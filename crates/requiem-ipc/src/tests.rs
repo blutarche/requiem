@@ -1,6 +1,7 @@
 use std::env;
 use std::fs::{self, Permissions};
 use std::io::{self, Cursor, Write};
+use std::iter;
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
@@ -10,7 +11,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use crossbeam_channel::{Receiver, unbounded};
+use crossbeam_channel::{Receiver, RecvTimeoutError, unbounded};
 use requiem_core::testing::{EngineCall, FakeEngineHandle, FakeProvider, Gate, Step};
 use requiem_core::{
     Command, EngineEvent, EnqueueMode, Event, PlayState, ProviderError, ProviderId, Session,
@@ -18,12 +19,13 @@ use requiem_core::{
 };
 
 use crate::frame::{self, Deadline, MAX_FRAME};
+use crate::hub::{self, HubMsg};
 use crate::path::{SOCKET_NAME, SUN_PATH_LEN, check_sun_path, default_dir, prepare_dir};
-use crate::sys;
 use crate::{
     Client, ClientCounts, ClientMsg, Incoming, PROTOCOL, Role, ServeError, Server, ServerHooks,
     ServerMsg,
 };
+use crate::{server, sys};
 
 const WAIT: Duration = Duration::from_secs(5);
 const SECS: fn(u64) -> Duration = Duration::from_secs;
@@ -187,12 +189,47 @@ fn wait_sub(rx: &Receiver<Event>, pred: impl Fn(&Event) -> bool) -> Event {
     }
 }
 
-fn wait_disconnected(rx: &Receiver<Incoming>) {
+/// Skips other messages up to `Goodbye`, which must be the last.
+fn wait_goodbye(rx: &Receiver<Incoming>) {
     loop {
-        if let Incoming::Disconnected(_) = rx.recv_timeout(WAIT).expect("still connected") {
-            return;
+        match rx.recv_timeout(WAIT).expect("still connected") {
+            Incoming::Goodbye => break,
+            Incoming::Disconnected(why) => panic!("disconnected without a Goodbye: {why}"),
+            _ => {}
         }
     }
+    assert_eq!(rx.recv_timeout(WAIT), Err(RecvTimeoutError::Disconnected));
+}
+
+/// Skips other messages up to `Disconnected`, which must be the last.
+fn wait_disconnected(rx: &Receiver<Incoming>) {
+    loop {
+        match rx.recv_timeout(WAIT).expect("still connected") {
+            Incoming::Disconnected(_) => break,
+            Incoming::Goodbye => panic!("Goodbye on a dropped connection"),
+            _ => {}
+        }
+    }
+    assert_eq!(rx.recv_timeout(WAIT), Err(RecvTimeoutError::Disconnected));
+}
+
+/// A client of a fake daemon on a socketpair that answers `Welcome`, sends `then` and hangs
+/// up without closing anything else.
+fn client_of(then: Vec<ServerMsg>) -> (Client, Receiver<Incoming>) {
+    let (ours, theirs) = UnixStream::pair().unwrap();
+    let daemon = thread::spawn(move || {
+        let _: ClientMsg = frame::read(&mut &theirs).unwrap().unwrap();
+        let welcome = ServerMsg::Welcome {
+            protocol: PROTOCOL,
+            version: "test".into(),
+        };
+        for msg in iter::once(welcome).chain(then) {
+            frame::write(&mut &theirs, &msg).unwrap();
+        }
+    });
+    let connected = Client::handshake(ours, Role::Gui).unwrap();
+    daemon.join().unwrap();
+    connected
 }
 
 #[test]
@@ -632,7 +669,7 @@ fn shutdown_command_runs_the_hook_and_leaves_the_session_to_the_daemon() {
 
     let path = rig.path.clone();
     rig.server.shutdown();
-    wait_disconnected(&rx);
+    wait_goodbye(&rx);
     assert!(!path.exists());
     assert!(rig.engine.calls().contains(&EngineCall::Stop));
 }
@@ -767,4 +804,155 @@ fn connect_or_spawn_needs_an_absolute_daemon_path() {
         panic!("connected through a relative daemon path");
     };
     assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
+}
+
+#[test]
+fn goodbye_is_the_last_message() {
+    let (_c, rx) = client_of(vec![ServerMsg::Event(Event::Volume(3)), ServerMsg::Goodbye]);
+    assert_eq!(next_event(&rx), Event::Volume(3));
+    wait_goodbye(&rx);
+}
+
+#[test]
+fn dropped_connection_is_disconnected_without_goodbye() {
+    let (_c, rx) = client_of(vec![ServerMsg::Event(Event::Volume(3))]);
+    assert_eq!(next_event(&rx), Event::Volume(3));
+    wait_disconnected(&rx);
+}
+
+#[test]
+fn shutdown_says_goodbye_to_every_client_last() {
+    let rig = rig();
+    let (_gui, gui_rx) = rig.client(Role::Gui);
+    let (_cli, cli_rx) = rig.client(Role::Cli);
+    let raw = rig.raw(Role::Cli);
+    rig.wait_clients(ClientCounts { gui: 1, cli: 2 });
+    rig.server.shutdown();
+    wait_goodbye(&gui_rx);
+    wait_goodbye(&cli_rx);
+    let mut last = None;
+    while let Some(msg) = frame::read::<_, ServerMsg>(&mut &raw).unwrap() {
+        last = Some(msg);
+    }
+    assert_eq!(last, Some(ServerMsg::Goodbye));
+}
+
+/// Over socketpairs, so it runs where binding a socket is not allowed.
+#[test]
+fn stop_says_goodbye_without_waiting_on_a_stuck_client() {
+    let session = Session::spawn(
+        vec![FakeProvider::new("fake")],
+        FakeEngineHandle::new().factory(),
+        SessionConfig::default(),
+    );
+    let hooks = ServerHooks {
+        on_shutdown: Box::new(|| {}),
+    };
+    let (hub, hub_thread) = hub::spawn(session, hooks).unwrap();
+    let (sub_tx, sub) = unbounded();
+    hub.send(HubMsg::Subscribe(sub_tx)).unwrap();
+
+    let (ours, theirs) = UnixStream::pair().unwrap();
+    server::admit(1, theirs, &hub);
+    let (_reader, rx) = Client::handshake(ours, Role::Gui).unwrap();
+    let (stuck, theirs) = UnixStream::pair().unwrap();
+    server::admit(2, theirs, &hub);
+    stuck.set_read_timeout(Some(WAIT)).unwrap();
+    hello(&stuck, PROTOCOL, Role::Cli);
+    for _ in 0..4 {
+        read_msg(&stuck);
+    }
+
+    // One frame far larger than a socket buffer blocks the writer of a peer that stops
+    // reading.
+    let filler: Vec<Track> = (0..3000)
+        .map(|i| Track {
+            title: "x".repeat(400),
+            ..track(&format!("f{i}"))
+        })
+        .collect();
+    hub.send(HubMsg::Command {
+        from: None,
+        cmd: Command::Enqueue {
+            tracks: filler,
+            mode: EnqueueMode::Append,
+        },
+    })
+    .unwrap();
+    let is_filler =
+        |e: &Event| matches!(e, Event::QueueChanged { tracks, .. } if tracks.len() == 3000);
+    wait_sub(&sub, is_filler);
+    take(&rx, 3);
+    assert!(is_filler(&next_event(&rx)));
+
+    let started = Instant::now();
+    hub.send(HubMsg::Stop).unwrap();
+    hub_thread.join().unwrap();
+    assert!(
+        started.elapsed() < SECS(2),
+        "stop took {:?}",
+        started.elapsed()
+    );
+    wait_goodbye(&rx);
+    // `stuck` gets what fit in its socket buffer, then the connection ends mid-frame.
+    loop {
+        match frame::read::<_, ServerMsg>(&mut &stuck) {
+            Ok(Some(msg)) => assert_ne!(msg, ServerMsg::Goodbye),
+            Ok(None) => break,
+            Err(e) => {
+                assert_eq!(e.kind(), io::ErrorKind::UnexpectedEof);
+                break;
+            }
+        }
+    }
+}
+
+#[test]
+fn send_to_a_daemon_that_stopped_reading_times_out_and_disconnects() {
+    let (ours, theirs) = UnixStream::pair().unwrap();
+    let daemon = thread::spawn(move || {
+        let _: ClientMsg = frame::read(&mut &theirs).unwrap().unwrap();
+        let welcome = ServerMsg::Welcome {
+            protocol: PROTOCOL,
+            version: "test".into(),
+        };
+        frame::write(&mut &theirs, &welcome).unwrap();
+        theirs
+    });
+    let (client, rx) = Client::handshake(ours, Role::Gui).unwrap();
+    // Held open and never read from again.
+    let _theirs = daemon.join().unwrap();
+
+    // A clone stays alive, so `Client::drop` can't be what closes the connection.
+    let client = Arc::new(client);
+    let sender = client.clone();
+    let (done_tx, done) = unbounded();
+    thread::spawn(move || {
+        let cmd = Command::Enqueue {
+            tracks: (0..50)
+                .map(|i| Track {
+                    title: "x".repeat(400),
+                    ..track(&format!("t{i}"))
+                })
+                .collect(),
+            mode: EnqueueMode::Append,
+        };
+        let err = loop {
+            if let Err(e) = sender.send(cmd.clone()) {
+                break e;
+            }
+        };
+        let _ = done_tx.send(err);
+    });
+    // A write that gets part of the frame out before timing out succeeds, so the send
+    // can take two timeouts.
+    let err = done.recv_timeout(2 * WAIT).expect("send still blocked");
+    assert!(
+        matches!(
+            err.kind(),
+            io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
+        ),
+        "{err}"
+    );
+    wait_disconnected(&rx);
 }

@@ -100,8 +100,10 @@ fn run() {
     client.send(Command::Shutdown).unwrap();
     for rx in [&rx, &again_rx] {
         loop {
-            if let Incoming::Disconnected(_) = rx.recv_timeout(WAIT).expect("still connected") {
-                break;
+            match rx.recv_timeout(WAIT).expect("still connected") {
+                Incoming::Goodbye => break,
+                Incoming::Disconnected(why) => panic!("disconnected without a Goodbye: {why}"),
+                _ => {}
             }
         }
     }

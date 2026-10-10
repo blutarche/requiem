@@ -65,6 +65,15 @@ fn too_big(len: usize) -> io::Error {
     )
 }
 
+/// macOS refuses socket options once both directions are shut down; reads then return at
+/// once, so the timeout isn't needed.
+pub(crate) fn set_read_timeout(stream: &UnixStream, timeout: Option<Duration>) -> io::Result<()> {
+    match stream.set_read_timeout(timeout) {
+        Err(e) if e.kind() == io::ErrorKind::InvalidInput => Ok(()),
+        r => r,
+    }
+}
+
 /// Reads from `stream` that must all finish by one deadline, however many `read` calls a
 /// frame takes.
 pub(crate) struct Deadline<'a> {
@@ -87,12 +96,7 @@ impl Read for Deadline<'_> {
         if left.is_zero() {
             return Err(io::ErrorKind::TimedOut.into());
         }
-        match self.stream.set_read_timeout(Some(left)) {
-            // macOS refuses socket options once both directions are shut down; reads then
-            // return at once, so the timeout isn't needed.
-            Err(e) if e.kind() == io::ErrorKind::InvalidInput => {}
-            r => r?,
-        }
+        set_read_timeout(self.stream, Some(left))?;
         let mut stream = self.stream;
         match stream.read(buf) {
             // An expired socket timeout reads as WouldBlock on some platforms.

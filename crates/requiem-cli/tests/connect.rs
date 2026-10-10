@@ -1,18 +1,19 @@
 //! `--connect` mode against an in-process `requiem_ipc::Server`. All tests share one socket
 //! directory, so they run one at a time.
 
-use std::io::{self, Cursor, Write};
+use std::io::{self, Cursor, Read, Write};
+use std::os::unix::net::UnixListener;
 use std::path::Path;
 use std::sync::{Arc, Mutex, MutexGuard, Once, PoisonError};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crossbeam_channel::{Receiver, bounded};
-use requiem_cli::app::{self, App, Flow};
+use requiem_cli::app::{self, App, Flow, Player};
 use requiem_cli::remote::RemotePlayer;
 use requiem_core::testing::{FakeEngineHandle, FakeProvider, Step};
 use requiem_core::{EngineEvent, ProviderId, Session, SessionConfig, Track, TrackId};
-use requiem_ipc::{Server, ServerHooks};
+use requiem_ipc::{Client, PROTOCOL, Role, Server, ServerHooks};
 
 static SERIAL: Mutex<()> = Mutex::new(());
 static DIR: Once = Once::new();
@@ -157,8 +158,14 @@ fn shutdown_daemon_runs_the_hook_and_ends_the_session() {
         .recv_timeout(Duration::from_secs(5))
         .expect("on_shutdown ran");
     assert!(!out.text().contains("status:"), "{}", out.text());
-    drop(player);
+    // What the daemon does next.
     d.server.shutdown();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while player.disconnected().is_none() {
+        assert!(Instant::now() < deadline, "player never saw the daemon go");
+        thread::sleep(Duration::from_millis(10));
+    }
+    assert_eq!(player.disconnected().as_deref(), Some("player quit"));
 }
 
 #[test]
@@ -184,7 +191,7 @@ fn quit_leaves_the_daemon_running() {
 }
 
 #[test]
-fn disconnect_mid_script_exits_2() {
+fn daemon_quit_mid_script_exits_2() {
     let _g = serial();
     let d = daemon();
     let player = connect();
@@ -204,6 +211,48 @@ fn disconnect_mid_script_exits_2() {
     killer.join().unwrap();
     assert_eq!(code, 2);
     let text = out.text();
-    assert!(text.contains("error: player disconnected: "), "{text}");
+    assert!(
+        text.contains("error: player disconnected: player quit\n"),
+        "{text}"
+    );
+    assert!(!text.contains("status:"), "{text}");
+}
+
+#[test]
+fn disconnect_mid_script_exits_2() {
+    let _g = serial();
+    // A daemon that completes the handshake, then drops the connection without a Goodbye.
+    let path = requiem_ipc::socket_dir().unwrap().join("fake.sock");
+    let _ = std::fs::remove_file(&path);
+    let listener = UnixListener::bind(&path).unwrap();
+    let fake = thread::spawn(move || {
+        let (mut s, _) = listener.accept().unwrap();
+        let mut len = [0; 4];
+        s.read_exact(&mut len).unwrap();
+        s.read_exact(&mut vec![0; u32::from_be_bytes(len) as usize])
+            .unwrap();
+        let welcome = format!(r#"{{"Welcome":{{"protocol":{PROTOCOL},"version":"test"}}}}"#);
+        s.write_all(&u32::try_from(welcome.len()).unwrap().to_be_bytes())
+            .unwrap();
+        s.write_all(welcome.as_bytes()).unwrap();
+        thread::sleep(Duration::from_millis(300));
+    });
+    let (client, incoming) = Client::connect(&path, Role::Cli).unwrap();
+    let player = RemotePlayer::new(client, incoming).unwrap();
+    let out = Buf::default();
+    let code = app::run(
+        &player,
+        Cursor::new("await playing 20\nstatus\n"),
+        out.clone(),
+        true,
+    )
+    .unwrap();
+    fake.join().unwrap();
+    assert_eq!(code, 2);
+    let text = out.text();
+    assert!(
+        text.contains("error: player disconnected: daemon closed the connection\n"),
+        "{text}"
+    );
     assert!(!text.contains("status:"), "{text}");
 }
