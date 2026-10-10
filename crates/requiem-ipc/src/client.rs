@@ -18,6 +18,8 @@ use crate::path::{DIR_ENV, LOG_NAME, OLD_LOG_NAME, check_sun_path, socket_dir, s
 use crate::proto::{ClientMsg, PROTOCOL, Role, ServerMsg, VERSION};
 
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
+/// A daemon that stops reading must not block a sender forever.
+const WRITE_TIMEOUT: Duration = Duration::from_secs(2);
 const SPAWN_POLL: Duration = Duration::from_millis(25);
 /// How long a spawned daemon that exited gets before nothing listening counts against it.
 const EXIT_GRACE: Duration = Duration::from_millis(500);
@@ -118,16 +120,24 @@ impl Client {
         }
     }
 
+    /// A failed or timed-out write closes the connection; the receiver then gets
+    /// `Disconnected`.
     pub fn send(&self, cmd: Command) -> io::Result<()> {
         let frame = frame::encode(&ClientMsg::Command(cmd))?;
         let _guard = self.write.lock().unwrap_or_else(PoisonError::into_inner);
-        (&mut &*self.stream).write_all(&frame)
+        let written = (&mut &*self.stream).write_all(&frame);
+        if written.is_err() {
+            // Part of the frame may be on the wire, so the stream can't carry another.
+            let _ = self.stream.shutdown(Shutdown::Both);
+        }
+        written
     }
 
     pub(crate) fn handshake(
         stream: UnixStream,
         role: Role,
     ) -> io::Result<(Client, Receiver<Incoming>)> {
+        stream.set_write_timeout(Some(WRITE_TIMEOUT))?;
         let hello = ClientMsg::Hello {
             protocol: PROTOCOL,
             role,

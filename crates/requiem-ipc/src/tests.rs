@@ -906,3 +906,53 @@ fn stop_says_goodbye_without_waiting_on_a_stuck_client() {
         }
     }
 }
+
+#[test]
+fn send_to_a_daemon_that_stopped_reading_times_out_and_disconnects() {
+    let (ours, theirs) = UnixStream::pair().unwrap();
+    let daemon = thread::spawn(move || {
+        let _: ClientMsg = frame::read(&mut &theirs).unwrap().unwrap();
+        let welcome = ServerMsg::Welcome {
+            protocol: PROTOCOL,
+            version: "test".into(),
+        };
+        frame::write(&mut &theirs, &welcome).unwrap();
+        theirs
+    });
+    let (client, rx) = Client::handshake(ours, Role::Gui).unwrap();
+    // Held open and never read from again.
+    let _theirs = daemon.join().unwrap();
+
+    // A clone stays alive, so `Client::drop` can't be what closes the connection.
+    let client = Arc::new(client);
+    let sender = client.clone();
+    let (done_tx, done) = unbounded();
+    thread::spawn(move || {
+        let cmd = Command::Enqueue {
+            tracks: (0..50)
+                .map(|i| Track {
+                    title: "x".repeat(400),
+                    ..track(&format!("t{i}"))
+                })
+                .collect(),
+            mode: EnqueueMode::Append,
+        };
+        let err = loop {
+            if let Err(e) = sender.send(cmd.clone()) {
+                break e;
+            }
+        };
+        let _ = done_tx.send(err);
+    });
+    // A write that gets part of the frame out before timing out succeeds, so the send
+    // can take two timeouts.
+    let err = done.recv_timeout(2 * WAIT).expect("send still blocked");
+    assert!(
+        matches!(
+            err.kind(),
+            io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
+        ),
+        "{err}"
+    );
+    wait_disconnected(&rx);
+}
