@@ -264,3 +264,15 @@ fn run_returns_zero_on_eof() {
     let code = app::run(&r.session, Cursor::new("help\n"), r.out.clone(), true).unwrap();
     assert_eq!(code, 0);
 }
+
+#[test]
+fn shutdown_daemon_needs_a_connection() {
+    let r = rig();
+    let app = r.app(true);
+    assert_eq!(app.exec("shutdown-daemon"), Flow::Continue);
+    assert!(
+        r.out.text().contains("error: not connected to a daemon\n"),
+        "{}",
+        r.out.text()
+    );
+}

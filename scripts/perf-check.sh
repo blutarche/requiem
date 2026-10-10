@@ -1,7 +1,16 @@
 #!/usr/bin/env bash
 # Perf gate: drives a release build through scripted phases and checks peak RSS and CPU.
 # Plays audio: the script sets the volume to 5% first.
+# Default: measures the in-process `requiem`. With --daemon: measures a release `requiemd`
+# driven by `requiem --connect`.
 set -euo pipefail
+
+daemon=0
+case "${1:-}" in
+  "") ;;
+  --daemon) daemon=1 ;;
+  *) echo "usage: $0 [--daemon]" >&2; exit 2 ;;
+esac
 
 cd "$(dirname "$0")/.."
 
@@ -12,10 +21,16 @@ export PERF_CPU_IDLE="${PERF_CPU_IDLE:-0.5}"
 # Seeks and track changes refill the ring in a burst; the 1% budget is for steady playback.
 export PERF_CPU_BURST="${PERF_CPU_BURST:-2.0}"
 
-"$CARGO_BIN" build --release -p requiem-cli
+if [ "$daemon" -eq 1 ]; then
+  "$CARGO_BIN" build --release -p requiem-cli -p requiem-daemon
+else
+  "$CARGO_BIN" build --release -p requiem-cli
+fi
 
 work="$(mktemp -d)"
-trap 'rm -rf "$work"' EXIT
+pid=""
+cli_pid=""
+trap 'for p in $pid $cli_pid; do kill "$p" 2>/dev/null || true; done; rm -rf "$work"' EXIT
 script="$work/perf.script"
 log="$work/stdout.log"
 samples="$work/samples.log"
@@ -47,11 +62,42 @@ next
 await stopped 10
 sleep 10
 mark end
-quit
 SCRIPT
+if [ "$daemon" -eq 1 ]; then
+  echo shutdown-daemon >>"$script"
+fi
+echo quit >>"$script"
 
-REQUIEM_LOG="${PERF_DEBUG:+debug}" target/release/requiem --script "$script" >"$log" 2>"$work/stderr.log" &
-pid=$!
+if [ "$daemon" -eq 1 ]; then
+  mkdir -m 0700 "$work/sock"
+  export REQUIEM_SOCKET_DIR="$work/sock"
+  # The sampled pid is the daemon's; the CLI only supplies the MARK lines.
+  REQUIEM_LOG="${PERF_DEBUG:+debug}" target/release/requiemd 2>"$work/stderr.log" &
+  pid=$!
+  # A client that connects before the daemon listens would spawn a second daemon.
+  for _ in $(seq 100); do
+    [ -S "$work/sock/daemon.sock" ] && break
+    kill -0 "$pid" 2>/dev/null || break
+    sleep 0.1
+  done
+  [ -S "$work/sock/daemon.sock" ] || { echo "daemon did not listen" >&2; exit 1; }
+  # The subshell reaps the CLI. If the CLI ends without stopping the daemon (an aborted
+  # script), the daemon gets 5 s to exit and is then killed so the sampler can finish.
+  (
+    cli_status=0
+    target/release/requiem --connect --script "$script" >"$log" 2>"$work/cli-stderr.log" || cli_status=$?
+    echo "$cli_status" >"$work/cli.status"
+    for _ in $(seq 50); do
+      case "$(ps -o stat= -p "$pid" 2>/dev/null)" in "" | Z*) exit 0 ;; esac
+      sleep 0.1
+    done
+    kill "$pid" 2>/dev/null || true
+  ) &
+  cli_pid=$!
+else
+  REQUIEM_LOG="${PERF_DEBUG:+debug}" target/release/requiem --script "$script" >"$log" 2>"$work/stderr.log" &
+  pid=$!
+fi
 
 # Sample until the process is gone. Memory gate: macOS physical footprint
 # (proc_pid_rusage ri_phys_footprint, bytes), Linux Pss from smaps_rollup; `ps` RSS is
@@ -115,6 +161,16 @@ PY
 
 status=0
 wait "$pid" || status=$?
+pid=""
+if [ -n "$cli_pid" ]; then
+  wait "$cli_pid" || true
+  cli_pid=""
+  cli_status="$(cat "$work/cli.status" 2>/dev/null || echo 1)"
+  if [ "$status" -eq 0 ] && [ "$cli_status" -ne 0 ]; then
+    echo "requiem --connect exited with status $cli_status" >&2
+    status=$cli_status
+  fi
+fi
 
 summary=0
 python3 -I - "$log" "$samples" "$status" <<'PY' || summary=$?
@@ -184,5 +240,9 @@ if [ "$summary" -ne 0 ]; then
   tail -n 15 "$log"
   echo "--- stderr (tail) ---"
   tail -n 25 "$work/stderr.log"
+  if [ "$daemon" -eq 1 ]; then
+    echo "--- cli stderr (tail) ---"
+    tail -n 25 "$work/cli-stderr.log"
+  fi
 fi
 exit "$summary"

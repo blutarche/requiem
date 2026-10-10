@@ -14,6 +14,9 @@ path = "src/main.rs"
 requiem-core.workspace = true
 requiem-audio.workspace = true
 requiem-provider-ytmusic.workspace = true
+requiem-ipc.workspace = true
+crossbeam-channel.workspace = true
 
 [dev-dependencies]
 requiem-core = { workspace = true, features = ["test-util"] }
+requiem-ipc.workspace = true

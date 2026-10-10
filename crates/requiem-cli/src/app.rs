@@ -2,6 +2,7 @@ use std::io::{self, BufRead, Write};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use crossbeam_channel::Receiver;
 use requiem_core::{Command, EnqueueMode, Event, PlayState, SeekTarget, Session, Track};
 
 const DEFAULT_AWAIT_SECS: f64 = 30.0;
@@ -21,7 +22,36 @@ commands:
   await <results|playing|stopped|nowplaying> [timeout_secs=30]
                         wait for that event since the last play/next/prev/search
   mark <name>           print MARK <name> <unix_millis>
-  help | quit";
+  shutdown-daemon       with --connect: stop the daemon and exit
+  help | quit           quit leaves a --connect daemon running";
+
+/// What the REPL drives: an in-process `Session` or a daemon over IPC.
+pub trait Player {
+    fn send(&self, cmd: Command);
+
+    /// Called once, by `App::new`.
+    fn subscribe(&self) -> Receiver<Event>;
+
+    /// True when commands go to a daemon that outlives this process.
+    fn remote(&self) -> bool {
+        false
+    }
+
+    /// The reason the player went away. Must be set before the `subscribe` channel closes.
+    fn disconnected(&self) -> Option<String> {
+        None
+    }
+}
+
+impl Player for Session {
+    fn send(&self, cmd: Command) {
+        Session::send(self, cmd);
+    }
+
+    fn subscribe(&self) -> Receiver<Event> {
+        Session::subscribe(self)
+    }
+}
 
 #[derive(Default)]
 struct Seen {
@@ -43,6 +73,8 @@ struct Ui {
     position: Duration,
     volume: u8,
     seen: Seen,
+    /// The event channel has ended.
+    closed: bool,
 }
 
 struct Hub {
@@ -171,19 +203,19 @@ fn parse_secs(arg: &str) -> Option<Duration> {
 pub enum Flow {
     Continue,
     Quit,
-    /// Script mode only: abort with this exit code.
+    /// Abort with this exit code: a script-mode failure, or a lost daemon connection.
     Exit(u8),
 }
 
 pub struct App<'a> {
-    session: &'a Session,
+    player: &'a dyn Player,
     hub: Arc<Hub>,
     script: bool,
 }
 
 impl<'a> App<'a> {
     /// Subscribes and starts the printer thread, which ends when the session shuts down.
-    pub fn new(session: &'a Session, out: impl Write + Send + 'static, script: bool) -> Self {
+    pub fn new(player: &'a dyn Player, out: impl Write + Send + 'static, script: bool) -> Self {
         let hub = Arc::new(Hub {
             ui: Mutex::new(Ui {
                 latest_req: 0,
@@ -196,11 +228,12 @@ impl<'a> App<'a> {
                 position: Duration::ZERO,
                 volume: 100,
                 seen: Seen::default(),
+                closed: false,
             }),
             changed: Condvar::new(),
             out: Mutex::new(Box::new(out)),
         });
-        let rx = session.subscribe();
+        let rx = player.subscribe();
         let h = hub.clone();
         std::thread::Builder::new()
             .name("requiem-printer".into())
@@ -208,16 +241,33 @@ impl<'a> App<'a> {
                 for ev in rx {
                     h.on_event(ev);
                 }
+                h.lock_ui().closed = true;
+                h.changed.notify_all();
             })
             .expect("spawn printer thread");
         Self {
-            session,
+            player,
             hub,
             script,
         }
     }
 
+    /// `Exit` once the daemon connection is lost; `None` while it is up.
+    fn lost(&self, closed: bool) -> Option<Flow> {
+        if !closed {
+            return None;
+        }
+        let reason = self.player.disconnected()?;
+        self.hub
+            .say(&format!("error: player disconnected: {reason}"));
+        Some(Flow::Exit(if self.script { 2 } else { 1 }))
+    }
+
     pub fn exec(&self, line: &str) -> Flow {
+        let closed = self.hub.lock_ui().closed;
+        if let Some(flow) = self.lost(closed) {
+            return flow;
+        }
         let line = line.trim();
         if line.is_empty() || line.starts_with('#') {
             return Flow::Continue;
@@ -240,7 +290,7 @@ impl<'a> App<'a> {
                     ui.seen.results = false;
                     ui.latest_req
                 };
-                self.session.send(Command::Search {
+                self.player.send(Command::Search {
                     req,
                     query: arg.to_owned(),
                 });
@@ -251,13 +301,13 @@ impl<'a> App<'a> {
                 };
                 if cmd == "play" {
                     self.clear_playback_seen();
-                    self.session.send(Command::Enqueue {
+                    self.player.send(Command::Enqueue {
                         tracks: vec![track],
                         mode: EnqueueMode::Replace,
                     });
-                    self.session.send(Command::PlayIndex(0));
+                    self.player.send(Command::PlayIndex(0));
                 } else {
-                    self.session.send(Command::Enqueue {
+                    self.player.send(Command::Enqueue {
                         tracks: vec![track],
                         mode: EnqueueMode::Append,
                     });
@@ -275,7 +325,7 @@ impl<'a> App<'a> {
             }
             "next" | "prev" | "pause" | "resume" | "toggle" => {
                 self.clear_playback_seen();
-                self.session.send(match cmd {
+                self.player.send(match cmd {
                     "next" => Command::Next,
                     "prev" => Command::Prev,
                     "pause" => Command::Pause,
@@ -284,11 +334,11 @@ impl<'a> App<'a> {
                 });
             }
             "seek" => match parse_seek(arg) {
-                Some(t) => self.session.send(Command::Seek(t)),
+                Some(t) => self.player.send(Command::Seek(t)),
                 None => say("error: usage: seek <secs|+secs|-secs>"),
             },
             "vol" => match arg.parse::<u8>() {
-                Ok(v) if v <= 100 => self.session.send(Command::SetVolume(v)),
+                Ok(v) if v <= 100 => self.player.send(Command::SetVolume(v)),
                 _ => say("error: usage: vol <0-100>"),
             },
             "status" => say(&self.status()),
@@ -308,6 +358,14 @@ impl<'a> App<'a> {
                 }
             }
             "help" => say(HELP),
+            "shutdown-daemon" => {
+                if !self.player.remote() {
+                    say("error: not connected to a daemon");
+                } else {
+                    self.player.send(Command::Shutdown);
+                    return Flow::Quit;
+                }
+            }
             "quit" | "exit" => return Flow::Quit,
             other => {
                 say(&format!("error: unknown command {other}"));
@@ -383,6 +441,10 @@ impl<'a> App<'a> {
         let deadline = Instant::now() + timeout;
         let mut ui = self.hub.lock_ui();
         while !pick(&ui.seen) {
+            if ui.closed {
+                drop(ui);
+                return self.lost(true).unwrap_or(Flow::Continue);
+            }
             let Some(left) = deadline.checked_duration_since(Instant::now()) else {
                 drop(ui);
                 self.hub
@@ -404,15 +466,15 @@ impl<'a> App<'a> {
     }
 }
 
-/// Returns the process exit code: 0 on quit or end of input, 2 on a script-mode abort.
-/// The caller shuts the session down afterwards.
+/// Returns the process exit code: 0 on quit or end of input, 2 on a script-mode abort, 1 on
+/// a lost daemon connection in interactive mode. The caller shuts the session down afterwards.
 pub fn run(
-    session: &Session,
+    player: &dyn Player,
     input: impl BufRead,
     out: impl Write + Send + 'static,
     script: bool,
 ) -> io::Result<u8> {
-    let app = App::new(session, out, script);
+    let app = App::new(player, out, script);
     for line in input.lines() {
         match app.exec(&line?) {
             Flow::Continue => {}

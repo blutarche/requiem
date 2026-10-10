@@ -1,0 +1,20 @@
+[package]
+name = "requiem-daemon"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "requiemd"
+path = "src/main.rs"
+
+[dependencies]
+requiem-core.workspace = true
+requiem-audio.workspace = true
+requiem-provider-ytmusic.workspace = true
+requiem-ipc.workspace = true
+requiem-macos.workspace = true
+crossbeam-channel.workspace = true
+libc.workspace = true

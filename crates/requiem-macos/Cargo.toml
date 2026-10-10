@@ -1,0 +1,54 @@
+[package]
+name = "requiem-macos"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+requiem-core.workspace = true
+crossbeam-channel.workspace = true
+
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2.workspace = true
+block2.workspace = true
+objc2-foundation = { workspace = true, features = [
+    "std",
+    "NSDate",
+    "NSDictionary",
+    "NSGeometry",
+    "NSObjCRuntime",
+    "NSObject",
+    "NSRunLoop",
+    "NSString",
+    "NSTimer",
+    "NSValue",
+] }
+objc2-app-kit = { workspace = true, features = [
+    "std",
+    "objc2-core-foundation",
+    "NSApplication",
+    "NSButton",
+    "NSControl",
+    "NSEvent",
+    "NSGraphicsContext",
+    "NSImage",
+    "NSMenu",
+    "NSMenuItem",
+    "NSResponder",
+    "NSRunningApplication",
+    "NSStatusBar",
+    "NSStatusBarButton",
+    "NSStatusItem",
+    "NSView",
+] }
+objc2-media-player = { workspace = true, features = [
+    "std",
+    "block2",
+    "MPMediaItem",
+    "MPNowPlayingInfoCenter",
+    "MPRemoteCommand",
+    "MPRemoteCommandCenter",
+    "MPRemoteCommandEvent",
+] }
