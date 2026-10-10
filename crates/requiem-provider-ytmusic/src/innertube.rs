@@ -98,6 +98,13 @@ impl InnertubeClient {
         parse_search(&resp.body, limit)
     }
 
+    /// Forgets the cached visitorData and the connection pool, so the next resolve
+    /// starts from a fresh visitorData.
+    pub(crate) fn reset_visitor(&self) {
+        self.set_visitor(None);
+        self.transport.reset();
+    }
+
     fn fetch_visitor(&self) -> Result<String, ProviderError> {
         let body = json!({"context": Self::music_context(), "input": ""});
         let resp = self.post_music("visitor data", SUGGESTIONS_URL, &body)?;
@@ -163,8 +170,7 @@ impl InnertubeClient {
         let mut outcome = self.player_call(video_id, &visitor, prefer_aac)?;
         if outcome == PlayerOutcome::LoginRequired {
             debug!("LOGIN_REQUIRED: refreshing visitorData and connection pool");
-            self.set_visitor(None);
-            self.transport.reset();
+            self.reset_visitor();
             let visitor = self.fetch_visitor()?;
             outcome = self.player_call(video_id, &visitor, prefer_aac)?;
         }
@@ -194,6 +200,9 @@ pub(crate) struct ClientRefresher {
 
 impl Refresher for ClientRefresher {
     fn refresh(&self) -> Result<(String, u32, u64), ProviderError> {
+        // Some visitorData buckets get URLs capped at 1 MiB (403 from byte 1048576), and
+        // re-resolving with the same visitorData returns another capped URL.
+        self.client.reset_visitor();
         let f = self.client.resolve(&self.video_id, self.prefer_aac)?;
         Ok((f.url, f.itag, f.content_length))
     }
@@ -409,5 +418,37 @@ mod tests {
         let (url, itag, len) = r.refresh().unwrap();
         assert!(url.contains("videoplayback"));
         assert_eq!((itag, len), (140, 6953417));
+    }
+
+    #[test]
+    fn refresh_uses_fresh_visitor_data() {
+        let t = FakeTransport::with(vec![
+            (200, &vd_reply("VD1")),
+            (200, OK),
+            (200, &vd_reply("VD2")),
+            (200, OK),
+        ]);
+        let client = Arc::new(client(&t));
+        client.resolve("vid", false).unwrap();
+        let r = ClientRefresher {
+            client: client.clone(),
+            video_id: "vid".into(),
+            prefer_aac: false,
+        };
+        r.refresh().unwrap();
+        assert_eq!(
+            t.urls(),
+            vec![
+                "get_search_suggestions",
+                "player",
+                "get_search_suggestions",
+                "player"
+            ]
+        );
+        let reqs = t.requests.lock().unwrap();
+        assert_eq!(reqs[1].1.as_deref(), Some("VD1"));
+        assert_eq!(reqs[3].1.as_deref(), Some("VD2"));
+        assert_eq!(*t.resets.lock().unwrap(), 1);
+        assert_eq!(client.cached_visitor().as_deref(), Some("VD2"));
     }
 }

@@ -69,6 +69,8 @@ pub(crate) struct HttpRangeSource {
     lru: VecDeque<(u64, Vec<u8>)>,
     refreshes: u32,
     last_refresh: Option<Instant>,
+    /// Whether the URL from the latest refresh has served a chunk.
+    served_since_refresh: bool,
 }
 
 fn other(msg: impl Into<String>) -> io::Error {
@@ -96,6 +98,7 @@ impl HttpRangeSource {
             lru: VecDeque::with_capacity(LRU_CHUNKS),
             refreshes: 0,
             last_refresh: None,
+            served_since_refresh: false,
         }
     }
 
@@ -164,13 +167,17 @@ impl HttpRangeSource {
         if self.refreshes >= MAX_REFRESHES {
             return Err(other("stream URL refresh limit reached"));
         }
-        if self
-            .last_refresh
-            .is_some_and(|t| t.elapsed() < self.cfg.min_refresh_interval)
+        // Throttle only a URL that worked and then died; a refreshed URL that 403s before
+        // serving anything was a capped draw, so retrying at once is the fix, not a loop.
+        if self.served_since_refresh
+            && self
+                .last_refresh
+                .is_some_and(|t| t.elapsed() < self.cfg.min_refresh_interval)
         {
             return Err(other("stream URL rejected again right after a refresh"));
         }
         self.refreshes += 1;
+        self.served_since_refresh = false;
         self.last_refresh = Some(Instant::now());
         let (url, itag, len) = self
             .refresher
@@ -196,6 +203,7 @@ impl HttpRangeSource {
                 403 | 410 => self.refresh()?,
                 _ => {
                     self.validate(&resp, start, end)?;
+                    self.served_since_refresh = true;
                     return Ok(resp.body);
                 }
             }
@@ -571,13 +579,36 @@ mod tests {
     }
 
     #[test]
-    fn refresh_within_min_interval_errors() {
-        // first 403 refreshes; the refreshed URL 403s again immediately
+    fn refresh_of_never_served_url_is_immediate() {
         let f = Fake::new(vec![Step::Status(403), Step::Status(403)]);
         let r = FakeRefresher::new(vec![]);
         let mut s = source(&f, &r, Duration::from_secs(3600));
+        let mut b = [0u8; 4];
+        s.read_exact(&mut b).unwrap();
+        assert_eq!(&b, &data()[..4]);
+        assert_eq!(r.count(), 2);
+    }
+
+    #[test]
+    fn refresh_within_min_interval_after_serving_errors() {
+        // 403 -> refresh -> served a chunk -> 403 again within the interval
+        let f = Fake::new(vec![Step::Status(403), Step::Ok, Step::Status(403)]);
+        let r = FakeRefresher::new(vec![]);
+        let mut s = source(&f, &r, Duration::from_secs(3600));
+        s.read_exact(&mut [0u8; 4]).unwrap();
+        s.seek(SeekFrom::Start(64)).unwrap();
         assert!(s.read(&mut [0u8; 4]).is_err());
         assert_eq!(r.count(), 1);
+    }
+
+    #[test]
+    fn four_never_served_403s_error_at_the_fourth() {
+        let f = Fake::new(vec![Step::Status(403); 10]);
+        let r = FakeRefresher::new(vec![]);
+        let mut s = source(&f, &r, Duration::from_secs(3600));
+        assert!(s.read(&mut [0u8; 4]).is_err());
+        assert_eq!(r.count(), 3);
+        assert_eq!(f.starts().len(), 4);
     }
 
     #[test]
