@@ -675,3 +675,19 @@ fn clear_stops_and_empties() {
     r.wait_event(queue_is(&[], None));
     assert!(r.engine.calls().contains(&EngineCall::Stop));
 }
+
+#[test]
+fn seek_reports_the_new_position_even_while_paused() {
+    let r = rig(config());
+    r.enqueue(&["a"]);
+    r.send(Command::PlayIndex(0));
+    let (r#gen, _) = r.engine.wait_load(1);
+    r.start(r#gen, Some(SECS(100)));
+    r.send(Command::Pause);
+    r.wait_event(|e| *e == Event::State(PlayState::Paused));
+
+    r.send(Command::Seek(SeekTarget::Absolute(SECS(42))));
+    r.wait_event(|e| *e == Event::Position(SECS(42)));
+    r.send(Command::Seek(SeekTarget::Absolute(SECS(500))));
+    r.wait_event(|e| *e == Event::Position(SECS(100)));
+}

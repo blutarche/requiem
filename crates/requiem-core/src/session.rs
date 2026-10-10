@@ -420,8 +420,12 @@ impl Actor {
 
     fn seek_to(&mut self, to: Duration) {
         if self.playing.is_some() {
+            let to = self.duration.map_or(to, |d| to.min(d));
             self.engine.seek(to);
             self.last_pos = to;
+            // The engine reports position only while playing; a paused seek would otherwise
+            // leave clients showing the old time until resume.
+            self.emit(Event::Position(to));
         }
     }
 
