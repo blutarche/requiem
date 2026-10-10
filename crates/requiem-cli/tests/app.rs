@@ -316,10 +316,21 @@ fn started_queue(r: &Rig, app: &App<'_>) {
         "q",
         vec![Step::ok(vec![track("t1"), track("t2"), track("t3")])],
     );
-    exec_all(
-        app,
-        "search q\nawait results 5\nplay 1\nadd 2\nadd 3\nqueue",
-    );
+    exec_all(app, "search q\nawait results 5\nplay 1\nadd 2\nadd 3");
+    wait_out(r, "queue: 3 tracks, current 1", 1);
+}
+
+/// Polls the output until `needle` has been printed `n` times.
+fn wait_out(r: &Rig, needle: &str, n: usize) {
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while r.out.text().matches(needle).count() < n {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "timed out waiting for {needle:?}: {}",
+            r.out.text()
+        );
+        thread::sleep(Duration::from_millis(10));
+    }
 }
 
 #[test]
@@ -328,7 +339,9 @@ fn remove_move_clear_map_one_based_positions() {
     let app = r.app(true);
     started_queue(&r, &app);
     r.engine.wait_load(1);
-    exec_all(&app, "move 3 1\nsleep 0.2\nqueue");
+    exec_all(&app, "move 3 1");
+    wait_out(&r, "queue: 3 tracks, current 2", 1);
+    exec_all(&app, "queue");
     let text = r.out.text();
     assert!(
         text.contains("  1. A, B — Title t3 [Album] (2:05)\n"),
@@ -338,10 +351,11 @@ fn remove_move_clear_map_one_based_positions() {
         text.contains("> 2. A, B — Title t1 [Album] (2:05)\n"),
         "{text}"
     );
-    exec_all(&app, "remove 1\nsleep 0.2\nqueue");
-    let text = r.out.text();
-    assert!(text.contains("queue: 2 tracks"), "{text}");
-    exec_all(&app, "clear\nsleep 0.2\nqueue");
+    exec_all(&app, "remove 1");
+    wait_out(&r, "queue: 2 tracks, current 1", 2);
+    exec_all(&app, "clear");
+    wait_out(&r, "queue: 0 tracks, current none", 1);
+    exec_all(&app, "queue");
     assert!(r.out.text().contains("queue empty"), "{}", r.out.text());
 }
 
