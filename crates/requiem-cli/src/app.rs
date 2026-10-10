@@ -7,6 +7,10 @@ use requiem_core::{Command, EnqueueMode, Event, PlayState, SeekTarget, Session, 
 
 const DEFAULT_AWAIT_SECS: f64 = 30.0;
 
+/// How long a `--connect` run waits for the daemon's join snapshot; matches the client's
+/// write timeout.
+const SYNC_TIMEOUT: Duration = Duration::from_secs(2);
+
 const HELP: &str = "\
 commands:
   search <query>        search; prints numbered results
@@ -73,6 +77,8 @@ struct Ui {
     position: Duration,
     volume: u8,
     seen: Seen,
+    /// The first `Volume` has arrived, which is the last event of a daemon's join snapshot.
+    synced: bool,
     /// The event channel has ended.
     closed: bool,
 }
@@ -139,6 +145,7 @@ impl Hub {
             Event::Volume(v) => {
                 self.say(&format!("volume: {v}"));
                 ui.volume = v;
+                ui.synced = true;
             }
             Event::TrackFailed { track, error } => {
                 self.say(&format!("track failed: {}: {error}", track.title));
@@ -228,6 +235,7 @@ impl<'a> App<'a> {
                 position: Duration::ZERO,
                 volume: 100,
                 seen: Seen::default(),
+                synced: false,
                 closed: false,
             }),
             changed: Condvar::new(),
@@ -249,6 +257,24 @@ impl<'a> App<'a> {
             player,
             hub,
             script,
+        }
+    }
+
+    /// Blocks until the daemon's join snapshot has been applied, the channel has closed, or
+    /// `SYNC_TIMEOUT` passes, so the first command sees the daemon's state.
+    fn sync(&self) {
+        let deadline = Instant::now() + SYNC_TIMEOUT;
+        let mut ui = self.hub.lock_ui();
+        while !(ui.synced || ui.closed) {
+            let Some(left) = deadline.checked_duration_since(Instant::now()) else {
+                return;
+            };
+            ui = self
+                .hub
+                .changed
+                .wait_timeout(ui, left)
+                .unwrap_or_else(PoisonError::into_inner)
+                .0;
         }
     }
 
@@ -475,6 +501,9 @@ pub fn run(
     script: bool,
 ) -> io::Result<u8> {
     let app = App::new(player, out, script);
+    if player.remote() {
+        app.sync();
+    }
     for line in input.lines() {
         match app.exec(&line?) {
             Flow::Continue => {}

@@ -443,8 +443,8 @@ fn snapshot_replays_state_in_order() {
             duration: Some(SECS(180)),
         },
         Event::State(PlayState::Playing),
-        Event::Volume(30),
         Event::Position(SECS(42)),
+        Event::Volume(30),
     ];
     let (_c, rx) = rig.client(Role::Gui);
     assert_eq!(take(&rx, 5), playing);
@@ -456,8 +456,9 @@ fn snapshot_replays_state_in_order() {
 
     let sub2 = rig.server.subscribe();
     let got: Vec<Event> = (0..5).map(|_| sub2.recv_timeout(WAIT).unwrap()).collect();
-    assert_eq!(got[..4], playing[..4]);
-    assert_eq!(got[4], Event::Position(SECS(43)));
+    assert_eq!(got[..3], playing[..3]);
+    assert_eq!(got[3], Event::Position(SECS(43)));
+    assert_eq!(got[4], Event::Volume(30));
 
     // Stopped means no track is loaded: no NowPlaying or Position.
     rig.server.send(Command::Next);
