@@ -310,3 +310,80 @@ fn remote_run_waits_for_the_join_snapshot() {
         "{text}"
     );
 }
+
+fn started_queue(r: &Rig, app: &App<'_>) {
+    r.provider.script_search(
+        "q",
+        vec![Step::ok(vec![track("t1"), track("t2"), track("t3")])],
+    );
+    exec_all(app, "search q\nawait results 5\nplay 1\nadd 2\nadd 3");
+    wait_out(r, "queue: 3 tracks, current 1", 1);
+}
+
+/// Polls the output until `needle` has been printed `n` times.
+fn wait_out(r: &Rig, needle: &str, n: usize) {
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while r.out.text().matches(needle).count() < n {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "timed out waiting for {needle:?}: {}",
+            r.out.text()
+        );
+        thread::sleep(Duration::from_millis(10));
+    }
+}
+
+#[test]
+fn remove_move_clear_map_one_based_positions() {
+    let r = rig();
+    let app = r.app(true);
+    started_queue(&r, &app);
+    r.engine.wait_load(1);
+    exec_all(&app, "move 3 1");
+    wait_out(&r, "queue: 3 tracks, current 2", 1);
+    exec_all(&app, "queue");
+    let text = r.out.text();
+    assert!(
+        text.contains("  1. A, B — Title t3 [Album] (2:05)\n"),
+        "{text}"
+    );
+    assert!(
+        text.contains("> 2. A, B — Title t1 [Album] (2:05)\n"),
+        "{text}"
+    );
+    exec_all(&app, "remove 1");
+    wait_out(&r, "queue: 2 tracks, current 1", 2);
+    exec_all(&app, "clear");
+    wait_out(&r, "queue: 0 tracks, current none", 1);
+    exec_all(&app, "queue");
+    assert!(r.out.text().contains("queue empty"), "{}", r.out.text());
+}
+
+#[test]
+fn remove_and_move_reject_bad_arguments() {
+    let r = rig();
+    let app = r.app(true);
+    started_queue(&r, &app);
+    r.engine.wait_load(1);
+    let before = r.out.text();
+    for l in [
+        "remove 0", "remove 4", "remove x", "remove", "move 1 4", "move 0 1",
+    ] {
+        assert!(matches!(app.exec(l), Flow::Continue), "{l}");
+    }
+    assert!(matches!(app.exec("move 1"), Flow::Continue));
+    assert!(matches!(app.exec("move 1 2 3"), Flow::Continue));
+    let text = r.out.text()[before.len()..].to_owned();
+    assert_eq!(
+        text.matches("error: no queue position").count(),
+        6,
+        "{text}"
+    );
+    assert_eq!(
+        text.matches("error: usage: move <from> <to>").count(),
+        2,
+        "{text}"
+    );
+    exec_all(&app, "queue");
+    assert!(r.out.text().contains("queue: 3 tracks"), "{}", r.out.text());
+}

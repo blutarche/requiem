@@ -29,7 +29,7 @@ The bundle embeds Homebrew's libopus. Its minimum macOS version is whatever that
 ## Use
 
 - **Window:** type a query and press Enter; Return plays a result, Cmd+Return (or the row's +) adds it to the queue. Space toggles play/pause, Left / Right seek 5 s, Cmd+F focuses search, Cmd+1 / Cmd+2 switch between Search and Queue, Cmd+K opens the palette.
-- **CLI:** `requiem --connect`, then `help`. Commands: `search <query>`, `play <n>`, `add <n>`, `queue`, `next`, `prev`, `pause`, `resume`, `toggle`, `seek <secs|+secs|-secs>`, `vol <0-100>`, `status`, `shutdown-daemon`, `quit`. `--script <file>` runs commands from a file.
+- **CLI:** `requiem --connect`, then `help`. Commands: `search <query>`, `play <n>`, `add <n>`, `queue`, `remove <n>`, `move <from> <to>`, `clear`, `next`, `prev`, `pause`, `resume`, `toggle`, `seek <secs|+secs|-secs>`, `vol <0-100>`, `status`, `shutdown-daemon`, `quit`. `--script <file>` runs commands from a file.
 
 ## Footprint
 

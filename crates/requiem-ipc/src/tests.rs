@@ -379,7 +379,8 @@ fn version_mismatch_gets_incompatible() {
     // A future Hello whose other fields no longer parse still learns the supported version.
     let s = UnixStream::connect(&rig.path).unwrap();
     s.set_read_timeout(Some(WAIT)).unwrap();
-    let future = serde_json::json!({"Hello": {"protocol": 2, "role": "Tray", "build": 7}});
+    let future =
+        serde_json::json!({"Hello": {"protocol": PROTOCOL + 1, "role": "Tray", "build": 7}});
     frame::write(&mut &s, &future).unwrap();
     assert_eq!(
         read_msg(&s),
