@@ -2,7 +2,7 @@
 
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::mpsc::Sender;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Condvar, Mutex, PoisonError};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
@@ -55,6 +55,11 @@ pub(crate) struct Shared {
     pub epoch: AtomicU64,
     /// Output is gone and could not be reopened.
     pub dead: AtomicBool,
+    /// Set only while the output is stopped with no render in flight. The next render then
+    /// takes any queued feed before reading, so the current ring can no longer add to `played`.
+    pub parked: AtomicBool,
+    /// Output clock relative to realtime, as f32 bits; only `CaptureOutput` runs faster.
+    pub speed: AtomicU32,
     pub cur_gen: AtomicU64,
     pub ring_seconds: f32,
     pub debug: bool,
@@ -65,6 +70,10 @@ pub(crate) struct Shared {
 impl Shared {
     pub fn rate(&self) -> u32 {
         self.rate.load(Ordering::Acquire)
+    }
+
+    pub fn speed(&self) -> f64 {
+        f64::from(f32::from_bits(self.speed.load(Ordering::Relaxed)))
     }
 
     /// Samples (not frames) the ring must hold before playback starts or resumes.
@@ -97,6 +106,8 @@ pub(crate) fn new_shared(ring_seconds: f32, debug: bool) -> (Arc<Shared>, Callba
         rate: AtomicU32::new(0),
         epoch: AtomicU64::new(0),
         dead: AtomicBool::new(false),
+        parked: AtomicBool::new(true),
+        speed: AtomicU32::new(1.0f32.to_bits()),
         cur_gen: AtomicU64::new(NO_GEN),
         ring_seconds,
         debug,
@@ -191,18 +202,30 @@ impl Callback {
 
 pub(crate) trait Output {
     fn sample_rate(&self) -> u32;
-    /// Reopens the output after a stream error.
+    /// Reopens the output after a stream error, running only if it was running before.
     fn recover(&mut self) -> Result<(), AudioError>;
+    /// Starts or stops calling the callback. Once a stop returns, no render is in flight.
+    fn set_running(&mut self, run: bool) -> Result<(), AudioError>;
 }
 
 pub(crate) enum SupMsg {
     StreamError(String),
+    Play,
+    Pause,
     Shutdown,
 }
 
+#[derive(Default)]
+struct CaptureState {
+    run: bool,
+    stop: bool,
+}
+
+type CaptureCtl = Arc<(Mutex<CaptureState>, Condvar)>;
+
 pub(crate) struct CaptureOutput {
     rate: u32,
-    stop: Arc<AtomicBool>,
+    ctl: CaptureCtl,
     thread: Option<JoinHandle<()>>,
 }
 
@@ -215,9 +238,11 @@ impl CaptureOutput {
         sink: CaptureBuffer,
     ) -> Self {
         shared.rate.store(rate, Ordering::Release);
-        let stop = Arc::new(AtomicBool::new(false));
-        let stop2 = stop.clone();
-        let speed = f64::from(speed.max(0.01));
+        let speed = speed.max(0.01);
+        shared.speed.store(speed.to_bits(), Ordering::Relaxed);
+        let speed = f64::from(speed);
+        let ctl = CaptureCtl::default();
+        let ctl2 = ctl.clone();
         let thread = std::thread::Builder::new()
             .name("requiem-capture".into())
             .spawn(move || {
@@ -225,8 +250,20 @@ impl CaptureOutput {
                 let period = Duration::from_secs_f64(0.01 / speed);
                 let mut buf = vec![0.0f32; block_frames * 2];
                 let mut next = Instant::now();
-                while !stop2.load(Ordering::Acquire) {
-                    cb.render(&mut buf);
+                let (lock, cv) = &*ctl2;
+                loop {
+                    {
+                        // Rendering under the lock makes `set_running(false)` wait it out.
+                        let mut st = lock.lock().unwrap();
+                        if !st.run && !st.stop {
+                            st = cv.wait_while(st, |s| !s.run && !s.stop).unwrap();
+                            next = Instant::now();
+                        }
+                        if st.stop {
+                            break;
+                        }
+                        cb.render(&mut buf);
+                    }
                     sink.0.lock().unwrap().extend_from_slice(&buf);
                     next += period;
                     let now = Instant::now();
@@ -238,9 +275,15 @@ impl CaptureOutput {
             .expect("spawn capture thread");
         Self {
             rate,
-            stop,
+            ctl,
             thread: Some(thread),
         }
+    }
+
+    fn update(&self, f: impl FnOnce(&mut CaptureState)) {
+        let (lock, cv) = &*self.ctl;
+        f(&mut lock.lock().unwrap_or_else(PoisonError::into_inner));
+        cv.notify_all();
     }
 }
 
@@ -252,11 +295,16 @@ impl Output for CaptureOutput {
     fn recover(&mut self) -> Result<(), AudioError> {
         Ok(())
     }
+
+    fn set_running(&mut self, run: bool) -> Result<(), AudioError> {
+        self.update(|s| s.run = run);
+        Ok(())
+    }
 }
 
 impl Drop for CaptureOutput {
     fn drop(&mut self) {
-        self.stop.store(true, Ordering::Release);
+        self.update(|s| s.stop = true);
         if let Some(t) = self.thread.take() {
             let _ = t.join();
         }
@@ -310,6 +358,7 @@ impl Drop for CbGuard {
 
 pub(crate) struct DeviceOutput {
     stream: Option<cpal::Stream>,
+    playing: bool,
     rate: u32,
     slot: CbSlot,
     shared: Arc<Shared>,
@@ -324,6 +373,7 @@ impl DeviceOutput {
     ) -> Result<Self, AudioError> {
         let mut out = Self {
             stream: None,
+            playing: false,
             rate: 0,
             slot: Arc::new(Mutex::new(Some(cb))),
             shared,
@@ -365,9 +415,11 @@ impl DeviceOutput {
         self.shared
             .rate
             .store(config.sample_rate, Ordering::Release);
-        stream
-            .play()
-            .map_err(|e| AudioError(format!("start stream: {e}")))?;
+        if self.playing {
+            stream
+                .play()
+                .map_err(|e| AudioError(format!("start stream: {e}")))?;
+        }
         self.rate = config.sample_rate;
         self.stream = Some(stream);
         self.shared.log(|| {
@@ -415,5 +467,23 @@ impl Output for DeviceOutput {
         // Dropping the stream returns the callback to the slot.
         self.stream = None;
         self.build()
+    }
+
+    /// The no-render-in-flight guarantee on stop rests on CoreAudio's `AudioOutputUnitStop`
+    /// waiting out the current IO cycle when called off the IO thread.
+    fn set_running(&mut self, run: bool) -> Result<(), AudioError> {
+        self.playing = run;
+        let Some(stream) = &self.stream else {
+            return Ok(());
+        };
+        if run {
+            stream
+                .play()
+                .map_err(|e| AudioError(format!("start stream: {e}")))
+        } else {
+            stream
+                .pause()
+                .map_err(|e| AudioError(format!("pause stream: {e}")))
+        }
     }
 }

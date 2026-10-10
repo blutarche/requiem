@@ -313,7 +313,14 @@ fn seek_right_after_start() {
 }
 
 #[test]
-fn pause_emits_zeros_and_freezes_position() {
+fn output_is_parked_until_load() {
+    let h = harness(10.0);
+    std::thread::sleep(Duration::from_millis(100));
+    assert_eq!(h.capture.frames(), 0, "output rendered before any load");
+}
+
+#[test]
+fn pause_parks_output_and_freezes_position() {
     let mut h = harness(10.0);
     h.engine.load(1, opus());
     h.wait_capture_frames(RATE as usize, 20);
@@ -321,20 +328,80 @@ fn pause_emits_zeros_and_freezes_position() {
     std::thread::sleep(Duration::from_millis(50));
     let f0 = h.capture.frames();
     let pos0 = positions(&h.events(), 1);
-    // 2 s of captured audio at 10x realtime.
-    h.wait_capture_frames(f0 + 2 * RATE as usize, 20);
-    let l = left(&h.capture.samples());
-    assert!(
-        l[f0..].iter().all(|s| *s == 0.0),
-        "audio leaked while paused"
-    );
+    // 2 s of output time at 10x realtime.
+    std::thread::sleep(Duration::from_millis(200));
+    assert_eq!(h.capture.frames(), f0, "output rendered while paused");
     let pos1 = positions(&h.events(), 1);
     assert_eq!(pos0.len(), pos1.len(), "position advanced while paused");
     h.engine.resume();
+    h.wait_capture_frames(f0 + RATE as usize / 10, 5);
     h.wait_ended(1);
     let pos2 = positions(&h.events(), 1);
     assert!(*pos2.last().unwrap() > *pos0.last().unwrap());
     assert!(near(*pos2.last().unwrap(), 6.0, 0.4));
+    check_tone(&h, 6.0);
+}
+
+#[test]
+fn position_continues_across_pause() {
+    let mut h = harness(10.0);
+    h.engine.load(1, opus());
+    h.wait("positions", 10, |ev| {
+        positions(ev, 1).iter().any(|p| *p >= 2.0)
+    });
+    h.engine.pause();
+    std::thread::sleep(Duration::from_millis(50));
+    let before = positions(&h.events(), 1);
+    // 3 s of output time at 10x realtime: counting it would jump the position by ~3 s.
+    std::thread::sleep(Duration::from_millis(300));
+    h.engine.resume();
+    h.wait_ended(1);
+    let pos = positions(&h.events(), 1);
+    let (last, next) = (before[before.len() - 1], pos[before.len()]);
+    assert!(next > last && next - last < 1.0, "{last} -> {next}");
+    assert!(pos.windows(2).all(|w| w[0] <= w[1]), "{pos:?}");
+    assert!(near(*pos.last().unwrap(), 6.0, 0.4), "{pos:?}");
+}
+
+#[test]
+fn seek_while_paused_wakes_decoder_and_lands() {
+    let mut h = harness(4.0);
+    let reads: Arc<Mutex<Vec<Instant>>> = Arc::default();
+    let r = reads.clone();
+    h.engine.load(
+        1,
+        hooked(
+            fixture("sine440_48k.webm"),
+            FormatHint::WebmOpus,
+            move |_| {
+                r.lock().unwrap().push(Instant::now());
+                ReadPlan::Full
+            },
+        ),
+    );
+    h.wait("positions", 10, |ev| !positions(ev, 1).is_empty());
+    h.engine.pause();
+    std::thread::sleep(Duration::from_millis(100));
+    let n = positions(&h.events(), 1).len();
+    let t = Instant::now();
+    h.engine.seek(Duration::from_secs(4));
+    std::thread::sleep(Duration::from_millis(200));
+    assert!(
+        reads.lock().unwrap().iter().any(|at| *at > t),
+        "decoder did not act on a seek while paused"
+    );
+    let f0 = h.capture.frames();
+    h.engine.resume();
+    h.wait_ended(1);
+    let pos = positions(&h.events(), 1);
+    assert!(
+        pos.len() > n && pos[n..].iter().all(|p| *p >= 4.0),
+        "{pos:?}"
+    );
+    let l = left(&h.capture.samples());
+    let (first, last) = active_span(&l[f0..]);
+    let remaining = secs(last - first);
+    assert!(near(remaining, 2.0, 0.2), "remaining {remaining}");
 }
 
 fn rms_of_play(volume: f32) -> f64 {
@@ -475,21 +542,41 @@ fn slow_source_reports_buffering() {
 }
 
 #[test]
-fn stop_goes_silent() {
+fn stop_goes_silent_and_parks_output() {
     let mut h = harness(4.0);
     h.engine.load(1, opus());
     h.wait("positions", 10, |ev| positions(ev, 1).len() >= 2);
     h.engine.stop();
     let n_events = h.events().len();
     let f0 = h.capture.frames();
-    // 1 s of captured audio at 4x realtime.
-    h.wait_capture_frames(f0 + RATE as usize, 20);
+    std::thread::sleep(Duration::from_millis(50));
+    let f1 = h.capture.frames();
+    // 1 s of output time at 4x realtime.
+    std::thread::sleep(Duration::from_millis(250));
+    assert_eq!(h.capture.frames(), f1, "output rendered after stop");
     assert_eq!(h.events().len(), n_events, "events after stop");
     let l = left(&h.capture.samples());
     assert!(
-        l[f0 + 2_000..].iter().all(|s| *s == 0.0),
+        l[(f0 + 2_000).min(l.len())..].iter().all(|s| *s == 0.0),
         "audio after stop"
     );
+}
+
+#[test]
+fn load_after_stop_plays() {
+    let mut h = harness(10.0);
+    h.engine.load(1, opus());
+    h.wait("positions", 10, |ev| positions(ev, 1).len() >= 2);
+    h.engine.stop();
+    std::thread::sleep(Duration::from_millis(50));
+    let f0 = h.capture.frames();
+    h.engine.load(2, opus());
+    h.wait_ended(2);
+    let l = left(&h.capture.samples());
+    let (first, last) = active_span(&l[f0..]);
+    let len = secs(last - first);
+    assert!(near(len, 6.0, 0.12), "duration {len}");
+    assert!(near(*positions(&h.events(), 2).last().unwrap(), 6.0, 0.4));
 }
 
 #[test]
