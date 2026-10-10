@@ -194,31 +194,46 @@ fn supervise(
     while let Ok(msg) = rx.recv() {
         match msg {
             SupMsg::Shutdown => return,
-            SupMsg::StreamError(detail) => {
-                let old_rate = output.sample_rate();
-                match output.recover() {
-                    Ok(()) => {
-                        shared.log(|| format!("output reopened at {} Hz", output.sample_rate()));
-                        if output.sample_rate() != old_rate {
-                            shared.epoch.fetch_add(1, Ordering::AcqRel);
-                        }
-                    }
-                    Err(e) => {
-                        shared.dead.store(true, Ordering::Release);
-                        let gen_ = shared.cur_gen.load(Ordering::Acquire);
-                        if gen_ != NO_GEN {
-                            let _gate = shared
-                                .emit_gate
-                                .lock()
-                                .unwrap_or_else(PoisonError::into_inner);
-                            sink(EngineEvent::Failed {
-                                r#gen: gen_,
-                                kind: FailureKind::Output,
-                                detail: format!("{detail}; reopen failed: {e}"),
-                            });
-                        }
-                    }
+            SupMsg::StreamError(detail) => reopen(output, shared, sink, &detail),
+            SupMsg::Play => {
+                shared.parked.store(false, Ordering::Release);
+                if let Err(e) = output.set_running(true) {
+                    reopen(output, shared, sink, &e.0);
                 }
+            }
+            SupMsg::Pause => {
+                if let Err(e) = output.set_running(false) {
+                    // Reopening drops the old stream, so no render is in flight afterwards.
+                    reopen(output, shared, sink, &e.0);
+                }
+                shared.parked.store(true, Ordering::Release);
+            }
+        }
+    }
+}
+
+fn reopen(output: &mut dyn Output, shared: &Shared, sink: &EngineEventSink, detail: &str) {
+    let old_rate = output.sample_rate();
+    match output.recover() {
+        Ok(()) => {
+            shared.log(|| format!("output reopened at {} Hz", output.sample_rate()));
+            if output.sample_rate() != old_rate {
+                shared.epoch.fetch_add(1, Ordering::AcqRel);
+            }
+        }
+        Err(e) => {
+            shared.dead.store(true, Ordering::Release);
+            let gen_ = shared.cur_gen.load(Ordering::Acquire);
+            if gen_ != NO_GEN {
+                let _gate = shared
+                    .emit_gate
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner);
+                sink(EngineEvent::Failed {
+                    r#gen: gen_,
+                    kind: FailureKind::Output,
+                    detail: format!("{detail}; reopen failed: {e}"),
+                });
             }
         }
     }
@@ -235,6 +250,9 @@ impl Engine for AudioEngine {
         });
         self.shared.cur_gen.store(r#gen, Ordering::Release);
         self.shared.paused.store(false, Ordering::Relaxed);
+        // Sent before spawning so the output is normally running by the ring handover; a
+        // handover that still finds it parked skips the ack wait (see `Shared::parked`).
+        let _ = self.sup_tx.send(SupMsg::Play);
         decode::spawn(Job {
             r#gen,
             src,
@@ -247,10 +265,15 @@ impl Engine for AudioEngine {
 
     fn pause(&mut self) {
         self.shared.paused.store(true, Ordering::Relaxed);
+        let _ = self.sup_tx.send(SupMsg::Pause);
     }
 
     fn resume(&mut self) {
         self.shared.paused.store(false, Ordering::Relaxed);
+        if let Some(live) = &self.live {
+            let _ = self.sup_tx.send(SupMsg::Play);
+            let _ = live.cmds.send(Cmd::Wake);
+        }
     }
 
     fn seek(&mut self, to: Duration) {
@@ -272,6 +295,7 @@ impl Engine for AudioEngine {
         self.cancel_live();
         self.shared.cur_gen.store(NO_GEN, Ordering::Release);
         self.silence();
+        let _ = self.sup_tx.send(SupMsg::Pause);
     }
 }
 

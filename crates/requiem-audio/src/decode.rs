@@ -2,7 +2,7 @@
 
 use std::io::{self, Read, Seek, SeekFrom};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::Receiver;
+use std::sync::mpsc::{Receiver, RecvTimeoutError};
 use std::sync::{Arc, PoisonError};
 use std::time::{Duration, Instant};
 
@@ -28,10 +28,16 @@ const MAX_DECODE_ERRORS: u32 = 50;
 const RESAMPLE_CHUNK: usize = 1024;
 const POSITION_EVERY: Duration = Duration::from_millis(250);
 const ACK_TIMEOUT: Duration = Duration::from_secs(2);
-const RING_FULL_SLEEP: Duration = Duration::from_millis(10);
+/// Idle wait while paused. Resume, seek and cancel end it early; the bound is a backstop for
+/// changes that send no command, such as an output reopen at another rate.
+const PAUSED_WAIT: Duration = Duration::from_secs(1);
+/// Output time added to computed waits so the callback has moved past the target on waking.
+const WAKE_SLACK: Duration = Duration::from_millis(15);
 
 pub(crate) enum Cmd {
     Seek(Duration),
+    /// Playback resumed: re-evaluate now rather than at the end of a paused wait.
+    Wake,
 }
 
 pub(crate) struct Job {
@@ -143,6 +149,7 @@ fn run(job: Job) {
         eof_flag: Arc::new(AtomicBool::new(false)),
         started: false,
         eof: false,
+        full: false,
         pending_seek: None,
         skip_frames: 0,
         base_time: 0.0,
@@ -195,6 +202,8 @@ struct Player {
     eof_flag: Arc<AtomicBool>,
     started: bool,
     eof: bool,
+    /// The ring filled up; writing resumes once it drains to `refill_level`.
+    full: bool,
     pending_seek: Option<Duration>,
     /// Source frames to drop after an accurate seek that landed before the target.
     skip_frames: u64,
@@ -275,7 +284,7 @@ impl Player {
                     (self.emit)(EngineEvent::Ended { r#gen: self.gen_ });
                     return Ok(());
                 }
-                std::thread::sleep(RING_FULL_SLEEP);
+                self.wait(self.idle_wait())?;
                 continue;
             }
 
@@ -359,11 +368,59 @@ impl Player {
         self.fill_samples() == 0
     }
 
+    /// Samples at or below which a full ring takes writes again: refills come in bursts.
+    fn refill_level(&self) -> usize {
+        self.ring_cap / 3 * 2
+    }
+
+    fn position_every(&self) -> u64 {
+        u64::from(self.out_rate.max(1)) * POSITION_EVERY.as_millis() as u64 / 1000
+    }
+
+    fn on_cmd(&mut self, cmd: Cmd) {
+        match cmd {
+            Cmd::Seek(to) => self.pending_seek = Some(to),
+            Cmd::Wake => {}
+        }
+    }
+
+    /// Blocks until a command arrives or `timeout` passes. The engine drops the sender when it
+    /// cancels this thread, which ends the wait at once.
+    fn wait(&mut self, timeout: Duration) -> R<()> {
+        match self.cmds.recv_timeout(timeout) {
+            Ok(cmd) => self.on_cmd(cmd),
+            Err(RecvTimeoutError::Timeout) => {}
+            Err(RecvTimeoutError::Disconnected) => return Err(Exit::Cancelled),
+        }
+        Ok(())
+    }
+
+    /// Time until the next Position is due or the ring next needs attention: refill at
+    /// `refill_level`, or drained after EOF.
+    fn idle_wait(&self) -> Duration {
+        if self.shared.paused.load(Ordering::Relaxed) {
+            return PAUSED_WAIT;
+        }
+        let played = self.shared.played.load(Ordering::Relaxed);
+        let to_position = self
+            .position_every()
+            .saturating_sub(played.saturating_sub(self.last_emit_played));
+        let fill = self.fill_samples();
+        let to_ring = if self.eof {
+            fill
+        } else {
+            fill.saturating_sub(self.refill_level())
+        } / 2;
+        let frames = to_position.min(to_ring as u64);
+        let secs = frames as f64 / f64::from(self.out_rate.max(1)) + WAKE_SLACK.as_secs_f64();
+        Duration::from_secs_f64(secs / self.shared.speed())
+    }
+
     /// Cancel check, queued commands, output reopen, position and buffering reports.
     fn service(&mut self) -> R<()> {
         self.checked()?;
-        while let Ok(Cmd::Seek(to)) = self.cmds.try_recv() {
-            self.pending_seek = Some(to);
+        while let Ok(cmd) = self.cmds.try_recv() {
+            self.on_cmd(cmd);
         }
         if !self.started {
             return Ok(());
@@ -402,8 +459,7 @@ impl Player {
         }
 
         let played = self.shared.played.load(Ordering::Relaxed);
-        let every = u64::from(self.out_rate.max(1)) * POSITION_EVERY.as_millis() as u64 / 1000;
-        if !paused && played.saturating_sub(self.last_emit_played) >= every {
+        if !paused && played.saturating_sub(self.last_emit_played) >= self.position_every() {
             self.last_emit_played = played;
             self.checked()?;
             (self.emit)(EngineEvent::Position {
@@ -446,11 +502,13 @@ impl Player {
         }
         self.prod = Some(prod);
         self.eof = false;
+        self.full = false;
 
         let deadline = Instant::now() + ACK_TIMEOUT;
         while self.shared.active_ring.load(Ordering::Acquire) != id
             && Instant::now() < deadline
             && !self.shared.dead.load(Ordering::Relaxed)
+            && !self.shared.parked.load(Ordering::Acquire)
         {
             self.checked()?;
             std::thread::sleep(Duration::from_millis(1));
@@ -562,10 +620,18 @@ impl Player {
             if self.pending_seek.is_some() {
                 return Ok(false);
             }
+            if self.full && self.fill_samples() <= self.refill_level() {
+                self.full = false;
+            }
             let prod = self.prod.as_mut().expect("ring exists once started");
-            let n = prod.slots().min(data.len() - off) & !1;
+            let n = if self.full {
+                0
+            } else {
+                prod.slots().min(data.len() - off) & !1
+            };
             if n == 0 {
-                std::thread::sleep(RING_FULL_SLEEP);
+                self.full = true;
+                self.wait(self.idle_wait())?;
                 continue;
             }
             let mut chunk = prod.write_chunk(n).expect("n <= free slots");
