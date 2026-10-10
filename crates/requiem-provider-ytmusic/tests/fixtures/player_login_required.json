@@ -1,0 +1,14 @@
+{
+ "responseContext": {
+  "visitorData": "VISITOR",
+  "maxAgeSeconds": 0,
+  "cacheInstruction": {
+   "maxAgeSeconds": 0,
+   "monitoringKey": 1001
+  }
+ },
+ "playabilityStatus": {
+  "status": "LOGIN_REQUIRED",
+  "reason": "Sign in to confirm you’re not a bot"
+ }
+}

@@ -1,0 +1,10 @@
+{
+ "responseContext": {
+  "visitorData": "VISITOR",
+  "maxAgeSeconds": 0
+ },
+ "playabilityStatus": {
+  "status": "ERROR",
+  "reason": "This video is unavailable"
+ }
+}

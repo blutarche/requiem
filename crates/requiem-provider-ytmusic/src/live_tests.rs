@@ -1,0 +1,88 @@
+//! Live smoke tests against YouTube. Run with `-- --ignored live_ --test-threads=1`.
+
+use std::io::{Read, Seek, SeekFrom};
+use std::time::{Duration, Instant};
+
+use requiem_core::{FormatHint, Provider};
+
+use crate::{IpFamily, YtMusicOptions, YtMusicProvider};
+
+const FAMILIES: [IpFamily; 2] = [IpFamily::V4, IpFamily::V6];
+const QUERY: &str = "daft punk around the world";
+
+fn provider(prefer_aac: bool, ip_family: IpFamily) -> YtMusicProvider {
+    YtMusicProvider::new(YtMusicOptions {
+        prefer_aac,
+        ip_family,
+    })
+}
+
+#[test]
+#[ignore]
+fn live_search() {
+    for family in FAMILIES {
+        let tracks = provider(false, family).search(QUERY, 20).unwrap();
+        println!("{family:?}: {} tracks", tracks.len());
+        assert!(tracks.len() >= 5);
+        for t in &tracks {
+            assert!(
+                !t.id.id.is_empty() && !t.title.is_empty() && t.duration.is_some(),
+                "{t:?}"
+            );
+        }
+    }
+}
+
+fn stream(prefer_aac: bool, hint: FormatHint) {
+    for family in FAMILIES {
+        let p = provider(prefer_aac, family);
+        let track = p.search(QUERY, 5).unwrap().remove(0);
+        let (format, mut src) = p.open(&track.id.id).unwrap();
+        assert_eq!(format.hint, hint, "{family:?}");
+
+        let t0 = Instant::now();
+        let mut first = [0u8; 1];
+        src.read_exact(&mut first).unwrap();
+        let ttfb = t0.elapsed();
+
+        let start = Instant::now();
+        let mut total = 1u64;
+        let mut buf = vec![0u8; 64 * 1024];
+        while start.elapsed() < Duration::from_secs(10) {
+            let n = src.read(&mut buf).unwrap();
+            if n == 0 {
+                break;
+            }
+            total += n as u64;
+        }
+        let rate = total as f64 / start.elapsed().as_secs_f64();
+        let floor = 4.0 * format.average_bitrate.unwrap_or(0) as f64 / 8.0;
+        println!(
+            "{family:?} itag {}: ttfb {ttfb:?}, {total} bytes, {rate:.0} B/s (floor {floor:.0})",
+            format.itag
+        );
+        assert!(rate >= floor, "{family:?}: {rate} < {floor}");
+
+        let mid = format.content_length / 2;
+        src.seek(SeekFrom::Start(mid)).unwrap();
+        let mut got = 0;
+        let mut chunk = vec![0u8; 16 * 1024];
+        while got < 256 * 1024 {
+            let n = src.read(&mut chunk).unwrap();
+            assert!(n > 0, "{family:?}: EOF mid-stream");
+            got += n;
+        }
+    }
+}
+
+#[test]
+#[ignore]
+fn live_stream_opus() {
+    stream(false, FormatHint::WebmOpus);
+}
+
+#[test]
+#[ignore]
+fn live_stream_aac() {
+    stream(true, FormatHint::Mp4Aac);
+}

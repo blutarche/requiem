@@ -1,0 +1,899 @@
+{
+ "responseContext": {
+  "visitorData": "VISITOR"
+ },
+ "contents": {
+  "tabbedSearchResultsRenderer": {
+   "tabs": [
+    {
+     "tabRenderer": {
+      "content": {
+       "sectionListRenderer": {
+        "contents": [
+         {
+          "musicShelfRenderer": {
+           "contents": [
+            {
+             "musicResponsiveListItemRenderer": {
+              "thumbnail": {
+               "musicThumbnailRenderer": {
+                "thumbnail": {
+                 "thumbnails": [
+                  {
+                   "url": "https://yt3.googleusercontent.com/1gXa4i8m_NecS7xNqLqzxy6rdOWBh_L6U91YYv5ULNdmvvYT1Pr6ld7_SyUs5L52pEQheVyfU9SnXUm9=w60-h60-l90-rj",
+                   "width": 60,
+                   "height": 60
+                  },
+                  {
+                   "url": "https://yt3.googleusercontent.com/1gXa4i8m_NecS7xNqLqzxy6rdOWBh_L6U91YYv5ULNdmvvYT1Pr6ld7_SyUs5L52pEQheVyfU9SnXUm9=w120-h120-l90-rj",
+                   "width": 120,
+                   "height": 120
+                  }
+                 ]
+                },
+                "thumbnailCrop": "MUSIC_THUMBNAIL_CROP_UNSPECIFIED",
+                "thumbnailScale": "MUSIC_THUMBNAIL_SCALE_ASPECT_FIT"
+               }
+              },
+              "flexColumns": [
+               {
+                "musicResponsiveListItemFlexColumnRenderer": {
+                 "text": {
+                  "runs": [
+                   {
+                    "text": "Around the World",
+                    "navigationEndpoint": {
+                     "watchEndpoint": {
+                      "videoId": "Jb6gcoR266U",
+                      "watchEndpointMusicSupportedConfigs": {
+                       "watchEndpointMusicConfig": {
+                        "musicVideoType": "MUSIC_VIDEO_TYPE_ATV"
+                       }
+                      }
+                     }
+                    }
+                   }
+                  ]
+                 },
+                 "displayPriority": "MUSIC_RESPONSIVE_LIST_ITEM_COLUMN_DISPLAY_PRIORITY_HIGH"
+                }
+               },
+               {
+                "musicResponsiveListItemFlexColumnRenderer": {
+                 "text": {
+                  "runs": [
+                   {
+                    "text": "Daft Punk",
+                    "navigationEndpoint": {
+                     "browseEndpoint": {
+                      "browseId": "UCRr1xG_2WIDs18a6cIiCxeA",
+                      "browseEndpointContextSupportedConfigs": {
+                       "browseEndpointContextMusicConfig": {
+                        "pageType": "MUSIC_PAGE_TYPE_ARTIST"
+                       }
+                      }
+                     }
+                    }
+                   },
+                   {
+                    "text": " • "
+                   },
+                   {
+                    "text": "Homework",
+                    "navigationEndpoint": {
+                     "browseEndpoint": {
+                      "browseId": "MPREb_dMHztPsrDgN",
+                      "browseEndpointContextSupportedConfigs": {
+                       "browseEndpointContextMusicConfig": {
+                        "pageType": "MUSIC_PAGE_TYPE_ALBUM"
+                       }
+                      }
+                     }
+                    }
+                   },
+                   {
+                    "text": " • "
+                   },
+                   {
+                    "text": "7:10"
+                   }
+                  ]
+                 },
+                 "displayPriority": "MUSIC_RESPONSIVE_LIST_ITEM_COLUMN_DISPLAY_PRIORITY_HIGH"
+                }
+               },
+               {
+                "musicResponsiveListItemFlexColumnRenderer": {
+                 "text": {
+                  "runs": [
+                   {
+                    "text": "298M plays"
+                   }
+                  ]
+                 },
+                 "displayPriority": "MUSIC_RESPONSIVE_LIST_ITEM_COLUMN_DISPLAY_PRIORITY_HIGH"
+                }
+               }
+              ],
+              "playlistItemData": {
+               "videoId": "Jb6gcoR266U"
+              },
+              "flexColumnDisplayStyle": "MUSIC_RESPONSIVE_LIST_ITEM_FLEX_COLUMN_DISPLAY_STYLE_TWO_LINE_STACK",
+              "itemHeight": "MUSIC_RESPONSIVE_LIST_ITEM_HEIGHT_TALL"
+             }
+            },
+            {
+             "musicResponsiveListItemRenderer": {
+              "thumbnail": {
+               "musicThumbnailRenderer": {
+                "thumbnail": {
+                 "thumbnails": [
+                  {
+                   "url": "https://yt3.googleusercontent.com/nJaGpUDWaZOj-B9OFnyPUofnpdg1ykrngSnUmeGRQoesffXP5s2JklfkNzZBPzL8NmekYZF30-lgn_SC8A=w60-h60-l90-rj",
+                   "width": 60,
+                   "height": 60
+                  },
+                  {
+                   "url": "https://yt3.googleusercontent.com/nJaGpUDWaZOj-B9OFnyPUofnpdg1ykrngSnUmeGRQoesffXP5s2JklfkNzZBPzL8NmekYZF30-lgn_SC8A=w120-h120-l90-rj",
+                   "width": 120,
+                   "height": 120
+                  }
+                 ]
+                },
+                "thumbnailCrop": "MUSIC_THUMBNAIL_CROP_UNSPECIFIED",
+                "thumbnailScale": "MUSIC_THUMBNAIL_SCALE_ASPECT_FIT"
+               }
+              },
+              "flexColumns": [
+               {
+                "musicResponsiveListItemFlexColumnRenderer": {
+                 "text": {
+                  "runs": [
+                   {
+                    "text": "Around the World (In the Style of Daft Punk) [Karaoke Version]",
+                    "navigationEndpoint": {
+                     "watchEndpoint": {
+                      "videoId": "7jatND5NZ4c",
+                      "watchEndpointMusicSupportedConfigs": {
+                       "watchEndpointMusicConfig": {
+                        "musicVideoType": "MUSIC_VIDEO_TYPE_ATV"
+                       }
+                      }
+                     }
+                    }
+                   }
+                  ]
+                 },
+                 "displayPriority": "MUSIC_RESPONSIVE_LIST_ITEM_COLUMN_DISPLAY_PRIORITY_HIGH"
+                }
+               },
+               {
+                "musicResponsiveListItemFlexColumnRenderer": {
+                 "text": {
+                  "runs": [
+                   {
+                    "text": "Ameritz Countdown Karaoke",
+                    "navigationEndpoint": {
+                     "browseEndpoint": {
+                      "browseId": "UCfARTWWQuS2V8Dsc-7mQ2Ug",
+                      "browseEndpointContextSupportedConfigs": {
+                       "browseEndpointContextMusicConfig": {
+                        "pageType": "MUSIC_PAGE_TYPE_ARTIST"
+                       }
+                      }
+                     }
+                    }
+                   },
+                   {
+                    "text": " • "
+                   },
+                   {
+                    "text": "Karaoke Hits from 1997",
+                    "navigationEndpoint": {
+                     "browseEndpoint": {
+                      "browseId": "MPREb_QxXHPxop1TR",
+                      "browseEndpointContextSupportedConfigs": {
+                       "browseEndpointContextMusicConfig": {
+                        "pageType": "MUSIC_PAGE_TYPE_ALBUM"
+                       }
+                      }
+                     }
+                    }
+                   },
+                   {
+                    "text": " • "
+                   },
+                   {
+                    "text": "3:57"
+                   }
+                  ]
+                 },
+                 "displayPriority": "MUSIC_RESPONSIVE_LIST_ITEM_COLUMN_DISPLAY_PRIORITY_HIGH"
+                }
+               },
+               {
+                "musicResponsiveListItemFlexColumnRenderer": {
+                 "text": {
+                  "runs": [
+                   {
+                    "text": "3.7K plays"
+                   }
+                  ]
+                 },
+                 "displayPriority": "MUSIC_RESPONSIVE_LIST_ITEM_COLUMN_DISPLAY_PRIORITY_HIGH"
+                }
+               }
+              ],
+              "playlistItemData": {
+               "videoId": "7jatND5NZ4c"
+              },
+              "flexColumnDisplayStyle": "MUSIC_RESPONSIVE_LIST_ITEM_FLEX_COLUMN_DISPLAY_STYLE_TWO_LINE_STACK",
+              "itemHeight": "MUSIC_RESPONSIVE_LIST_ITEM_HEIGHT_TALL"
+             }
+            },
+            {
+             "musicResponsiveListItemRenderer": {
+              "thumbnail": {
+               "musicThumbnailRenderer": {
+                "thumbnail": {
+                 "thumbnails": [
+                  {
+                   "url": "https://yt3.googleusercontent.com/WcxKKKOBAyf3a4qI8N2FjOyylr6Th1wDdoofTEO3rDw5kmjI-DF2h0hPJeGURrCqPCs9BIhJAQj3f10=w60-h60-l90-rj",
+                   "width": 60,
+                   "height": 60
+                  },
+                  {
+                   "url": "https://yt3.googleusercontent.com/WcxKKKOBAyf3a4qI8N2FjOyylr6Th1wDdoofTEO3rDw5kmjI-DF2h0hPJeGURrCqPCs9BIhJAQj3f10=w120-h120-l90-rj",
+                   "width": 120,
+                   "height": 120
+                  }
+                 ]
+                },
+                "thumbnailCrop": "MUSIC_THUMBNAIL_CROP_UNSPECIFIED",
+                "thumbnailScale": "MUSIC_THUMBNAIL_SCALE_ASPECT_FIT"
+               }
+              },
+              "flexColumns": [
+               {
+                "musicResponsiveListItemFlexColumnRenderer": {
+                 "text": {
+                  "runs": [
+                   {
+                    "text": "Da Funk / Daftendirekt",
+                    "navigationEndpoint": {
+                     "watchEndpoint": {
+                      "videoId": "uaumM3VcjoA",
+                      "watchEndpointMusicSupportedConfigs": {
+                       "watchEndpointMusicConfig": {
+                        "musicVideoType": "MUSIC_VIDEO_TYPE_ATV"
+                       }
+                      }
+                     }
+                    }
+                   }
+                  ]
+                 },
+                 "displayPriority": "MUSIC_RESPONSIVE_LIST_ITEM_COLUMN_DISPLAY_PRIORITY_HIGH"
+                }
+               },
+               {
+                "musicResponsiveListItemFlexColumnRenderer": {
+                 "text": {
+                  "runs": [
+                   {
+                    "text": "Daft Punk",
+                    "navigationEndpoint": {
+                     "browseEndpoint": {
+                      "browseId": "UCRr1xG_2WIDs18a6cIiCxeA",
+                      "browseEndpointContextSupportedConfigs": {
+                       "browseEndpointContextMusicConfig": {
+                        "pageType": "MUSIC_PAGE_TYPE_ARTIST"
+                       }
+                      }
+                     }
+                    }
+                   },
+                   {
+                    "text": " • "
+                   },
+                   {
+                    "text": "Alive 2007",
+                    "navigationEndpoint": {
+                     "browseEndpoint": {
+                      "browseId": "MPREb_CtOaObihCXA",
+                      "browseEndpointContextSupportedConfigs": {
+                       "browseEndpointContextMusicConfig": {
+                        "pageType": "MUSIC_PAGE_TYPE_ALBUM"
+                       }
+                      }
+                     }
+                    }
+                   },
+                   {
+                    "text": " • "
+                   },
+                   {
+                    "text": "6:37"
+                   }
+                  ]
+                 },
+                 "displayPriority": "MUSIC_RESPONSIVE_LIST_ITEM_COLUMN_DISPLAY_PRIORITY_HIGH"
+                }
+               },
+               {
+                "musicResponsiveListItemFlexColumnRenderer": {
+                 "text": {
+                  "runs": [
+                   {
+                    "text": "5.1M plays"
+                   }
+                  ]
+                 },
+                 "displayPriority": "MUSIC_RESPONSIVE_LIST_ITEM_COLUMN_DISPLAY_PRIORITY_HIGH"
+                }
+               }
+              ],
+              "playlistItemData": {
+               "videoId": "uaumM3VcjoA"
+              },
+              "flexColumnDisplayStyle": "MUSIC_RESPONSIVE_LIST_ITEM_FLEX_COLUMN_DISPLAY_STYLE_TWO_LINE_STACK",
+              "itemHeight": "MUSIC_RESPONSIVE_LIST_ITEM_HEIGHT_TALL"
+             }
+            },
+            {
+             "musicResponsiveListItemRenderer": {
+              "thumbnail": {
+               "musicThumbnailRenderer": {
+                "thumbnail": {
+                 "thumbnails": [
+                  {
+                   "url": "https://yt3.googleusercontent.com/7Hd_1G2RWTmkhN4c1dQUGxVfwa-KkDa2SVsbXia3OOPo1uI8e-_ZUiE2-yGy8F_-4OMW_jEIhjrn44o=w60-h60-l90-rj",
+                   "width": 60,
+                   "height": 60
+                  },
+                  {
+                   "url": "https://yt3.googleusercontent.com/7Hd_1G2RWTmkhN4c1dQUGxVfwa-KkDa2SVsbXia3OOPo1uI8e-_ZUiE2-yGy8F_-4OMW_jEIhjrn44o=w120-h120-l90-rj",
+                   "width": 120,
+                   "height": 120
+                  }
+                 ]
+                },
+                "thumbnailCrop": "MUSIC_THUMBNAIL_CROP_UNSPECIFIED",
+                "thumbnailScale": "MUSIC_THUMBNAIL_SCALE_ASPECT_FIT"
+               }
+              },
+              "flexColumns": [
+               {
+                "musicResponsiveListItemFlexColumnRenderer": {
+                 "text": {
+                  "runs": [
+                   {
+                    "text": "Around The World (Daft Punk Cuatropop Cover)",
+                    "navigationEndpoint": {
+                     "watchEndpoint": {
+                      "videoId": "E3jyB_2XGFk",
+                      "watchEndpointMusicSupportedConfigs": {
+                       "watchEndpointMusicConfig": {
+                        "musicVideoType": "MUSIC_VIDEO_TYPE_ATV"
+                       }
+                      }
+                     }
+                    }
+                   }
+                  ]
+                 },
+                 "displayPriority": "MUSIC_RESPONSIVE_LIST_ITEM_COLUMN_DISPLAY_PRIORITY_HIGH"
+                }
+               },
+               {
+                "musicResponsiveListItemFlexColumnRenderer": {
+                 "text": {
+                  "runs": [
+                   {
+                    "text": "Alee Unity",
+                    "navigationEndpoint": {
+                     "browseEndpoint": {
+                      "browseId": "UC-tTvnb9o6u1JzfDtujgbrQ",
+                      "browseEndpointContextSupportedConfigs": {
+                       "browseEndpointContextMusicConfig": {
+                        "pageType": "MUSIC_PAGE_TYPE_ARTIST"
+                       }
+                      }
+                     }
+                    }
+                   },
+                   {
+                    "text": " • "
+                   },
+                   {
+                    "text": "Cuatropop",
+                    "navigationEndpoint": {
+                     "browseEndpoint": {
+                      "browseId": "MPREb_Xz3bphDQW2o",
+                      "browseEndpointContextSupportedConfigs": {
+                       "browseEndpointContextMusicConfig": {
+                        "pageType": "MUSIC_PAGE_TYPE_ALBUM"
+                       }
+                      }
+                     }
+                    }
+                   },
+                   {
+                    "text": " • "
+                   },
+                   {
+                    "text": "2:31"
+                   }
+                  ]
+                 },
+                 "displayPriority": "MUSIC_RESPONSIVE_LIST_ITEM_COLUMN_DISPLAY_PRIORITY_HIGH"
+                }
+               },
+               {
+                "musicResponsiveListItemFlexColumnRenderer": {
+                 "text": {
+                  "runs": [
+                   {
+                    "text": "478 plays"
+                   }
+                  ]
+                 },
+                 "displayPriority": "MUSIC_RESPONSIVE_LIST_ITEM_COLUMN_DISPLAY_PRIORITY_HIGH"
+                }
+               }
+              ],
+              "playlistItemData": {
+               "videoId": "E3jyB_2XGFk"
+              },
+              "flexColumnDisplayStyle": "MUSIC_RESPONSIVE_LIST_ITEM_FLEX_COLUMN_DISPLAY_STYLE_TWO_LINE_STACK",
+              "itemHeight": "MUSIC_RESPONSIVE_LIST_ITEM_HEIGHT_TALL"
+             }
+            },
+            {
+             "musicResponsiveListItemRenderer": {
+              "thumbnail": {
+               "musicThumbnailRenderer": {
+                "thumbnail": {
+                 "thumbnails": [
+                  {
+                   "url": "https://yt3.googleusercontent.com/qrY7xjdjqL0FEneZKHk845JeeFjdWOgexUa_BhsUxskJ2iflhzpbofqGJZBcPHDGU9JjoZflE4yn3P74=w60-h60-l90-rj",
+                   "width": 60,
+                   "height": 60
+                  },
+                  {
+                   "url": "https://yt3.googleusercontent.com/qrY7xjdjqL0FEneZKHk845JeeFjdWOgexUa_BhsUxskJ2iflhzpbofqGJZBcPHDGU9JjoZflE4yn3P74=w120-h120-l90-rj",
+                   "width": 120,
+                   "height": 120
+                  }
+                 ]
+                },
+                "thumbnailCrop": "MUSIC_THUMBNAIL_CROP_UNSPECIFIED",
+                "thumbnailScale": "MUSIC_THUMBNAIL_SCALE_ASPECT_FIT"
+               }
+              },
+              "flexColumns": [
+               {
+                "musicResponsiveListItemFlexColumnRenderer": {
+                 "text": {
+                  "runs": [
+                   {
+                    "text": "High Life",
+                    "navigationEndpoint": {
+                     "watchEndpoint": {
+                      "videoId": "IUpgPigGJ5s",
+                      "watchEndpointMusicSupportedConfigs": {
+                       "watchEndpointMusicConfig": {
+                        "musicVideoType": "MUSIC_VIDEO_TYPE_ATV"
+                       }
+                      }
+                     }
+                    }
+                   }
+                  ]
+                 },
+                 "displayPriority": "MUSIC_RESPONSIVE_LIST_ITEM_COLUMN_DISPLAY_PRIORITY_HIGH"
+                }
+               },
+               {
+                "musicResponsiveListItemFlexColumnRenderer": {
+                 "text": {
+                  "runs": [
+                   {
+                    "text": "Daft Punk",
+                    "navigationEndpoint": {
+                     "browseEndpoint": {
+                      "browseId": "UCRr1xG_2WIDs18a6cIiCxeA",
+                      "browseEndpointContextSupportedConfigs": {
+                       "browseEndpointContextMusicConfig": {
+                        "pageType": "MUSIC_PAGE_TYPE_ARTIST"
+                       }
+                      }
+                     }
+                    }
+                   },
+                   {
+                    "text": " • "
+                   },
+                   {
+                    "text": "Discovery",
+                    "navigationEndpoint": {
+                     "browseEndpoint": {
+                      "browseId": "MPREb_7ltM34kr0mH",
+                      "browseEndpointContextSupportedConfigs": {
+                       "browseEndpointContextMusicConfig": {
+                        "pageType": "MUSIC_PAGE_TYPE_ALBUM"
+                       }
+                      }
+                     }
+                    }
+                   },
+                   {
+                    "text": " • "
+                   },
+                   {
+                    "text": "3:22"
+                   }
+                  ]
+                 },
+                 "displayPriority": "MUSIC_RESPONSIVE_LIST_ITEM_COLUMN_DISPLAY_PRIORITY_HIGH"
+                }
+               },
+               {
+                "musicResponsiveListItemFlexColumnRenderer": {
+                 "text": {
+                  "runs": [
+                   {
+                    "text": "27M plays"
+                   }
+                  ]
+                 },
+                 "displayPriority": "MUSIC_RESPONSIVE_LIST_ITEM_COLUMN_DISPLAY_PRIORITY_HIGH"
+                }
+               }
+              ],
+              "playlistItemData": {
+               "videoId": "IUpgPigGJ5s"
+              },
+              "flexColumnDisplayStyle": "MUSIC_RESPONSIVE_LIST_ITEM_FLEX_COLUMN_DISPLAY_STYLE_TWO_LINE_STACK",
+              "itemHeight": "MUSIC_RESPONSIVE_LIST_ITEM_HEIGHT_TALL"
+             }
+            },
+            {
+             "musicResponsiveListItemRenderer": {
+              "thumbnail": {
+               "musicThumbnailRenderer": {
+                "thumbnail": {
+                 "thumbnails": [
+                  {
+                   "url": "https://yt3.googleusercontent.com/j-loenjeVB3WOaUi-Mlm3f9rfv2C4ZOK2sLJVa1qy3jGv9iFvhKaana8ZJ-uxK6mYgYmtHP8TJKvYU0=w60-h60-l90-rj",
+                   "width": 60,
+                   "height": 60
+                  },
+                  {
+                   "url": "https://yt3.googleusercontent.com/j-loenjeVB3WOaUi-Mlm3f9rfv2C4ZOK2sLJVa1qy3jGv9iFvhKaana8ZJ-uxK6mYgYmtHP8TJKvYU0=w120-h120-l90-rj",
+                   "width": 120,
+                   "height": 120
+                  }
+                 ]
+                },
+                "thumbnailCrop": "MUSIC_THUMBNAIL_CROP_UNSPECIFIED",
+                "thumbnailScale": "MUSIC_THUMBNAIL_SCALE_ASPECT_FIT"
+               }
+              },
+              "flexColumns": [
+               {
+                "musicResponsiveListItemFlexColumnRenderer": {
+                 "text": {
+                  "runs": [
+                   {
+                    "text": "Around The World",
+                    "navigationEndpoint": {
+                     "watchEndpoint": {
+                      "videoId": "8A2C9w9advg",
+                      "watchEndpointMusicSupportedConfigs": {
+                       "watchEndpointMusicConfig": {
+                        "musicVideoType": "MUSIC_VIDEO_TYPE_ATV"
+                       }
+                      }
+                     }
+                    }
+                   }
+                  ]
+                 },
+                 "displayPriority": "MUSIC_RESPONSIVE_LIST_ITEM_COLUMN_DISPLAY_PRIORITY_HIGH"
+                }
+               },
+               {
+                "musicResponsiveListItemFlexColumnRenderer": {
+                 "text": {
+                  "runs": [
+                   {
+                    "text": "Aqua",
+                    "navigationEndpoint": {
+                     "browseEndpoint": {
+                      "browseId": "UCYKLsBeLLaPmAsRkw8yznCw",
+                      "browseEndpointContextSupportedConfigs": {
+                       "browseEndpointContextMusicConfig": {
+                        "pageType": "MUSIC_PAGE_TYPE_ARTIST"
+                       }
+                      }
+                     }
+                    }
+                   },
+                   {
+                    "text": " • "
+                   },
+                   {
+                    "text": "Aquarius (Special Edition)",
+                    "navigationEndpoint": {
+                     "browseEndpoint": {
+                      "browseId": "MPREb_2jCwfDMCIO0",
+                      "browseEndpointContextSupportedConfigs": {
+                       "browseEndpointContextMusicConfig": {
+                        "pageType": "MUSIC_PAGE_TYPE_ALBUM"
+                       }
+                      }
+                     }
+                    }
+                   },
+                   {
+                    "text": " • "
+                   },
+                   {
+                    "text": "3:30"
+                   }
+                  ]
+                 },
+                 "displayPriority": "MUSIC_RESPONSIVE_LIST_ITEM_COLUMN_DISPLAY_PRIORITY_HIGH"
+                }
+               },
+               {
+                "musicResponsiveListItemFlexColumnRenderer": {
+                 "text": {
+                  "runs": [
+                   {
+                    "text": "34M plays"
+                   }
+                  ]
+                 },
+                 "displayPriority": "MUSIC_RESPONSIVE_LIST_ITEM_COLUMN_DISPLAY_PRIORITY_HIGH"
+                }
+               }
+              ],
+              "playlistItemData": {
+               "videoId": "8A2C9w9advg"
+              },
+              "flexColumnDisplayStyle": "MUSIC_RESPONSIVE_LIST_ITEM_FLEX_COLUMN_DISPLAY_STYLE_TWO_LINE_STACK",
+              "itemHeight": "MUSIC_RESPONSIVE_LIST_ITEM_HEIGHT_TALL"
+             }
+            },
+            {
+             "musicResponsiveListItemRenderer": {
+              "thumbnail": {
+               "musicThumbnailRenderer": {
+                "thumbnail": {
+                 "thumbnails": [
+                  {
+                   "url": "https://yt3.googleusercontent.com/SqGz2Cntekp25RBtNKhJ5BoXTGs-ZLzjiRnWHJEHJZo4ogmvb0CdIrbZPqFe1wlYFn-6xpHMCKgtHFU=w60-h60-l90-rj",
+                   "width": 60,
+                   "height": 60
+                  },
+                  {
+                   "url": "https://yt3.googleusercontent.com/SqGz2Cntekp25RBtNKhJ5BoXTGs-ZLzjiRnWHJEHJZo4ogmvb0CdIrbZPqFe1wlYFn-6xpHMCKgtHFU=w120-h120-l90-rj",
+                   "width": 120,
+                   "height": 120
+                  }
+                 ]
+                },
+                "thumbnailCrop": "MUSIC_THUMBNAIL_CROP_UNSPECIFIED",
+                "thumbnailScale": "MUSIC_THUMBNAIL_SCALE_ASPECT_FIT"
+               }
+              },
+              "flexColumns": [
+               {
+                "musicResponsiveListItemFlexColumnRenderer": {
+                 "text": {
+                  "runs": [
+                   {
+                    "text": "Around the World (Computer Game Version)",
+                    "navigationEndpoint": {
+                     "watchEndpoint": {
+                      "videoId": "3559Mp5lr14",
+                      "watchEndpointMusicSupportedConfigs": {
+                       "watchEndpointMusicConfig": {
+                        "musicVideoType": "MUSIC_VIDEO_TYPE_ATV"
+                       }
+                      }
+                     }
+                    }
+                   }
+                  ]
+                 },
+                 "displayPriority": "MUSIC_RESPONSIVE_LIST_ITEM_COLUMN_DISPLAY_PRIORITY_HIGH"
+                }
+               },
+               {
+                "musicResponsiveListItemFlexColumnRenderer": {
+                 "text": {
+                  "runs": [
+                   {
+                    "text": "8-Bit Arcade",
+                    "navigationEndpoint": {
+                     "browseEndpoint": {
+                      "browseId": "UCCy2h-z5yQoOF908Qa05ykA",
+                      "browseEndpointContextSupportedConfigs": {
+                       "browseEndpointContextMusicConfig": {
+                        "pageType": "MUSIC_PAGE_TYPE_ARTIST"
+                       }
+                      }
+                     }
+                    }
+                   },
+                   {
+                    "text": " • "
+                   },
+                   {
+                    "text": "The Ultimate Daft Punk",
+                    "navigationEndpoint": {
+                     "browseEndpoint": {
+                      "browseId": "MPREb_8CTt3ZkiIB3",
+                      "browseEndpointContextSupportedConfigs": {
+                       "browseEndpointContextMusicConfig": {
+                        "pageType": "MUSIC_PAGE_TYPE_ALBUM"
+                       }
+                      }
+                     }
+                    }
+                   },
+                   {
+                    "text": " • "
+                   },
+                   {
+                    "text": "2:40"
+                   }
+                  ]
+                 },
+                 "displayPriority": "MUSIC_RESPONSIVE_LIST_ITEM_COLUMN_DISPLAY_PRIORITY_HIGH"
+                }
+               },
+               {
+                "musicResponsiveListItemFlexColumnRenderer": {
+                 "text": {
+                  "runs": [
+                   {
+                    "text": "29K plays"
+                   }
+                  ]
+                 },
+                 "displayPriority": "MUSIC_RESPONSIVE_LIST_ITEM_COLUMN_DISPLAY_PRIORITY_HIGH"
+                }
+               }
+              ],
+              "playlistItemData": {
+               "videoId": "3559Mp5lr14"
+              },
+              "flexColumnDisplayStyle": "MUSIC_RESPONSIVE_LIST_ITEM_FLEX_COLUMN_DISPLAY_STYLE_TWO_LINE_STACK",
+              "itemHeight": "MUSIC_RESPONSIVE_LIST_ITEM_HEIGHT_TALL"
+             }
+            },
+            {
+             "musicResponsiveListItemRenderer": {
+              "thumbnail": {
+               "musicThumbnailRenderer": {
+                "thumbnail": {
+                 "thumbnails": [
+                  {
+                   "url": "https://yt3.googleusercontent.com/gnRox5zW8ka7YgE2F6sONOEkaFDSsO9NagQU3nv3zG8kk0Q_LYPLpMBocYPwKPyDiECW9foBOEHmk8c=w60-h60-l90-rj",
+                   "width": 60,
+                   "height": 60
+                  },
+                  {
+                   "url": "https://yt3.googleusercontent.com/gnRox5zW8ka7YgE2F6sONOEkaFDSsO9NagQU3nv3zG8kk0Q_LYPLpMBocYPwKPyDiECW9foBOEHmk8c=w120-h120-l90-rj",
+                   "width": 120,
+                   "height": 120
+                  }
+                 ]
+                },
+                "thumbnailCrop": "MUSIC_THUMBNAIL_CROP_UNSPECIFIED",
+                "thumbnailScale": "MUSIC_THUMBNAIL_SCALE_ASPECT_FIT"
+               }
+              },
+              "flexColumns": [
+               {
+                "musicResponsiveListItemFlexColumnRenderer": {
+                 "text": {
+                  "runs": [
+                   {
+                    "text": "Around The World (Instrumental In The Style Of Daft Punk)",
+                    "navigationEndpoint": {
+                     "watchEndpoint": {
+                      "videoId": "WLOPQBaBlP4",
+                      "watchEndpointMusicSupportedConfigs": {
+                       "watchEndpointMusicConfig": {
+                        "musicVideoType": "MUSIC_VIDEO_TYPE_ATV"
+                       }
+                      }
+                     }
+                    }
+                   }
+                  ]
+                 },
+                 "displayPriority": "MUSIC_RESPONSIVE_LIST_ITEM_COLUMN_DISPLAY_PRIORITY_HIGH"
+                }
+               },
+               {
+                "musicResponsiveListItemFlexColumnRenderer": {
+                 "text": {
+                  "runs": [
+                   {
+                    "text": "The Hit Beat Makers",
+                    "navigationEndpoint": {
+                     "browseEndpoint": {
+                      "browseId": "UCHqvOq9cnA_S8QQvY7vsPFA",
+                      "browseEndpointContextSupportedConfigs": {
+                       "browseEndpointContextMusicConfig": {
+                        "pageType": "MUSIC_PAGE_TYPE_ARTIST"
+                       }
+                      }
+                     }
+                    }
+                   },
+                   {
+                    "text": " • "
+                   },
+                   {
+                    "text": "Instrumental Dance Beats Vol. 1 - Instrumental Versions of The Hottest Dance Hits",
+                    "navigationEndpoint": {
+                     "browseEndpoint": {
+                      "browseId": "MPREb_H5TMsIOiyhs",
+                      "browseEndpointContextSupportedConfigs": {
+                       "browseEndpointContextMusicConfig": {
+                        "pageType": "MUSIC_PAGE_TYPE_ALBUM"
+                       }
+                      }
+                     }
+                    }
+                   },
+                   {
+                    "text": " • "
+                   },
+                   {
+                    "text": "5:16"
+                   }
+                  ]
+                 },
+                 "displayPriority": "MUSIC_RESPONSIVE_LIST_ITEM_COLUMN_DISPLAY_PRIORITY_HIGH"
+                }
+               },
+               {
+                "musicResponsiveListItemFlexColumnRenderer": {
+                 "text": {
+                  "runs": [
+                   {
+                    "text": "19K plays"
+                   }
+                  ]
+                 },
+                 "displayPriority": "MUSIC_RESPONSIVE_LIST_ITEM_COLUMN_DISPLAY_PRIORITY_HIGH"
+                }
+               }
+              ],
+              "playlistItemData": {
+               "videoId": "WLOPQBaBlP4"
+              },
+              "flexColumnDisplayStyle": "MUSIC_RESPONSIVE_LIST_ITEM_FLEX_COLUMN_DISPLAY_STYLE_TWO_LINE_STACK",
+              "itemHeight": "MUSIC_RESPONSIVE_LIST_ITEM_HEIGHT_TALL"
+             }
+            }
+           ]
+          }
+         }
+        ]
+       }
+      }
+     }
+    }
+   ]
+  }
+ }
+}
