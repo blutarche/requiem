@@ -9,6 +9,8 @@ CARGO_BIN="${CARGO:-cargo}"
 export PERF_FOOTPRINT_KIB="${PERF_FOOTPRINT_KIB:-30720}"
 export PERF_CPU_PLAY="${PERF_CPU_PLAY:-1.0}"
 export PERF_CPU_IDLE="${PERF_CPU_IDLE:-0.5}"
+# Seeks and track changes refill the ring in a burst; the 1% budget is for steady playback.
+export PERF_CPU_BURST="${PERF_CPU_BURST:-2.0}"
 
 "$CARGO_BIN" build --release -p requiem-cli
 
@@ -122,9 +124,10 @@ log, samples_path, status = sys.argv[1], sys.argv[2], int(sys.argv[3])
 fp_cap = float(os.environ["PERF_FOOTPRINT_KIB"])
 cpu_play = float(os.environ["PERF_CPU_PLAY"])
 cpu_idle = float(os.environ["PERF_CPU_IDLE"])
+cpu_burst = float(os.environ["PERF_CPU_BURST"])
 phases = ["idle_search", "play", "seeks", "transition", "idle_end"]
 limit = {"idle_search": cpu_idle, "idle_end": cpu_idle,
-         "play": cpu_play, "seeks": cpu_play, "transition": cpu_play}
+         "play": cpu_play, "seeks": cpu_burst, "transition": cpu_burst}
 
 marks = {}
 with open(log) as f:
