@@ -45,8 +45,13 @@ fi
 
 app="target/requiem.app"
 rm -rf "$app"
-mkdir -p "$app/Contents/MacOS" "$app/Contents/Frameworks" "$app/Contents/Resources/licenses"
-cp target/release/requiem-gui target/release/requiemd "$app/Contents/MacOS/"
+# requiemd is a helper app with its own bundle id: inside the main app, LaunchServices
+# would take the running daemon for the app itself and never start the GUI.
+helper="$app/Contents/Helpers/requiemd.app"
+mkdir -p "$app/Contents/MacOS" "$app/Contents/Frameworks" "$app/Contents/Resources/licenses" \
+  "$helper/Contents/MacOS"
+cp target/release/requiem-gui "$app/Contents/MacOS/"
+cp target/release/requiemd "$helper/Contents/MacOS/"
 frameworks="$app/Contents/Frameworks"
 licenses="$app/Contents/Resources/licenses"
 
@@ -67,8 +72,9 @@ copy_license() {
   [ "$found" -eq 1 ] || echo "warning: no license file found next to $dylib (looked in $keg)" >&2
 }
 
+# `ref` is how `target` reaches Contents/Frameworks.
 embed() {
-  local target="$1" dep name
+  local target="$1" ref="$2" dep name
   while IFS= read -r dep; do
     [ -n "$dep" ] || continue
     name="$(basename "$dep")"
@@ -77,19 +83,19 @@ embed() {
       chmod u+w "$frameworks/$name"
       install_name_tool -id "@executable_path/../Frameworks/$name" "$frameworks/$name"
       copy_license "$dep" "$name"
-      embed "$frameworks/$name"
+      embed "$frameworks/$name" "@loader_path"
     fi
-    install_name_tool -change "$dep" "@executable_path/../Frameworks/$name" "$target"
+    install_name_tool -change "$dep" "$ref/$name" "$target"
   done < <(deps "$target")
 }
 
-embed "$app/Contents/MacOS/requiemd"
-embed "$app/Contents/MacOS/requiem-gui"
+embed "$helper/Contents/MacOS/requiemd" "@executable_path/../../../../Frameworks"
+embed "$app/Contents/MacOS/requiem-gui" "@executable_path/../Frameworks"
 
 # Every remaining dependency must be a system library or inside the bundle.
-for f in "$app"/Contents/MacOS/* "$frameworks"/*; do
+for f in "$app"/Contents/MacOS/* "$helper"/Contents/MacOS/* "$frameworks"/*; do
   [ -e "$f" ] || continue
-  bad="$(otool -L "$f" | tail -n +2 | awk '{print $1}' | grep -v -E '^(/usr/lib/|/System/|@executable_path/\.\./Frameworks/)' || true)"
+  bad="$(otool -L "$f" | tail -n +2 | awk '{print $1}' | grep -v -E '^(/usr/lib/|/System/|@executable_path/\.\./Frameworks/|@executable_path/\.\./\.\./\.\./\.\./Frameworks/|@loader_path/)' || true)"
   if [ -n "$bad" ]; then
     echo "bundle-macos.sh: $f still references: $bad" >&2
     exit 1
@@ -134,7 +140,24 @@ cat >"$app/Contents/Info.plist" <<PLIST
 </dict>
 </plist>
 PLIST
-plutil -lint "$app/Contents/Info.plist" >/dev/null
+cat >"$helper/Contents/Info.plist" <<PLIST
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>CFBundleIdentifier</key><string>dev.blutarche.requiem.player</string>
+  <key>CFBundleName</key><string>requiem</string>
+  <key>CFBundleExecutable</key><string>requiemd</string>
+  <key>CFBundlePackageType</key><string>APPL</string>
+  <key>CFBundleShortVersionString</key><string>$version</string>
+  <key>CFBundleVersion</key><string>$version</string>
+  <key>LSMinimumSystemVersion</key><string>$min_os</string>
+  <key>LSUIElement</key><true/>
+  <key>NSHighResolutionCapable</key><true/>
+</dict>
+</plist>
+PLIST
+plutil -lint "$app/Contents/Info.plist" "$helper/Contents/Info.plist" >/dev/null
 
 cp LICENSE-MIT "$licenses/requiem-LICENSE-MIT"
 cp LICENSE-APACHE "$licenses/requiem-LICENSE-APACHE"
@@ -147,7 +170,7 @@ for d in "$frameworks"/*.dylib; do
   [ -e "$d" ] || continue
   codesign --force --sign - --timestamp=none "$d"
 done
-codesign --force --sign - --timestamp=none "$app/Contents/MacOS/requiemd"
+codesign --force --sign - --timestamp=none "$helper"
 codesign --force --sign - --timestamp=none "$app"
 codesign --verify --deep --strict "$app"
 
