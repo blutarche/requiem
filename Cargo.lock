@@ -699,8 +699,10 @@ dependencies = [
 name = "requiem-cli"
 version = "0.1.0"
 dependencies = [
+ "crossbeam-channel",
  "requiem-audio",
  "requiem-core",
+ "requiem-ipc",
  "requiem-provider-ytmusic",
 ]
 
@@ -710,6 +712,17 @@ version = "0.1.0"
 dependencies = [
  "crossbeam-channel",
  "serde",
+]
+
+[[package]]
+name = "requiem-daemon"
+version = "0.1.0"
+dependencies = [
+ "crossbeam-channel",
+ "requiem-audio",
+ "requiem-core",
+ "requiem-ipc",
+ "requiem-provider-ytmusic",
 ]
 
 [[package]]
