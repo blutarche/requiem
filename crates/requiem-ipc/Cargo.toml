@@ -1,0 +1,22 @@
+[package]
+name = "requiem-ipc"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+requiem-core.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+crossbeam-channel.workspace = true
+libc.workspace = true
+
+[dev-dependencies]
+requiem-core = { workspace = true, features = ["test-util"] }
+
+# Its `main` doubles as the fake daemon that `connect_or_spawn` launches.
+[[test]]
+name = "spawn"
+harness = false

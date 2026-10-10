@@ -19,11 +19,13 @@ cpal = "0.18.2"
 rubato = "5.0.1"
 rtrb = "0.4.0"
 ureq = "3.4.2"
+libc = "0.2.190"
 
 requiem-core = { path = "crates/requiem-core" }
 requiem-audio = { path = "crates/requiem-audio" }
 requiem-provider-ytmusic = { path = "crates/requiem-provider-ytmusic" }
 requiem-cli = { path = "crates/requiem-cli" }
+requiem-ipc = { path = "crates/requiem-ipc" }
 
 [profile.release]
 lto = "thin"
