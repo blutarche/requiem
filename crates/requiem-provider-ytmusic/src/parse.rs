@@ -423,6 +423,9 @@ mod tests {
     const OK: &str = include_str!("../tests/fixtures/player_ok.json");
     const LOGIN: &str = include_str!("../tests/fixtures/player_login_required.json");
     const ERROR: &str = include_str!("../tests/fixtures/player_error.json");
+    // Hand-edited from player_ok.json (status/reason swapped, streamingData removed):
+    // UNPLAYABLE, AGE_CHECK_REQUIRED, no-audio (video formats only) and cipher-only.
+    // The rest are real captures, scrubbed. ERROR comes from a nonexistent video id.
     const UNPLAYABLE: &str = include_str!("../tests/fixtures/player_unplayable.json");
     const AGE: &str = include_str!("../tests/fixtures/player_age_check.json");
     const NO_AUDIO: &str = include_str!("../tests/fixtures/player_no_audio.json");
