@@ -23,11 +23,14 @@ const SPAWN_POLL: Duration = Duration::from_millis(25);
 const EXIT_GRACE: Duration = Duration::from_millis(500);
 const LOG_ROTATE_BYTES: u64 = 1024 * 1024;
 
+/// The last message is always exactly one `Goodbye` or `Disconnected`.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Incoming {
     Event(Event),
     Raise,
-    /// Always the last message; the reason is for display.
+    /// The daemon quit on purpose, as opposed to the connection failing.
+    Goodbye,
+    /// The connection failed or was closed without a `Goodbye`; the reason is for display.
     Disconnected(String),
 }
 
@@ -156,7 +159,8 @@ impl Client {
                 ));
             }
         }
-        stream.set_read_timeout(None)?;
+        // A daemon that is stopping may already have sent `Goodbye` and closed.
+        frame::set_read_timeout(&stream, None)?;
         let stream = Arc::new(stream);
         let (tx, rx) = unbounded();
         let reader = stream.clone();
@@ -178,22 +182,31 @@ impl Drop for Client {
 }
 
 fn read_loop(stream: &UnixStream, tx: &Sender<Incoming>) {
-    let reason = loop {
+    let last = loop {
         let incoming = match frame::read(&mut &*stream) {
             Ok(Some(ServerMsg::Event(ev))) => Incoming::Event(ev),
             Ok(Some(ServerMsg::Raise)) => Incoming::Raise,
             Ok(Some(ServerMsg::Pong(_))) => continue,
-            Ok(Some(other)) => break Some(format!("unexpected message from daemon: {other:?}")),
-            Ok(None) => break Some("daemon closed the connection".to_owned()),
-            Err(e) => break Some(e.to_string()),
+            Ok(Some(ServerMsg::Goodbye)) => break Some(Incoming::Goodbye),
+            Ok(Some(other)) => {
+                break Some(Incoming::Disconnected(format!(
+                    "unexpected message from daemon: {other:?}"
+                )));
+            }
+            Ok(None) => {
+                break Some(Incoming::Disconnected(
+                    "daemon closed the connection".to_owned(),
+                ));
+            }
+            Err(e) => break Some(Incoming::Disconnected(e.to_string())),
         };
         if tx.send(incoming).is_err() {
             break None;
         }
     };
     let _ = stream.shutdown(Shutdown::Both);
-    if let Some(reason) = reason {
-        let _ = tx.send(Incoming::Disconnected(reason));
+    if let Some(last) = last {
+        let _ = tx.send(last);
     }
 }
 

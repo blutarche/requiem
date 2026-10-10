@@ -230,17 +230,22 @@ fn serve(id: ClientId, stream: UnixStream, hub: &Sender<HubMsg>) {
     };
     let stream = Arc::new(stream);
     let (queue, outbound) = bounded(QUEUE_CAP);
+    let (flushed_tx, flushed) = bounded::<()>(0);
     let writer = {
         let stream = stream.clone();
         thread::Builder::new()
             .name("requiem-ipc-writer".into())
-            .spawn(move || write_loop(&stream, &outbound))
+            .spawn(move || {
+                write_loop(&stream, &outbound);
+                drop(flushed_tx);
+            })
     };
     let join = HubMsg::Join {
         id,
         role,
         queue,
         stream: stream.clone(),
+        flushed,
     };
     if writer.is_ok() && hub.send(join).is_ok() {
         forward(id, &stream, hub);

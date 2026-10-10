@@ -5,7 +5,7 @@ use std::net::Shutdown;
 use std::os::unix::net::UnixStream;
 use std::sync::Arc;
 use std::thread::{self, JoinHandle};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crossbeam_channel::{Receiver, Sender, never, select, unbounded};
 use requiem_core::{Command, Event, PlayState, Session, Track};
@@ -17,6 +17,8 @@ use crate::server::{ClientCounts, ServerHooks};
 pub(crate) const QUEUE_CAP: usize = 256;
 /// A client or subscriber with more queued messages than this stops receiving `Position`.
 const POSITION_BACKLOG: usize = 64;
+/// How long, in total, writers get on stop to send what is queued, `Goodbye` last.
+const GOODBYE_FLUSH: Duration = Duration::from_millis(200);
 
 pub(crate) type ClientId = u64;
 pub(crate) type Frame = Arc<Vec<u8>>;
@@ -27,6 +29,7 @@ pub(crate) enum HubMsg {
         role: Role,
         queue: Sender<Frame>,
         stream: Arc<UnixStream>,
+        flushed: Receiver<()>,
     },
     Leave(ClientId),
     /// `from` is `None` for in-daemon controls.
@@ -49,6 +52,9 @@ struct Peer {
     role: Role,
     queue: Sender<Frame>,
     stream: Arc<UnixStream>,
+    /// Disconnects when the writer thread exits, which it does once `queue` is dropped
+    /// and drained.
+    flushed: Receiver<()>,
 }
 
 impl Peer {
@@ -190,10 +196,33 @@ impl Hub {
                 },
             }
         }
-        for p in &self.peers {
-            let _ = p.stream.shutdown(Shutdown::Both);
-        }
+        self.say_goodbye();
         self.session.shutdown();
+    }
+
+    /// A client whose queue is full, or that doesn't read its backlog by the deadline, is
+    /// closed without its `Goodbye`.
+    fn say_goodbye(&mut self) {
+        let deadline = Instant::now() + GOODBYE_FLUSH;
+        let goodbye = encode(&ServerMsg::Goodbye);
+        let mut closing = Vec::with_capacity(self.peers.len());
+        for p in self.peers.drain(..) {
+            if let Some(frame) = &goodbye {
+                p.offer(frame, false);
+            }
+            let Peer {
+                queue,
+                stream,
+                flushed,
+                ..
+            } = p;
+            drop(queue);
+            closing.push((stream, flushed));
+        }
+        for (stream, flushed) in closing {
+            let _ = flushed.recv_deadline(deadline);
+            let _ = stream.shutdown(Shutdown::Both);
+        }
     }
 
     fn on_event(&mut self, ev: Event) {
@@ -253,11 +282,13 @@ impl Hub {
                 role,
                 queue,
                 stream,
+                flushed,
             } => self.join(Peer {
                 id,
                 role,
                 queue,
                 stream,
+                flushed,
             }),
             // Every connection ends with a Leave, including peers the hub cut off.
             HubMsg::Leave(id) => {

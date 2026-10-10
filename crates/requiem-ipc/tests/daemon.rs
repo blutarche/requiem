@@ -58,6 +58,18 @@ fn wait_disconnected(rx: &Receiver<Incoming>) {
     }
 }
 
+/// Skips other messages up to `Goodbye`, which must be the last.
+fn wait_goodbye(rx: &Receiver<Incoming>) {
+    loop {
+        match rx.recv_timeout(WAIT).expect("still connected") {
+            Incoming::Goodbye => break,
+            Incoming::Disconnected(why) => panic!("disconnected without a Goodbye: {why}"),
+            _ => {}
+        }
+    }
+    assert!(rx.recv_timeout(WAIT).is_err_and(|e| e.is_disconnected()));
+}
+
 fn wait_clients(server: &Server, want: ClientCounts) {
     let deadline = Instant::now() + WAIT;
     while server.clients() != want {
@@ -192,7 +204,7 @@ fn daemon_flow() {
     cli.send(Command::Shutdown).unwrap();
     quit_rx.recv_timeout(WAIT).unwrap();
     server.shutdown();
-    wait_disconnected(&gui_rx);
-    wait_disconnected(&cli_rx);
+    wait_goodbye(&gui_rx);
+    wait_goodbye(&cli_rx);
     assert!(!path.exists());
 }

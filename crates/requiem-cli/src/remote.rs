@@ -40,6 +40,11 @@ impl RemotePlayer {
                         }
                         Incoming::Raise => {}
                         // Stored before `tx` drops, which closes the event channel.
+                        Incoming::Goodbye => {
+                            *slot.lock().unwrap_or_else(PoisonError::into_inner) =
+                                Some("player quit".into());
+                            return;
+                        }
                         Incoming::Disconnected(reason) => {
                             *slot.lock().unwrap_or_else(PoisonError::into_inner) = Some(reason);
                             return;

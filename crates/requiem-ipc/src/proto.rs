@@ -24,11 +24,18 @@ pub enum ClientMsg {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum ServerMsg {
-    Welcome { protocol: u32, version: String },
-    Incompatible { supported: u32 },
+    Welcome {
+        protocol: u32,
+        version: String,
+    },
+    Incompatible {
+        supported: u32,
+    },
     Event(Event),
     Raise,
     Pong(u64),
+    /// The daemon is stopping on purpose; it closes the connection after this.
+    Goodbye,
 }
 
 /// Reads only the protocol number, so a `Hello` from another protocol version still gets
