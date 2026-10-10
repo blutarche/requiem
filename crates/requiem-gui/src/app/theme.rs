@@ -246,6 +246,7 @@ pub enum Icon {
     Plus,
     X,
     Music,
+    Check,
 }
 
 impl Icon {
@@ -261,6 +262,7 @@ impl Icon {
             Icon::Plus => include_bytes!("../../assets/icons/plus.svg"),
             Icon::X => include_bytes!("../../assets/icons/x.svg"),
             Icon::Music => include_bytes!("../../assets/icons/music.svg"),
+            Icon::Check => include_bytes!("../../assets/icons/check.svg"),
         }
     }
 
@@ -296,6 +298,7 @@ mod tests {
             Icon::Plus,
             Icon::X,
             Icon::Music,
+            Icon::Check,
         ] {
             assert!(icon.image(16.0).is_some(), "{icon:?}");
         }

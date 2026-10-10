@@ -272,6 +272,14 @@ impl HoverButton {
         this
     }
 
+    /// A secondary text button: transparent with a 1 px line. `set_label` sizes its width.
+    pub fn secondary(mtm: MainThreadMarker, frame: NSRect) -> Retained<Self> {
+        let this = Self::filled(mtm, frame, None, &theme::line_2(), theme::RADIUS);
+        border(&this, &theme::line_2(), 1.0);
+        this.setImagePosition(NSCellImagePosition::NoImage);
+        this
+    }
+
     fn filled(
         mtm: MainThreadMarker,
         frame: NSRect,
@@ -357,10 +365,11 @@ pub struct NavIvars {
     hovered: Cell<bool>,
     icon: OnceCell<Retained<NSImageView>>,
     label: OnceCell<Retained<NSTextField>>,
+    count: OnceCell<Retained<NSTextField>>,
 }
 
 define_class!(
-    /// A sidebar entry: icon and label, accent-soft when active.
+    /// A sidebar entry: icon, label and an optional count, accent-soft when active.
     // SAFETY: NSView has no subclassing requirements; no Drop impl.
     #[unsafe(super(NSView, NSResponder, objc2_foundation::NSObject))]
     #[thread_kind = MainThreadOnly]
@@ -418,6 +427,7 @@ impl NavItem {
             hovered: Cell::new(false),
             icon: OnceCell::new(),
             label: OnceCell::new(),
+            count: OnceCell::new(),
         });
         // SAFETY: `initWithFrame:` is NSView's designated initializer.
         let this: Retained<Self> = unsafe { msg_send![super(this), initWithFrame: frame] };
@@ -442,10 +452,25 @@ impl NavItem {
             frame.size.width - 52.0,
             FLEX_W,
         );
+        let count_w = 48.0;
+        let count = placed_label(
+            mtm,
+            "",
+            &theme::tabular(12.0, Weight::Regular),
+            &theme::muted(),
+            frame.size.width - 12.0 - count_w,
+            h / 2.0,
+            count_w,
+            PIN_RIGHT,
+        );
+        count.setAlignment(NSTextAlignment::Right);
+        count.setHidden(true);
         this.addSubview(&icon);
         this.addSubview(&label);
+        this.addSubview(&count);
         let _ = this.ivars().icon.set(icon);
         let _ = this.ivars().label.set(label);
+        let _ = this.ivars().count.set(count);
         track_hover(&this, NSTrackingAreaOptions::empty());
         this.paint();
         this
@@ -454,6 +479,14 @@ impl NavItem {
     pub fn set_active(&self, active: bool) {
         if self.ivars().active.replace(active) != active {
             self.paint();
+        }
+    }
+
+    /// `None` hides the count.
+    pub fn set_count(&self, count: Option<&str>) {
+        if let Some(l) = self.ivars().count.get() {
+            set_text(l, count.unwrap_or_default());
+            l.setHidden(count.is_none());
         }
     }
 
@@ -650,7 +683,7 @@ impl Field {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SliderKind {
-    /// Seeks on mouse-up.
+    /// Previews the target time while dragging; seeks on mouse-up.
     Seek,
     /// Sets the volume while dragging.
     Volume,
@@ -761,6 +794,10 @@ impl Slider {
         }
     }
 
+    pub fn is_dragging(&self) -> bool {
+        self.ivars().dragging.get()
+    }
+
     /// Dims a disabled slider, which takes no input and shows no knob.
     pub fn set_enabled(&self, enabled: bool) {
         if self.ivars().enabled.replace(enabled) != enabled {
@@ -797,6 +834,10 @@ impl Slider {
                 true,
             ) {
                 let up = ev.r#type() == NSEventType::LeftMouseUp;
+                if up {
+                    // The seek's own update replaces the preview.
+                    self.ivars().dragging.set(false);
+                }
                 self.track_mouse(&ev, up);
                 if up {
                     break;
@@ -818,7 +859,9 @@ impl Slider {
             SliderKind::Seek if done => {
                 ui::with(|ui| ui.seek_fraction(v));
             }
-            SliderKind::Seek => {}
+            SliderKind::Seek => {
+                ui::with(|ui| ui.preview_seek(v));
+            }
             SliderKind::Volume => {
                 ui::with(|ui| ui.set_volume((v * 100.0).round() as u8));
             }

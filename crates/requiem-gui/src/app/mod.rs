@@ -95,6 +95,11 @@ define_class!(
             ui::with(|ui| ui.close_toast());
         }
 
+        #[unsafe(method(toastAction:))]
+        fn toast_action(&self, _sender: Option<&AnyObject>) {
+            ui::with(|ui| ui.toast_action());
+        }
+
         #[unsafe(method(showSearch:))]
         fn show_search(&self, _sender: Option<&AnyObject>) {
             ui::with(|ui| {

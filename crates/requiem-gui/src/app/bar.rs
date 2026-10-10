@@ -33,9 +33,13 @@ pub struct PlayerBar {
 impl PlayerBar {
     pub const H: CGFloat = 72.0;
     const CENTER_W: CGFloat = 520.0;
-    const TIME_W: CGFloat = 64.0;
+    /// Fits "Buffering…".
+    const TIME_W: CGFloat = 72.0;
     const PLAY: CGFloat = 36.0;
     const SKIP: CGFloat = 32.0;
+    /// The title's centre with an artist line below it, and alone.
+    const TITLE_Y: CGFloat = 45.0;
+    const TITLE_ALONE_Y: CGFloat = Self::H / 2.0;
 
     pub fn new(mtm: MainThreadMarker, width: CGFloat, target: &AnyObject) -> PlayerBar {
         let h = Self::H;
@@ -62,7 +66,7 @@ impl PlayerBar {
             &theme::font(14.0, Weight::SemiBold),
             &theme::ink(),
             20.0,
-            45.0,
+            Self::TITLE_Y,
             left_w,
             FLEX_W | PIN_LEFT,
         );
@@ -88,6 +92,49 @@ impl PlayerBar {
         let mid = cw / 2.0;
         let row_y = 46.0;
         let centred = PIN_LEFT | PIN_RIGHT;
+
+        let seek_y = 19.0;
+        let tw = Self::TIME_W;
+        let time_font = theme::tabular(12.0, Weight::Regular);
+        let elapsed = widgets::placed_label(
+            mtm,
+            "",
+            &time_font,
+            &theme::muted(),
+            0.0,
+            seek_y,
+            tw,
+            PIN_LEFT,
+        );
+        elapsed.setAlignment(NSTextAlignment::Right);
+        let total = widgets::placed_label(
+            mtm,
+            "",
+            &time_font,
+            &theme::muted(),
+            cw - tw,
+            seek_y,
+            tw,
+            PIN_RIGHT,
+        );
+        // 24 pt tall for an easy grab; it reaches under the transport buttons, which sit
+        // above it and keep their clicks.
+        let seek_h = 24.0;
+        let seek = Slider::new(
+            mtm,
+            rect(
+                tw + 6.0,
+                seek_y - seek_h / 2.0,
+                cw - 2.0 * (tw + 6.0),
+                seek_h,
+            ),
+            FLEX_W,
+            SliderKind::Seek,
+        );
+        center.addSubview(&elapsed);
+        center.addSubview(&seek);
+        center.addSubview(&total);
+
         let ghost = |icon, x| {
             let b = HoverButton::new(
                 mtm,
@@ -126,40 +173,6 @@ impl PlayerBar {
         center.addSubview(&prev);
         center.addSubview(&play);
         center.addSubview(&next);
-
-        let seek_y = 19.0;
-        let tw = Self::TIME_W;
-        let time_font = theme::tabular(12.0, Weight::Regular);
-        let elapsed = widgets::placed_label(
-            mtm,
-            "",
-            &time_font,
-            &theme::muted(),
-            0.0,
-            seek_y,
-            tw,
-            PIN_LEFT,
-        );
-        elapsed.setAlignment(NSTextAlignment::Right);
-        let total = widgets::placed_label(
-            mtm,
-            "",
-            &time_font,
-            &theme::muted(),
-            cw - tw,
-            seek_y,
-            tw,
-            PIN_RIGHT,
-        );
-        let seek = Slider::new(
-            mtm,
-            rect(tw + 6.0, seek_y - 8.0, cw - 2.0 * (tw + 6.0), 16.0),
-            FLEX_W,
-            SliderKind::Seek,
-        );
-        center.addSubview(&elapsed);
-        center.addSubview(&seek);
-        center.addSubview(&total);
         view.addSubview(&center);
 
         let vw = 112.0;
@@ -200,17 +213,29 @@ impl PlayerBar {
 
     /// `None` when nothing is loaded.
     pub fn set_track(&self, track: Option<(&str, &str)>, total: &str) {
-        match track {
+        let artists = match track {
             Some((title, artists)) => {
                 widgets::set_text(&self.title, title);
                 self.title.setTextColor(Some(&theme::ink()));
-                widgets::set_text(&self.artists, artists);
+                artists
             }
             None => {
                 widgets::set_text(&self.title, "Nothing playing");
                 self.title.setTextColor(Some(&theme::muted()));
-                widgets::set_text(&self.artists, "");
+                ""
             }
+        };
+        widgets::set_text(&self.artists, artists);
+        let mid = if artists.is_empty() {
+            Self::TITLE_ALONE_Y
+        } else {
+            Self::TITLE_Y
+        };
+        let f = self.title.frame();
+        let y = (mid - f.size.height / 2.0).round();
+        if f.origin.y != y {
+            self.title
+                .setFrameOrigin(objc2_foundation::NSPoint::new(f.origin.x, y));
         }
         widgets::set_text(&self.total, total);
     }
@@ -225,7 +250,14 @@ impl PlayerBar {
             .setAlphaValue(if c.player { 1.0 } else { widgets::DIMMED });
     }
 
+    /// Ignored while the seek bar is dragged, which shows its target time instead.
     pub fn set_elapsed(&self, text: &str) {
+        if !self.seek.is_dragging() {
+            widgets::set_text(&self.elapsed, text);
+        }
+    }
+
+    pub fn preview_seek(&self, text: &str) {
         widgets::set_text(&self.elapsed, text);
     }
 

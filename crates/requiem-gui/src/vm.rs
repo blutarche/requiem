@@ -185,7 +185,7 @@ impl Default for UiState {
 impl UiState {
     pub fn elapsed_text(&self) -> String {
         if self.state == PlayState::Buffering {
-            return "buffering…".to_owned();
+            return "Buffering…".to_owned();
         }
         if self.now_playing.is_none() {
             return String::new();
@@ -214,6 +214,11 @@ impl UiState {
             }
             _ => 0.0,
         }
+    }
+
+    /// Where a seek to `fraction` of the bar lands; `None` until the duration is known.
+    pub fn seek_target(&self, fraction: f64) -> Option<Duration> {
+        self.duration.map(|d| d.mul_f64(fraction.clamp(0.0, 1.0)))
     }
 
     pub fn is_playing(&self) -> bool {
@@ -1144,7 +1149,7 @@ mod tests {
         let mut vm = playing(225);
         vm.apply(Event::Position(Duration::from_secs(10)));
         vm.apply(Event::State(PlayState::Buffering));
-        assert_eq!(vm.ui().elapsed_text(), "buffering…");
+        assert_eq!(vm.ui().elapsed_text(), "Buffering…");
         assert!(vm.ui().is_playing());
         vm.apply(Event::State(PlayState::Playing));
         assert_eq!(vm.ui().elapsed_text(), "0:10");
@@ -1279,6 +1284,15 @@ mod tests {
         assert_eq!(vm.intent(Intent::Toggle), vec![Command::TogglePause]);
         assert_eq!(vm.intent(Intent::Next), vec![Command::Next]);
         assert_eq!(vm.intent(Intent::Prev), vec![Command::Prev]);
+    }
+
+    #[test]
+    fn seek_target_scales_the_measured_duration() {
+        let mut vm = playing(200);
+        assert_eq!(vm.ui().seek_target(0.25), Some(Duration::from_secs(50)));
+        assert_eq!(vm.ui().seek_target(1.5), Some(Duration::from_secs(200)));
+        vm.apply(Event::State(PlayState::Stopped));
+        assert_eq!(vm.ui().seek_target(0.5), None);
     }
 
     #[test]

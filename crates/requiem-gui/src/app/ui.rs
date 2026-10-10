@@ -63,11 +63,15 @@ const PAD: CGFloat = 24.0;
 const TOP: CGFloat = 20.0;
 const STATUS_H: CGFloat = 26.0;
 const TOAST_H: CGFloat = 40.0;
+/// Tall enough for a compact button.
+const TOAST_ACTION_H: CGFloat = 48.0;
+const TOAST_BUTTON_H: CGFloat = 32.0;
 
 struct ToastView {
     view: Retained<NSView>,
     accent: Retained<NSView>,
     label: Retained<NSTextField>,
+    action: Retained<HoverButton>,
     id: Cell<u64>,
 }
 
@@ -329,6 +333,8 @@ impl Ui {
         widgets::round(&view, theme::RADIUS);
         widgets::border(&view, &theme::line_2(), 1.0);
         let accent = widgets::panel(mtm, rect(0.0, 0.0, 3.0, TOAST_H), FLEX_H, &theme::bad());
+        // Both vertical margins flex, so the rows stay centred as the height changes.
+        let centred = PIN_TOP | PIN_BOTTOM;
         let label = widgets::placed_label(
             mtm,
             "",
@@ -337,8 +343,15 @@ impl Ui {
             16.0,
             TOAST_H / 2.0,
             w - 16.0 - 40.0,
-            FLEX_W,
+            FLEX_W | centred,
         );
+        let action = HoverButton::secondary(
+            mtm,
+            rect(0.0, (TOAST_H - TOAST_BUTTON_H) / 2.0, 0.0, TOAST_BUTTON_H),
+        );
+        action.setAutoresizingMask(PIN_RIGHT | centred);
+        action.set_action(target, sel!(toastAction:));
+        action.setHidden(true);
         let close = HoverButton::new(
             mtm,
             rect(w - 32.0, (TOAST_H - 24.0) / 2.0, 24.0, 24.0),
@@ -349,16 +362,18 @@ impl Ui {
             &theme::line_2(),
             theme::RADIUS,
         );
-        close.setAutoresizingMask(PIN_RIGHT);
+        close.setAutoresizingMask(PIN_RIGHT | centred);
         close.set_action(target, sel!(closeToast:));
         view.addSubview(&accent);
         view.addSubview(&label);
+        view.addSubview(&action);
         view.addSubview(&close);
         view.setHidden(true);
         ToastView {
             view,
             accent,
             label,
+            action,
             id: Cell::new(0),
         }
     }
@@ -485,9 +500,17 @@ impl Ui {
     }
 
     pub fn seek_fraction(&self, fraction: f64) {
-        let d = self.vm.borrow().ui().duration;
-        if let Some(d) = d {
-            self.intent(Intent::SeekTo(d.mul_f64(fraction.clamp(0.0, 1.0))));
+        let to = self.vm.borrow().ui().seek_target(fraction);
+        if let Some(to) = to {
+            self.intent(Intent::SeekTo(to));
+        }
+    }
+
+    /// Shows where a seek-bar drag would land in the elapsed label.
+    pub fn preview_seek(&self, fraction: f64) {
+        let to = self.vm.borrow().ui().seek_target(fraction);
+        if let Some(to) = to {
+            self.bar.preview_seek(&vm::fmt_time(to));
         }
     }
 
@@ -497,6 +520,11 @@ impl Ui {
 
     pub fn close_toast(&self) {
         self.dismiss_toast(self.toast.id.get());
+    }
+
+    /// The toast's action button; the view model checks the toast is still the one shown.
+    pub fn toast_action(&self) {
+        self.intent(Intent::Undo);
     }
 
     fn dismiss_toast(&self, id: u64) {
@@ -596,6 +624,9 @@ impl Ui {
                     .set(Icon::Search, &e.heading, &e.sub, e.action.label());
             }
         }
+        if let Some(badge) = p.queue_badge {
+            self.nav_queue.set_count(badge.as_deref());
+        }
         if let Some((rows, current)) = p.queue {
             let n = rows.len();
             widgets::set_text(
@@ -684,14 +715,26 @@ impl Ui {
         widgets::set_text(&t.label, &toast.text);
         t.accent.setHidden(!toast.error);
         let text_w = t.label.fittingSize().width;
-        let w: CGFloat = (16.0 + text_w + 8.0 + 40.0).clamp(240.0, 440.0);
+        // The action sits between the text and the close button.
+        let action_w = toast.action.map_or(0.0, |a| t.action.set_label(a) + 8.0);
+        t.action.setHidden(toast.action.is_none());
+        let w: CGFloat = (16.0 + text_w + 8.0 + action_w + 40.0).clamp(240.0, 440.0 + action_w);
+        let h = if toast.action.is_some() {
+            TOAST_ACTION_H
+        } else {
+            TOAST_H
+        };
         let root = self.root.bounds();
-        t.view.setFrame(rect(
-            root.size.width - 16.0 - w,
-            PlayerBar::H + 16.0,
-            w,
-            TOAST_H,
-        ));
+        t.view
+            .setFrame(rect(root.size.width - 16.0 - w, PlayerBar::H + 16.0, w, h));
+        if action_w > 0.0 {
+            t.action.setFrame(rect(
+                w - 40.0 - action_w,
+                (h - TOAST_BUTTON_H) / 2.0,
+                action_w - 8.0,
+                TOAST_BUTTON_H,
+            ));
+        }
         t.label.setToolTip(Some(&NSString::from_str(&toast.text)));
         t.view.setHidden(false);
         let id = toast.id;
@@ -715,6 +758,7 @@ struct Patch {
     results: Option<(Vec<table::RowText>, Option<EmptyText>)>,
     search_status: Option<Option<(String, bool)>>,
     queue: Option<(Vec<table::RowText>, Option<usize>)>,
+    queue_badge: Option<Option<String>>,
     now_playing: Option<NowPlaying>,
     elapsed: Option<String>,
     progress: Option<f64>,
@@ -732,6 +776,7 @@ impl Patch {
             results: any(Dirty::RESULTS).then(|| (table::rows(&s.results), s.results_empty())),
             search_status: any(Dirty::SEARCH_STATUS).then(|| s.search_status_text()),
             queue: any(Dirty::QUEUE).then(|| (table::rows(&s.queue), s.current)),
+            queue_badge: any(Dirty::QUEUE).then(|| s.queue_badge()),
             now_playing: (any(Dirty::NOW_PLAYING) || any(Dirty::STATE)).then(|| NowPlaying {
                 track: s
                     .now_playing
@@ -767,6 +812,7 @@ mod tests {
         let p = Patch::new(Dirty::VOLUME, vm.ui());
         assert_eq!(p.volume, Some(70));
         assert!(p.results.is_none() && p.search_status.is_none() && p.queue.is_none());
+        assert!(p.queue_badge.is_none());
         assert!(p.now_playing.is_none() && p.elapsed.is_none() && p.progress.is_none());
         assert!(p.playing.is_none() && p.toast.is_none() && p.banner.is_none());
         assert!(p.controls.is_none());
@@ -782,6 +828,7 @@ mod tests {
         assert_eq!(p.search_status, Some(None));
         let (queue, current) = p.queue.unwrap();
         assert_eq!((queue.len(), current), (8, Some(2)));
+        assert_eq!(p.queue_badge, Some(Some("8".into())));
         let now = p.now_playing.unwrap();
         assert_eq!(
             now.track,
