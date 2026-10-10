@@ -11,7 +11,8 @@ use objc2::runtime::{AnyObject, ProtocolObject};
 use objc2::{MainThreadOnly, sel};
 use objc2_app_kit::{
     NSAnimatablePropertyContainer, NSApplication, NSBackingStoreType, NSTextAlignment, NSTextField,
-    NSTextFieldDelegate, NSView, NSWindow, NSWindowStyleMask, NSWindowTitleVisibility,
+    NSTextFieldDelegate, NSView, NSWindow, NSWindowOcclusionState, NSWindowStyleMask,
+    NSWindowTitleVisibility,
 };
 use objc2_core_foundation::CGFloat;
 use objc2_foundation::{MainThreadMarker, NSPoint, NSSize, NSString};
@@ -630,8 +631,25 @@ impl Ui {
         self.window.makeKeyAndOrderFront(None);
     }
 
-    /// Pushes the view model's changed regions into the views.
+    /// Pushes the view model's changed regions into the views. While the window can't be
+    /// seen they pile up in the view model, for `catch_up`.
     pub fn render(&self) {
+        if self.on_screen() {
+            self.render_now();
+        } else {
+            self.schedule_tick();
+        }
+    }
+
+    /// Renders what changed while the window couldn't be seen, once it can.
+    pub fn catch_up(&self) {
+        if self.on_screen() {
+            self.render_now();
+        }
+    }
+
+    /// `render`, whether or not the window can be seen.
+    pub fn render_now(&self) {
         let patch = {
             let mut vm = self.vm.borrow_mut();
             let dirty = vm.take_dirty();
@@ -641,6 +659,15 @@ impl Ui {
             self.apply(patch);
         }
         self.schedule_tick();
+    }
+
+    /// Not hidden, minimized or fully covered.
+    fn on_screen(&self) -> bool {
+        let w = &self.window;
+        w.isVisible()
+            && !w.isMiniaturized()
+            && !NSApplication::sharedApplication(self.mtm).isHidden()
+            && w.occlusionState().contains(NSWindowOcclusionState::Visible)
     }
 
     /// Wakes the view model when the banner is due to change on its own.

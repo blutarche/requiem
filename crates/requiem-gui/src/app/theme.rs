@@ -1,5 +1,7 @@
 //! Blutarche Studio design tokens (dark), embedded Inter, and Lucide icons.
 
+use std::cell::RefCell;
+use std::collections::HashMap;
 use std::ptr;
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -239,7 +241,7 @@ pub fn tabular(size: CGFloat, weight: Weight) -> Retained<NSFont> {
     NSFont::fontWithDescriptor_size(&desc, size).unwrap_or(base)
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Icon {
     Play,
     Pause,
@@ -273,8 +275,24 @@ impl Icon {
 
     /// A template image at `size` points; tint it with `contentTintColor`. `None`, logged,
     /// if the SVG does not decode: callers run inside AppKit callbacks, where a panic would
-    /// abort, and a missing icon is the lesser failure.
+    /// abort, and a missing icon is the lesser failure. Shared per icon and size, so callers
+    /// must not change it.
     pub fn image(self, size: CGFloat) -> Option<Retained<NSImage>> {
+        /// Keyed by icon and the size's bits.
+        type Images = HashMap<(Icon, u64), Option<Retained<NSImage>>>;
+        thread_local! {
+            static IMAGES: RefCell<Images> = RefCell::new(HashMap::new());
+        }
+        IMAGES.with(|images| {
+            images
+                .borrow_mut()
+                .entry((self, size.to_bits()))
+                .or_insert_with(|| self.decode(size))
+                .clone()
+        })
+    }
+
+    fn decode(self, size: CGFloat) -> Option<Retained<NSImage>> {
         let data = NSData::with_bytes(self.svg());
         let Some(img) = NSImage::initWithData(NSImage::alloc(), &data) else {
             eprintln!("requiem-gui: embedded icon {self:?} does not decode");
@@ -307,5 +325,15 @@ mod tests {
         ] {
             assert!(icon.image(16.0).is_some(), "{icon:?}");
         }
+    }
+
+    #[test]
+    fn icons_are_decoded_once_per_size() {
+        let a = Icon::Plus.image(16.0).unwrap();
+        let b = Icon::Plus.image(16.0).unwrap();
+        let big = Icon::Plus.image(20.0).unwrap();
+        assert!(ptr::eq(&*a, &*b));
+        assert!(!ptr::eq(&*a, &*big));
+        assert_eq!(big.size(), NSSize::new(20.0, 20.0));
     }
 }

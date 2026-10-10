@@ -23,6 +23,7 @@ use objc2_app_kit::{
     NSAppearance, NSAppearanceNameDarkAqua, NSApplication, NSApplicationActivationPolicy,
     NSApplicationDelegate, NSButton, NSControl, NSControlTextEditingDelegate, NSEvent, NSEventMask,
     NSEventModifierFlags, NSMenu, NSMenuItem, NSResponder, NSText, NSTextFieldDelegate, NSTextView,
+    NSWindowDelegate,
 };
 use objc2_foundation::{MainThreadMarker, NSNotification, NSString};
 
@@ -33,7 +34,7 @@ use backend::{Backend, Live};
 use ui::{AppView, Ui};
 
 define_class!(
-    /// App delegate, text-field delegate, and the target of buttons and menu items.
+    /// App, window and text-field delegate, and the target of buttons and menu items.
     // SAFETY: NSObject has no subclassing requirements; no ivars; no Drop impl.
     #[unsafe(super(NSObject))]
     #[thread_kind = MainThreadOnly]
@@ -42,11 +43,29 @@ define_class!(
     // SAFETY: no requirements.
     unsafe impl NSObjectProtocol for Delegate {}
 
-    // SAFETY: the implemented method has the protocol's signature.
+    // SAFETY: the implemented methods have the protocol's signatures.
     unsafe impl NSApplicationDelegate for Delegate {
         #[unsafe(method(applicationShouldTerminateAfterLastWindowClosed:))]
         fn terminate_after_last_window_closed(&self, _app: &NSApplication) -> bool {
             true
+        }
+
+        #[unsafe(method(applicationDidUnhide:))]
+        fn application_did_unhide(&self, _notification: &NSNotification) {
+            ui::with(|ui| ui.catch_up());
+        }
+    }
+
+    // SAFETY: the implemented methods have the protocol's signatures.
+    unsafe impl NSWindowDelegate for Delegate {
+        #[unsafe(method(windowDidChangeOcclusionState:))]
+        fn window_did_change_occlusion_state(&self, _notification: &NSNotification) {
+            ui::with(|ui| ui.catch_up());
+        }
+
+        #[unsafe(method(windowDidDeminiaturize:))]
+        fn window_did_deminiaturize(&self, _notification: &NSNotification) {
+            ui::with(|ui| ui.catch_up());
         }
     }
 
@@ -453,7 +472,10 @@ pub fn run(args: Args) {
     };
     let ui = Ui::new(mtm, vm, backend, &delegate);
     ui::install(ui.clone());
-    ui.render();
+    ui.window
+        .setDelegate(Some(ProtocolObject::from_ref(&*delegate)));
+    // The window is not on screen yet, which `render` waits for.
+    ui.render_now();
     match args.view {
         View::Queue => ui.show(AppView::Queue),
         View::Palette => ui.open_palette(),
