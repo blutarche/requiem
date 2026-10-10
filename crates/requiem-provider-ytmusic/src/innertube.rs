@@ -7,7 +7,9 @@ use serde_json::{Value, json};
 
 use crate::clients::*;
 use crate::log::debug;
-use crate::parse::{PlayerOutcome, StreamFormat, classify_player, parse_search, visitor_data};
+use crate::parse::{
+    PlayerOutcome, StreamFormat, classify_player, parse_search, structure_summary, visitor_data,
+};
 use crate::range::{RangeFetcher, Refresher};
 use crate::transport::{HttpResponse, Transport};
 
@@ -85,7 +87,7 @@ impl InnertubeClient {
         }})
     }
 
-    pub(crate) fn search(&self, query: &str, limit: usize) -> Result<Vec<Track>, ProviderError> {
+    fn search_once(&self, query: &str, limit: usize) -> Result<Vec<Track>, ProviderError> {
         let body = json!({
             "context": Self::music_context(),
             "query": query,
@@ -95,7 +97,22 @@ impl InnertubeClient {
         if let Some(v) = visitor_data(&resp.body) {
             self.set_visitor(Some(v));
         }
-        parse_search(&resp.body, limit)
+        let tracks = parse_search(&resp.body, limit)?;
+        if tracks.is_empty() && crate::log::enabled() {
+            debug!("empty search: {}", structure_summary(&resp.body));
+        }
+        Ok(tracks)
+    }
+
+    pub(crate) fn search(&self, query: &str, limit: usize) -> Result<Vec<Track>, ProviderError> {
+        let tracks = self.search_once(query, limit)?;
+        // Real queries are never empty; a zero-item response is an anomaly tied to the
+        // visitorData / connection, so retry once from a fresh one.
+        if tracks.is_empty() && !query.trim().is_empty() && limit > 0 {
+            self.reset_visitor();
+            return self.search_once(query, limit);
+        }
+        Ok(tracks)
     }
 
     /// Forgets the cached visitorData and the connection pool, so the next resolve
@@ -308,6 +325,23 @@ mod tests {
         assert!(reqs[1].2.contains(r#""visitorData":"VD1""#));
         assert!(reqs[1].2.contains(r#""clientName":"VISIONOS""#));
         assert!(reqs[1].2.contains(r#""videoId":"vid""#));
+    }
+
+    #[test]
+    fn empty_search_retries_once_with_fresh_visitor() {
+        let t = FakeTransport::with(vec![(200, r#"{"contents":{"x":[]}}"#), (200, SEARCH)]);
+        let tracks = client(&t).search("daft punk", 3).unwrap();
+        assert_eq!(tracks.len(), 3);
+        assert_eq!(t.urls(), vec!["search", "search"]);
+        assert_eq!(*t.resets.lock().unwrap(), 1);
+    }
+
+    #[test]
+    fn empty_search_after_retry_is_returned_without_third_attempt() {
+        let empty = r#"{"contents":{}}"#;
+        let t = FakeTransport::with(vec![(200, empty), (200, empty)]);
+        assert!(client(&t).search("daft punk", 3).unwrap().is_empty());
+        assert_eq!(t.urls().len(), 2);
     }
 
     #[test]
