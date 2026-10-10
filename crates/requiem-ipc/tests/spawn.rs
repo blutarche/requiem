@@ -1,12 +1,14 @@
 //! `Client::connect_or_spawn` against a fake daemon: this test binary itself, re-run with
-//! `FAKE_DAEMON` set, serves a `Session` over fakes.
+//! `FAKE_DAEMON` set, serves a `Session` over fakes and writes what it saw to daemon.log.
 
 use std::env;
-use std::fs;
+use std::fs::{self, File};
 use std::os::unix::fs::MetadataExt;
 use std::panic;
+use std::path::Path;
 use std::process;
-use std::time::Duration;
+use std::thread;
+use std::time::{Duration, Instant};
 
 use crossbeam_channel::{Receiver, bounded};
 use requiem_core::testing::{FakeEngineHandle, FakeProvider};
@@ -38,34 +40,59 @@ fn main() {
 
 fn run() {
     let exe = env::current_exe().unwrap();
-    let log = socket_dir().unwrap().join("daemon.log");
-    fs::write(&log, "left over from an earlier run\n").unwrap();
+    let dir = socket_dir().unwrap();
+    let log = dir.join("daemon.log");
+    // Over the rotation threshold, so the first spawn moves it aside.
+    let old = "left over from an earlier run\n".repeat(40_000);
+    fs::write(&log, &old).unwrap();
 
+    // Plays a daemon that is stopping: it holds the lock, but its socket is gone. The first
+    // spawn exits 0 on seeing it; the lock is let go after that, so the one respawn wins.
+    let lock = File::options()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(dir.join("daemon.lock"))
+        .unwrap();
+    lock.try_lock().unwrap();
+    let release = {
+        let log = log.clone();
+        thread::spawn(move || {
+            let deadline = Instant::now() + WAIT;
+            while !fs::read_to_string(&log).is_ok_and(|t| t.contains("already running")) {
+                assert!(Instant::now() < deadline, "the first daemon never gave up");
+                thread::sleep(Duration::from_millis(10));
+            }
+            drop(lock);
+        })
+    };
     let (client, rx) = Client::connect_or_spawn(&exe, Role::Cli, WAIT).unwrap();
+    release.join().unwrap();
     expect_snapshot(&rx);
 
+    assert_eq!(fs::read_to_string(dir.join("daemon.log.old")).unwrap(), old);
     let text = fs::read_to_string(&log).unwrap();
-    assert!(!text.contains("left over"), "log not truncated: {text:?}");
-    let line = text
+    assert_eq!(text.matches("already running").count(), 1, "{text:?}");
+    let daemons: Vec<&str> = text
         .lines()
-        .find(|l| l.starts_with("fake daemon"))
-        .unwrap_or_else(|| panic!("no daemon output in the log: {text:?}"));
-    let field = |name: &str| {
-        line.split(' ')
-            .find_map(|kv| kv.strip_prefix(name))
-            .unwrap_or_else(|| panic!("no {name} in {line:?}"))
-    };
-    assert_eq!(
-        field("pid="),
-        field("sid="),
-        "daemon is not a session leader"
-    );
+        .filter(|l| l.starts_with("fake daemon"))
+        .collect();
+    assert_eq!(daemons.len(), 2, "{text:?}");
     // SAFETY: getsid has no preconditions.
-    let own_sid = unsafe { libc::getsid(0) };
-    assert_ne!(field("sid="), own_sid.to_string());
-    assert_eq!(field("stdin_null="), "true");
+    let own_sid = unsafe { libc::getsid(0) }.to_string();
+    for line in daemons {
+        let field = |name: &str| {
+            line.split(' ')
+                .find_map(|kv| kv.strip_prefix(name))
+                .unwrap_or_else(|| panic!("no {name} in {line:?}"))
+        };
+        assert_eq!(field("pid="), field("sid="), "not a session leader: {line}");
+        assert_ne!(field("sid="), own_sid);
+        assert_eq!(field("stdin_null="), "true");
+    }
 
-    // A running daemon is reused; a respawn would have truncated the log.
+    // A running daemon is reused, not respawned.
     let (again, again_rx) = Client::connect_or_spawn(&exe, Role::Gui, WAIT).unwrap();
     expect_snapshot(&again_rx);
     assert_eq!(fs::read_to_string(&log).unwrap(), text);
@@ -79,6 +106,19 @@ fn run() {
         }
     }
     drop(again);
+
+    // A daemon that fails is reported, pointing at the log.
+    let fails = ["/usr/bin/false", "/bin/false"]
+        .map(Path::new)
+        .into_iter()
+        .find(|p| p.exists())
+        .expect("no false(1)");
+    let Err(err) = Client::connect_or_spawn(fails, Role::Cli, WAIT) else {
+        panic!("connected through {}", fails.display());
+    };
+    let msg = err.to_string();
+    assert!(msg.contains("exited with"), "{msg}");
+    assert!(msg.contains(&*log.to_string_lossy()), "{msg}");
 }
 
 fn expect_snapshot(rx: &Receiver<Incoming>) {
@@ -115,7 +155,10 @@ fn fake_daemon() {
     };
     let server = match Server::start(session, hooks) {
         Ok(s) => s,
-        Err(ServeError::AlreadyRunning) => return,
+        Err(ServeError::AlreadyRunning) => {
+            println!("already running");
+            return;
+        }
         Err(e) => {
             eprintln!("fake daemon: {e}");
             process::exit(1);

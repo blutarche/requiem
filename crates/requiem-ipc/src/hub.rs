@@ -151,15 +151,7 @@ pub(crate) fn spawn(
 ) -> io::Result<(Sender<HubMsg>, JoinHandle<()>)> {
     let events = session.subscribe();
     let (tx, rx) = unbounded();
-    let hub = Hub {
-        session,
-        hooks,
-        mirror: Mirror::new(),
-        peers: Vec::new(),
-        subs: Vec::new(),
-        searches: HashMap::new(),
-        next_search: 0,
-    };
+    let hub = Hub::new(session, hooks);
     let handle = thread::Builder::new()
         .name("requiem-ipc-hub".into())
         .spawn(move || hub.run(&rx, events))?;
@@ -171,6 +163,18 @@ fn encode(msg: &ServerMsg) -> Option<Frame> {
 }
 
 impl Hub {
+    fn new(session: Session, hooks: ServerHooks) -> Self {
+        Self {
+            session,
+            hooks,
+            mirror: Mirror::new(),
+            peers: Vec::new(),
+            subs: Vec::new(),
+            searches: HashMap::new(),
+            next_search: 0,
+        }
+    }
+
     fn run(mut self, rx: &Receiver<HubMsg>, events: Receiver<Event>) {
         let mut events = Some(events);
         let gone = never();
@@ -255,7 +259,11 @@ impl Hub {
                 queue,
                 stream,
             }),
-            HubMsg::Leave(id) => self.peers.retain(|p| p.id != id),
+            // Every connection ends with a Leave, including peers the hub cut off.
+            HubMsg::Leave(id) => {
+                self.peers.retain(|p| p.id != id);
+                self.searches.retain(|_, (from, _)| *from != Some(id));
+            }
             HubMsg::Command { from, cmd } => self.on_command(from, cmd),
             HubMsg::Ping { id, n } => self.offer_to(id, &ServerMsg::Pong(n)),
             HubMsg::Subscribe(tx) => {
@@ -298,6 +306,7 @@ impl Hub {
         };
         let snapshot = self.mirror.snapshot().into_iter().map(ServerMsg::Event);
         for msg in iter::once(welcome).chain(snapshot) {
+            // An oversize event is skipped here too; see `broadcast`.
             if let Some(frame) = encode(&msg)
                 && !peer.offer(&frame, false)
             {
@@ -322,5 +331,39 @@ impl Hub {
             }
             cmd => self.session.send(cmd),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use requiem_core::SessionConfig;
+    use requiem_core::testing::{FakeEngineHandle, FakeProvider};
+
+    use super::*;
+
+    #[test]
+    fn leaving_client_forgets_its_searches() {
+        let session = Session::spawn(
+            vec![FakeProvider::new("fake")],
+            FakeEngineHandle::new().factory(),
+            SessionConfig::default(),
+        );
+        let hooks = ServerHooks {
+            on_shutdown: Box::new(|| {}),
+        };
+        let mut hub = Hub::new(session, hooks);
+        for from in [Some(1), Some(2), Some(1), None] {
+            hub.on_command(
+                from,
+                Command::Search {
+                    req: 5,
+                    query: "q".into(),
+                },
+            );
+        }
+        hub.on_msg(HubMsg::Leave(1));
+        let mut left: Vec<_> = hub.searches.values().copied().collect();
+        left.sort();
+        assert_eq!(left, [(None, 5), (Some(2), 5)]);
     }
 }

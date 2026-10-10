@@ -17,8 +17,9 @@ use requiem_core::{
     SessionConfig, Track, TrackId,
 };
 
-use crate::frame::{self, MAX_FRAME};
+use crate::frame::{self, Deadline, MAX_FRAME};
 use crate::path::{SOCKET_NAME, SUN_PATH_LEN, check_sun_path, default_dir, prepare_dir};
+use crate::sys;
 use crate::{
     Client, ClientCounts, ClientMsg, Incoming, PROTOCOL, Role, ServeError, Server, ServerHooks,
     ServerMsg,
@@ -689,13 +690,18 @@ fn socket_dir_is_created_private_and_validated() {
     assert_eq!(mode(&dir), 0o700);
     prepare_dir(&dir).unwrap();
 
-    for bad in [0o770, 0o720, 0o702, 0o777] {
-        fs::set_permissions(&dir, Permissions::from_mode(bad)).unwrap();
-        let err = prepare_dir(&dir).unwrap_err();
-        assert_eq!(err.kind(), io::ErrorKind::PermissionDenied, "mode {bad:o}");
+    // Ours, so any group or other bits are removed rather than refused.
+    for loose in [0o770, 0o720, 0o702, 0o777, 0o755, 0o701] {
+        fs::set_permissions(&dir, Permissions::from_mode(loose)).unwrap();
+        prepare_dir(&dir).unwrap();
+        assert_eq!(mode(&dir), 0o700, "from {loose:o}");
     }
-    fs::set_permissions(&dir, Permissions::from_mode(0o755)).unwrap();
-    prepare_dir(&dir).unwrap();
+
+    // Not ours: refused before anything is changed. Root owns everything, so skip as root.
+    if sys::euid() != 0 {
+        let err = prepare_dir(Path::new("/")).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::PermissionDenied);
+    }
 
     let link = tmp.0.join("l");
     std::os::unix::fs::symlink(&dir, &link).unwrap();
@@ -723,8 +729,42 @@ fn socket_paths_must_fit_sun_path() {
 }
 
 #[test]
-fn default_dir_is_absolute_and_ends_in_requiem() {
+fn default_dir_is_per_user() {
     let dir = default_dir().unwrap();
     assert!(dir.is_absolute(), "{}", dir.display());
+    #[cfg(target_os = "macos")]
     assert!(dir.ends_with("requiem"), "{}", dir.display());
+    #[cfg(target_os = "linux")]
+    match env::var_os("XDG_RUNTIME_DIR").map(PathBuf::from) {
+        Some(xdg) if xdg.is_absolute() => assert_eq!(dir, xdg.join("requiem")),
+        _ => assert_eq!(dir, PathBuf::from(format!("/tmp/requiem-{}", sys::euid()))),
+    }
+}
+
+#[test]
+fn handshake_reads_share_one_deadline() {
+    let (ours, theirs) = UnixStream::pair().unwrap();
+    // Each byte arrives well within the deadline; the whole frame never does.
+    let trickle = thread::spawn(move || {
+        for b in frame::encode(&ClientMsg::Ping(1)).unwrap() {
+            if (&theirs).write_all(&[b]).is_err() {
+                return;
+            }
+            thread::sleep(Duration::from_millis(50));
+        }
+    });
+    let started = Instant::now();
+    let err = frame::read_body(&mut Deadline::new(&ours, Duration::from_millis(200))).unwrap_err();
+    assert_eq!(err.kind(), io::ErrorKind::TimedOut);
+    assert!(started.elapsed() < Duration::from_secs(1));
+    drop(ours);
+    trickle.join().unwrap();
+}
+
+#[test]
+fn connect_or_spawn_needs_an_absolute_daemon_path() {
+    let Err(err) = Client::connect_or_spawn(Path::new("requiemd"), Role::Gui, WAIT) else {
+        panic!("connected through a relative daemon path");
+    };
+    assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
 }

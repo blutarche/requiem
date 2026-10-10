@@ -1,7 +1,7 @@
 use std::env;
-use std::fs::{self, DirBuilder};
+use std::fs::{self, DirBuilder, Permissions};
 use std::io;
-use std::os::unix::fs::{DirBuilderExt, MetadataExt};
+use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
 use crate::sys;
@@ -10,6 +10,7 @@ pub(crate) const DIR_ENV: &str = "REQUIEM_SOCKET_DIR";
 pub(crate) const SOCKET_NAME: &str = "daemon.sock";
 pub(crate) const LOCK_NAME: &str = "daemon.lock";
 pub(crate) const LOG_NAME: &str = "daemon.log";
+pub(crate) const OLD_LOG_NAME: &str = "daemon.log.old";
 
 /// `sockaddr_un.sun_path`, terminating NUL included.
 #[cfg(target_os = "macos")]
@@ -18,7 +19,7 @@ pub(crate) const SUN_PATH_LEN: usize = 104;
 pub(crate) const SUN_PATH_LEN: usize = 108;
 
 /// The per-user socket directory, created with mode 0700 if missing. It must be a real
-/// directory owned by this user and not group- or world-writable.
+/// directory owned by this user; an existing one is reset to mode 0700.
 /// `REQUIEM_SOCKET_DIR` overrides the location and is checked the same way.
 pub fn socket_dir() -> io::Result<PathBuf> {
     let dir = match env::var_os(DIR_ENV).filter(|v| !v.is_empty()) {
@@ -101,20 +102,25 @@ pub(crate) fn default_dir() -> io::Result<PathBuf> {
     }
 }
 
-/// Creates `dir` with mode 0700, then requires it to be a real directory (not a symlink)
-/// owned by this user and not group- or world-writable.
+/// Creates `dir` with mode 0700 if missing. An existing `dir` must be a real directory (not a
+/// symlink) owned by this user; any group or other permission bits are removed.
 pub(crate) fn prepare_dir(dir: &Path) -> io::Result<()> {
-    match DirBuilder::new().mode(0o700).create(dir) {
-        Ok(()) => {}
-        Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {}
-        Err(e) => {
-            return Err(io::Error::new(
-                e.kind(),
-                format!("create {}: {e}", dir.display()),
-            ));
+    let meta = match fs::symlink_metadata(dir) {
+        Err(e) if e.kind() == io::ErrorKind::NotFound => {
+            match DirBuilder::new().mode(0o700).create(dir) {
+                Ok(()) => {}
+                Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {}
+                Err(e) => {
+                    return Err(io::Error::new(
+                        e.kind(),
+                        format!("create {}: {e}", dir.display()),
+                    ));
+                }
+            }
+            fs::symlink_metadata(dir)?
         }
-    }
-    let meta = fs::symlink_metadata(dir)?;
+        meta => meta?,
+    };
     let refuse = |why: String| {
         Err(io::Error::new(
             io::ErrorKind::PermissionDenied,
@@ -128,11 +134,8 @@ pub(crate) fn prepare_dir(dir: &Path) -> io::Result<()> {
     if meta.uid() != euid {
         return refuse(format!("owned by uid {}, not {euid}", meta.uid()));
     }
-    if meta.mode() & 0o022 != 0 {
-        return refuse(format!(
-            "group- or world-writable (mode {:o})",
-            meta.mode() & 0o7777
-        ));
+    if meta.mode() & 0o077 != 0 {
+        fs::set_permissions(dir, Permissions::from_mode(0o700))?;
     }
     Ok(())
 }

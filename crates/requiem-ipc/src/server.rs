@@ -14,7 +14,7 @@ use std::time::Duration;
 use crossbeam_channel::{Receiver, Sender, bounded, unbounded};
 use requiem_core::{Command, Event, Session};
 
-use crate::frame;
+use crate::frame::{self, Deadline};
 use crate::hub::{self, ClientId, Frame, HubMsg, QUEUE_CAP};
 use crate::path::{LOCK_NAME, socket_dir, socket_path_in};
 use crate::proto::{ClientMsg, HelloProbe, PROTOCOL, Role, ServerMsg};
@@ -109,9 +109,16 @@ impl Server {
             Err(e) => return Err(e.into()),
         }
         let listener = UnixListener::bind(&path)?;
-        fs::set_permissions(&path, Permissions::from_mode(0o600))?;
-
-        let (hub, hub_thread) = hub::spawn(session, hooks)?;
+        let started = fs::set_permissions(&path, Permissions::from_mode(0o600))
+            .and_then(|()| hub::spawn(session, hooks));
+        let (hub, hub_thread) = match started {
+            Ok(h) => h,
+            Err(e) => {
+                // Still under the lock, so this can't be another daemon's socket.
+                let _ = fs::remove_file(&path);
+                return Err(e.into());
+            }
+        };
         let mut server = Server {
             hub: hub.clone(),
             hub_thread: Some(hub_thread),
@@ -121,6 +128,7 @@ impl Server {
             _lock: lock,
         };
         let stopping = server.stopping.clone();
+        // On failure, dropping `server` removes the socket before releasing the lock.
         server.accept_thread = Some(
             thread::Builder::new()
                 .name("requiem-ipc-accept".into())
@@ -166,7 +174,8 @@ impl Server {
             return;
         };
         self.stopping.store(true, Ordering::Release);
-        // Connecting wakes the blocked accept so the thread sees the flag.
+        // Connecting wakes the blocked accept so the thread sees the flag. If the path no
+        // longer reaches this listener, the wake fails and the thread is left detached.
         if let Some(accept) = self.accept_thread.take()
             && UnixStream::connect(&self.path).is_ok()
         {
@@ -201,6 +210,7 @@ fn accept_loop(listener: &UnixListener, hub: &Sender<HubMsg>, stopping: &AtomicB
     }
 }
 
+/// No cap on connections: each one costs two threads until it closes.
 pub(crate) fn admit(id: ClientId, stream: UnixStream, hub: &Sender<HubMsg>) {
     let euid = sys::euid();
     if !sys::peer_uid(&stream).is_ok_and(|uid| uid == euid) {
@@ -259,8 +269,7 @@ fn forward(id: ClientId, stream: &UnixStream, hub: &Sender<HubMsg>) {
 /// Reads the client's `Hello` and answers a protocol mismatch with `Incompatible`.
 /// `Welcome` comes from the hub, ahead of the snapshot.
 fn handshake(stream: &UnixStream) -> Option<Role> {
-    stream.set_read_timeout(Some(HANDSHAKE_TIMEOUT)).ok()?;
-    let body = frame::read_body(&mut &*stream).ok()??;
+    let body = frame::read_body(&mut Deadline::new(stream, HANDSHAKE_TIMEOUT)).ok()??;
     let HelloProbe::Hello { protocol } = frame::decode(&body).ok()?;
     if protocol != PROTOCOL {
         let reply = ServerMsg::Incompatible {
