@@ -127,8 +127,22 @@ pub enum Intent {
     SeekBy(i64),
     SetVolume(u8),
     VolumeBy(i16),
-    /// The shown toast's action: restores the queue a result replaced.
+    /// The shown toast's action: restores the queue a result replaced or Clear emptied.
     Undo,
+    /// `selected` is the queue row selected now; the selection follows that track.
+    EditQueue {
+        edit: QueueEdit,
+        selected: Option<usize>,
+    },
+}
+
+/// A change to the queue: to one row, by index, or to all of it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum QueueEdit {
+    Remove(usize),
+    MoveUp(usize),
+    MoveDown(usize),
+    Clear,
 }
 
 /// Which controls take input.
@@ -234,6 +248,24 @@ impl UiState {
         }
     }
 
+    /// The command `edit` sends, or `None` when it does nothing: disconnected, a row out of
+    /// range, a move past either end, or clearing an empty queue. The menus enable an edit
+    /// exactly when this is `Some`, and the session ignores the rest without an answer.
+    pub fn edit_command(&self, edit: QueueEdit) -> Option<Command> {
+        if !self.controls().player {
+            return None;
+        }
+        let len = self.queue.len();
+        match edit {
+            QueueEdit::Remove(i) => (i < len).then_some(Command::Remove(i)),
+            QueueEdit::MoveUp(i) => {
+                (i > 0 && i < len).then(|| Command::Move { from: i, to: i - 1 })
+            }
+            QueueEdit::MoveDown(i) => (i + 1 < len).then(|| Command::Move { from: i, to: i + 1 }),
+            QueueEdit::Clear => (len > 0).then_some(Command::Clear),
+        }
+    }
+
     /// The Queue nav item's count; `None` when the queue is empty.
     pub fn queue_badge(&self) -> Option<String> {
         (!self.queue.is_empty()).then(|| self.queue.len().to_string())
@@ -323,6 +355,10 @@ pub struct Vm {
     undo: Option<Undo>,
     /// Where to seek once the track an undo restarted begins.
     restore: Option<Restore>,
+    /// Where the selected queue row lands once the queue shows the user's edit.
+    select_after: Option<usize>,
+    /// The queue row to select now; the view takes it once.
+    queue_selection: Option<usize>,
     /// The toast of a `TrackFailed` whose outcome the next event tells.
     failed_toast: Option<u64>,
 }
@@ -395,6 +431,12 @@ impl Vm {
         std::mem::take(&mut self.dirty)
     }
 
+    /// The queue row to select after an edit, once the queue shows it; `None` leaves the
+    /// selection alone.
+    pub fn take_queue_selection(&mut self) -> Option<usize> {
+        self.queue_selection.take()
+    }
+
     /// Commands to send that no intent returned: a search resent on reconnect, or the seek
     /// that finishes an undo.
     pub fn take_commands(&mut self) -> Vec<Command> {
@@ -448,6 +490,11 @@ impl Vm {
                 }
             }
             Event::QueueChanged { tracks, current } => {
+                // The next queue shows the edit: the session answers an edit at once, and
+                // `edit_command` sends none it would ignore.
+                if let Some(row) = self.select_after.take() {
+                    self.queue_selection = tracks.len().checked_sub(1).map(|last| row.min(last));
+                }
                 self.ui.queue = tracks;
                 self.ui.current = current;
                 self.dirty |= Dirty::QUEUE;
@@ -602,6 +649,16 @@ impl Vm {
                 self.volume_command(v as u8, now)
             }
             Intent::Undo if can.player => self.undo(),
+            Intent::EditQueue { edit, selected } => {
+                let Some(cmd) = self.ui.edit_command(edit) else {
+                    return Vec::new();
+                };
+                self.select_after = selected.and_then(|s| follow(s, &cmd));
+                if edit == QueueEdit::Clear {
+                    self.offer_undo("Queue cleared");
+                }
+                vec![cmd]
+            }
             _ => Vec::new(),
         }
     }
@@ -644,20 +701,26 @@ impl Vm {
             Command::PlayIndex(0),
         ];
         if !self.ui.queue.is_empty() {
-            let tracks = self.ui.queue.clone();
-            let playing = self
-                .ui
-                .current
-                .filter(|_| self.ui.now_playing.is_some())
-                .map(|c| (c, self.ui.position));
-            self.toast_with("Queue replaced".to_owned(), false, Some("Undo"));
-            self.undo = Some(Undo {
-                toast: self.last_toast,
-                tracks,
-                playing,
-            });
+            self.offer_undo("Queue replaced");
         }
         cmds
+    }
+
+    /// Shows `text` with Undo, which restores the queue as it is now: its tracks, and the
+    /// playing track and position.
+    fn offer_undo(&mut self, text: &str) {
+        let tracks = self.ui.queue.clone();
+        let playing = self
+            .ui
+            .current
+            .filter(|_| self.ui.now_playing.is_some())
+            .map(|c| (c, self.ui.position));
+        self.toast_with(text.to_owned(), false, Some("Undo"));
+        self.undo = Some(Undo {
+            toast: self.last_toast,
+            tracks,
+            playing,
+        });
     }
 
     /// Restores the queue: `Enqueue` and `PlayIndex` now, and the `Seek` once the restored
@@ -801,6 +864,8 @@ impl Vm {
         self.seek_hold = None;
         self.volume_hold = None;
         self.restore = None;
+        self.select_after = None;
+        self.queue_selection = None;
         self.ui.queue.clear();
         self.ui.current = None;
         self.ui.now_playing = None;
@@ -809,6 +874,25 @@ impl Vm {
         self.ui.state = PlayState::Stopped;
         self.dirty |=
             Dirty::QUEUE | Dirty::NOW_PLAYING | Dirty::ELAPSED | Dirty::SEEK | Dirty::STATE;
+    }
+}
+
+/// Where row `selected` ends up after `cmd`, by the session's arithmetic; a removed row's
+/// place goes to the row after it. `None` once the queue is cleared.
+fn follow(selected: usize, cmd: &Command) -> Option<usize> {
+    match *cmd {
+        Command::Remove(i) if selected > i => Some(selected - 1),
+        Command::Remove(_) => Some(selected),
+        Command::Move { from, to } => Some(if selected == from {
+            to
+        } else if from < selected && selected <= to {
+            selected - 1
+        } else if to <= selected && selected < from {
+            selected + 1
+        } else {
+            selected
+        }),
+        _ => None,
     }
 }
 
@@ -846,10 +930,11 @@ pub enum PaletteAction {
     ShowQueue,
     VolumeUp,
     VolumeDown,
+    ClearQueue,
 }
 
 impl PaletteAction {
-    pub const ALL: [PaletteAction; 10] = [
+    pub const ALL: [PaletteAction; 11] = [
         PaletteAction::PlayPause,
         PaletteAction::Next,
         PaletteAction::Previous,
@@ -860,6 +945,7 @@ impl PaletteAction {
         PaletteAction::ShowQueue,
         PaletteAction::VolumeUp,
         PaletteAction::VolumeDown,
+        PaletteAction::ClearQueue,
     ];
 
     pub fn label(self) -> &'static str {
@@ -874,6 +960,7 @@ impl PaletteAction {
             PaletteAction::ShowQueue => "Show queue",
             PaletteAction::VolumeUp => "Volume up",
             PaletteAction::VolumeDown => "Volume down",
+            PaletteAction::ClearQueue => "Clear queue",
         }
     }
 
@@ -890,6 +977,7 @@ impl PaletteAction {
             PaletteAction::ShowQueue => "⌘2",
             PaletteAction::VolumeUp => "⌘↑",
             PaletteAction::VolumeDown => "⌘↓",
+            PaletteAction::ClearQueue => "",
         }
     }
 
@@ -1810,7 +1898,9 @@ mod tests {
         let keys: Vec<_> = PaletteAction::ALL.iter().map(|a| a.shortcut()).collect();
         assert_eq!(
             keys,
-            ["Space", "⌘→", "⌘←", "↩", "⌘↩", "⌘F", "⌘1", "⌘2", "⌘↑", "⌘↓"]
+            [
+                "Space", "⌘→", "⌘←", "↩", "⌘↩", "⌘F", "⌘1", "⌘2", "⌘↑", "⌘↓", ""
+            ]
         );
     }
 
@@ -2079,6 +2169,190 @@ mod tests {
         let t = vm.ui().toast.clone().unwrap();
         assert!(t.text.starts_with("YouTube Music stopped working"));
         assert!(!t.text.contains("Playback stopped"));
+    }
+
+    /// Connected with a queue of `n`, nothing loaded.
+    fn queued(n: usize) -> Vm {
+        let mut vm = connected();
+        vm.apply(Event::QueueChanged {
+            tracks: tracks(n),
+            current: None,
+        });
+        vm.take_dirty();
+        vm
+    }
+
+    fn edit(vm: &mut Vm, edit: QueueEdit, selected: Option<usize>) -> Vec<Command> {
+        vm.intent(Intent::EditQueue { edit, selected })
+    }
+
+    #[test]
+    fn queue_edits_send_zero_based_commands() {
+        let mut vm = queued(5);
+        assert_eq!(
+            edit(&mut vm, QueueEdit::Remove(2), None),
+            [Command::Remove(2)]
+        );
+        assert_eq!(
+            edit(&mut vm, QueueEdit::MoveUp(2), None),
+            [Command::Move { from: 2, to: 1 }]
+        );
+        assert_eq!(
+            edit(&mut vm, QueueEdit::MoveDown(2), None),
+            [Command::Move { from: 2, to: 3 }]
+        );
+        assert_eq!(edit(&mut vm, QueueEdit::Clear, None), [Command::Clear]);
+    }
+
+    #[test]
+    fn queue_edits_past_the_ends_or_disconnected_send_nothing() {
+        let mut vm = queued(5);
+        for e in [
+            QueueEdit::MoveUp(0),
+            QueueEdit::MoveDown(4),
+            QueueEdit::Remove(5),
+            QueueEdit::MoveUp(5),
+            QueueEdit::MoveDown(5),
+        ] {
+            assert_eq!(vm.ui().edit_command(e), None, "{e:?}");
+            assert!(edit(&mut vm, e, Some(0)).is_empty(), "{e:?}");
+        }
+        assert_eq!(queued(0).ui().edit_command(QueueEdit::Clear), None);
+
+        let mut vm = queued(5);
+        vm.link(Link::Lost("gone".into()));
+        for e in [
+            QueueEdit::Remove(0),
+            QueueEdit::MoveDown(0),
+            QueueEdit::Clear,
+        ] {
+            assert_eq!(vm.ui().edit_command(e), None, "{e:?}");
+            assert!(edit(&mut vm, e, Some(0)).is_empty(), "{e:?}");
+        }
+    }
+
+    /// Applies the session's answer to an edit: the queue with `n` tracks.
+    fn answer(vm: &mut Vm, n: usize) -> Option<usize> {
+        vm.apply(Event::QueueChanged {
+            tracks: tracks(n),
+            current: None,
+        });
+        vm.take_queue_selection()
+    }
+
+    #[test]
+    fn selection_lands_on_the_next_row_after_a_remove() {
+        let mut vm = queued(5);
+        edit(&mut vm, QueueEdit::Remove(2), Some(2));
+        assert_eq!(answer(&mut vm, 4), Some(2));
+        // Removing the last row selects the new last row.
+        let mut vm = queued(5);
+        edit(&mut vm, QueueEdit::Remove(4), Some(4));
+        assert_eq!(answer(&mut vm, 4), Some(3));
+        let mut vm = queued(1);
+        edit(&mut vm, QueueEdit::Remove(0), Some(0));
+        assert_eq!(answer(&mut vm, 0), None);
+    }
+
+    #[test]
+    fn selection_follows_its_track() {
+        let mut vm = queued(5);
+        edit(&mut vm, QueueEdit::MoveUp(2), Some(2));
+        assert_eq!(answer(&mut vm, 5), Some(1));
+        let mut vm = queued(5);
+        edit(&mut vm, QueueEdit::MoveDown(2), Some(2));
+        assert_eq!(answer(&mut vm, 5), Some(3));
+        // An edit to another row, as from a context menu, keeps the selected track.
+        let mut vm = queued(5);
+        edit(&mut vm, QueueEdit::Remove(1), Some(3));
+        assert_eq!(answer(&mut vm, 4), Some(2));
+        let mut vm = queued(5);
+        edit(&mut vm, QueueEdit::MoveDown(2), Some(3));
+        assert_eq!(answer(&mut vm, 5), Some(2));
+        let mut vm = queued(5);
+        edit(&mut vm, QueueEdit::Remove(3), Some(1));
+        assert_eq!(answer(&mut vm, 4), Some(1));
+        let mut vm = queued(5);
+        edit(&mut vm, QueueEdit::Clear, Some(1));
+        assert_eq!(answer(&mut vm, 0), None);
+    }
+
+    #[test]
+    fn selection_moves_only_once_and_only_after_an_edit() {
+        let mut vm = queued(5);
+        assert_eq!(answer(&mut vm, 5), None);
+        edit(&mut vm, QueueEdit::Remove(2), Some(2));
+        assert_eq!(vm.take_queue_selection(), None, "not before the answer");
+        assert_eq!(answer(&mut vm, 4), Some(2));
+        assert_eq!(vm.take_queue_selection(), None);
+        // A later queue, say the next track starting, leaves the selection alone.
+        assert_eq!(answer(&mut vm, 4), None);
+        // Without a selection there is nothing to follow.
+        edit(&mut vm, QueueEdit::Remove(0), None);
+        assert_eq!(answer(&mut vm, 3), None);
+    }
+
+    /// Playing the third of three queued tracks at 1:01, then cleared.
+    fn cleared() -> (Vm, Vec<Track>) {
+        let mut vm = connected();
+        let old = tracks(3);
+        vm.apply(Event::QueueChanged {
+            tracks: old.clone(),
+            current: Some(2),
+        });
+        vm.apply(Event::NowPlaying {
+            track: old[2].clone(),
+            duration: old[2].duration,
+        });
+        vm.apply(Event::Position(Duration::from_secs(61)));
+        assert_eq!(edit(&mut vm, QueueEdit::Clear, None), [Command::Clear]);
+        // The session's answer.
+        vm.apply(Event::QueueChanged {
+            tracks: Vec::new(),
+            current: None,
+        });
+        vm.apply(Event::State(PlayState::Stopped));
+        (vm, old)
+    }
+
+    #[test]
+    fn clearing_the_queue_offers_undo() {
+        let (mut vm, old) = cleared();
+        let t = vm.ui().toast.clone().unwrap();
+        assert_eq!(
+            (t.text.as_str(), t.error, t.action),
+            ("Queue cleared", false, Some("Undo"))
+        );
+        assert_eq!(
+            vm.intent(Intent::Undo),
+            [
+                Command::Enqueue {
+                    tracks: old.clone(),
+                    mode: EnqueueMode::Replace
+                },
+                Command::PlayIndex(2)
+            ]
+        );
+        vm.apply(Event::QueueChanged {
+            tracks: old.clone(),
+            current: Some(2),
+        });
+        vm.apply(Event::NowPlaying {
+            track: old[2].clone(),
+            duration: old[2].duration,
+        });
+        assert_eq!(
+            vm.take_commands(),
+            [Command::Seek(SeekTarget::Absolute(Duration::from_secs(61)))]
+        );
+    }
+
+    #[test]
+    fn removing_a_row_offers_no_undo() {
+        let mut vm = queued(3);
+        edit(&mut vm, QueueEdit::Remove(1), Some(1));
+        assert!(vm.ui().toast.is_none());
+        assert!(vm.intent(Intent::Undo).is_empty());
     }
 
     #[test]

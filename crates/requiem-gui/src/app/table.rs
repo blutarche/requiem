@@ -6,11 +6,11 @@ use std::time::Duration;
 
 use dispatch2::{DispatchQueue, DispatchTime, MainThreadBound};
 use objc2::rc::{Retained, Weak};
-use objc2::runtime::{AnyObject, NSObject, ProtocolObject};
+use objc2::runtime::{AnyObject, NSObject, ProtocolObject, Sel};
 use objc2::{DefinedClass, MainThreadOnly, Message, define_class, msg_send, sel};
 use objc2_app_kit::{
     NSAttributedStringNSStringDrawing, NSBezierPath, NSBorderType, NSControlTextEditingDelegate,
-    NSEvent, NSFocusRingType, NSResponder, NSScrollView, NSTableColumn,
+    NSEvent, NSFocusRingType, NSMenu, NSMenuItem, NSResponder, NSScrollView, NSTableColumn,
     NSTableColumnResizingOptions, NSTableRowView, NSTableView, NSTableViewColumnAutoresizingStyle,
     NSTableViewDataSource, NSTableViewDelegate, NSTableViewSelectionHighlightStyle,
     NSTableViewStyle, NSTextAlignment, NSTextField, NSTrackingAreaOptions,
@@ -26,7 +26,7 @@ use requiem_core::Track;
 use super::theme::{self, Icon, Weight};
 use super::ui;
 use super::widgets::{self, FLEX_H, FLEX_W, HoverButton, PIN_BOTTOM, PIN_LEFT, PIN_TOP, rect};
-use crate::vm::{self, Intent};
+use crate::vm::{self, Intent, QueueEdit};
 
 pub const ROW_H: CGFloat = 36.0;
 const HEADER_H: CGFloat = 32.0;
@@ -172,12 +172,48 @@ define_class!(
     impl Controller {
         #[unsafe(method(rowDoubleClicked:))]
         fn row_double_clicked(&self, _sender: Option<&AnyObject>) {
-            let Some(table) = self.table() else { return };
-            let Ok(row) = usize::try_from(table.clickedRow()) else { return };
-            match self.ivars().kind {
-                Kind::Results => ui::with(|ui| ui.intent(Intent::PlayResult(row))),
-                Kind::Queue => ui::with(|ui| ui.play_queue(row)),
-            };
+            if let Some(row) = self.clicked_row() {
+                self.play(row);
+            }
+        }
+
+        #[unsafe(method(contextPlay:))]
+        fn context_play(&self, _sender: Option<&AnyObject>) {
+            if let Some(row) = self.clicked_row() {
+                self.play(row);
+            }
+        }
+
+        #[unsafe(method(contextAdd:))]
+        fn context_add(&self, _sender: Option<&AnyObject>) {
+            if let Some(row) = self.clicked_row() {
+                ui::with(|ui| ui.intent(Intent::AppendResult(row)));
+            }
+        }
+
+        #[unsafe(method(contextRemove:))]
+        fn context_remove(&self, _sender: Option<&AnyObject>) {
+            self.edit_clicked(QueueEdit::Remove);
+        }
+
+        #[unsafe(method(contextMoveUp:))]
+        fn context_move_up(&self, _sender: Option<&AnyObject>) {
+            self.edit_clicked(QueueEdit::MoveUp);
+        }
+
+        #[unsafe(method(contextMoveDown:))]
+        fn context_move_down(&self, _sender: Option<&AnyObject>) {
+            self.edit_clicked(QueueEdit::MoveDown);
+        }
+
+        #[unsafe(method(contextClear:))]
+        fn context_clear(&self, _sender: Option<&AnyObject>) {
+            ui::with(|ui| ui.edit_queue(QueueEdit::Clear));
+        }
+
+        #[unsafe(method(validateMenuItem:))]
+        fn validate_menu_item(&self, item: &NSMenuItem) -> bool {
+            self.validate(item)
         }
 
         #[unsafe(method(addClicked:))]
@@ -210,6 +246,47 @@ impl Controller {
 
     fn table(&self) -> Option<Retained<NSTableView>> {
         self.ivars().table.get()?.load()
+    }
+
+    /// The row a double-click or the context menu is for: the clicked row, not the selection.
+    fn clicked_row(&self) -> Option<usize> {
+        let table = self.table()?;
+        usize::try_from(table.clickedRow()).ok()
+    }
+
+    fn play(&self, row: usize) {
+        match self.ivars().kind {
+            Kind::Results => ui::with(|ui| ui.intent(Intent::PlayResult(row))),
+            Kind::Queue => ui::with(|ui| ui.play_queue(row)),
+        };
+    }
+
+    fn edit_clicked(&self, edit: fn(usize) -> QueueEdit) {
+        if let Some(row) = self.clicked_row() {
+            ui::with(|ui| ui.edit_queue(edit(row)));
+        }
+    }
+
+    /// Enables the context menu's items for the clicked row; all of them need a player.
+    fn validate(&self, item: &NSMenuItem) -> bool {
+        let row = self.clicked_row();
+        let rows = self.ivars().rows.borrow().len();
+        let action = item.action();
+        ui::with(|ui| {
+            let edit = |f: fn(usize) -> QueueEdit| row.is_some_and(|r| ui.can_edit(f(r)));
+            if action == Some(sel!(contextRemove:)) {
+                edit(QueueEdit::Remove)
+            } else if action == Some(sel!(contextMoveUp:)) {
+                edit(QueueEdit::MoveUp)
+            } else if action == Some(sel!(contextMoveDown:)) {
+                edit(QueueEdit::MoveDown)
+            } else if action == Some(sel!(contextClear:)) {
+                ui.can_edit(QueueEdit::Clear)
+            } else {
+                row.is_some_and(|r| r < rows) && ui.playback().1.player
+            }
+        })
+        .unwrap_or(false)
     }
 
     pub fn set_rows(&self, rows: Vec<RowText>, current: Option<usize>) {
@@ -822,14 +899,16 @@ impl Table {
         // SAFETY: NSObject's `init`.
         let controller: Retained<Controller> = unsafe { msg_send![super(controller), init] };
         let _ = controller.ivars().table.set(Weak::from_retained(&table));
-        // SAFETY: the table's data source, delegate and target are weak. The controller lives
-        // in the returned `Table` next to the table view, and the installed `Ui` holds both
-        // tables until exit, so the references stay valid. It implements the actions set here.
+        // SAFETY: the table's data source, delegate and target, and its menu items' targets, are
+        // weak. The controller lives in the returned `Table` next to the table view, and the
+        // installed `Ui` holds both tables until exit, so the references stay valid. It
+        // implements the actions set here.
         unsafe {
             table.setDataSource(Some(ProtocolObject::from_ref(&*controller)));
             table.setDelegate(Some(ProtocolObject::from_ref(&*controller)));
             table.setTarget(Some(&controller));
             table.setDoubleAction(Some(sel!(rowDoubleClicked:)));
+            table.setMenu(Some(&context_menu(mtm, kind, &controller)));
         }
 
         let view = widgets::view(mtm, frame, FLEX_W | FLEX_H);
@@ -917,6 +996,56 @@ impl Table {
         // SAFETY: a nil sender is allowed.
         unsafe { self.table.deselectAll(None) };
     }
+
+    pub fn select(&self, row: usize) {
+        let Ok(i) = NSInteger::try_from(row) else {
+            return;
+        };
+        if i < self.table.numberOfRows() {
+            self.table
+                .selectRowIndexes_byExtendingSelection(&NSIndexSet::indexSetWithIndex(row), false);
+            self.table.scrollRowToVisible(i);
+        }
+    }
+}
+
+/// The right-click menu. Its items act on the clicked row, which `Controller` validates.
+fn context_menu(mtm: MainThreadMarker, kind: Kind, target: &Controller) -> Retained<NSMenu> {
+    let menu = NSMenu::initWithTitle(NSMenu::alloc(mtm), &NSString::new());
+    // `None` is a separator.
+    let items: &[Option<(&str, Sel)>] = match kind {
+        Kind::Results => &[
+            Some(("Play", sel!(contextPlay:))),
+            Some(("Add to Queue", sel!(contextAdd:))),
+        ],
+        Kind::Queue => &[
+            Some(("Play", sel!(contextPlay:))),
+            Some(("Remove from Queue", sel!(contextRemove:))),
+            Some(("Move Up", sel!(contextMoveUp:))),
+            Some(("Move Down", sel!(contextMoveDown:))),
+            None,
+            Some(("Clear Queue", sel!(contextClear:))),
+        ],
+    };
+    for &entry in items {
+        let Some((title, action)) = entry else {
+            menu.addItem(&NSMenuItem::separatorItem(mtm));
+            continue;
+        };
+        // SAFETY: `Controller` implements every action listed; `Table::new` covers the target.
+        let item = unsafe {
+            let i = NSMenuItem::initWithTitle_action_keyEquivalent(
+                NSMenuItem::alloc(mtm),
+                &NSString::from_str(title),
+                Some(action),
+                &NSString::new(),
+            );
+            i.setTarget(Some(target));
+            i
+        };
+        menu.addItem(&item);
+    }
+    menu
 }
 
 #[cfg(test)]
