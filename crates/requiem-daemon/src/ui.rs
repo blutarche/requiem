@@ -63,10 +63,11 @@ pub fn run_platform(stop_tx: &Sender<()>, stop: Receiver<()>, server: &Server) {
     });
 }
 
-/// The `.app` directory that `exe` runs from, if any.
-fn app_bundle(exe: &Path) -> Option<&Path> {
+/// The app that holds `exe` as a helper (`X.app/Contents/Helpers/requiemd.app/...`), which is
+/// the GUI app to `open`. `None` for dev builds, which have no outer app.
+fn gui_app(exe: &Path) -> Option<&Path> {
     exe.ancestors().find(|dir| {
-        dir.extension().is_some_and(|e| e == "app") && exe.starts_with(dir.join("Contents/MacOS"))
+        dir.extension().is_some_and(|e| e == "app") && exe.starts_with(dir.join("Contents/Helpers"))
     })
 }
 
@@ -78,7 +79,7 @@ fn launch_gui() {
             return;
         }
     };
-    let child = match app_bundle(&exe) {
+    let child = match gui_app(&exe) {
         Some(app) => Process::new("/usr/bin/open").arg(app).spawn(),
         None => {
             let gui: PathBuf = exe.with_file_name("requiem-gui");
@@ -127,34 +128,24 @@ mod tests {
     use super::*;
 
     #[test]
-    fn finds_the_enclosing_bundle() {
-        let exe = Path::new("/Applications/requiem.app/Contents/MacOS/requiemd");
-        assert_eq!(
-            app_bundle(exe),
-            Some(Path::new("/Applications/requiem.app"))
+    fn helper_layout_opens_the_outer_app() {
+        let exe = Path::new(
+            "/Applications/requiem.app/Contents/Helpers/requiemd.app/Contents/MacOS/requiemd",
         );
+        assert_eq!(gui_app(exe), Some(Path::new("/Applications/requiem.app")));
     }
 
     #[test]
-    fn plain_paths_are_not_bundles() {
-        assert_eq!(app_bundle(Path::new("/usr/local/bin/requiemd")), None);
-        assert_eq!(app_bundle(Path::new("/x/requiem.app/requiemd")), None);
+    fn dev_layouts_have_no_outer_app() {
+        assert_eq!(gui_app(Path::new("/usr/local/bin/requiemd")), None);
+        assert_eq!(gui_app(Path::new("/x/target/release/requiemd")), None);
         assert_eq!(
-            app_bundle(Path::new("/x/requiem.app/Contents/Resources/requiemd")),
+            gui_app(Path::new("/x/requiem.app/Contents/MacOS/requiemd")),
             None
         );
         assert_eq!(
-            app_bundle(Path::new("/x/notapp/Contents/MacOS/requiemd")),
+            gui_app(Path::new("/x/requiem.app/Contents/Resources/requiemd")),
             None
-        );
-    }
-
-    #[test]
-    fn nested_bundles_pick_the_one_that_holds_the_exe() {
-        let exe = Path::new("/a.app/Contents/Frameworks/b.app/Contents/MacOS/requiemd");
-        assert_eq!(
-            app_bundle(exe),
-            Some(Path::new("/a.app/Contents/Frameworks/b.app"))
         );
     }
 }

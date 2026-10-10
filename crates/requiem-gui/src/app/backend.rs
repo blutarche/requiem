@@ -119,9 +119,20 @@ fn daemon_path() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("requiemd"))
 }
 
-/// `requiemd` in the executable's directory: `Contents/MacOS/` in the app bundle.
+/// In an app bundle, the daemon is the helper app `Contents/Helpers/requiemd.app`; elsewhere
+/// (dev builds) it sits in the executable's directory.
 fn beside(exe: &Path) -> Option<PathBuf> {
-    exe.parent().map(|d| d.join("requiemd"))
+    let dir = exe.parent()?;
+    let contents = dir.parent()?;
+    let app = contents.parent()?;
+    let in_bundle = dir.file_name().is_some_and(|n| n == "MacOS")
+        && contents.file_name().is_some_and(|n| n == "Contents")
+        && app.extension().is_some_and(|e| e == "app");
+    Some(if in_bundle {
+        contents.join("Helpers/requiemd.app/Contents/MacOS/requiemd")
+    } else {
+        dir.join("requiemd")
+    })
 }
 
 fn connection(daemon: PathBuf, slot: Slot) {
@@ -206,14 +217,22 @@ mod tests {
     }
 
     #[test]
-    fn daemon_is_found_next_to_the_gui() {
+    fn daemon_is_the_helper_app_inside_a_bundle() {
         assert_eq!(
             beside(Path::new(
                 "/Applications/requiem.app/Contents/MacOS/requiem-gui"
             )),
             Some(PathBuf::from(
-                "/Applications/requiem.app/Contents/MacOS/requiemd"
+                "/Applications/requiem.app/Contents/Helpers/requiemd.app/Contents/MacOS/requiemd"
             ))
+        );
+    }
+
+    #[test]
+    fn daemon_is_a_sibling_in_dev_builds() {
+        assert_eq!(
+            beside(Path::new("/work/target/release/requiem-gui")),
+            Some(PathBuf::from("/work/target/release/requiemd"))
         );
     }
 }
