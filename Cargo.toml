@@ -20,12 +20,18 @@ rubato = "5.0.1"
 rtrb = "0.4.0"
 ureq = "3.4.2"
 libc = "0.2.190"
+objc2 = "0.6.5"
+objc2-foundation = { version = "0.3.2", default-features = false }
+objc2-app-kit = { version = "0.3.2", default-features = false }
+objc2-media-player = { version = "0.3.2", default-features = false }
+block2 = "0.6.2"
 
 requiem-core = { path = "crates/requiem-core" }
 requiem-audio = { path = "crates/requiem-audio" }
 requiem-provider-ytmusic = { path = "crates/requiem-provider-ytmusic" }
 requiem-cli = { path = "crates/requiem-cli" }
 requiem-ipc = { path = "crates/requiem-ipc" }
+requiem-macos = { path = "crates/requiem-macos" }
 
 [profile.release]
 lto = "thin"
