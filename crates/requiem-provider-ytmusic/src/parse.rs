@@ -200,7 +200,10 @@ fn parse_subtitle(runs: &[Run]) -> Subtitle {
         }
     }
     if artists.is_empty() && album.is_none() {
-        let mut untyped = groups.into_iter().filter(|g| !g.is_empty());
+        // Video results put a view or play count where a song has its album.
+        let mut untyped = groups
+            .into_iter()
+            .filter(|g| !g.is_empty() && !g.ends_with(" views") && !g.ends_with(" plays"));
         if let Some(a) = untyped.next() {
             artists.push(a);
         }
@@ -513,6 +516,20 @@ mod tests {
         assert_eq!(t.artists, vec!["A & B"]);
         assert_eq!(t.album.as_deref(), Some("Alb"));
         assert_eq!(t.duration, Some(Duration::from_secs(3723)));
+    }
+
+    #[test]
+    fn search_untyped_view_count_is_not_an_album() {
+        let body = r#"{"contents":{"x":{"musicResponsiveListItemRenderer":{
+            "playlistItemData":{"videoId":"v"},
+            "flexColumns":[
+              {"musicResponsiveListItemFlexColumnRenderer":{"text":{"runs":[{"text":"T"}]}}},
+              {"musicResponsiveListItemFlexColumnRenderer":{"text":{"runs":[
+                {"text":"A"},{"text":" • "},{"text":"4.8K views"},
+                {"text":" • "},{"text":"2:32"}]}}}]}}}}"#;
+        let t = &parse_search(body.as_bytes(), 1).unwrap()[0];
+        assert_eq!(t.artists, vec!["A"]);
+        assert_eq!(t.album, None);
     }
 
     #[test]
