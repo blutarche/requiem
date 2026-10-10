@@ -1,0 +1,86 @@
+[package]
+name = "requiem-gui"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "requiem-gui"
+path = "src/main.rs"
+
+[dependencies]
+requiem-core.workspace = true
+
+[target.'cfg(target_os = "macos")'.dependencies]
+requiem-ipc.workspace = true
+crossbeam-channel.workspace = true
+objc2 = "0.6.5"
+block2 = "0.6.2"
+dispatch2 = { version = "0.3.1", default-features = false, features = ["std"] }
+objc2-core-foundation = { version = "0.3.2", default-features = false, features = ["std", "CFBase", "CFData", "CFCGTypes"] }
+objc2-core-graphics = { version = "0.3.2", default-features = false, features = ["std", "CGColor", "CGDataProvider", "CGFont"] }
+objc2-core-text = { version = "0.3.2", default-features = false, features = ["std", "objc2-core-graphics", "CTFontManager"] }
+objc2-quartz-core = { version = "0.3.2", default-features = false, features = ["std", "objc2-core-foundation", "objc2-core-graphics", "CALayer"] }
+objc2-foundation = { version = "0.3.2", default-features = false, features = [
+    "std",
+    "block2",
+    "objc2-core-foundation",
+    "NSArray",
+    "NSAttributedString",
+    "NSData",
+    "NSDate",
+    "NSDictionary",
+    "NSGeometry",
+    "NSIndexSet",
+    "NSNotification",
+    "NSObject",
+    "NSRange",
+    "NSString",
+    "NSValue",
+] }
+objc2-app-kit = { version = "0.3.2", default-features = false, features = [
+    "std",
+    "block2",
+    "objc2-core-foundation",
+    "objc2-core-graphics",
+    "objc2-quartz-core",
+    "NSAppearance",
+    "NSApplication",
+    "NSAttributedString",
+    "NSBezierPath",
+    "NSBitmapImageRep",
+    "NSButton",
+    "NSButtonCell",
+    "NSCell",
+    "NSClipView",
+    "NSColor",
+    "NSControl",
+    "NSEvent",
+    "NSFont",
+    "NSFontDescriptor",
+    "NSGraphics",
+    "NSImage",
+    "NSImageRep",
+    "NSImageView",
+    "NSLayoutConstraint",
+    "NSMenu",
+    "NSMenuItem",
+    "NSParagraphStyle",
+    "NSResponder",
+    "NSRunningApplication",
+    "NSScrollView",
+    "NSStringDrawing",
+    "NSTableColumn",
+    "NSTableHeaderView",
+    "NSTableRowView",
+    "NSTableView",
+    "NSText",
+    "NSTextField",
+    "NSTextView",
+    "NSTrackingArea",
+    "NSUserInterfaceItemIdentification",
+    "NSView",
+    "NSWindow",
+] }
