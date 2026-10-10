@@ -100,6 +100,10 @@ pub fn accent_hi() -> Retained<NSColor> {
 pub fn accent_soft() -> Retained<NSColor> {
     rgba(ACCENT, SOFT)
 }
+/// Range sliders and data only, never actions.
+pub fn accent_2() -> Retained<NSColor> {
+    rgb(0xF0A8D0)
+}
 pub fn accent_ring() -> Retained<NSColor> {
     rgba(0x7C70F5, 0.25)
 }

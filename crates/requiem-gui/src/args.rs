@@ -3,12 +3,13 @@
 use std::path::PathBuf;
 
 pub const USAGE: &str = "\
-usage: requiem-gui [--demo] [--smoke] [--snapshot <png>] [--view search|queue|palette]
+usage: requiem-gui [--demo] [--smoke] [--snapshot <png>] [--view <view>]
 
   --demo             fill the window with fixed fake data; no player daemon
   --smoke            like --demo, then exit 0 after 2 s
   --snapshot <png>   with --demo: render the window to a PNG and exit 0
-  --view <view>      the view shown at start: search (default), queue or palette";
+  --view <view>      the view shown at start: search (default), queue or palette;
+                     with --demo also empty, disconnected, toast or out-of-date";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum View {
@@ -17,6 +18,31 @@ pub enum View {
     Queue,
     /// The search view with the command palette open.
     Palette,
+    /// Demo only: the search view before any query.
+    Empty,
+    /// Demo only: the reconnecting banner.
+    Disconnected,
+    /// Demo only: an error toast.
+    Toast,
+    /// Demo only: the stale-daemon banner.
+    OutOfDate,
+}
+
+impl View {
+    const NAMES: [(&str, View); 7] = [
+        ("search", View::Search),
+        ("queue", View::Queue),
+        ("palette", View::Palette),
+        ("empty", View::Empty),
+        ("disconnected", View::Disconnected),
+        ("toast", View::Toast),
+        ("out-of-date", View::OutOfDate),
+    ];
+
+    /// Whether the view is a staged demo state rather than a place in the app.
+    pub fn is_demo_only(self) -> bool {
+        !matches!(self, View::Search | View::Queue | View::Palette)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -47,17 +73,20 @@ pub fn parse(args: impl IntoIterator<Item = String>) -> Result<Args, ArgsError> 
                 out.snapshot = Some(PathBuf::from(path));
             }
             "--view" => {
-                out.view = match it.next().as_deref() {
-                    Some("search") => View::Search,
-                    Some("queue") => View::Queue,
-                    Some("palette") => View::Palette,
-                    Some(other) => {
-                        return Err(ArgsError::Bad(format!(
-                            "unknown view {other:?}; expected search, queue or palette"
-                        )));
-                    }
-                    None => return Err(ArgsError::Bad("--view needs a value".into())),
-                };
+                let name = it
+                    .next()
+                    .ok_or_else(|| ArgsError::Bad("--view needs a value".into()))?;
+                out.view = View::NAMES
+                    .iter()
+                    .find(|(n, _)| *n == name)
+                    .map(|&(_, v)| v)
+                    .ok_or_else(|| {
+                        let names: Vec<_> = View::NAMES.iter().map(|(n, _)| *n).collect();
+                        ArgsError::Bad(format!(
+                            "unknown view {name:?}; expected one of {}",
+                            names.join(", ")
+                        ))
+                    })?;
             }
             "-h" | "--help" => return Err(ArgsError::Help),
             other => return Err(ArgsError::Bad(format!("unknown argument {other:?}"))),
@@ -65,6 +94,9 @@ pub fn parse(args: impl IntoIterator<Item = String>) -> Result<Args, ArgsError> 
     }
     if out.snapshot.is_some() && !out.demo {
         return Err(ArgsError::Bad("--snapshot needs --demo".into()));
+    }
+    if out.view.is_demo_only() && !out.uses_demo_data() {
+        return Err(ArgsError::Bad("this --view needs --demo".into()));
     }
     if out.snapshot.is_some() && out.smoke {
         return Err(ArgsError::Bad(
@@ -129,5 +161,20 @@ mod tests {
         assert!(matches!(p(&["--view", "nope"]), Err(ArgsError::Bad(_))));
         assert!(matches!(p(&["--view"]), Err(ArgsError::Bad(_))));
         assert!(matches!(p(&["--in-process"]), Err(ArgsError::Bad(_))));
+        assert!(matches!(p(&["--view", "toast"]), Err(ArgsError::Bad(_))));
+    }
+
+    #[test]
+    fn demo_states_need_demo_data() {
+        for (name, view) in [
+            ("empty", View::Empty),
+            ("disconnected", View::Disconnected),
+            ("toast", View::Toast),
+            ("out-of-date", View::OutOfDate),
+        ] {
+            assert_eq!(p(&["--demo", "--view", name]).unwrap().view, view);
+            assert_eq!(p(&["--smoke", "--view", name]).unwrap().view, view);
+            assert!(matches!(p(&["--view", name]), Err(ArgsError::Bad(_))));
+        }
     }
 }

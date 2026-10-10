@@ -7,9 +7,10 @@ use objc2::rc::{Retained, Weak};
 use objc2::runtime::{AnyObject, Sel};
 use objc2::{AnyThread, DefinedClass, MainThreadOnly, Message, define_class, msg_send};
 use objc2_app_kit::{
-    NSAutoresizingMaskOptions, NSBezierPath, NSButton, NSCellImagePosition, NSColor, NSControl,
-    NSEvent, NSFocusRingType, NSFont, NSImageScaling, NSImageView, NSLineBreakMode, NSResponder,
-    NSTextAlignment, NSTextField, NSTrackingArea, NSTrackingAreaOptions, NSView,
+    NSAttributedStringNSStringDrawing, NSAutoresizingMaskOptions, NSBezierPath, NSButton,
+    NSCellImagePosition, NSColor, NSControl, NSEvent, NSFocusRingType, NSFont, NSImageScaling,
+    NSImageView, NSLineBreakMode, NSResponder, NSTextAlignment, NSTextField, NSTrackingArea,
+    NSTrackingAreaOptions, NSView,
 };
 use objc2_core_foundation::CGFloat;
 use objc2_foundation::{
@@ -198,7 +199,7 @@ pub struct ButtonIvars {
 }
 
 define_class!(
-    /// A borderless icon button with a hover background.
+    /// A borderless icon or text button with a hover background.
     // SAFETY: NSButton has no subclassing requirements; no Drop impl.
     #[unsafe(super(NSButton, NSControl, NSView, NSResponder, objc2_foundation::NSObject))]
     #[thread_kind = MainThreadOnly]
@@ -238,6 +239,34 @@ impl HoverButton {
         hover: &NSColor,
         radius: CGFloat,
     ) -> Retained<Self> {
+        let this = Self::filled(mtm, frame, normal, hover, radius);
+        this.setTitle(&NSString::new());
+        this.setImagePosition(NSCellImagePosition::ImageOnly);
+        this.set_icon(icon, icon_size);
+        this.setContentTintColor(Some(tint));
+        this
+    }
+
+    /// A primary text button: accent fill, ink title. `set_label` sizes its width.
+    pub fn primary(mtm: MainThreadMarker, frame: NSRect) -> Retained<Self> {
+        let this = Self::filled(
+            mtm,
+            frame,
+            Some(&theme::accent()),
+            &theme::accent_hi(),
+            theme::RADIUS,
+        );
+        this.setImagePosition(NSCellImagePosition::NoImage);
+        this
+    }
+
+    fn filled(
+        mtm: MainThreadMarker,
+        frame: NSRect,
+        normal: Option<&NSColor>,
+        hover: &NSColor,
+        radius: CGFloat,
+    ) -> Retained<Self> {
         let this = Self::alloc(mtm).set_ivars(ButtonIvars {
             normal: normal.map(|c| c.retain()),
             hover: hover.retain(),
@@ -246,15 +275,18 @@ impl HoverButton {
         // SAFETY: `initWithFrame:` is NSButton's designated initializer.
         let this: Retained<Self> = unsafe { msg_send![super(this), initWithFrame: frame] };
         this.setBordered(false);
-        this.setTitle(&NSString::new());
-        this.setImagePosition(NSCellImagePosition::ImageOnly);
-        this.set_icon(icon, icon_size);
-        this.setContentTintColor(Some(tint));
         this.setFocusRingType(NSFocusRingType::None);
         round(&this, radius);
         this.paint();
         track_hover(&this, NSTrackingAreaOptions::empty());
         this
+    }
+
+    /// Sets a text button's title and returns the width it needs: the text plus 12 px a side.
+    pub fn set_label(&self, title: &str) -> CGFloat {
+        let s = attributed(title, &theme::font(14.0, Weight::Medium), &theme::ink());
+        self.setAttributedTitle(&s);
+        s.size().width.ceil() + 24.0
     }
 
     pub fn set_icon(&self, icon: Icon, size: CGFloat) {
@@ -595,7 +627,7 @@ pub struct SliderIvars {
 }
 
 define_class!(
-    /// A thin custom-drawn slider: line-2 track, accent fill, knob on hover or drag.
+    /// A thin custom-drawn slider: line-2 track, accent-2 fill, knob on hover or drag.
     // SAFETY: NSView has no subclassing requirements; no Drop impl.
     #[unsafe(super(NSView, NSResponder, objc2_foundation::NSObject))]
     #[thread_kind = MainThreadOnly]
@@ -610,8 +642,9 @@ define_class!(
             theme::line_2().setFill();
             NSBezierPath::bezierPathWithRoundedRect_xRadius_yRadius(rect(x0, mid - 2.0, w, 4.0), 2.0, 2.0)
                 .fill();
+            let fill = theme::accent_2();
             if v > 0.0 {
-                theme::accent().setFill();
+                fill.setFill();
                 NSBezierPath::bezierPathWithRoundedRect_xRadius_yRadius(
                     rect(x0, mid - 2.0, (w * v).max(4.0), 4.0),
                     2.0,
@@ -621,7 +654,7 @@ define_class!(
             }
             let iv = self.ivars();
             if iv.enabled.get() && (iv.hovered.get() || iv.dragging.get()) {
-                theme::ink().setFill();
+                fill.setFill();
                 NSBezierPath::bezierPathWithOvalInRect(rect(x0 + w * v - 6.0, mid - 6.0, 12.0, 12.0))
                     .fill();
             }
@@ -747,34 +780,48 @@ impl Slider {
 /// Centred icon, heading and subtext for an empty list.
 pub struct EmptyState {
     pub view: Retained<NSView>,
+    /// Fixed height, so resizing moves the block without squeezing its rows together.
+    group: Retained<NSView>,
     icon: Retained<NSImageView>,
     heading: Retained<NSTextField>,
     sub: Retained<NSTextField>,
+    action: Retained<HoverButton>,
 }
 
 impl EmptyState {
-    pub fn new(mtm: MainThreadMarker, frame: NSRect, icon: Icon) -> EmptyState {
+    const BUTTON_H: CGFloat = 36.0;
+    const GROUP_H: CGFloat = 136.0;
+
+    /// The action button sends `focusSearch:` to `target`.
+    pub fn new(mtm: MainThreadMarker, frame: NSRect, icon: Icon, target: &AnyObject) -> EmptyState {
         let view = view(mtm, frame, FLEX_W | FLEX_H);
         let (w, h) = (frame.size.width, frame.size.height);
-        let center = PIN_LEFT | PIN_RIGHT | PIN_TOP | PIN_BOTTOM;
-        let mid = (h / 2.0 + 24.0).round();
+        let gh = Self::GROUP_H;
+        // Slightly above centre, which reads as centred.
+        let group = self::view(
+            mtm,
+            rect(0.0, ((h - gh) / 2.0 + 8.0).round(), w, gh),
+            FLEX_W | PIN_TOP | PIN_BOTTOM,
+        );
+        let centred = PIN_LEFT | PIN_RIGHT;
+        let (sub_y, heading_y) = (62.0, 86.0);
         let iconv = icon_view(
             mtm,
             icon,
             32.0,
             &theme::muted(),
-            rect((w - 32.0) / 2.0, mid + 4.0, 32.0, 32.0),
+            rect(((w - 32.0) / 2.0).round(), heading_y + 18.0, 32.0, 32.0),
         );
-        iconv.setAutoresizingMask(center);
+        iconv.setAutoresizingMask(centred);
         let heading = placed_label(
             mtm,
             "",
             &theme::font(16.0, Weight::SemiBold),
             &theme::ink(),
             0.0,
-            mid - 14.0,
+            heading_y,
             w,
-            FLEX_W | PIN_TOP | PIN_BOTTOM,
+            FLEX_W,
         );
         heading.setAlignment(NSTextAlignment::Center);
         let sub = placed_label(
@@ -783,25 +830,35 @@ impl EmptyState {
             &theme::font(14.0, Weight::Regular),
             &theme::muted(),
             0.0,
-            mid - 38.0,
+            sub_y,
             w,
-            FLEX_W | PIN_TOP | PIN_BOTTOM,
+            FLEX_W,
         );
         sub.setAlignment(NSTextAlignment::Center);
-        view.addSubview(&iconv);
-        view.addSubview(&heading);
-        view.addSubview(&sub);
+        let action = HoverButton::primary(mtm, rect(0.0, 0.0, 0.0, Self::BUTTON_H));
+        action.setAutoresizingMask(centred);
+        action.set_action(target, objc2::sel!(focusSearch:));
+        group.addSubview(&iconv);
+        group.addSubview(&heading);
+        group.addSubview(&sub);
+        group.addSubview(&action);
+        view.addSubview(&group);
         EmptyState {
             view,
+            group,
             icon: iconv,
             heading,
             sub,
+            action,
         }
     }
 
-    pub fn set(&self, icon: Icon, heading: &str, sub: &str) {
+    pub fn set(&self, icon: Icon, heading: &str, sub: &str, action: &str) {
         self.icon.setImage(Some(&icon.image(32.0)));
         set_text(&self.heading, heading);
         set_text(&self.sub, sub);
+        let w = self.action.set_label(action);
+        let x = ((self.group.bounds().size.width - w) / 2.0).round();
+        self.action.setFrame(rect(x, 0.0, w, Self::BUTTON_H));
     }
 }

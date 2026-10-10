@@ -432,7 +432,8 @@ pub struct AddCellIvars {
 }
 
 define_class!(
-    /// The results table's last cell: a "+" ghost button shown while the row is hovered.
+    /// The results table's cell before Time: a "+" ghost button shown while the row is
+    /// hovered.
     // SAFETY: NSView has no subclassing requirements; no Drop impl.
     #[unsafe(super(NSView, NSResponder, NSObject))]
     #[thread_kind = MainThreadOnly]
@@ -561,12 +562,13 @@ impl Table {
 
         let fixed = DURATION_W + if kind == Kind::Results { ADD_W } else { 0.0 };
         let flex = w - fixed;
+        // Time stays the last column, flush with the table's right edge in both tables.
         let cols: &[(Col, &str, CGFloat)] = &[
             (Col::Title, "Title", (flex * 0.42).floor()),
             (Col::Artists, "Artists", (flex * 0.29).floor()),
             (Col::Album, "Album", (flex * 0.29).floor()),
-            (Col::Duration, "Time", DURATION_W),
             (Col::Add, "", ADD_W),
+            (Col::Duration, "Time", DURATION_W),
         ];
         let mut titles = Vec::with_capacity(cols.len());
         for &(col, title, width) in cols {

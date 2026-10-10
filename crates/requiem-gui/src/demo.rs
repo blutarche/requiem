@@ -7,6 +7,7 @@ use requiem_core::{
     Command, EnqueueMode, Event, PlayState, ProviderId, SeekTarget, Track, TrackId,
 };
 
+use crate::args::View;
 use crate::vm::{Intent, Link, Vm};
 
 pub const QUERY: &str = "night drive";
@@ -169,6 +170,8 @@ const QUEUE: [usize; 8] = [4, 9, 0, 13, 6, 20, 10, 23];
 const CURRENT: usize = 2;
 const POSITION: Duration = Duration::from_secs(83);
 const VOLUME: u8 = 70;
+/// The result whose playback fails in the toast demo.
+const FAILED: usize = 5;
 
 pub fn results() -> Vec<Track> {
     RESULTS
@@ -344,16 +347,33 @@ impl Daemon {
 /// A view model and daemon stand-in in the demo's starting state: the snapshot applied and
 /// `QUERY` searched.
 pub fn start() -> (Vm, Daemon) {
+    start_in(View::Search)
+}
+
+/// `start`, staged for a demo-only `view`: `Empty` skips the search; `Disconnected`,
+/// `OutOfDate` and `Toast` add their banner or toast. Other views get the plain start.
+pub fn start_in(view: View) -> (Vm, Daemon) {
     let mut vm = Vm::new();
     let mut daemon = Daemon::default();
     vm.link(Link::Demo);
     for ev in daemon.snapshot() {
         vm.apply(ev);
     }
-    for cmd in vm.intent(Intent::Search(QUERY.into())) {
-        for ev in daemon.apply(cmd) {
-            vm.apply(ev);
+    if view != View::Empty {
+        for cmd in vm.intent(Intent::Search(QUERY.into())) {
+            for ev in daemon.apply(cmd) {
+                vm.apply(ev);
+            }
         }
+    }
+    match view {
+        View::Disconnected => vm.link(Link::Lost("demo".into())),
+        View::OutOfDate => vm.link(Link::OutOfDate),
+        View::Toast => vm.apply(Event::TrackFailed {
+            track: daemon.results[FAILED].clone(),
+            error: "video unavailable".into(),
+        }),
+        View::Search | View::Queue | View::Palette | View::Empty => {}
     }
     (vm, daemon)
 }
@@ -386,6 +406,41 @@ mod tests {
         assert_eq!(ui.total_text(), "3:45");
         assert_eq!(ui.volume, 70);
         assert_eq!(ui.now_playing.as_ref(), Some(&ui.queue[2]));
+    }
+
+    #[test]
+    fn empty_has_no_query_or_results() {
+        let (vm, _) = start_in(View::Empty);
+        let ui = vm.ui();
+        assert_eq!(ui.query, "");
+        assert!(ui.results.is_empty());
+        assert_eq!(ui.search, SearchStatus::Idle);
+        let empty = ui.results_empty().unwrap();
+        assert_eq!(empty.heading, "Search YouTube Music");
+        assert_eq!(empty.action, "Start a search");
+        assert_eq!(ui.state, PlayState::Playing);
+    }
+
+    #[test]
+    fn staged_banners_and_toast() {
+        let (vm, _) = start_in(View::Disconnected);
+        let b = vm.ui().banner().unwrap();
+        assert!(b.text.starts_with("Player disconnected") && !b.error);
+        assert!(vm.ui().toast.is_none());
+
+        let (vm, _) = start_in(View::OutOfDate);
+        let b = vm.ui().banner().unwrap();
+        assert!(b.text.contains("out of date") && b.error);
+
+        let (vm, _) = start_in(View::Toast);
+        let t = vm.ui().toast.clone().unwrap();
+        assert!(t.error);
+        assert_eq!(
+            t.text,
+            "Couldn't play “Fever in the Valley”: video unavailable"
+        );
+        assert!(vm.ui().banner().is_none());
+        assert_eq!(vm.ui().results.len(), 30);
     }
 
     #[test]

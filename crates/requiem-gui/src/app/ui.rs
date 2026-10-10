@@ -25,7 +25,7 @@ use super::widgets::{
     self, EmptyState, FLEX_H, FLEX_W, Field, HoverButton, NavItem, PIN_BOTTOM, PIN_LEFT, PIN_RIGHT,
     PIN_TOP, rect,
 };
-use crate::vm::{self, Banner, Dirty, Intent, PaletteAction, Toast, UiState, Vm};
+use crate::vm::{self, Banner, Dirty, EmptyText, Intent, PaletteAction, Toast, UiState, Vm};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AppView {
@@ -205,7 +205,7 @@ impl Ui {
         status.setHidden(true);
         let list = rect(PAD, 0.0, mw - 2.0 * PAD, field_y - 16.0);
         let results = Table::new(mtm, list, Kind::Results);
-        let results_empty = EmptyState::new(mtm, list, Icon::Search);
+        let results_empty = EmptyState::new(mtm, list, Icon::Search, target);
         search_page.addSubview(&search.ring);
         search_page.addSubview(&status);
         search_page.addSubview(&results.view);
@@ -237,11 +237,12 @@ impl Ui {
         );
         queue_count.setAlignment(NSTextAlignment::Right);
         let queue = Table::new(mtm, list, Kind::Queue);
-        let queue_empty = EmptyState::new(mtm, list, Icon::ListMusic);
+        let queue_empty = EmptyState::new(mtm, list, Icon::ListMusic, target);
         queue_empty.set(
             Icon::ListMusic,
             "Queue is empty",
             "Play or add a search result",
+            "Go to search",
         );
         queue_page.addSubview(&heading);
         queue_page.addSubview(&queue_count);
@@ -526,8 +527,9 @@ impl Ui {
             self.results.deselect();
             self.results.view.setHidden(!has_rows);
             self.results_empty.view.setHidden(has_rows);
-            if let Some((heading, sub)) = empty {
-                self.results_empty.set(Icon::Search, &heading, &sub);
+            if let Some(e) = empty {
+                self.results_empty
+                    .set(Icon::Search, &e.heading, &e.sub, e.action);
             }
         }
         if let Some((rows, current)) = p.queue {
@@ -629,8 +631,6 @@ impl Ui {
     }
 }
 
-type EmptyText = (String, String);
-
 struct NowPlaying {
     track: Option<(String, String)>,
     total: String,
@@ -639,7 +639,7 @@ struct NowPlaying {
 /// Owned copies of the dirty regions, taken so the view-model borrow ends before AppKit
 /// runs.
 struct Patch {
-    /// Rows, and the empty-state heading and subtext when there are none.
+    /// Rows, and the empty state when there are none.
     results: Option<(Vec<table::RowText>, Option<EmptyText>)>,
     search_status: Option<Option<(String, bool)>>,
     queue: Option<(Vec<table::RowText>, Option<usize>)>,

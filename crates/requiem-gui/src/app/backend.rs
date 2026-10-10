@@ -2,7 +2,7 @@
 
 use std::cell::RefCell;
 use std::io;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::thread;
 use std::time::Duration;
@@ -93,8 +93,13 @@ impl Live {
 fn daemon_path() -> PathBuf {
     std::env::current_exe()
         .ok()
-        .and_then(|exe| exe.parent().map(|d| d.join("requiemd")))
+        .and_then(|exe| beside(&exe))
         .unwrap_or_else(|| PathBuf::from("requiemd"))
+}
+
+/// `requiemd` in the executable's directory: `Contents/MacOS/` in the app bundle.
+fn beside(exe: &Path) -> Option<PathBuf> {
+    exe.parent().map(|d| d.join("requiemd"))
 }
 
 fn connection(daemon: PathBuf, slot: Slot) {
@@ -148,4 +153,21 @@ fn post(batch: Vec<Msg>) {
     DispatchQueue::main().exec_async(move || {
         ui::with(|ui| ui.receive(batch));
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn daemon_is_found_next_to_the_gui() {
+        assert_eq!(
+            beside(Path::new(
+                "/Applications/requiem.app/Contents/MacOS/requiem-gui"
+            )),
+            Some(PathBuf::from(
+                "/Applications/requiem.app/Contents/MacOS/requiemd"
+            ))
+        );
+    }
 }

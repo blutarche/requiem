@@ -316,7 +316,7 @@ pub fn run(args: Args) {
     // Live messages are dispatched to the main queue, which drains only once `app.run()`
     // starts, after the UI is installed.
     let (vm, backend) = if args.uses_demo_data() {
-        let (vm, daemon) = demo::start();
+        let (vm, daemon) = demo::start_in(args.view);
         (vm, Backend::Demo(RefCell::new(daemon)))
     } else {
         (Vm::new(), Backend::Live(Live::start()))
@@ -325,9 +325,11 @@ pub fn run(args: Args) {
     ui::install(ui.clone());
     ui.render();
     match args.view {
-        View::Search => ui.show(AppView::Search),
         View::Queue => ui.show(AppView::Queue),
         View::Palette => ui.open_palette(),
+        View::Search | View::Empty | View::Disconnected | View::Toast | View::OutOfDate => {
+            ui.show(AppView::Search)
+        }
     }
 
     if let Some(path) = &args.snapshot {

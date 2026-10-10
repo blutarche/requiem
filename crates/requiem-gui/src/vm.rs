@@ -190,21 +190,24 @@ impl UiState {
         }
     }
 
-    /// `(heading, subtext)` for the results area when there are no results.
-    pub fn results_empty(&self) -> Option<(String, String)> {
+    /// The results area's empty state, when there are no results. Its action focuses the
+    /// search field.
+    pub fn results_empty(&self) -> Option<EmptyText> {
         if !self.results.is_empty() {
             return None;
         }
         Some(if self.search == SearchStatus::Done {
-            (
-                "No results".to_owned(),
-                format!("Nothing matched “{}”", self.query),
-            )
+            EmptyText {
+                heading: "No results".to_owned(),
+                sub: format!("Nothing matched “{}”", self.query),
+                action: "Edit search",
+            }
         } else {
-            (
-                "Search YouTube Music".to_owned(),
-                "Type a song, artist or album".to_owned(),
-            )
+            EmptyText {
+                heading: "Search YouTube Music".to_owned(),
+                sub: "Type a song, artist or album".to_owned(),
+                action: "Start a search",
+            }
         })
     }
 
@@ -221,6 +224,14 @@ impl UiState {
 pub struct Banner {
     pub text: &'static str,
     pub error: bool,
+}
+
+/// An empty state: heading, subtext and the label of its primary action.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EmptyText {
+    pub heading: String,
+    pub sub: String,
+    pub action: &'static str,
 }
 
 #[derive(Debug, Default)]
@@ -1144,10 +1155,11 @@ mod tests {
         let mut vm = connected();
         assert_eq!(
             vm.ui().results_empty(),
-            Some((
-                "Search YouTube Music".into(),
-                "Type a song, artist or album".into()
-            ))
+            Some(EmptyText {
+                heading: "Search YouTube Music".into(),
+                sub: "Type a song, artist or album".into(),
+                action: "Start a search",
+            })
         );
         let req = search_req(&mut vm, "zzz");
         vm.apply(Event::SearchResults {
@@ -1156,7 +1168,11 @@ mod tests {
         });
         assert_eq!(
             vm.ui().results_empty(),
-            Some(("No results".into(), "Nothing matched “zzz”".into()))
+            Some(EmptyText {
+                heading: "No results".into(),
+                sub: "Nothing matched “zzz”".into(),
+                action: "Edit search",
+            })
         );
         assert_eq!(with_results(1).ui().results_empty(), None);
     }
