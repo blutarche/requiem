@@ -1,6 +1,7 @@
 //! Response parsers. Every field is optional so a missing one never fails deserialization;
 //! a structurally unusable response is `ProviderError::Parse`.
 
+use std::collections::BTreeSet;
 use std::time::Duration;
 
 use requiem_core::{FormatHint, ProviderError, ProviderId, Track, TrackId};
@@ -277,6 +278,38 @@ pub(crate) fn parse_search(body: &[u8], limit: usize) -> Result<Vec<Track>, Prov
     Ok(tracks)
 }
 
+/// Byte length and the `*Renderer` key paths down to 10 object levels; never any text content.
+pub(crate) fn structure_summary(body: &[u8]) -> String {
+    fn walk(v: &Value, path: &str, depth: usize, out: &mut BTreeSet<String>) {
+        if depth > 10 {
+            return;
+        }
+        match v {
+            Value::Object(map) => {
+                for (k, child) in map {
+                    let next = if k.ends_with("Renderer") {
+                        let p = format!("{path}>{k}");
+                        out.insert(p.clone());
+                        p
+                    } else {
+                        path.to_owned()
+                    };
+                    walk(child, &next, depth + 1, out);
+                }
+            }
+            Value::Array(a) => a.iter().for_each(|c| walk(c, path, depth, out)),
+            _ => {}
+        }
+    }
+    let mut paths = BTreeSet::new();
+    match serde_json::from_slice::<Value>(body) {
+        Ok(v) => walk(&v, "", 0, &mut paths),
+        Err(_) => return format!("{} bytes, not json", body.len()),
+    }
+    let list: Vec<String> = paths.into_iter().collect();
+    format!("{} bytes, renderers: {}", body.len(), list.join(", "))
+}
+
 // ---------------------------------------------------------------- player
 
 #[derive(Deserialize, Default)]
@@ -494,6 +527,14 @@ mod tests {
             );
         }
         assert_eq!(parse_search(br#"{"contents":{}}"#, 5).unwrap(), vec![]);
+    }
+
+    #[test]
+    fn structure_summary_has_paths_but_no_text() {
+        let s = structure_summary(SEARCH.as_bytes());
+        assert!(s.contains("musicResponsiveListItemRenderer"), "{s}");
+        assert!(!s.contains("Around the World"), "{s}");
+        assert!(structure_summary(b"nope").contains("not json"));
     }
 
     #[test]
