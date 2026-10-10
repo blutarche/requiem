@@ -270,6 +270,15 @@ impl Actor {
                     self.start(i);
                 }
             }
+            Command::Remove(i) => self.remove(i),
+            Command::Move { from, to } => self.move_track(from, to),
+            Command::Clear => {
+                self.queue.clear();
+                self.current = None;
+                self.queue_version += 1;
+                self.stop();
+                self.emit_queue();
+            }
             Command::Next => {
                 let next = self.current.map_or(0, |c| c + 1);
                 if next < self.queue.len() {
@@ -312,6 +321,70 @@ impl Actor {
                 self.emit(Event::Volume(self.volume));
             }
             Command::Shutdown => unreachable!("handled in run"),
+        }
+    }
+
+    fn remove(&mut self, i: usize) {
+        if i >= self.queue.len() {
+            return;
+        }
+        self.queue.remove(i);
+        self.queue_version += 1;
+        match self.current {
+            Some(c) if c == i => {
+                self.pre = None;
+                if i >= self.queue.len() {
+                    self.current = None;
+                    self.stop();
+                    self.emit_queue();
+                } else if matches!(self.state, PlayState::Playing | PlayState::Buffering) {
+                    self.start(i);
+                } else {
+                    // The engine cannot load paused, so a paused session stops with the
+                    // cursor just before the successor: `Next` then plays it.
+                    self.current = i.checked_sub(1);
+                    if self.state != PlayState::Stopped {
+                        self.stop();
+                    }
+                    self.emit_queue();
+                }
+            }
+            cur => {
+                if let Some(c) = cur.filter(|c| i < *c) {
+                    self.current = Some(c - 1);
+                }
+                self.drop_pre();
+                self.emit_queue();
+                if self.started {
+                    self.ensure_pre_resolve();
+                }
+            }
+        }
+    }
+
+    fn move_track(&mut self, from: usize, to: usize) {
+        let len = self.queue.len();
+        if from >= len || to >= len || from == to {
+            return;
+        }
+        let track = self.queue.remove(from);
+        self.queue.insert(to, track);
+        self.current = self.current.map(|c| {
+            if c == from {
+                to
+            } else if from < c && c <= to {
+                c - 1
+            } else if to <= c && c < from {
+                c + 1
+            } else {
+                c
+            }
+        });
+        self.queue_version += 1;
+        self.drop_pre();
+        self.emit_queue();
+        if self.started {
+            self.ensure_pre_resolve();
         }
     }
 

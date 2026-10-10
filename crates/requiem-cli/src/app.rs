@@ -17,6 +17,9 @@ commands:
   play <n>              replace the queue with result n and play it
   add <n>               append result n to the queue
   queue                 show the queue (> marks the current track)
+  remove <n>            remove queue position n
+  move <from> <to>      move queue position from so it ends up at to
+  clear                 empty the queue and stop
   next | prev           skip
   pause | resume | toggle
   seek <secs>           absolute; +<secs> / -<secs> relative to now
@@ -349,6 +352,26 @@ impl<'a> App<'a> {
                     say(&format!("{mark} {}. {}", i + 1, track_line(t)));
                 }
             }
+            "remove" => match self.queue_pos(arg) {
+                Some(i) => self.player.send(Command::Remove(i)),
+                None => self.say_no_position(arg),
+            },
+            "move" => {
+                let mut it = arg.split_whitespace();
+                let (Some(from), Some(to), None) = (it.next(), it.next(), it.next()) else {
+                    say("error: usage: move <from> <to>");
+                    return Flow::Continue;
+                };
+                match (self.queue_pos(from), self.queue_pos(to)) {
+                    (Some(from), Some(to)) => self.player.send(Command::Move { from, to }),
+                    (None, _) => self.say_no_position(from),
+                    (_, None) => self.say_no_position(to),
+                }
+            }
+            "clear" => {
+                self.clear_playback_seen();
+                self.player.send(Command::Clear);
+            }
             "next" | "prev" | "pause" | "resume" | "toggle" => {
                 self.clear_playback_seen();
                 self.player.send(match cmd {
@@ -419,6 +442,19 @@ impl<'a> App<'a> {
             self.hub.say(&format!("error: no result {arg}"));
         }
         track.cloned()
+    }
+
+    /// The 0-based queue index for a 1-based `queue` position, if it exists.
+    fn queue_pos(&self, arg: &str) -> Option<usize> {
+        let len = self.hub.lock_ui().queue.len();
+        arg.parse::<usize>()
+            .ok()
+            .and_then(|n| n.checked_sub(1))
+            .filter(|i| *i < len)
+    }
+
+    fn say_no_position(&self, arg: &str) {
+        self.hub.say(&format!("error: no queue position {arg}"));
     }
 
     fn clear_playback_seen(&self) {

@@ -533,3 +533,145 @@ fn shutdown_returns_while_provider_is_blocked() {
     assert!(t.elapsed() < SECS(1), "shutdown took {:?}", t.elapsed());
     assert_eq!(r.engine.calls().last(), Some(&EngineCall::Stop));
 }
+
+fn last_queue(r: &Rig, pred: impl Fn(&Event) -> bool) -> (Vec<String>, Option<usize>) {
+    match r.wait_event(pred) {
+        Event::QueueChanged { tracks, current } => {
+            (tracks.into_iter().map(|t| t.id.id).collect(), current)
+        }
+        e => panic!("unexpected {e:?}"),
+    }
+}
+
+fn queue_is(ids: &[&str], cur: Option<usize>) -> impl Fn(&Event) -> bool {
+    let ids: Vec<String> = ids.iter().map(|s| (*s).to_owned()).collect();
+    move |e| {
+        matches!(e, Event::QueueChanged { tracks, current }
+            if *current == cur && tracks.iter().map(|t| t.id.id.clone()).eq(ids.iter().cloned()))
+    }
+}
+
+#[test]
+fn remove_before_current_shifts_index_and_keeps_playing() {
+    let r = rig(config());
+    r.play_started(&["a", "b", "c"]);
+    r.send(Command::PlayIndex(2));
+    let (g, _) = r.engine.wait_load(2);
+    r.start(g, None);
+    r.send(Command::Remove(0));
+    r.wait_event(queue_is(&["b", "c"], Some(1)));
+    r.barrier();
+    assert_eq!(r.loads(), ["a", "c"]);
+    assert!(!r.engine.calls().contains(&EngineCall::Stop));
+}
+
+#[test]
+fn remove_after_current_keeps_current_and_playing() {
+    let r = rig(config());
+    r.play_started(&["a", "b", "c"]);
+    r.send(Command::Remove(2));
+    r.wait_event(queue_is(&["a", "b"], Some(0)));
+    r.barrier();
+    assert_eq!(r.loads(), ["a"]);
+    assert!(!r.engine.calls().contains(&EngineCall::Stop));
+}
+
+#[test]
+fn remove_current_while_playing_loads_successor() {
+    let r = rig(config());
+    r.play_started(&["a", "b", "c"]);
+    r.send(Command::Remove(0));
+    r.wait_event(queue_is(&["b", "c"], Some(0)));
+    assert_eq!(r.engine.wait_load(2).1, "b");
+}
+
+#[test]
+fn remove_last_current_while_playing_stops() {
+    let r = rig(config());
+    r.play_started(&["a", "b"]);
+    r.send(Command::PlayIndex(1));
+    let (g, _) = r.engine.wait_load(2);
+    r.start(g, None);
+    r.send(Command::Remove(1));
+    r.wait_event(|e| matches!(e, Event::State(PlayState::Stopped)));
+    r.wait_event(queue_is(&["a"], None));
+    assert!(r.engine.calls().contains(&EngineCall::Stop));
+    assert_eq!(r.loads(), ["a", "b"]);
+}
+
+#[test]
+fn remove_current_while_paused_stops_before_successor() {
+    let r = rig(config());
+    r.play_started(&["a", "b", "c"]);
+    r.send(Command::PlayIndex(1));
+    let (g, _) = r.engine.wait_load(2);
+    r.start(g, None);
+    r.send(Command::Pause);
+    r.wait_event(|e| matches!(e, Event::State(PlayState::Paused)));
+    r.send(Command::Remove(1));
+    r.wait_event(queue_is(&["a", "c"], Some(0)));
+    assert!(r.engine.calls().contains(&EngineCall::Stop));
+    r.send(Command::Next);
+    assert_eq!(r.engine.wait_load(3).1, "c");
+}
+
+#[test]
+fn remove_out_of_range_is_a_noop() {
+    let r = rig(config());
+    r.enqueue(&["a"]);
+    r.wait_event(queue_is(&["a"], None));
+    r.send(Command::Remove(1));
+    r.send(Command::Remove(9));
+    r.send(Command::Move { from: 0, to: 1 });
+    r.send(Command::Move { from: 1, to: 0 });
+    r.send(Command::Move { from: 0, to: 0 });
+    r.send(Command::SetVolume(50));
+    // The next event is Volume, so none of the above emitted QueueChanged.
+    assert_eq!(r.wait_event(|_| true), Event::Volume(50));
+}
+
+#[test]
+fn move_keeps_current_on_the_same_track() {
+    let r = rig(config());
+    r.play_started(&["a", "b", "c", "d"]);
+    r.send(Command::Move { from: 0, to: 2 });
+    assert_eq!(
+        last_queue(&r, queue_is(&["b", "c", "a", "d"], Some(2))).1,
+        Some(2)
+    );
+    r.send(Command::Move { from: 3, to: 0 });
+    r.wait_event(queue_is(&["d", "b", "c", "a"], Some(3)));
+    r.send(Command::Move { from: 3, to: 1 });
+    r.wait_event(queue_is(&["d", "a", "b", "c"], Some(1)));
+    r.send(Command::Move { from: 2, to: 0 });
+    r.wait_event(queue_is(&["b", "d", "a", "c"], Some(2)));
+    r.send(Command::Move { from: 0, to: 3 });
+    r.wait_event(queue_is(&["d", "a", "c", "b"], Some(1)));
+    r.barrier();
+    assert_eq!(r.loads(), ["a"]);
+    assert!(!r.engine.calls().contains(&EngineCall::Stop));
+}
+
+#[test]
+fn move_drops_the_stale_preresolve() {
+    let r = rig(config());
+    r.play_started(&["a", "b", "c"]);
+    r.provider.wait_resolve_calls("b", 1);
+    r.send(Command::Move { from: 2, to: 1 });
+    r.wait_event(queue_is(&["a", "c", "b"], Some(0)));
+    r.provider.wait_resolve_calls("c", 1);
+    r.engine.emit(EngineEvent::Ended {
+        r#gen: r.engine.wait_load(1).0,
+    });
+    assert_eq!(r.engine.wait_load(2).1, "c");
+}
+
+#[test]
+fn clear_stops_and_empties() {
+    let r = rig(config());
+    r.play_started(&["a", "b"]);
+    r.send(Command::Clear);
+    r.wait_event(|e| matches!(e, Event::State(PlayState::Stopped)));
+    r.wait_event(queue_is(&[], None));
+    assert!(r.engine.calls().contains(&EngineCall::Stop));
+}

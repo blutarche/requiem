@@ -286,7 +286,9 @@ impl Daemon {
                 self.volume = v.min(100);
                 vec![Event::Volume(self.volume)]
             }
-            Command::Shutdown => Vec::new(),
+            Command::Remove(_) | Command::Move { .. } | Command::Clear | Command::Shutdown => {
+                Vec::new()
+            }
         }
     }
 

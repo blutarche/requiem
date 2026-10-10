@@ -153,6 +153,14 @@ pub enum Command {
         mode: EnqueueMode,
     },
     PlayIndex(usize),
+    /// 0-based queue index.
+    Remove(usize),
+    /// 0-based; `to` is the track's index after the move.
+    Move {
+        from: usize,
+        to: usize,
+    },
+    Clear,
     Next,
     Prev,
     Pause,
