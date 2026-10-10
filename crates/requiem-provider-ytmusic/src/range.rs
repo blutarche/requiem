@@ -69,8 +69,8 @@ pub(crate) struct HttpRangeSource {
     lru: VecDeque<(u64, Vec<u8>)>,
     refreshes: u32,
     last_refresh: Option<Instant>,
-    /// Whether the URL from the latest refresh has served a chunk.
-    served_since_refresh: bool,
+    /// Highest byte offset the current URL has served since the latest refresh.
+    served_end: Option<u64>,
 }
 
 fn other(msg: impl Into<String>) -> io::Error {
@@ -98,7 +98,7 @@ impl HttpRangeSource {
             lru: VecDeque::with_capacity(LRU_CHUNKS),
             refreshes: 0,
             last_refresh: None,
-            served_since_refresh: false,
+            served_end: None,
         }
     }
 
@@ -163,13 +163,13 @@ impl HttpRangeSource {
         Ok(())
     }
 
-    fn refresh(&mut self) -> io::Result<()> {
+    fn refresh(&mut self, failed_start: u64) -> io::Result<()> {
         if self.refreshes >= MAX_REFRESHES {
             return Err(other("stream URL refresh limit reached"));
         }
-        // Throttle only a URL that worked and then died; a refreshed URL that 403s before
-        // serving anything was a capped draw, so retrying at once is the fix, not a loop.
-        if self.served_since_refresh
+        // Throttle only a URL that refuses a region it already served (it died). A 403
+        // above everything it served is the 1 MiB visitorData cap, so refresh at once.
+        if self.served_end.is_some_and(|end| failed_start <= end)
             && self
                 .last_refresh
                 .is_some_and(|t| t.elapsed() < self.cfg.min_refresh_interval)
@@ -177,7 +177,7 @@ impl HttpRangeSource {
             return Err(other("stream URL rejected again right after a refresh"));
         }
         self.refreshes += 1;
-        self.served_since_refresh = false;
+        self.served_end = None;
         self.last_refresh = Some(Instant::now());
         let (url, itag, len) = self
             .refresher
@@ -200,10 +200,10 @@ impl HttpRangeSource {
         loop {
             let resp = self.fetch_once(start, end)?;
             match resp.status {
-                403 | 410 => self.refresh()?,
+                403 | 410 => self.refresh(start)?,
                 _ => {
                     self.validate(&resp, start, end)?;
-                    self.served_since_refresh = true;
+                    self.served_end = Some(self.served_end.map_or(end, |e| e.max(end)));
                     return Ok(resp.body);
                 }
             }
@@ -590,18 +590,6 @@ mod tests {
     }
 
     #[test]
-    fn refresh_within_min_interval_after_serving_errors() {
-        // 403 -> refresh -> served a chunk -> 403 again within the interval
-        let f = Fake::new(vec![Step::Status(403), Step::Ok, Step::Status(403)]);
-        let r = FakeRefresher::new(vec![]);
-        let mut s = source(&f, &r, Duration::from_secs(3600));
-        s.read_exact(&mut [0u8; 4]).unwrap();
-        s.seek(SeekFrom::Start(64)).unwrap();
-        assert!(s.read(&mut [0u8; 4]).is_err());
-        assert_eq!(r.count(), 1);
-    }
-
-    #[test]
     fn four_never_served_403s_error_at_the_fourth() {
         let f = Fake::new(vec![Step::Status(403); 10]);
         let r = FakeRefresher::new(vec![]);
@@ -609,6 +597,41 @@ mod tests {
         assert!(s.read(&mut [0u8; 4]).is_err());
         assert_eq!(r.count(), 3);
         assert_eq!(f.starts().len(), 4);
+    }
+
+    #[test]
+    fn refresh_when_403_is_above_everything_served() {
+        // refreshed URL serves chunk 1, then 403s on chunk 2: a cap, not a death
+        let f = Fake::new(vec![Step::Status(403), Step::Ok, Step::Status(403)]);
+        let r = FakeRefresher::new(vec![]);
+        let mut s = source(&f, &r, Duration::from_secs(3600));
+        read_chunk_at(&mut s, 16);
+        s.seek(SeekFrom::Start(32)).unwrap();
+        let mut b = [0u8; 4];
+        s.read_exact(&mut b).unwrap();
+        assert_eq!(&b, &data()[32..36]);
+        assert_eq!(r.count(), 2);
+    }
+
+    #[test]
+    fn refresh_throttled_when_403_hits_a_served_region() {
+        // refreshed URL serves chunks 2-4, then 403s on chunk 2 again after eviction
+        let f = Fake::new(vec![
+            Step::Status(403),
+            Step::Ok,
+            Step::Ok,
+            Step::Ok,
+            Step::Status(403),
+        ]);
+        let r = FakeRefresher::new(vec![]);
+        let mut s = source(&f, &r, Duration::from_secs(3600));
+        for pos in [32, 48, 64] {
+            read_chunk_at(&mut s, pos);
+        }
+        s.seek(SeekFrom::Start(32)).unwrap();
+        let e = s.read(&mut [0u8; 4]).unwrap_err();
+        assert!(e.to_string().contains("right after a refresh"), "{e}");
+        assert_eq!(r.count(), 1);
     }
 
     #[test]
