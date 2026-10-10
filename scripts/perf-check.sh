@@ -6,7 +6,7 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 CARGO_BIN="${CARGO:-cargo}"
-export PERF_RSS_KIB="${PERF_RSS_KIB:-30720}"
+export PERF_FOOTPRINT_KIB="${PERF_FOOTPRINT_KIB:-30720}"
 export PERF_CPU_PLAY="${PERF_CPU_PLAY:-1.0}"
 export PERF_CPU_IDLE="${PERF_CPU_IDLE:-0.5}"
 
@@ -51,13 +51,32 @@ SCRIPT
 REQUIEM_LOG="${PERF_DEBUG:+debug}" target/release/requiem --script "$script" >"$log" 2>"$work/stderr.log" &
 pid=$!
 
-# Sample until the process is gone; CPU time comes from /proc where available because
-# `ps` reports whole seconds on Linux.
+# Sample until the process is gone. Memory gate: macOS physical footprint
+# (proc_pid_rusage ri_phys_footprint, bytes), Linux Pss from smaps_rollup; `ps` RSS is
+# informational because it counts ~10-12 MiB of shared system-framework pages. CPU time
+# comes from /proc where available because `ps` reports whole seconds on Linux.
 python3 -I - "$pid" "$samples" <<'PY' || true
 import os, subprocess, sys, time
 
 pid, path = int(sys.argv[1]), sys.argv[2]
 tck = os.sysconf("SC_CLK_TCK") if os.path.exists(f"/proc/{pid}/stat") else None
+
+if tck is None:
+    import ctypes
+    _libproc = ctypes.CDLL("/usr/lib/libproc.dylib", use_errno=True)
+
+def footprint_kib():
+    if tck:
+        with open(f"/proc/{pid}/smaps_rollup") as f:
+            for line in f:
+                if line.startswith("Pss:"):
+                    return int(line.split()[1])
+        raise ValueError("no Pss")
+    buf = ctypes.create_string_buffer(512)
+    # RUSAGE_INFO_V0: uuid[16] then seven u64 counters (resident_size at 64), then ri_phys_footprint at offset 72.
+    if _libproc.proc_pid_rusage(pid, 0, buf) != 0:
+        raise OSError("proc_pid_rusage failed")
+    return int.from_bytes(buf.raw[72:80], "little") // 1024
 
 def ps_cpu(t):
     days = 0
@@ -84,9 +103,10 @@ with open(path, "w") as out:
             break
         try:
             cpu = proc_cpu() if tck else ps_cpu(fields[1])
+            fp = footprint_kib()
         except (OSError, IndexError, ValueError):
             break
-        out.write(f"{int(time.time() * 1000)} {fields[0]} {cpu}\n")
+        out.write(f"{int(time.time() * 1000)} {fields[0]} {cpu} {fp}\n")
         out.flush()
         time.sleep(max(0.0, 0.5 - (time.time() - t0)))
 PY
@@ -99,7 +119,7 @@ python3 -I - "$log" "$samples" "$status" <<'PY' || summary=$?
 import os, sys
 
 log, samples_path, status = sys.argv[1], sys.argv[2], int(sys.argv[3])
-rss_cap = float(os.environ["PERF_RSS_KIB"])
+fp_cap = float(os.environ["PERF_FOOTPRINT_KIB"])
 cpu_play = float(os.environ["PERF_CPU_PLAY"])
 cpu_idle = float(os.environ["PERF_CPU_IDLE"])
 phases = ["idle_search", "play", "seeks", "transition", "idle_end"]
@@ -115,8 +135,8 @@ with open(log) as f:
 samples = []
 with open(samples_path) as f:
     for line in f:
-        t, rss, cpu = line.split()
-        samples.append((int(t), int(rss), float(cpu)))
+        t, rss, cpu, fp = line.split()
+        samples.append((int(t), int(rss), float(cpu), int(fp)))
 
 failures = []
 if status != 0:
@@ -137,17 +157,18 @@ if not missing and samples:
         sa, sb = nearest(a), nearest(b)
         inside = [s for s in samples if sa[0] <= s[0] <= sb[0]]
         peak = max(s[1] for s in inside) if inside else 0
+        peak_fp = max(s[3] for s in inside) if inside else 0
         wall = (sb[0] - sa[0]) / 1000.0
         cpu = (sb[2] - sa[2]) / wall * 100 if wall > 0 else float("nan")
-        rows.append((name, wall, peak, cpu))
-        if peak > rss_cap:
-            failures.append(f"{name}: peak RSS {peak} KiB > {rss_cap:.0f} KiB")
+        rows.append((name, wall, peak_fp, peak, cpu))
+        if peak_fp > fp_cap:
+            failures.append(f"{name}: peak footprint {peak_fp} KiB > {fp_cap:.0f} KiB")
         if not cpu < limit[name]:
             failures.append(f"{name}: CPU {cpu:.2f}% >= {limit[name]}%")
 
-print(f"{'phase':<12} {'seconds':>8} {'peak RSS MiB':>13} {'CPU %':>7}")
-for name, wall, peak, cpu in rows:
-    print(f"{name:<12} {wall:>8.1f} {peak / 1024:>13.1f} {cpu:>7.2f}")
+print(f"{'phase':<12} {'seconds':>8} {'peak footprint MiB':>19} {'peak RSS MiB (info)':>20} {'CPU %':>7}")
+for name, wall, fp, peak, cpu in rows:
+    print(f"{name:<12} {wall:>8.1f} {fp / 1024:>19.1f} {peak / 1024:>20.1f} {cpu:>7.2f}")
 if failures:
     for f in failures:
         print(f"FAIL: {f}")
