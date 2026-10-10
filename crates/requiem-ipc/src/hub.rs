@@ -120,6 +120,7 @@ impl Mirror {
         }
     }
 
+    /// The CLI treats the first `Volume` as the end of the snapshot, so it must stay last.
     fn snapshot(&self) -> Vec<Event> {
         let mut evs = vec![Event::QueueChanged {
             tracks: self.tracks.clone(),
@@ -132,10 +133,10 @@ impl Mirror {
             });
         }
         evs.push(Event::State(self.state));
-        evs.push(Event::Volume(self.volume));
         if self.now.is_some() {
             evs.push(Event::Position(self.position));
         }
+        evs.push(Event::Volume(self.volume));
         evs
     }
 }
@@ -371,6 +372,34 @@ mod tests {
     use requiem_core::testing::{FakeEngineHandle, FakeProvider};
 
     use super::*;
+
+    #[test]
+    fn snapshot_ends_with_volume() {
+        let mut mirror = Mirror::new();
+        assert_eq!(mirror.snapshot().last(), Some(&Event::Volume(100)));
+
+        let track = Track {
+            id: requiem_core::TrackId {
+                provider: requiem_core::ProviderId("fake".into()),
+                id: "a".into(),
+            },
+            title: "a".into(),
+            artists: Vec::new(),
+            album: None,
+            duration: None,
+            artwork_url: None,
+        };
+        mirror.apply(&Event::NowPlaying {
+            track,
+            duration: None,
+        });
+        mirror.apply(&Event::State(PlayState::Playing));
+        mirror.apply(&Event::Position(Duration::from_secs(3)));
+        mirror.apply(&Event::Volume(5));
+        let snap = mirror.snapshot();
+        assert!(snap.contains(&Event::Position(Duration::from_secs(3))));
+        assert_eq!(snap.last(), Some(&Event::Volume(5)));
+    }
 
     #[test]
     fn leaving_client_forgets_its_searches() {

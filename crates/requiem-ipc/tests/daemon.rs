@@ -181,8 +181,8 @@ fn daemon_flow() {
             },
             now_playing.clone(),
             Event::State(state),
-            Event::Volume(40),
             Event::Position(SECS(5)),
+            Event::Volume(40),
         ]
     };
     assert_eq!(take(&cli_rx, 5), snapshot(PlayState::Playing));

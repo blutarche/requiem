@@ -276,3 +276,37 @@ fn shutdown_daemon_needs_a_connection() {
         r.out.text()
     );
 }
+
+struct SlowRemote;
+
+impl app::Player for SlowRemote {
+    fn send(&self, _: requiem_core::Command) {}
+
+    fn subscribe(&self) -> crossbeam_channel::Receiver<requiem_core::Event> {
+        let (tx, rx) = crossbeam_channel::unbounded();
+        thread::spawn(move || {
+            thread::sleep(Duration::from_millis(150));
+            tx.send(requiem_core::Event::State(requiem_core::PlayState::Playing))
+                .unwrap();
+            tx.send(requiem_core::Event::Volume(5)).unwrap();
+            thread::sleep(Duration::from_secs(5));
+        });
+        rx
+    }
+
+    fn remote(&self) -> bool {
+        true
+    }
+}
+
+#[test]
+fn remote_run_waits_for_the_join_snapshot() {
+    let out = Buf::default();
+    let code = app::run(&SlowRemote, Cursor::new("status\n"), out.clone(), true).unwrap();
+    let text = out.text();
+    assert_eq!(code, 0, "{text}");
+    assert!(
+        text.contains("status: playing") && text.contains("volume 5"),
+        "{text}"
+    );
+}
