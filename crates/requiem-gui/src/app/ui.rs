@@ -10,9 +10,9 @@ use objc2::rc::Retained;
 use objc2::runtime::{AnyObject, ProtocolObject};
 use objc2::{MainThreadOnly, sel};
 use objc2_app_kit::{
-    NSAnimatablePropertyContainer, NSApplication, NSBackingStoreType, NSTextAlignment, NSTextField,
-    NSTextFieldDelegate, NSView, NSWindow, NSWindowOcclusionState, NSWindowStyleMask,
-    NSWindowTitleVisibility,
+    NSAnimatablePropertyContainer, NSApplication, NSBackingStoreType, NSLineBreakMode,
+    NSTextAlignment, NSTextField, NSTextFieldDelegate, NSView, NSWindow, NSWindowOcclusionState,
+    NSWindowStyleMask, NSWindowTitleVisibility,
 };
 use objc2_core_foundation::CGFloat;
 use objc2_foundation::{MainThreadMarker, NSPoint, NSSize, NSString};
@@ -358,6 +358,13 @@ impl Ui {
             w - 16.0 - 40.0,
             FLEX_W | centred,
         );
+        // Long messages wrap to a second line rather than losing their end.
+        label.setUsesSingleLineMode(false);
+        label.setMaximumNumberOfLines(2);
+        label.setLineBreakMode(NSLineBreakMode::ByWordWrapping);
+        if let Some(cell) = label.cell() {
+            cell.setTruncatesLastVisibleLine(true);
+        }
         let action = HoverButton::secondary(
             mtm,
             rect(0.0, (TOAST_H - TOAST_BUTTON_H) / 2.0, 0.0, TOAST_BUTTON_H),
@@ -855,14 +862,25 @@ impl Ui {
         let action_w = toast.action.map_or(0.0, |a| t.action.set_label(a) + 8.0);
         t.action.setHidden(toast.action.is_none());
         let w: CGFloat = (16.0 + text_w + 8.0 + action_w + 40.0).clamp(240.0, 440.0 + action_w);
-        let h = if toast.action.is_some() {
+        let text_room = w - 16.0 - 8.0 - action_w - 40.0;
+        let line_h = t.label.font().map_or(18.0, |f| widgets::line_height(&f));
+        let lines: CGFloat = if text_w > text_room { 2.0 } else { 1.0 };
+        let base_h = if toast.action.is_some() {
             TOAST_ACTION_H
         } else {
             TOAST_H
         };
+        let h = base_h + (lines - 1.0) * (line_h - 2.0);
         let root = self.root.bounds();
         t.view
             .setFrame(rect(root.size.width - 16.0 - w, PlayerBar::H + 16.0, w, h));
+        let text_h = lines * line_h;
+        t.label.setFrame(rect(
+            16.0,
+            ((h - text_h) / 2.0).round(),
+            text_room + 8.0,
+            text_h,
+        ));
         if action_w > 0.0 {
             t.action.setFrame(rect(
                 w - 40.0 - action_w,
