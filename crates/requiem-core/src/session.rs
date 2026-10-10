@@ -5,7 +5,8 @@ use std::time::Duration;
 use crossbeam_channel::{Receiver, Sender, unbounded};
 
 use crate::{
-    AudioSource, Command, EnqueueMode, Engine, EngineEvent, EngineEventSink, Event, FailureKind,    PlayState, Provider, ProviderError, SeekTarget, Track, TrackId,
+    AudioSource, Command, Engine, EngineEvent, EngineEventSink, EnqueueMode, Event, FailureKind,
+    PlayState, Provider, ProviderError, SeekTarget, Track, TrackId,
 };
 
 #[derive(Debug, Clone)]
@@ -31,16 +32,28 @@ impl Default for SessionConfig {
 }
 
 enum Purpose {
-    Start { r#gen: u64 },
-    Pre { version: u64, index: usize, track: TrackId },
+    Start {
+        r#gen: u64,
+    },
+    Pre {
+        version: u64,
+        index: usize,
+        track: TrackId,
+    },
 }
 
 enum Msg {
     Command(Command),
     Subscribe(Sender<Event>),
     Engine(EngineEvent),
-    Searched { req: u64, result: Result<Vec<Track>, ProviderError> },
-    Resolved { purpose: Purpose, result: Result<AudioSource, ProviderError> },
+    Searched {
+        req: u64,
+        result: Result<Vec<Track>, ProviderError>,
+    },
+    Resolved {
+        purpose: Purpose,
+        result: Result<AudioSource, ProviderError>,
+    },
 }
 
 pub struct Session {
@@ -66,7 +79,10 @@ impl Session {
                 Actor::new(providers, make_engine(sink), config, actor_tx).run(rx);
             })
             .expect("spawn session thread");
-        Session { tx, handle: Some(handle) }
+        Session {
+            tx,
+            handle: Some(handle),
+        }
     }
 
     pub fn send(&self, cmd: Command) {
@@ -197,7 +213,10 @@ impl Actor {
                 Msg::Engine(ev) => self.on_engine(ev),
                 Msg::Searched { req, result } => match result {
                     Ok(tracks) => self.emit(Event::SearchResults { req, tracks }),
-                    Err(e) => self.emit(Event::SearchFailed { req, error: e.to_string() }),
+                    Err(e) => self.emit(Event::SearchFailed {
+                        req,
+                        error: e.to_string(),
+                    }),
                 },
                 Msg::Resolved { purpose, result } => self.on_resolved(purpose, result),
             }
@@ -221,7 +240,10 @@ impl Actor {
     }
 
     fn emit_queue(&mut self) {
-        let ev = Event::QueueChanged { tracks: self.queue.clone(), current: self.current };
+        let ev = Event::QueueChanged {
+            tracks: self.queue.clone(),
+            current: self.current,
+        };
         self.emit(ev);
     }
 
@@ -295,7 +317,10 @@ impl Actor {
 
     fn search(&mut self, req: u64, query: String) {
         let Some(provider) = self.providers.first().cloned() else {
-            self.emit(Event::SearchFailed { req, error: "no provider configured".into() });
+            self.emit(Event::SearchFailed {
+                req,
+                error: "no provider configured".into(),
+            });
             return;
         };
         let tx = self.tx.clone();
@@ -378,9 +403,17 @@ impl Actor {
     }
 
     fn ensure_pre_resolve(&mut self) {
-        let Some(idx) = self.current.map(|c| c + 1) else { return };
-        let Some(track) = self.queue.get(idx) else { return };
-        if self.pre.as_ref().is_some_and(|p| p.matches(self.queue_version, idx, &track.id)) {
+        let Some(idx) = self.current.map(|c| c + 1) else {
+            return;
+        };
+        let Some(track) = self.queue.get(idx) else {
+            return;
+        };
+        if self
+            .pre
+            .as_ref()
+            .is_some_and(|p| p.matches(self.queue_version, idx, &track.id))
+        {
             return;
         }
         let track = track.id.clone();
@@ -391,12 +424,20 @@ impl Actor {
             state: PreState::Pending,
             waiting: None,
         });
-        let purpose = Purpose::Pre { version: self.queue_version, index: idx, track: track.clone() };
+        let purpose = Purpose::Pre {
+            version: self.queue_version,
+            index: idx,
+            track: track.clone(),
+        };
         self.spawn_resolve(track, purpose);
     }
 
     fn spawn_resolve(&self, track: TrackId, purpose: Purpose) {
-        let provider = self.providers.iter().find(|p| p.id() == track.provider).cloned();
+        let provider = self
+            .providers
+            .iter()
+            .find(|p| p.id() == track.provider)
+            .cloned();
         let tx = self.tx.clone();
         let delay = self.config.resolve_retry_delay;
         thread::spawn(move || {
@@ -422,8 +463,14 @@ impl Actor {
                     Err(e) => self.on_resolve_error(e),
                 }
             }
-            Purpose::Pre { version, index, track } => {
-                let Some(slot) = self.pre.as_mut() else { return };
+            Purpose::Pre {
+                version,
+                index,
+                track,
+            } => {
+                let Some(slot) = self.pre.as_mut() else {
+                    return;
+                };
                 if !slot.matches(version, index, &track) || version != self.queue_version {
                     return;
                 }
@@ -447,14 +494,23 @@ impl Actor {
     }
 
     fn on_resolve_error(&mut self, err: ProviderError) {
-        let Some(track) = self.playing.clone() else { return };
+        let Some(track) = self.playing.clone() else {
+            return;
+        };
         match err {
             ProviderError::ClientBroken(d) => {
-                self.emit(Event::ProviderBroken { provider: track.id.provider, detail: d });
+                self.emit(Event::ProviderBroken {
+                    provider: track.id.provider,
+                    detail: d,
+                });
                 self.stop();
             }
             ProviderError::Parse(d) => {
-                if self.last_parse_failure.as_ref().is_some_and(|t| *t != track.id) {
+                if self
+                    .last_parse_failure
+                    .as_ref()
+                    .is_some_and(|t| *t != track.id)
+                {
                     self.emit(Event::ProviderBroken {
                         provider: track.id.provider,
                         detail: format!("repeated parse failures: {d}"),
@@ -485,7 +541,9 @@ impl Actor {
         }
         match ev {
             EngineEvent::Started { duration, .. } => {
-                let Some(track) = self.playing.clone() else { return };
+                let Some(track) = self.playing.clone() else {
+                    return;
+                };
                 self.started = true;
                 self.strikes = 0;
                 self.stream_strikes = 0;
@@ -529,8 +587,13 @@ impl Actor {
     }
 
     fn track_failed(&mut self, error: String, stream: bool) {
-        let Some(track) = self.playing.clone() else { return };
-        self.emit(Event::TrackFailed { track: track.clone(), error });
+        let Some(track) = self.playing.clone() else {
+            return;
+        };
+        self.emit(Event::TrackFailed {
+            track: track.clone(),
+            error,
+        });
         self.strikes += 1;
         if stream {
             self.stream_strikes += 1;

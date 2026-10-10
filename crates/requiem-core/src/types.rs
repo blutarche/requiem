@@ -86,11 +86,26 @@ pub enum FailureKind {
 /// Every event carries the load generation it belongs to.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum EngineEvent {
-    Started { r#gen: u64, duration: Option<Duration> },
-    Position { r#gen: u64, at: Duration },
-    Buffering { r#gen: u64, on: bool },
-    Ended { r#gen: u64 },
-    Failed { r#gen: u64, kind: FailureKind, detail: String },
+    Started {
+        r#gen: u64,
+        duration: Option<Duration>,
+    },
+    Position {
+        r#gen: u64,
+        at: Duration,
+    },
+    Buffering {
+        r#gen: u64,
+        on: bool,
+    },
+    Ended {
+        r#gen: u64,
+    },
+    Failed {
+        r#gen: u64,
+        kind: FailureKind,
+        detail: String,
+    },
 }
 
 pub type EngineEventSink = Arc<dyn Fn(EngineEvent) + Send + Sync>;
@@ -129,8 +144,14 @@ pub enum PlayState {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum Command {
-    Search { req: u64, query: String },
-    Enqueue { tracks: Vec<Track>, mode: EnqueueMode },
+    Search {
+        req: u64,
+        query: String,
+    },
+    Enqueue {
+        tracks: Vec<Track>,
+        mode: EnqueueMode,
+    },
     PlayIndex(usize),
     Next,
     Prev,
@@ -144,13 +165,31 @@ pub enum Command {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum Event {
-    SearchResults { req: u64, tracks: Vec<Track> },
-    SearchFailed { req: u64, error: String },
-    QueueChanged { tracks: Vec<Track>, current: Option<usize> },
-    NowPlaying { track: Track, duration: Option<Duration> },
+    SearchResults {
+        req: u64,
+        tracks: Vec<Track>,
+    },
+    SearchFailed {
+        req: u64,
+        error: String,
+    },
+    QueueChanged {
+        tracks: Vec<Track>,
+        current: Option<usize>,
+    },
+    NowPlaying {
+        track: Track,
+        duration: Option<Duration>,
+    },
     Position(Duration),
     State(PlayState),
     Volume(u8),
-    TrackFailed { track: Track, error: String },
-    ProviderBroken { provider: ProviderId, detail: String },
+    TrackFailed {
+        track: Track,
+        error: String,
+    },
+    ProviderBroken {
+        provider: ProviderId,
+        detail: String,
+    },
 }

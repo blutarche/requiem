@@ -70,11 +70,19 @@ pub struct Step<T> {
 
 impl<T> Step<T> {
     pub fn ok(value: T) -> Self {
-        Self { result: Ok(value), delay: Duration::ZERO, gate: None }
+        Self {
+            result: Ok(value),
+            delay: Duration::ZERO,
+            gate: None,
+        }
     }
 
     pub fn err(e: ProviderError) -> Self {
-        Self { result: Err(e), delay: Duration::ZERO, gate: None }
+        Self {
+            result: Err(e),
+            delay: Duration::ZERO,
+            gate: None,
+        }
     }
 
     pub fn delayed(mut self, d: Duration) -> Self {
@@ -124,15 +132,29 @@ impl FakeProvider {
 
     /// Steps are consumed one per call; once exhausted, calls succeed.
     pub fn script_resolve(&self, track_id: &str, steps: Vec<Step<()>>) {
-        self.state.lock().unwrap().resolve_scripts.insert(track_id.into(), steps.into());
+        self.state
+            .lock()
+            .unwrap()
+            .resolve_scripts
+            .insert(track_id.into(), steps.into());
     }
 
     pub fn script_search(&self, query: &str, steps: Vec<Step<Vec<Track>>>) {
-        self.state.lock().unwrap().search_scripts.insert(query.into(), steps.into());
+        self.state
+            .lock()
+            .unwrap()
+            .search_scripts
+            .insert(query.into(), steps.into());
     }
 
     pub fn resolve_calls(&self, track_id: &str) -> usize {
-        self.state.lock().unwrap().resolve_calls.get(track_id).copied().unwrap_or(0)
+        self.state
+            .lock()
+            .unwrap()
+            .resolve_calls
+            .get(track_id)
+            .copied()
+            .unwrap_or(0)
     }
 
     pub fn search_calls(&self) -> usize {
@@ -148,13 +170,18 @@ impl FakeProvider {
                 s.resolve_calls.get(track_id).copied().unwrap_or(0) < n
             })
             .unwrap();
-        assert!(!res.timed_out(), "timed out waiting for {n} resolve calls of {track_id}");
+        assert!(
+            !res.timed_out(),
+            "timed out waiting for {n} resolve calls of {track_id}"
+        );
     }
 
     pub fn wait_search_calls(&self, n: usize) {
         let st = self.state.lock().unwrap();
-        let (_st, res) =
-            self.called.wait_timeout_while(st, WAIT, |s| s.search_calls < n).unwrap();
+        let (_st, res) = self
+            .called
+            .wait_timeout_while(st, WAIT, |s| s.search_calls < n)
+            .unwrap();
         assert!(!res.timed_out(), "timed out waiting for {n} search calls");
     }
 }
@@ -169,7 +196,9 @@ impl Provider for FakeProvider {
             let mut st = self.state.lock().unwrap();
             st.search_calls += 1;
             self.called.notify_all();
-            st.search_scripts.get_mut(query).and_then(VecDeque::pop_front)
+            st.search_scripts
+                .get_mut(query)
+                .and_then(VecDeque::pop_front)
         };
         match step {
             Some(s) => s.run(),
@@ -182,7 +211,9 @@ impl Provider for FakeProvider {
             let mut st = self.state.lock().unwrap();
             *st.resolve_calls.entry(track.id.clone()).or_default() += 1;
             self.called.notify_all();
-            st.resolve_scripts.get_mut(&track.id).and_then(VecDeque::pop_front)
+            st.resolve_scripts
+                .get_mut(&track.id)
+                .and_then(VecDeque::pop_front)
         };
         if let Some(s) = step {
             s.run()?;
@@ -197,7 +228,10 @@ impl Provider for FakeProvider {
 #[derive(Debug, Clone, PartialEq)]
 pub enum EngineCall {
     /// `payload` is the full content of the loaded source.
-    Load { r#gen: u64, payload: Vec<u8> },
+    Load {
+        r#gen: u64,
+        payload: Vec<u8>,
+    },
     Pause,
     Resume,
     Seek(Duration),
@@ -246,16 +280,26 @@ impl FakeEngineHandle {
     /// Waits until `pred` holds over the recorded calls, then returns them.
     pub fn wait_calls(&self, pred: impl Fn(&[EngineCall]) -> bool) -> Vec<EngineCall> {
         let calls = self.0.calls.lock().unwrap();
-        let (calls, res) =
-            self.0.recorded.wait_timeout_while(calls, WAIT, |c| !pred(c)).unwrap();
-        assert!(!res.timed_out(), "timed out waiting on engine calls: {calls:?}");
+        let (calls, res) = self
+            .0
+            .recorded
+            .wait_timeout_while(calls, WAIT, |c| !pred(c))
+            .unwrap();
+        assert!(
+            !res.timed_out(),
+            "timed out waiting on engine calls: {calls:?}"
+        );
         calls.clone()
     }
 
     /// Waits for the nth (1-based) load and returns its `(r#gen, payload)`.
     pub fn wait_load(&self, n: usize) -> (u64, String) {
         let calls = self.wait_calls(|c| loads(c) >= n);
-        match calls.iter().filter(|c| c.load_payload().is_some()).nth(n - 1) {
+        match calls
+            .iter()
+            .filter(|c| c.load_payload().is_some())
+            .nth(n - 1)
+        {
             Some(EngineCall::Load { r#gen, payload }) => {
                 (*r#gen, String::from_utf8_lossy(payload).into_owned())
             }
@@ -264,13 +308,22 @@ impl FakeEngineHandle {
     }
 
     pub fn emit(&self, ev: EngineEvent) {
-        let sink = self.0.sink.lock().unwrap().clone().expect("engine not constructed yet");
+        let sink = self
+            .0
+            .sink
+            .lock()
+            .unwrap()
+            .clone()
+            .expect("engine not constructed yet");
         sink(ev);
     }
 }
 
 fn loads(calls: &[EngineCall]) -> usize {
-    calls.iter().filter(|c| matches!(c, EngineCall::Load { .. })).count()
+    calls
+        .iter()
+        .filter(|c| matches!(c, EngineCall::Load { .. }))
+        .count()
 }
 
 struct FakeEngine(Arc<EngineShared>);

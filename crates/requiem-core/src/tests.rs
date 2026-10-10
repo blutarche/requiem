@@ -16,7 +16,10 @@ struct Rig {
 }
 
 fn config() -> SessionConfig {
-    SessionConfig { resolve_retry_delay: Duration::from_millis(5), ..SessionConfig::default() }
+    SessionConfig {
+        resolve_retry_delay: Duration::from_millis(5),
+        ..SessionConfig::default()
+    }
 }
 
 fn rig(config: SessionConfig) -> Rig {
@@ -24,12 +27,20 @@ fn rig(config: SessionConfig) -> Rig {
     let engine = FakeEngineHandle::new();
     let session = Session::spawn(vec![provider.clone()], engine.factory(), config);
     let rx = session.subscribe();
-    Rig { session, provider, engine, rx }
+    Rig {
+        session,
+        provider,
+        engine,
+        rx,
+    }
 }
 
 fn track(id: &str) -> Track {
     Track {
-        id: TrackId { provider: ProviderId("fake".into()), id: id.into() },
+        id: TrackId {
+            provider: ProviderId("fake".into()),
+            id: id.into(),
+        },
         title: id.into(),
         artists: vec![],
         album: None,
@@ -48,7 +59,10 @@ impl Rig {
     }
 
     fn enqueue(&self, ids: &[&str]) {
-        self.send(Command::Enqueue { tracks: tracks(ids), mode: EnqueueMode::Replace });
+        self.send(Command::Enqueue {
+            tracks: tracks(ids),
+            mode: EnqueueMode::Replace,
+        });
     }
 
     /// Reads events until `pred` matches one, returning it.
@@ -91,7 +105,11 @@ impl Rig {
     }
 
     fn loads(&self) -> Vec<String> {
-        self.engine.calls().iter().filter_map(EngineCall::load_payload).collect()
+        self.engine
+            .calls()
+            .iter()
+            .filter_map(EngineCall::load_payload)
+            .collect()
     }
 }
 
@@ -109,9 +127,18 @@ fn replace_play_start_then_preresolves_next() {
     assert_eq!(payload, "a");
     assert_eq!(r.provider.resolve_calls("b"), 0);
 
-    r.engine.emit(EngineEvent::Started { r#gen, duration: Some(SECS(200)) });
+    r.engine.emit(EngineEvent::Started {
+        r#gen,
+        duration: Some(SECS(200)),
+    });
     let ev = r.wait_event(|e| matches!(e, Event::NowPlaying { .. }));
-    assert_eq!(ev, Event::NowPlaying { track: track("a"), duration: Some(SECS(200)) });
+    assert_eq!(
+        ev,
+        Event::NowPlaying {
+            track: track("a"),
+            duration: Some(SECS(200))
+        }
+    );
     r.wait_event(|e| matches!(e, Event::State(PlayState::Playing)));
     r.provider.wait_resolve_calls("b", 1);
 }
@@ -132,7 +159,8 @@ fn ended_advances_using_preresolved_source() {
 fn late_start_resolve_after_next_is_dropped() {
     let r = rig(config());
     let gate = Gate::new();
-    r.provider.script_resolve("a", vec![Step::ok(()).gated(&gate)]);
+    r.provider
+        .script_resolve("a", vec![Step::ok(()).gated(&gate)]);
     r.enqueue(&["a", "b"]);
     r.send(Command::PlayIndex(0));
     r.provider.wait_resolve_calls("a", 1);
@@ -149,7 +177,8 @@ fn late_start_resolve_after_next_is_dropped() {
 fn late_preresolve_after_replace_is_dropped() {
     let r = rig(config());
     let gate = Gate::new();
-    r.provider.script_resolve("b", vec![Step::ok(()).gated(&gate)]);
+    r.provider
+        .script_resolve("b", vec![Step::ok(()).gated(&gate)]);
     r.play_started(&["a", "b"]);
     r.provider.wait_resolve_calls("b", 1);
 
@@ -185,7 +214,8 @@ fn prev_rules() {
     r.engine.emit(EngineEvent::Position { r#gen, at: SECS(5) });
     r.wait_event(|e| matches!(e, Event::Position(_)));
     r.send(Command::Prev);
-    r.engine.wait_calls(|c| c.contains(&EngineCall::Seek(Duration::ZERO)));
+    r.engine
+        .wait_calls(|c| c.contains(&EngineCall::Seek(Duration::ZERO)));
     assert_eq!(r.loads(), ["b"]);
 
     r.engine.emit(EngineEvent::Position { r#gen, at: SECS(2) });
@@ -196,11 +226,20 @@ fn prev_rules() {
     r.start(gen2, None);
 
     let seeks = |r: &Rig| {
-        r.engine.calls().iter().filter(|c| matches!(c, EngineCall::Seek(_))).count()
+        r.engine
+            .calls()
+            .iter()
+            .filter(|c| matches!(c, EngineCall::Seek(_)))
+            .count()
     };
     assert_eq!(seeks(&r), 1);
     r.send(Command::Prev);
-    r.engine.wait_calls(|c| c.iter().filter(|c| matches!(c, EngineCall::Seek(_))).count() == 2);
+    r.engine.wait_calls(|c| {
+        c.iter()
+            .filter(|c| matches!(c, EngineCall::Seek(_)))
+            .count()
+            == 2
+    });
     assert_eq!(r.loads(), ["b", "a"]);
 }
 
@@ -216,7 +255,10 @@ fn next_past_end_stops() {
 #[test]
 fn unplayable_fails_and_skips() {
     let r = rig(config());
-    r.provider.script_resolve("a", vec![Step::err(ProviderError::Unplayable("gone".into()))]);
+    r.provider.script_resolve(
+        "a",
+        vec![Step::err(ProviderError::Unplayable("gone".into()))],
+    );
     r.enqueue(&["a", "b"]);
     r.send(Command::PlayIndex(0));
     r.wait_event(is_failed("a"));
@@ -226,7 +268,10 @@ fn unplayable_fails_and_skips() {
 #[test]
 fn client_broken_reports_and_stops() {
     let r = rig(config());
-    r.provider.script_resolve("a", vec![Step::err(ProviderError::ClientBroken("403".into()))]);
+    r.provider.script_resolve(
+        "a",
+        vec![Step::err(ProviderError::ClientBroken("403".into()))],
+    );
     r.enqueue(&["a", "b"]);
     r.send(Command::PlayIndex(0));
     let ev = r.wait_event(|e| matches!(e, Event::ProviderBroken { .. }));
@@ -254,7 +299,8 @@ fn parse_twice_in_a_row_is_provider_broken() {
 #[test]
 fn parse_once_then_success_continues() {
     let r = rig(config());
-    r.provider.script_resolve("a", vec![Step::err(ProviderError::Parse("odd".into()))]);
+    r.provider
+        .script_resolve("a", vec![Step::err(ProviderError::Parse("odd".into()))]);
     r.enqueue(&["a", "b"]);
     r.send(Command::PlayIndex(0));
     r.wait_event(is_failed("a"));
@@ -284,7 +330,11 @@ fn fail_three(kinds: [FailureKind; 3]) -> Vec<Event> {
     r.send(Command::PlayIndex(0));
     for (i, kind) in kinds.into_iter().enumerate() {
         let (r#gen, _) = r.engine.wait_load(i + 1);
-        r.engine.emit(EngineEvent::Failed { r#gen, kind, detail: "x".into() });
+        r.engine.emit(EngineEvent::Failed {
+            r#gen,
+            kind,
+            detail: "x".into(),
+        });
     }
     let mut seen = Vec::new();
     loop {
@@ -304,30 +354,49 @@ fn fail_three(kinds: [FailureKind; 3]) -> Vec<Event> {
 fn three_engine_failures_stop() {
     use FailureKind::*;
     let seen = fail_three([Decode, Decode, Stream]);
-    assert!(!seen.iter().any(|e| matches!(e, Event::ProviderBroken { .. })));
+    assert!(
+        !seen
+            .iter()
+            .any(|e| matches!(e, Event::ProviderBroken { .. }))
+    );
 }
 
 #[test]
 fn stream_failures_report_provider_broken() {
     use FailureKind::*;
     let seen = fail_three([Stream, Decode, Stream]);
-    assert!(seen.iter().any(|e| matches!(e, Event::ProviderBroken { .. })));
+    assert!(
+        seen.iter()
+            .any(|e| matches!(e, Event::ProviderBroken { .. }))
+    );
 }
 
 #[test]
 fn failed_preresolve_is_not_a_strike() {
-    let r = rig(SessionConfig { max_consecutive_failures: 2, ..config() });
-    r.provider.script_resolve("b", vec![Step::err(ProviderError::Unplayable("x".into()))]);
+    let r = rig(SessionConfig {
+        max_consecutive_failures: 2,
+        ..config()
+    });
+    r.provider
+        .script_resolve("b", vec![Step::err(ProviderError::Unplayable("x".into()))]);
     let r#gen = r.play_started(&["a", "b", "c"]);
     r.provider.wait_resolve_calls("b", 1);
 
-    r.engine.emit(EngineEvent::Failed { r#gen, kind: FailureKind::Decode, detail: "x".into() });
+    r.engine.emit(EngineEvent::Failed {
+        r#gen,
+        kind: FailureKind::Decode,
+        detail: "x".into(),
+    });
     r.wait_event(is_failed("a"));
     let (gen_b, payload) = r.engine.wait_load(2);
     assert_eq!(payload, "b");
     assert_eq!(r.provider.resolve_calls("b"), 2);
 
-    r.engine.emit(EngineEvent::Failed { r#gen: gen_b, kind: FailureKind::Decode, detail: "x".into() });
+    r.engine.emit(EngineEvent::Failed {
+        r#gen: gen_b,
+        kind: FailureKind::Decode,
+        detail: "x".into(),
+    });
     r.wait_event(is_failed("b"));
     r.wait_event(|e| matches!(e, Event::State(PlayState::Stopped)));
     assert_eq!(r.loads(), ["a", "b"]);
@@ -337,17 +406,37 @@ fn failed_preresolve_is_not_a_strike() {
 fn searches_answered_out_of_order() {
     let r = rig(config());
     let gate = Gate::new();
-    r.provider.script_search("slow", vec![Step::ok(tracks(&["s"])).gated(&gate)]);
-    r.provider.script_search("fast", vec![Step::ok(tracks(&["f"]))]);
-    r.send(Command::Search { req: 1, query: "slow".into() });
+    r.provider
+        .script_search("slow", vec![Step::ok(tracks(&["s"])).gated(&gate)]);
+    r.provider
+        .script_search("fast", vec![Step::ok(tracks(&["f"]))]);
+    r.send(Command::Search {
+        req: 1,
+        query: "slow".into(),
+    });
     r.provider.wait_search_calls(1);
-    r.send(Command::Search { req: 2, query: "fast".into() });
+    r.send(Command::Search {
+        req: 2,
+        query: "fast".into(),
+    });
 
     let ev = r.wait_event(|e| matches!(e, Event::SearchResults { .. }));
-    assert_eq!(ev, Event::SearchResults { req: 2, tracks: tracks(&["f"]) });
+    assert_eq!(
+        ev,
+        Event::SearchResults {
+            req: 2,
+            tracks: tracks(&["f"])
+        }
+    );
     gate.release();
     let ev = r.wait_event(|e| matches!(e, Event::SearchResults { .. }));
-    assert_eq!(ev, Event::SearchResults { req: 1, tracks: tracks(&["s"]) });
+    assert_eq!(
+        ev,
+        Event::SearchResults {
+            req: 1,
+            tracks: tracks(&["s"])
+        }
+    );
 }
 
 #[test]
@@ -368,7 +457,10 @@ fn transport_commands_map_to_engine_and_events() {
     r.send(Command::Resume);
     state(&r, PlayState::Playing);
 
-    r.engine.emit(EngineEvent::Position { r#gen, at: SECS(10) });
+    r.engine.emit(EngineEvent::Position {
+        r#gen,
+        at: SECS(10),
+    });
     r.wait_event(|e| matches!(e, Event::Position(_)));
     r.send(Command::Seek(SeekTarget::Relative(30)));
     r.send(Command::Seek(SeekTarget::Relative(-100)));
@@ -401,12 +493,18 @@ fn transport_commands_map_to_engine_and_events() {
 fn volume_events_clamp() {
     let r = rig(config());
     r.send(Command::SetVolume(150));
-    assert_eq!(r.wait_event(|e| matches!(e, Event::Volume(_))), Event::Volume(100));
+    assert_eq!(
+        r.wait_event(|e| matches!(e, Event::Volume(_))),
+        Event::Volume(100)
+    );
 }
 
 #[test]
 fn backlogged_subscriber_skips_position_only() {
-    let r = rig(SessionConfig { subscriber_position_backlog: 1, ..config() });
+    let r = rig(SessionConfig {
+        subscriber_position_backlog: 1,
+        ..config()
+    });
     let slow = r.session.subscribe();
     let r#gen = r.play_started(&["a"]);
 
@@ -423,8 +521,12 @@ fn backlogged_subscriber_skips_position_only() {
 #[test]
 fn shutdown_returns_while_provider_is_blocked() {
     let r = rig(config());
-    r.provider.script_search("q", vec![Step::ok(vec![]).delayed(SECS(5))]);
-    r.send(Command::Search { req: 1, query: "q".into() });
+    r.provider
+        .script_search("q", vec![Step::ok(vec![]).delayed(SECS(5))]);
+    r.send(Command::Search {
+        req: 1,
+        query: "q".into(),
+    });
     r.provider.wait_search_calls(1);
     let t = Instant::now();
     r.session.shutdown();
