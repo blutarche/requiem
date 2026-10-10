@@ -21,14 +21,14 @@ use objc2::runtime::{AnyObject, NSObject, NSObjectProtocol, ProtocolObject, Sel}
 use objc2::{ClassType, MainThreadOnly, define_class, msg_send, sel};
 use objc2_app_kit::{
     NSAppearance, NSAppearanceNameDarkAqua, NSApplication, NSApplicationActivationPolicy,
-    NSApplicationDelegate, NSControl, NSControlTextEditingDelegate, NSEvent, NSEventMask,
-    NSEventModifierFlags, NSMenu, NSMenuItem, NSText, NSTextFieldDelegate, NSTextView,
+    NSApplicationDelegate, NSButton, NSControl, NSControlTextEditingDelegate, NSEvent, NSEventMask,
+    NSEventModifierFlags, NSMenu, NSMenuItem, NSResponder, NSText, NSTextFieldDelegate, NSTextView,
 };
 use objc2_foundation::{MainThreadMarker, NSNotification, NSString};
 
 use crate::args::{Args, View};
 use crate::demo;
-use crate::vm::{Intent, SEEK_STEP_SECS, Vm};
+use crate::vm::{Intent, SEEK_STEP_SECS, VOLUME_STEP, Vm};
 use backend::{Backend, Live};
 use ui::{AppView, Ui};
 
@@ -66,8 +66,8 @@ define_class!(
         }
 
         #[unsafe(method(control:textView:doCommandBySelector:))]
-        fn do_command(&self, control: &NSControl, _text: &NSTextView, command: Sel) -> bool {
-            ui::with(|ui| field_command(ui, control, command)).unwrap_or(false)
+        fn do_command(&self, control: &NSControl, text: &NSTextView, command: Sel) -> bool {
+            ui::with(|ui| field_command(ui, control, text, command)).unwrap_or(false)
         }
     }
 
@@ -131,7 +131,37 @@ define_class!(
 
         #[unsafe(method(openPalette:))]
         fn open_palette(&self, _sender: Option<&AnyObject>) {
-            ui::with(|ui| ui.open_palette());
+            ui::with(|ui| ui.toggle_palette());
+        }
+
+        #[unsafe(method(playSelected:))]
+        fn play_selected(&self, _sender: Option<&AnyObject>) {
+            ui::with(|ui| ui.activate_selection(false));
+        }
+
+        #[unsafe(method(addToQueue:))]
+        fn add_to_queue(&self, _sender: Option<&AnyObject>) {
+            ui::with(|ui| ui.activate_selection(true));
+        }
+
+        #[unsafe(method(volumeUp:))]
+        fn volume_up(&self, _sender: Option<&AnyObject>) {
+            ui::with(|ui| ui.intent(Intent::VolumeBy(VOLUME_STEP)));
+        }
+
+        #[unsafe(method(volumeDown:))]
+        fn volume_down(&self, _sender: Option<&AnyObject>) {
+            ui::with(|ui| ui.intent(Intent::VolumeBy(-VOLUME_STEP)));
+        }
+
+        #[unsafe(method(quitAndStop:))]
+        fn quit_and_stop(&self, _sender: Option<&AnyObject>) {
+            ui::with(|ui| ui.quit_and_stop());
+        }
+
+        #[unsafe(method(validateMenuItem:))]
+        fn validate_menu_item(&self, item: &NSMenuItem) -> bool {
+            ui::with(|ui| validate(ui, item)).unwrap_or(true)
         }
     }
 );
@@ -143,8 +173,38 @@ impl Delegate {
     }
 }
 
+/// Enables our menu items. Arrow, Return and volume items step aside while a text field has
+/// focus, so its own editing keys work, and Return also for a focused button.
+fn validate(ui: &Ui, item: &NSMenuItem) -> bool {
+    let Some(action) = item.action() else {
+        return true;
+    };
+    let responder = ui.window.firstResponder();
+    let is = |class| {
+        responder
+            .as_deref()
+            .is_some_and(|r: &NSResponder| r.isKindOfClass(class))
+    };
+    let in_text = is(NSText::class());
+    let on_button = is(NSButton::class());
+    let (playing, can) = ui.playback();
+    if action == sel!(toggle:) {
+        item.setTitle(&NSString::from_str(if playing { "Pause" } else { "Play" }));
+        can.transport
+    } else if action == sel!(next:) || action == sel!(prev:) {
+        !in_text && can.transport
+    } else if action == sel!(volumeUp:) || action == sel!(volumeDown:) {
+        !in_text && can.player
+    } else if action == sel!(playSelected:) || action == sel!(addToQueue:) {
+        let append = action == sel!(addToQueue:);
+        !in_text && !on_button && can.player && ui.has_selection(append)
+    } else {
+        true
+    }
+}
+
 /// Keys the search and palette fields handle themselves; true when handled.
-fn field_command(ui: &Ui, control: &NSControl, command: Sel) -> bool {
+fn field_command(ui: &Ui, control: &NSControl, text: &NSTextView, command: Sel) -> bool {
     if ui.search.is(control) {
         if command == sel!(insertNewline:) {
             ui.search_submitted();
@@ -152,7 +212,11 @@ fn field_command(ui: &Ui, control: &NSControl, command: Sel) -> bool {
             ui.show(AppView::Search);
             ui.results.select_first();
         } else if command == sel!(cancelOperation:) {
-            ui.show(AppView::Search);
+            if text.string().length() > 0 {
+                text.setString(&NSString::new());
+            } else {
+                ui.show(AppView::Search);
+            }
         } else {
             return false;
         }
@@ -183,6 +247,7 @@ const KEY_ESCAPE: u16 = 53;
 const KEY_ENTER: u16 = 76;
 const KEY_LEFT: u16 = 123;
 const KEY_RIGHT: u16 = 124;
+const KEY_UP: u16 = 126;
 
 /// Window-wide keys outside text fields. True when handled.
 fn key_down(ui: &Ui, event: &NSEvent) -> bool {
@@ -194,13 +259,17 @@ fn key_down(ui: &Ui, event: &NSEvent) -> bool {
         }
         return false;
     }
-    let in_text = ui
-        .window
-        .firstResponder()
-        .is_some_and(|r| r.isKindOfClass(NSText::class()));
-    if in_text {
+    let responder = ui.window.firstResponder();
+    if responder
+        .as_deref()
+        .is_some_and(|r| r.isKindOfClass(NSText::class()))
+    {
         return false;
     }
+    // Space and Return press a focused button, with keyboard navigation on.
+    let on_button = responder
+        .as_deref()
+        .is_some_and(|r| r.isKindOfClass(NSButton::class()));
     let flags = event.modifierFlags();
     let cmd = flags.contains(NSEventModifierFlags::Command);
     let plain = !flags.intersects(
@@ -209,10 +278,11 @@ fn key_down(ui: &Ui, event: &NSEvent) -> bool {
             | NSEventModifierFlags::Option,
     );
     match code {
-        KEY_SPACE if plain => ui.intent(Intent::Toggle),
+        KEY_SPACE if plain && !on_button => ui.intent(Intent::Toggle),
         KEY_LEFT if plain => ui.intent(Intent::SeekBy(-SEEK_STEP_SECS)),
         KEY_RIGHT if plain => ui.intent(Intent::SeekBy(SEEK_STEP_SECS)),
-        KEY_RETURN | KEY_ENTER if plain || cmd => ui.activate_selection(cmd),
+        KEY_UP if plain && ui.results_at_top() => ui.focus_search(),
+        KEY_RETURN | KEY_ENTER if (plain || cmd) && !on_button => ui.activate_selection(cmd),
         _ => return false,
     }
     true
@@ -236,7 +306,14 @@ fn install_key_monitor() {
     std::mem::forget(monitor);
 }
 
-fn menu_bar(mtm: MainThreadMarker, target: &Delegate) -> Retained<NSMenu> {
+/// NSMenuItem key equivalents for the arrow keys: AppKit's function-key characters.
+const RIGHT_ARROW: &str = "\u{F703}";
+const LEFT_ARROW: &str = "\u{F702}";
+const UP_ARROW: &str = "\u{F700}";
+const DOWN_ARROW: &str = "\u{F701}";
+
+/// The main menu, and the Window menu to register with AppKit.
+fn menu_bar(mtm: MainThreadMarker, target: &Delegate) -> (Retained<NSMenu>, Retained<NSMenu>) {
     let bar = NSMenu::initWithTitle(NSMenu::alloc(mtm), &NSString::new());
     let ours: &AnyObject = target.as_ref();
     let item = |title: &str, action: Option<Sel>, key: &str, mine: bool| {
@@ -255,6 +332,11 @@ fn menu_bar(mtm: MainThreadMarker, target: &Delegate) -> Retained<NSMenu> {
             i
         }
     };
+    let with_mods = |i: Retained<NSMenuItem>, mods: NSEventModifierFlags| {
+        i.setKeyEquivalentModifierMask(mods);
+        i
+    };
+    let cmd_opt = NSEventModifierFlags::Command | NSEventModifierFlags::Option;
     let sep = || NSMenuItem::separatorItem(mtm);
     let submenu = |title: &str, items: Vec<Retained<NSMenuItem>>| {
         let m = NSMenu::initWithTitle(NSMenu::alloc(mtm), &NSString::from_str(title));
@@ -264,12 +346,35 @@ fn menu_bar(mtm: MainThreadMarker, target: &Delegate) -> Retained<NSMenu> {
         let top = item(title, None, "", false);
         top.setSubmenu(Some(&m));
         bar.addItem(&top);
+        m
     };
     submenu(
         "requiem",
         vec![
-            item("Hide requiem", Some(sel!(hide:)), "h", false),
+            item(
+                "About requiem",
+                Some(sel!(orderFrontStandardAboutPanel:)),
+                "",
+                false,
+            ),
             sep(),
+            item("Hide requiem", Some(sel!(hide:)), "h", false),
+            with_mods(
+                item(
+                    "Hide Others",
+                    Some(sel!(hideOtherApplications:)),
+                    "h",
+                    false,
+                ),
+                cmd_opt,
+            ),
+            item("Show All", Some(sel!(unhideAllApplications:)), "", false),
+            sep(),
+            // Quitting the window leaves the music playing; this one stops the player too.
+            with_mods(
+                item("Quit and Stop Music", Some(sel!(quitAndStop:)), "q", true),
+                cmd_opt,
+            ),
             item("Quit requiem", Some(sel!(terminate:)), "q", false),
         ],
     );
@@ -283,6 +388,8 @@ fn menu_bar(mtm: MainThreadMarker, target: &Delegate) -> Retained<NSMenu> {
             item("Copy", Some(sel!(copy:)), "c", false),
             item("Paste", Some(sel!(paste:)), "v", false),
             item("Select All", Some(sel!(selectAll:)), "a", false),
+            sep(),
+            item("Find", Some(sel!(focusSearch:)), "f", true),
         ],
     );
     submenu(
@@ -291,26 +398,39 @@ fn menu_bar(mtm: MainThreadMarker, target: &Delegate) -> Retained<NSMenu> {
             item("Search", Some(sel!(showSearch:)), "1", true),
             item("Queue", Some(sel!(showQueue:)), "2", true),
             sep(),
-            item("Find", Some(sel!(focusSearch:)), "f", true),
             item("Command Palette", Some(sel!(openPalette:)), "k", true),
         ],
     );
     submenu(
         "Playback",
         vec![
-            item("Play/Pause", Some(sel!(toggle:)), "", true),
-            item("Next", Some(sel!(next:)), "", true),
-            item("Previous", Some(sel!(prev:)), "", true),
+            // Titled Play or Pause by `validate`.
+            item("Play", Some(sel!(toggle:)), "", true),
+            item("Next", Some(sel!(next:)), RIGHT_ARROW, true),
+            item("Previous", Some(sel!(prev:)), LEFT_ARROW, true),
+            sep(),
+            // The key monitor handles Return first; the menu shows the key.
+            with_mods(
+                item("Play Selected", Some(sel!(playSelected:)), "\r", true),
+                NSEventModifierFlags::empty(),
+            ),
+            item("Add to Queue", Some(sel!(addToQueue:)), "\r", true),
+            sep(),
+            item("Volume Up", Some(sel!(volumeUp:)), UP_ARROW, true),
+            item("Volume Down", Some(sel!(volumeDown:)), DOWN_ARROW, true),
         ],
     );
-    submenu(
+    let window = submenu(
         "Window",
         vec![
             item("Minimize", Some(sel!(performMiniaturize:)), "m", false),
+            item("Zoom", Some(sel!(performZoom:)), "", false),
             item("Close", Some(sel!(performClose:)), "w", false),
+            sep(),
+            item("Bring All to Front", Some(sel!(arrangeInFront:)), "", false),
         ],
     );
-    bar
+    (bar, window)
 }
 
 pub fn run(args: Args) {
@@ -353,7 +473,9 @@ pub fn run(args: Args) {
     }
 
     app.setDelegate(Some(ProtocolObject::from_ref(&*delegate)));
-    app.setMainMenu(Some(&menu_bar(mtm, &delegate)));
+    let (menu, window_menu) = menu_bar(mtm, &delegate);
+    app.setMainMenu(Some(&menu));
+    app.setWindowsMenu(Some(&window_menu));
     install_key_monitor();
     ui.window.makeKeyAndOrderFront(None);
     if !ui.palette.is_open() {

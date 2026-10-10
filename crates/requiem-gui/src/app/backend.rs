@@ -3,6 +3,7 @@
 use std::cell::RefCell;
 use std::io;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 use std::thread;
 use std::time::Duration;
@@ -53,7 +54,23 @@ impl Backend {
             }
         }
     }
+
+    /// Asks the player to quit, and stops reconnecting, which would start a new one. False
+    /// for the demo, which has no player.
+    pub fn stop_player(&self) -> bool {
+        match self {
+            Backend::Demo(_) => false,
+            Backend::Live(l) => {
+                STOPPING.store(true, Ordering::Relaxed);
+                enqueue(&l.tx, Command::Shutdown);
+                true
+            }
+        }
+    }
 }
+
+/// Set by `stop_player`: a lost connection then closes the window instead of reconnecting.
+static STOPPING: AtomicBool = AtomicBool::new(false);
 
 type Slot = Arc<Mutex<Option<Arc<Client>>>>;
 
@@ -187,6 +204,10 @@ fn connection(daemon: PathBuf, slot: Slot) {
                 Link::Lost(e.to_string())
             }
         };
+        if STOPPING.load(Ordering::Relaxed) {
+            quit();
+            return;
+        }
         let delay = retry_delay(&link, attempt);
         post(vec![Msg::Link(link)]);
         thread::sleep(delay);
@@ -204,7 +225,8 @@ fn retry_delay(link: &Link, attempt: usize) -> Duration {
     }
 }
 
-/// The player quit on purpose (menu-bar Quit): close the window with it rather than respawn it.
+/// The player quit on purpose (menu-bar Quit, or "Quit and Stop Music"): close the window
+/// with it rather than respawn it.
 fn quit() {
     DispatchQueue::main().exec_async(|| {
         let mtm = MainThreadMarker::new().expect("the main queue runs on the main thread");

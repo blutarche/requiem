@@ -152,6 +152,7 @@ define_class!(
                 iv.odd.set(row % 2 == 1);
                 iv.current.set(usize::try_from(row).ok() == self.ivars().current.get());
                 iv.selected.set(table.selectedRow() == row);
+                iv.focused.set(table.downcast_ref::<KeyTable>().is_some_and(KeyTable::focused));
                 rv.paint();
             }
         }
@@ -257,6 +258,67 @@ impl Controller {
     }
 }
 
+pub struct KeyTableIvars {
+    focused: Cell<bool>,
+}
+
+define_class!(
+    /// A table that tells its rows when it holds keyboard focus. It draws no focus ring;
+    /// the selected row turns from neutral to accent instead.
+    // SAFETY: NSTableView has no subclassing requirements; no Drop impl.
+    #[unsafe(super(NSTableView, objc2_app_kit::NSControl, NSView, NSResponder, NSObject))]
+    #[thread_kind = MainThreadOnly]
+    #[ivars = KeyTableIvars]
+    pub struct KeyTable;
+
+    impl KeyTable {
+        #[unsafe(method(becomeFirstResponder))]
+        fn become_first_responder(&self) -> bool {
+            // SAFETY: forwards to the superclass implementation.
+            let ok: bool = unsafe { msg_send![super(self), becomeFirstResponder] };
+            if ok {
+                self.set_focused(true);
+            }
+            ok
+        }
+
+        #[unsafe(method(resignFirstResponder))]
+        fn resign_first_responder(&self) -> bool {
+            // SAFETY: forwards to the superclass implementation.
+            let ok: bool = unsafe { msg_send![super(self), resignFirstResponder] };
+            if ok {
+                self.set_focused(false);
+            }
+            ok
+        }
+    }
+);
+
+impl KeyTable {
+    fn new_table(mtm: MainThreadMarker, frame: NSRect) -> Retained<NSTableView> {
+        let this = Self::alloc(mtm).set_ivars(KeyTableIvars {
+            focused: Cell::new(false),
+        });
+        // SAFETY: `initWithFrame:` is NSView's designated initializer.
+        let this: Retained<Self> = unsafe { msg_send![super(this), initWithFrame: frame] };
+        Retained::into_super(this)
+    }
+
+    fn focused(&self) -> bool {
+        self.ivars().focused.get()
+    }
+
+    fn set_focused(&self, focused: bool) {
+        if self.ivars().focused.replace(focused) == focused {
+            return;
+        }
+        for_visible_rows(self, |_, rv| {
+            rv.ivars().focused.set(focused);
+            rv.paint();
+        });
+    }
+}
+
 fn for_visible_rows(table: &NSTableView, mut f: impl FnMut(NSInteger, &RowView)) {
     let range = table.rowsInRect(table.visibleRect());
     for row in range.location..range.location + range.length {
@@ -274,6 +336,8 @@ pub struct RowIvars {
     hovered: Cell<bool>,
     selected: Cell<bool>,
     current: Cell<bool>,
+    /// The table holds keyboard focus.
+    focused: Cell<bool>,
 }
 
 define_class!(
@@ -325,6 +389,7 @@ impl RowView {
             hovered: Cell::new(false),
             selected: Cell::new(false),
             current: Cell::new(false),
+            focused: Cell::new(false),
         });
         // SAFETY: `initWithFrame:` is the designated initializer.
         let this: Retained<Self> = unsafe { msg_send![super(this), initWithFrame: NSRect::ZERO] };
@@ -347,31 +412,39 @@ impl RowView {
 
     fn paint(&self) {
         let iv = self.ivars();
-        let base = if iv.hovered.get() {
+        let selected = iv.selected.get();
+        let base = if selected && !iv.focused.get() {
+            // Selection without keyboard focus is neutral, as in AppKit.
+            theme::LINE_2
+        } else if iv.hovered.get() {
             theme::BG_3
         } else if iv.odd.get() {
             theme::BG_2
         } else {
             theme::BG
         };
-        let color = if iv.selected.get() && iv.current.get() {
+        let accent = match (selected && iv.focused.get(), iv.current.get()) {
             // Selection over the current row's accent-soft tint, so the row stays marked.
-            let both = 1.0 - (1.0 - theme::SELECTED) * (1.0 - theme::SOFT);
-            theme::mix(base, theme::ACCENT, both)
-        } else if iv.selected.get() {
-            theme::mix(base, theme::ACCENT, theme::SELECTED)
-        } else if iv.current.get() {
-            theme::mix(base, theme::ACCENT, theme::SOFT)
-        } else {
-            theme::mix(base, base, 0.0)
+            (true, true) => 1.0 - (1.0 - theme::SELECTED) * (1.0 - theme::SOFT),
+            (true, false) => theme::SELECTED,
+            (false, true) => theme::SOFT,
+            (false, false) => 0.0,
         };
-        widgets::fill(self, Some(&color));
+        widgets::fill(self, Some(&theme::mix(base, theme::ACCENT, accent)));
+        for v in self.subviews().iter() {
+            if let Some(cell) = v.downcast_ref::<TextCell>() {
+                cell.set_row_selected(selected);
+            }
+        }
     }
 }
 
 pub struct TextCellIvars {
     label: OnceCell<Retained<NSTextField>>,
     bar: OnceCell<Retained<NSView>>,
+    /// Muted text, raised to ink-2 on a selected row.
+    secondary: bool,
+    row_selected: Cell<bool>,
 }
 
 define_class!(
@@ -389,6 +462,8 @@ impl TextCell {
         let this = Self::alloc(mtm).set_ivars(TextCellIvars {
             label: OnceCell::new(),
             bar: OnceCell::new(),
+            secondary: col != Col::Title,
+            row_selected: Cell::new(false),
         });
         let w = 200.0;
         // SAFETY: `initWithFrame:` is NSView's designated initializer.
@@ -429,6 +504,21 @@ impl TextCell {
         }
         let _ = this.ivars().label.set(label);
         this
+    }
+
+    fn set_row_selected(&self, selected: bool) {
+        let iv = self.ivars();
+        if !iv.secondary || iv.row_selected.replace(selected) == selected {
+            return;
+        }
+        if let Some(l) = iv.label.get() {
+            let c = if selected {
+                theme::ink_2()
+            } else {
+                theme::muted()
+            };
+            l.setTextColor(Some(&c));
+        }
     }
 }
 
@@ -488,6 +578,7 @@ impl AddCell {
         );
         b.setAutoresizingMask(widgets::PIN_RIGHT | PIN_LEFT | PIN_TOP | PIN_BOTTOM);
         b.set_action(target, sel!(addClicked:));
+        widgets::describe(&b, "Add to queue (⌘↩)", Some("Add to queue"));
         b.setHidden(true);
         this.addSubview(&b);
         let _ = this.ivars().button.set(b);
@@ -670,7 +761,7 @@ pub struct Table {
 impl Table {
     pub fn new(mtm: MainThreadMarker, frame: NSRect, kind: Kind) -> Table {
         let (w, h) = (frame.size.width, frame.size.height);
-        let table = NSTableView::initWithFrame(NSTableView::alloc(mtm), rect(0.0, 0.0, w, h));
+        let table = KeyTable::new_table(mtm, rect(0.0, 0.0, w, h));
         table.setStyle(NSTableViewStyle::Plain);
         table.setSelectionHighlightStyle(NSTableViewSelectionHighlightStyle::None);
         table.setIntercellSpacing(NSSize::new(0.0, 0.0));

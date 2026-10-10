@@ -37,6 +37,7 @@ impl PlayerBar {
     const TIME_W: CGFloat = 72.0;
     const PLAY: CGFloat = 36.0;
     const SKIP: CGFloat = 32.0;
+    const ICON: CGFloat = 20.0;
     /// The title's centre with an artist line below it, and alone.
     const TITLE_Y: CGFloat = 45.0;
     const TITLE_ALONE_Y: CGFloat = Self::H / 2.0;
@@ -140,7 +141,7 @@ impl PlayerBar {
                 mtm,
                 rect(x, row_y - Self::SKIP / 2.0, Self::SKIP, Self::SKIP),
                 icon,
-                18.0,
+                Self::ICON,
                 &theme::muted(),
                 None,
                 &theme::bg_3(),
@@ -160,7 +161,7 @@ impl PlayerBar {
                 Self::PLAY,
             ),
             Icon::Play,
-            18.0,
+            Self::ICON,
             &theme::on_accent(),
             Some(&theme::accent()),
             &theme::accent_hi(),
@@ -170,6 +171,9 @@ impl PlayerBar {
         prev.set_action(target, sel!(prev:));
         play.set_action(target, sel!(toggle:));
         next.set_action(target, sel!(next:));
+        widgets::describe(&prev, "Previous", None);
+        widgets::describe(&play, "Play", None);
+        widgets::describe(&next, "Next", None);
         center.addSubview(&prev);
         center.addSubview(&play);
         center.addSubview(&next);
@@ -267,8 +271,13 @@ impl PlayerBar {
 
     pub fn set_playing(&self, playing: bool) {
         if self.playing.replace(playing) != playing {
-            let icon = if playing { Icon::Pause } else { Icon::Play };
-            self.play.set_icon(icon, 18.0);
+            let (icon, name) = if playing {
+                (Icon::Pause, "Pause")
+            } else {
+                (Icon::Play, "Play")
+            };
+            self.play.set_icon(icon, Self::ICON);
+            widgets::describe(&self.play, name, None);
         }
     }
 

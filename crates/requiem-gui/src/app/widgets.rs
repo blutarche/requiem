@@ -7,6 +7,7 @@ use objc2::rc::{Retained, Weak};
 use objc2::runtime::{AnyObject, Sel};
 use objc2::{AnyThread, DefinedClass, MainThreadOnly, Message, define_class, msg_send};
 use objc2_app_kit::{
+    NSAccessibility, NSAccessibilityButtonRole, NSAccessibilitySliderRole,
     NSAttributedStringNSStringDrawing, NSAutoresizingMaskOptions, NSBezierPath, NSButton,
     NSCellImagePosition, NSColor, NSControl, NSEvent, NSEventMask, NSEventTrackingRunLoopMode,
     NSEventType, NSFocusRingType, NSFont, NSImageScaling, NSImageView, NSLineBreakMode,
@@ -14,15 +15,18 @@ use objc2_app_kit::{
 };
 use objc2_core_foundation::CGFloat;
 use objc2_foundation::{
-    MainThreadMarker, NSAttributedString, NSDate, NSDictionary, NSNotification, NSPoint, NSRect,
-    NSSize, NSString,
+    MainThreadMarker, NSAttributedString, NSDate, NSDictionary, NSNotification, NSNumber,
+    NSObjectProtocol, NSPoint, NSRect, NSSize, NSString,
 };
 
 use super::theme::{self, Icon, Weight};
 use super::ui::{self, AppView};
+use crate::vm::{Intent, SEEK_STEP_SECS, VOLUME_STEP};
 
 /// The opacity of a disabled control.
 pub const DIMMED: CGFloat = 0.4;
+/// The keyboard focus ring's width.
+const RING_W: CGFloat = 2.0;
 
 pub fn rect(x: CGFloat, y: CGFloat, w: CGFloat, h: CGFloat) -> NSRect {
     NSRect::new(NSPoint::new(x, y), NSSize::new(w, h))
@@ -141,6 +145,23 @@ pub fn icon_view(
     v
 }
 
+/// The tooltip, and the accessibility label (`label`, or the tooltip when `None`).
+pub fn describe(v: &NSView, tip: &str, label: Option<&str>) {
+    v.setToolTip(Some(&NSString::from_str(tip)));
+    v.setAccessibilityLabel(Some(&NSString::from_str(label.unwrap_or(tip))));
+}
+
+/// Makes `v` one accessibility button named `label`; its subviews stay out of the tree.
+fn as_button(v: &NSView, label: &str) {
+    v.setAccessibilityElement(true);
+    // SAFETY: the role static is an immutable framework constant.
+    v.setAccessibilityRole(Some(unsafe { NSAccessibilityButtonRole }));
+    v.setAccessibilityLabel(Some(&NSString::from_str(label)));
+    for sub in v.subviews().iter() {
+        sub.setAccessibilityElement(false);
+    }
+}
+
 /// Attributes for drawn or attributed text.
 pub fn attrs(
     font: &NSFont,
@@ -198,11 +219,18 @@ pub fn track_hover(v: &NSView, extra: NSTrackingAreaOptions) {
 pub struct ButtonIvars {
     normal: Option<Retained<NSColor>>,
     hover: Retained<NSColor>,
+    /// A secondary button's resting 1 px border.
+    line: Option<Retained<NSColor>>,
+    /// Text-button titles.
+    title_color: Retained<NSColor>,
+    /// Keyboard focus, drawn as a 2 px border in `ring`.
+    ring: Retained<NSColor>,
     hovered: Cell<bool>,
+    focused: Cell<bool>,
 }
 
 define_class!(
-    /// A borderless icon or text button with a hover background.
+    /// A borderless icon or text button with a hover background and its own focus ring.
     // SAFETY: NSButton has no subclassing requirements; no Drop impl.
     #[unsafe(super(NSButton, NSControl, NSView, NSResponder, objc2_foundation::NSObject))]
     #[thread_kind = MainThreadOnly]
@@ -235,6 +263,29 @@ define_class!(
             let _: () = unsafe { msg_send![super(self), viewDidHide] };
             self.clear_hover();
         }
+
+        /// Buttons take focus only with keyboard navigation turned on in System Settings.
+        #[unsafe(method(becomeFirstResponder))]
+        fn become_first_responder(&self) -> bool {
+            // SAFETY: forwards to the superclass implementation.
+            let ok: bool = unsafe { msg_send![super(self), becomeFirstResponder] };
+            if ok {
+                self.ivars().focused.set(true);
+                self.paint();
+            }
+            ok
+        }
+
+        #[unsafe(method(resignFirstResponder))]
+        fn resign_first_responder(&self) -> bool {
+            // SAFETY: forwards to the superclass implementation.
+            let ok: bool = unsafe { msg_send![super(self), resignFirstResponder] };
+            if ok {
+                self.ivars().focused.set(false);
+                self.paint();
+            }
+            ok
+        }
     }
 );
 
@@ -259,7 +310,7 @@ impl HoverButton {
         this
     }
 
-    /// A primary text button: accent fill, ink title. `set_label` sizes its width.
+    /// A primary text button: accent fill, white title. `set_label` sizes its width.
     pub fn primary(mtm: MainThreadMarker, frame: NSRect) -> Retained<Self> {
         let this = Self::filled(
             mtm,
@@ -274,8 +325,11 @@ impl HoverButton {
 
     /// A secondary text button: transparent with a 1 px line. `set_label` sizes its width.
     pub fn secondary(mtm: MainThreadMarker, frame: NSRect) -> Retained<Self> {
-        let this = Self::filled(mtm, frame, None, &theme::line_2(), theme::RADIUS);
-        border(&this, &theme::line_2(), 1.0);
+        let this = Self::alloc(mtm).set_ivars(ButtonIvars {
+            line: Some(theme::line_2()),
+            ..Self::ivars_for(None, &theme::line_2())
+        });
+        let this = Self::init(this, frame, theme::RADIUS);
         this.setImagePosition(NSCellImagePosition::NoImage);
         this
     }
@@ -287,11 +341,33 @@ impl HoverButton {
         hover: &NSColor,
         radius: CGFloat,
     ) -> Retained<Self> {
-        let this = Self::alloc(mtm).set_ivars(ButtonIvars {
+        let this = Self::alloc(mtm).set_ivars(Self::ivars_for(normal, hover));
+        Self::init(this, frame, radius)
+    }
+
+    fn ivars_for(normal: Option<&NSColor>, hover: &NSColor) -> ButtonIvars {
+        // An accent ring would vanish into an accent fill.
+        let on_accent = normal.is_some_and(|c| c.isEqual(Some(&theme::accent())));
+        ButtonIvars {
             normal: normal.map(|c| c.retain()),
             hover: hover.retain(),
+            line: None,
+            title_color: if on_accent {
+                theme::white()
+            } else {
+                theme::ink()
+            },
+            ring: if on_accent {
+                theme::ink()
+            } else {
+                theme::accent()
+            },
             hovered: Cell::new(false),
-        });
+            focused: Cell::new(false),
+        }
+    }
+
+    fn init(this: objc2::rc::PartialInit<Self>, frame: NSRect, radius: CGFloat) -> Retained<Self> {
         // SAFETY: `initWithFrame:` is NSButton's designated initializer.
         let this: Retained<Self> = unsafe { msg_send![super(this), initWithFrame: frame] };
         this.setBordered(false);
@@ -304,7 +380,11 @@ impl HoverButton {
 
     /// Sets a text button's title and returns the width it needs: the text plus 12 px a side.
     pub fn set_label(&self, title: &str) -> CGFloat {
-        let s = attributed(title, &theme::font(14.0, Weight::Medium), &theme::ink());
+        let s = attributed(
+            title,
+            &theme::font(14.0, Weight::Medium),
+            &self.ivars().title_color,
+        );
         self.setAttributedTitle(&s);
         s.size().width.ceil() + 24.0
     }
@@ -356,6 +436,13 @@ impl HoverButton {
             iv.normal.as_deref()
         };
         fill(self, c);
+        if iv.focused.get() {
+            border(self, &iv.ring, RING_W);
+        } else if let Some(line) = &iv.line {
+            border(self, line, 1.0);
+        } else if let Some(layer) = self.layer() {
+            layer.setBorderWidth(0.0);
+        }
     }
 }
 
@@ -400,6 +487,13 @@ define_class!(
             true
         }
 
+        #[unsafe(method(accessibilityPerformPress))]
+        fn accessibility_perform_press(&self) -> bool {
+            let target = self.ivars().target;
+            ui::with(|ui| ui.show(target));
+            true
+        }
+
         /// Clicks on the icon or label land on the item itself.
         #[unsafe(method_id(hitTest:))]
         fn hit_test(&self, point: NSPoint) -> Option<Retained<NSView>> {
@@ -437,9 +531,9 @@ impl NavItem {
         let icon = icon_view(
             mtm,
             icon,
-            18.0,
+            20.0,
             &theme::chrome_muted(),
-            rect(12.0, (h - 18.0) / 2.0, 18.0, 18.0),
+            rect(12.0, (h - 20.0) / 2.0, 20.0, 20.0),
         );
         let font = theme::font(14.0, Weight::Medium);
         let label = placed_label(
@@ -471,6 +565,7 @@ impl NavItem {
         let _ = this.ivars().icon.set(icon);
         let _ = this.ivars().label.set(label);
         let _ = this.ivars().count.set(count);
+        as_button(&this, text);
         track_hover(&this, NSTrackingAreaOptions::empty());
         this.paint();
         this
@@ -484,9 +579,16 @@ impl NavItem {
 
     /// `None` hides the count.
     pub fn set_count(&self, count: Option<&str>) {
-        if let Some(l) = self.ivars().count.get() {
+        let iv = self.ivars();
+        if let (Some(l), Some(name)) = (iv.count.get(), iv.label.get()) {
             set_text(l, count.unwrap_or_default());
             l.setHidden(count.is_none());
+            let name = name.stringValue().to_string();
+            let label = match count {
+                Some(n) => format!("{name}, {n}"),
+                None => name,
+            };
+            self.setAccessibilityLabel(Some(&NSString::from_str(&label)));
         }
     }
 
@@ -658,11 +760,7 @@ impl Field {
             cell.setScrollable(true);
             cell.setWraps(false);
         }
-        text.setPlaceholderAttributedString(Some(&attributed(
-            placeholder,
-            &font,
-            &theme::muted_2(),
-        )));
+        text.setPlaceholderAttributedString(Some(&attributed(placeholder, &font, &theme::muted())));
         text.setAutoresizingMask(FLEX_W);
         boxv.addSubview(&text);
         Field { ring, text }
@@ -687,6 +785,15 @@ pub enum SliderKind {
     Seek,
     /// Sets the volume while dragging.
     Volume,
+}
+
+impl SliderKind {
+    fn label(self) -> &'static str {
+        match self {
+            SliderKind::Seek => "Seek",
+            SliderKind::Volume => "Volume",
+        }
+    }
 }
 
 pub struct SliderIvars {
@@ -754,6 +861,30 @@ define_class!(
         fn accepts_first_mouse(&self, _event: Option<&NSEvent>) -> bool {
             true
         }
+
+        /// Percent, as VoiceOver reads it.
+        #[unsafe(method_id(accessibilityValue))]
+        fn accessibility_value(&self) -> Option<Retained<AnyObject>> {
+            let pct = (self.ivars().value.get() * 100.0).round();
+            Some(Retained::into_super(Retained::into_super(Retained::into_super(
+                NSNumber::new_f64(pct),
+            ))))
+        }
+
+        #[unsafe(method(isAccessibilityEnabled))]
+        fn accessibility_enabled(&self) -> bool {
+            self.ivars().enabled.get()
+        }
+
+        #[unsafe(method(accessibilityPerformIncrement))]
+        fn accessibility_increment(&self) -> bool {
+            self.step(1)
+        }
+
+        #[unsafe(method(accessibilityPerformDecrement))]
+        fn accessibility_decrement(&self) -> bool {
+            self.step(-1)
+        }
     }
 );
 
@@ -777,7 +908,24 @@ impl Slider {
         let this: Retained<Self> = unsafe { msg_send![super(this), initWithFrame: frame] };
         this.setAutoresizingMask(mask);
         track_hover(&this, NSTrackingAreaOptions::EnabledDuringMouseDrag);
+        this.setAccessibilityElement(true);
+        // SAFETY: the role static is an immutable framework constant.
+        this.setAccessibilityRole(Some(unsafe { NSAccessibilitySliderRole }));
+        describe(&this, kind.label(), None);
         this
+    }
+
+    /// One keyboard-sized step, as the Left/Right and Cmd+Up/Down keys take.
+    fn step(&self, dir: i8) -> bool {
+        if !self.ivars().enabled.get() {
+            return false;
+        }
+        let intent = match self.ivars().kind {
+            SliderKind::Seek => Intent::SeekBy(i64::from(dir) * SEEK_STEP_SECS),
+            SliderKind::Volume => Intent::VolumeBy(i16::from(dir) * VOLUME_STEP),
+        };
+        ui::with(|ui| ui.intent(intent));
+        true
     }
 
     /// Ignored mid-drag. Redraws only when the fill moves by at least half a point.

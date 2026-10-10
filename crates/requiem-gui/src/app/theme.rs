@@ -35,6 +35,7 @@ pub fn mix(base: u32, top: u32, alpha: CGFloat) -> Retained<NSColor> {
 pub const BG: u32 = 0x0A0A0C;
 pub const BG_2: u32 = 0x121216;
 pub const BG_3: u32 = 0x1A1A20;
+pub const LINE_2: u32 = 0x34343F;
 pub const ACCENT: u32 = 0x7C70F5;
 /// Alphas of `accent_soft` and `selection`.
 pub const SOFT: CGFloat = 0.10;
@@ -56,7 +57,7 @@ pub fn line() -> Retained<NSColor> {
     rgb(0x24242C)
 }
 pub fn line_2() -> Retained<NSColor> {
-    rgb(0x34343F)
+    rgb(LINE_2)
 }
 pub fn line_hi() -> Retained<NSColor> {
     rgb(0x43434F)
@@ -119,6 +120,10 @@ pub fn warn() -> Retained<NSColor> {
 /// Palette backdrop: bg at 60%.
 pub fn scrim() -> Retained<NSColor> {
     rgba(0x0A0A0C, 0.60)
+}
+/// Text on primary buttons.
+pub fn white() -> Retained<NSColor> {
+    rgb(0xFFFFFF)
 }
 /// The icon on the accent play button.
 pub fn on_accent() -> Retained<NSColor> {

@@ -6,8 +6,8 @@ use objc2::rc::Retained;
 use objc2::runtime::{NSObject, ProtocolObject};
 use objc2::{DefinedClass, MainThreadOnly, define_class, msg_send};
 use objc2_app_kit::{
-    NSEvent, NSResponder, NSTextAlignment, NSTextField, NSTextFieldDelegate, NSTrackingAreaOptions,
-    NSView,
+    NSAccessibility, NSAccessibilityButtonRole, NSEvent, NSResponder, NSTextAlignment, NSTextField,
+    NSTextFieldDelegate, NSTrackingAreaOptions, NSView,
 };
 use objc2_core_foundation::CGFloat;
 use objc2_foundation::{MainThreadMarker, NSPoint, NSRect};
@@ -42,11 +42,10 @@ define_class!(
 
 pub struct RowIvars {
     index: usize,
-    hovered: Cell<bool>,
 }
 
 define_class!(
-    /// One action; a click runs it.
+    /// One action; a click runs it, and the pointer entering selects it.
     // SAFETY: NSView has no subclassing requirements; no Drop impl.
     #[unsafe(super(NSView, NSResponder, NSObject))]
     #[thread_kind = MainThreadOnly]
@@ -60,24 +59,19 @@ define_class!(
             ui::with(|ui| ui.palette_run(i));
         }
 
+        /// The pointer and the arrow keys share one selection, so only one row is ever
+        /// highlighted: whichever moved last.
         #[unsafe(method(mouseEntered:))]
         fn mouse_entered(&self, _event: &NSEvent) {
-            self.ivars().hovered.set(true);
-            ui::with(|ui| ui.palette.repaint());
+            let i = self.ivars().index;
+            ui::with(|ui| ui.palette.select_row(i));
         }
 
-        #[unsafe(method(mouseExited:))]
-        fn mouse_exited(&self, _event: &NSEvent) {
-            self.ivars().hovered.set(false);
-            ui::with(|ui| ui.palette.repaint());
-        }
-
-        /// Also called when the palette closes. A hidden view gets no `mouseExited:`.
-        #[unsafe(method(viewDidHide))]
-        fn view_did_hide(&self) {
-            // SAFETY: forwards to the superclass implementation.
-            let _: () = unsafe { msg_send![super(self), viewDidHide] };
-            self.ivars().hovered.set(false);
+        #[unsafe(method(accessibilityPerformPress))]
+        fn accessibility_perform_press(&self) -> bool {
+            let i = self.ivars().index;
+            ui::with(|ui| ui.palette_run(i));
+            true
         }
     }
 );
@@ -142,10 +136,7 @@ impl Palette {
             .iter()
             .enumerate()
             .map(|(index, &action)| {
-                let this = ActionRow::alloc(mtm).set_ivars(RowIvars {
-                    index,
-                    hovered: Cell::new(false),
-                });
+                let this = ActionRow::alloc(mtm).set_ivars(RowIvars { index });
                 let f = rect(PAD, 0.0, PANEL_W - 2.0 * PAD, ROW_H);
                 // SAFETY: `initWithFrame:` is NSView's designated initializer.
                 let view: Retained<ActionRow> = unsafe { msg_send![super(this), initWithFrame: f] };
@@ -166,7 +157,7 @@ impl Palette {
                     mtm,
                     action.shortcut(),
                     &short,
-                    &theme::muted_2(),
+                    &theme::muted(),
                     w - 92.0,
                     ROW_H / 2.0,
                     80.0,
@@ -175,6 +166,14 @@ impl Palette {
                 keys.setAlignment(NSTextAlignment::Right);
                 view.addSubview(&label);
                 view.addSubview(&keys);
+                view.setAccessibilityElement(true);
+                // SAFETY: the role static is an immutable framework constant.
+                view.setAccessibilityRole(Some(unsafe { NSAccessibilityButtonRole }));
+                view.setAccessibilityLabel(Some(&objc2_foundation::NSString::from_str(
+                    action.label(),
+                )));
+                label.setAccessibilityElement(false);
+                keys.setAccessibilityElement(false);
                 widgets::track_hover(&view, NSTrackingAreaOptions::empty());
                 panel.addSubview(&view);
                 Row {
@@ -294,8 +293,6 @@ impl Palette {
                     Some(theme::mix(theme::BG_2, theme::ACCENT, theme::SELECTED)),
                     theme::ink(),
                 )
-            } else if r.view.ivars().hovered.get() {
-                (Some(theme::bg_3()), theme::ink_2())
             } else {
                 (None, theme::ink_2())
             };
@@ -312,6 +309,16 @@ impl Palette {
         let i = (self.selected.get() as isize + delta).rem_euclid(n as isize);
         self.selected.set(i as usize);
         self.repaint();
+    }
+
+    /// Selects the row for `PaletteAction::ALL[row]`, if it is shown.
+    fn select_row(&self, row: usize) {
+        let slot = self.shown.borrow().iter().position(|&i| i == row);
+        if let Some(slot) = slot
+            && self.selected.replace(slot) != slot
+        {
+            self.repaint();
+        }
     }
 
     pub fn selected_action(&self) -> Option<PaletteAction> {

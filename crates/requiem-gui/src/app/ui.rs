@@ -66,6 +66,8 @@ const TOAST_H: CGFloat = 40.0;
 /// Tall enough for a compact button.
 const TOAST_ACTION_H: CGFloat = 48.0;
 const TOAST_BUTTON_H: CGFloat = 32.0;
+/// How long "Quit and Stop Music" waits for the player's goodbye.
+const QUIT_GRACE: std::time::Duration = std::time::Duration::from_secs(3);
 
 struct ToastView {
     view: Retained<NSView>,
@@ -131,6 +133,9 @@ impl Ui {
         window.setTitlebarAppearsTransparent(true);
         window.setContentMinSize(NSSize::new(MIN_W, MIN_H));
         window.setBackgroundColor(Some(&theme::bg()));
+        // Tab moves between the field and the table, and through the buttons with keyboard
+        // navigation on.
+        window.setAutorecalculatesKeyViewLoop(true);
         window.center();
 
         let root = widgets::panel(
@@ -206,7 +211,7 @@ impl Ui {
         let status = widgets::placed_label(
             mtm,
             "",
-            &theme::font(13.0, Weight::Regular),
+            &theme::font(12.0, Weight::Regular),
             &theme::muted(),
             PAD,
             field_y - STATUS_H / 2.0 - 4.0,
@@ -239,7 +244,7 @@ impl Ui {
         let queue_count = widgets::placed_label(
             mtm,
             "",
-            &theme::font(13.0, Weight::Regular),
+            &theme::font(12.0, Weight::Regular),
             &theme::muted(),
             mw - PAD - 200.0,
             head_y,
@@ -271,7 +276,7 @@ impl Ui {
         let banner_label = widgets::placed_label(
             mtm,
             "",
-            &theme::font(13.0, Weight::Medium),
+            &theme::font(12.0, Weight::Medium),
             &theme::ink_2(),
             PAD,
             BANNER_H / 2.0,
@@ -338,7 +343,7 @@ impl Ui {
         let label = widgets::placed_label(
             mtm,
             "",
-            &theme::font(13.0, Weight::Regular),
+            &theme::font(14.0, Weight::Regular),
             &theme::ink_2(),
             16.0,
             TOAST_H / 2.0,
@@ -356,7 +361,7 @@ impl Ui {
             mtm,
             rect(w - 32.0, (TOAST_H - 24.0) / 2.0, 24.0, 24.0),
             Icon::X,
-            14.0,
+            16.0,
             &theme::muted(),
             None,
             &theme::line_2(),
@@ -364,6 +369,7 @@ impl Ui {
         );
         close.setAutoresizingMask(PIN_RIGHT | centred);
         close.set_action(target, sel!(closeToast:));
+        widgets::describe(&close, "Dismiss", None);
         view.addSubview(&accent);
         view.addSubview(&label);
         view.addSubview(&action);
@@ -388,12 +394,58 @@ impl Ui {
         self.queue_page.setHidden(view != AppView::Queue);
         self.nav_search.set_active(view == AppView::Search);
         self.nav_queue.set_active(view == AppView::Queue);
+        if view == AppView::Search && self.vm.borrow().ui().results.is_empty() {
+            self.window.makeFirstResponder(Some(&self.search.text));
+            return;
+        }
         let table = match view {
             AppView::Search => &self.results.table,
             AppView::Queue => &self.queue.table,
         };
         // Keeps Space and the arrow keys from landing in a hidden text field.
         self.window.makeFirstResponder(Some(table));
+    }
+
+    /// The results table has focus with its first row selected.
+    pub fn results_at_top(&self) -> bool {
+        let focused = self
+            .window
+            .firstResponder()
+            .is_some_and(|r| std::ptr::eq::<AnyObject>(r.as_ref(), self.results.table.as_ref()));
+        self.view.get() == AppView::Search && focused && self.results.selected_row() == Some(0)
+    }
+
+    /// Whether the visible table has a row that Return (or with `append`, Cmd+Return) acts on.
+    pub fn has_selection(&self, append: bool) -> bool {
+        match self.view.get() {
+            AppView::Search => self.results.selected_row().is_some(),
+            AppView::Queue => !append && self.queue.selected_row().is_some(),
+        }
+    }
+
+    /// Whether something plays, and which controls are live; for the menus.
+    pub fn playback(&self) -> (bool, Controls) {
+        let vm = self.vm.borrow();
+        (vm.ui().is_playing(), vm.ui().controls())
+    }
+
+    /// Stops the player, then the window closes on its goodbye. Without a connected player
+    /// the window just closes.
+    pub fn quit_and_stop(&self) {
+        let app = NSApplication::sharedApplication(self.mtm);
+        let connected = self.vm.borrow().ui().connection == vm::Connection::Connected;
+        if !connected || !self.backend.stop_player() {
+            app.terminate(None);
+            return;
+        }
+        // A player that never says goodbye still lets the window go.
+        if let Ok(when) = DispatchTime::try_from(QUIT_GRACE) {
+            let _ = DispatchQueue::main().after(when, || {
+                if let Some(mtm) = MainThreadMarker::new() {
+                    NSApplication::sharedApplication(mtm).terminate(None);
+                }
+            });
+        }
     }
 
     pub fn focus_search(&self) {
@@ -403,6 +455,14 @@ impl Ui {
 
     pub fn open_palette(&self) {
         if !self.palette.is_open() {
+            self.palette.open();
+        }
+    }
+
+    pub fn toggle_palette(&self) {
+        if self.palette.is_open() {
+            self.close_palette();
+        } else {
             self.palette.open();
         }
     }
