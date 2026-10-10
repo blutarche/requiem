@@ -2,13 +2,19 @@
 //! intents to `Command`s. No AppKit types, so it is unit-tested on every OS.
 
 use std::ops::{BitOr, BitOrAssign};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use requiem_core::{Command, EnqueueMode, Event, PlayState, SeekTarget, Track};
 
 pub const SEEK_STEP_SECS: i64 = 5;
 pub const VOLUME_STEP: i16 = 10;
 pub const TOAST_DURATION: Duration = Duration::from_secs(4);
+/// How long a local seek or volume change outranks the daemon's echoes. Without it, events
+/// the daemon sent before it saw the command snap the control back for a moment.
+pub const ECHO_HOLD: Duration = Duration::from_millis(500);
+/// A position this close to a local seek's target confirms it; engine ticks rarely land
+/// exactly on it.
+const SEEK_AGREES: Duration = Duration::from_secs(1);
 
 /// Regions of the window that need refreshing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -241,6 +247,37 @@ pub struct Vm {
     pending_req: Option<u64>,
     last_toast: u64,
     dirty: Dirty,
+    seek_hold: Option<Hold<Duration>>,
+    volume_hold: Option<Hold<u8>>,
+}
+
+/// A local value that wins over disagreeing echoes until `until`.
+#[derive(Debug, Clone, Copy)]
+struct Hold<T> {
+    target: T,
+    until: Instant,
+}
+
+impl<T> Hold<T> {
+    fn new(target: T, now: Instant) -> Option<Self> {
+        Some(Hold {
+            target,
+            until: now + ECHO_HOLD,
+        })
+    }
+}
+
+/// Whether to drop an echo: a hold is running and the echo disagrees with it. An agreeing
+/// echo, or any echo after the deadline, ends the hold.
+fn held<T>(hold: &mut Option<Hold<T>>, agrees: impl FnOnce(&T) -> bool, now: Instant) -> bool {
+    match hold {
+        Some(h) if now < h.until && !agrees(&h.target) => true,
+        Some(_) => {
+            *hold = None;
+            false
+        }
+        None => false,
+    }
 }
 
 impl Vm {
@@ -261,6 +298,11 @@ impl Vm {
     }
 
     pub fn apply(&mut self, ev: Event) {
+        self.apply_at(ev, Instant::now());
+    }
+
+    /// `apply` with the clock passed in.
+    pub fn apply_at(&mut self, ev: Event, now: Instant) {
         match ev {
             Event::SearchResults { req, tracks } => {
                 if self.pending_req == Some(req) {
@@ -283,14 +325,23 @@ impl Vm {
                 self.dirty |= Dirty::QUEUE;
             }
             Event::NowPlaying { track, duration } => {
+                self.seek_hold = None;
                 self.ui.now_playing = Some(track);
                 self.ui.duration = duration;
                 self.set_position(Duration::ZERO);
                 self.dirty |= Dirty::NOW_PLAYING | Dirty::ELAPSED | Dirty::SEEK;
             }
-            Event::Position(at) => self.set_position(at),
+            Event::Position(at) => {
+                if !held(&mut self.seek_hold, |&t| at.abs_diff(t) <= SEEK_AGREES, now) {
+                    self.set_position(at);
+                }
+            }
             Event::State(state) => self.set_state(state),
-            Event::Volume(v) => self.set_volume(v),
+            Event::Volume(v) => {
+                if !held(&mut self.volume_hold, |&t| t == v, now) {
+                    self.set_volume(v);
+                }
+            }
             Event::TrackFailed { track, error } => {
                 self.toast(format!("Couldn't play “{}”: {error}", track.title), true);
             }
@@ -341,6 +392,11 @@ impl Vm {
     }
 
     pub fn intent(&mut self, intent: Intent) -> Vec<Command> {
+        self.intent_at(intent, Instant::now())
+    }
+
+    /// `intent` with the clock passed in.
+    pub fn intent_at(&mut self, intent: Intent, now: Instant) -> Vec<Command> {
         match intent {
             Intent::Search(query) => {
                 let query = query.trim();
@@ -385,6 +441,7 @@ impl Vm {
                 }
                 let to = self.ui.duration.map_or(to, |d| to.min(d));
                 self.set_position(to);
+                self.seek_hold = Hold::new(to, now);
                 vec![Command::Seek(SeekTarget::Absolute(to))]
             }
             Intent::SeekBy(secs) => {
@@ -400,12 +457,13 @@ impl Vm {
                 };
                 let to = self.ui.duration.map_or(to, |d| to.min(d));
                 self.set_position(to);
+                self.seek_hold = Hold::new(to, now);
                 vec![Command::Seek(SeekTarget::Relative(secs))]
             }
-            Intent::SetVolume(v) => self.volume_command(v.min(100)),
+            Intent::SetVolume(v) => self.volume_command(v.min(100), now),
             Intent::VolumeBy(delta) => {
                 let v = (i16::from(self.ui.volume) + delta).clamp(0, 100);
-                self.volume_command(v as u8)
+                self.volume_command(v as u8, now)
             }
         }
     }
@@ -417,11 +475,12 @@ impl Vm {
         }
     }
 
-    fn volume_command(&mut self, v: u8) -> Vec<Command> {
+    fn volume_command(&mut self, v: u8, now: Instant) -> Vec<Command> {
         if v == self.ui.volume {
             return Vec::new();
         }
         self.set_volume(v);
+        self.volume_hold = Hold::new(v, now);
         vec![Command::SetVolume(v)]
     }
 
@@ -469,6 +528,8 @@ impl Vm {
     }
 
     fn reset_player(&mut self) {
+        self.seek_hold = None;
+        self.volume_hold = None;
         self.ui.queue.clear();
         self.ui.current = None;
         self.ui.now_playing = None;
@@ -606,6 +667,11 @@ mod tests {
             [Command::Search { req, .. }] => *req,
             other => panic!("expected one search, got {other:?}"),
         }
+    }
+
+    /// Applies `ev` after any echo hold from earlier intents has run out.
+    fn apply_later(vm: &mut Vm, ev: Event) {
+        vm.apply_at(ev, Instant::now() + ECHO_HOLD);
     }
 
     fn playing(secs: u64) -> Vm {
@@ -958,7 +1024,7 @@ mod tests {
             vec![Command::Seek(SeekTarget::Relative(-5))]
         );
         assert_eq!(vm.ui().position, Duration::ZERO);
-        vm.apply(Event::Position(Duration::from_secs(222)));
+        apply_later(&mut vm, Event::Position(Duration::from_secs(222)));
         assert_eq!(
             vm.intent(Intent::SeekBy(SEEK_STEP_SECS)),
             vec![Command::Seek(SeekTarget::Relative(5))]
@@ -1000,18 +1066,99 @@ mod tests {
             vec![Command::SetVolume(100)]
         );
         assert!(vm.intent(Intent::VolumeBy(VOLUME_STEP)).is_empty());
-        vm.apply(Event::Volume(5));
+        apply_later(&mut vm, Event::Volume(5));
         assert_eq!(
             vm.intent(Intent::VolumeBy(-VOLUME_STEP)),
             vec![Command::SetVolume(0)]
         );
         // Two quick presses compound on the optimistic value.
-        vm.apply(Event::Volume(50));
+        apply_later(&mut vm, Event::Volume(50));
         vm.intent(Intent::VolumeBy(VOLUME_STEP));
         assert_eq!(
             vm.intent(Intent::VolumeBy(VOLUME_STEP)),
             vec![Command::SetVolume(70)]
         );
+    }
+
+    #[test]
+    fn local_volume_ignores_stale_echoes_until_one_agrees() {
+        let mut vm = connected();
+        vm.apply(Event::Volume(70));
+        let t0 = Instant::now();
+        let ms = |n| t0 + Duration::from_millis(n);
+        vm.intent_at(Intent::SetVolume(40), t0);
+        vm.take_dirty();
+        // Sent by the daemon before it saw the command.
+        vm.apply_at(Event::Volume(70), ms(100));
+        assert_eq!(vm.ui().volume, 40);
+        assert!(vm.take_dirty().is_empty());
+        vm.apply_at(Event::Volume(40), ms(150));
+        // The hold ended with the agreeing echo; the daemon wins again.
+        vm.apply_at(Event::Volume(55), ms(200));
+        assert_eq!(vm.ui().volume, 55);
+        assert_eq!(vm.take_dirty(), Dirty::VOLUME);
+    }
+
+    #[test]
+    fn local_volume_hold_expires() {
+        let mut vm = connected();
+        vm.apply(Event::Volume(70));
+        let t0 = Instant::now();
+        vm.intent_at(Intent::VolumeBy(-VOLUME_STEP), t0);
+        vm.apply_at(Event::Volume(70), t0 + ECHO_HOLD - Duration::from_millis(1));
+        assert_eq!(vm.ui().volume, 60);
+        vm.apply_at(Event::Volume(70), t0 + ECHO_HOLD);
+        assert_eq!(vm.ui().volume, 70);
+    }
+
+    #[test]
+    fn local_seek_ignores_stale_positions_until_one_agrees() {
+        let mut vm = playing(225);
+        vm.apply(Event::Position(Duration::from_secs(83)));
+        let t0 = Instant::now();
+        let ms = |n| t0 + Duration::from_millis(n);
+        vm.intent_at(Intent::SeekTo(Duration::from_secs(150)), t0);
+        vm.take_dirty();
+        vm.apply_at(Event::Position(Duration::from_millis(83_250)), ms(100));
+        assert_eq!(vm.ui().position, Duration::from_secs(150));
+        assert!(vm.take_dirty().is_empty());
+        // Within `SEEK_AGREES` of the target: accepted, and the hold ends.
+        vm.apply_at(Event::Position(Duration::from_millis(150_200)), ms(200));
+        assert_eq!(vm.ui().position, Duration::from_millis(150_200));
+        vm.apply_at(Event::Position(Duration::from_secs(90)), ms(250));
+        assert_eq!(vm.ui().position, Duration::from_secs(90));
+    }
+
+    #[test]
+    fn local_seek_hold_expires_and_covers_relative_seeks() {
+        let mut vm = playing(225);
+        vm.apply(Event::Position(Duration::from_secs(83)));
+        let t0 = Instant::now();
+        vm.intent_at(Intent::SeekBy(SEEK_STEP_SECS), t0);
+        assert_eq!(vm.ui().position, Duration::from_secs(88));
+        vm.apply_at(
+            Event::Position(Duration::from_secs(83)),
+            t0 + ECHO_HOLD - Duration::from_millis(1),
+        );
+        assert_eq!(vm.ui().position, Duration::from_secs(88));
+        vm.apply_at(Event::Position(Duration::from_secs(84)), t0 + ECHO_HOLD);
+        assert_eq!(vm.ui().position, Duration::from_secs(84));
+    }
+
+    #[test]
+    fn new_track_ends_the_seek_hold() {
+        let mut vm = playing(225);
+        let t0 = Instant::now();
+        vm.intent_at(Intent::SeekTo(Duration::from_secs(150)), t0);
+        vm.apply_at(
+            Event::NowPlaying {
+                track: track("next", 200),
+                duration: Some(Duration::from_secs(200)),
+            },
+            t0,
+        );
+        vm.apply_at(Event::Position(Duration::from_secs(2)), t0);
+        assert_eq!(vm.ui().position, Duration::from_secs(2));
     }
 
     #[test]
@@ -1131,8 +1278,11 @@ mod tests {
     #[test]
     fn out_of_date_shows_error_banner() {
         let mut vm = Vm::new();
+        vm.take_dirty();
         vm.link(Link::OutOfDate);
         assert_eq!(vm.ui().connection, Connection::OutOfDate);
+        assert_eq!(vm.take_dirty(), Dirty::CONNECTION);
+        assert!(vm.ui().toast.is_none());
         assert_eq!(
             vm.ui().banner(),
             Some(Banner {
@@ -1140,6 +1290,20 @@ mod tests {
                 error: true
             })
         );
+    }
+
+    #[test]
+    fn out_of_date_after_a_connection_keeps_state_and_stays_put() {
+        let mut vm = playing(225);
+        vm.link(Link::OutOfDate);
+        assert_eq!(vm.ui().connection, Connection::OutOfDate);
+        assert!(vm.ui().banner().is_some_and(|b| b.error));
+        // No toast: the banner says it, and no reconnect follows.
+        assert!(vm.ui().toast.is_none());
+        assert!(vm.ui().now_playing.is_some());
+        vm.take_dirty();
+        vm.link(Link::OutOfDate);
+        assert!(vm.take_dirty().is_empty());
     }
 
     #[test]

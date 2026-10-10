@@ -220,7 +220,7 @@ impl Controller {
                 .and_then(|v| v.downcast::<AddCell>().ok());
             let cell = reused.unwrap_or_else(|| AddCell::new(mtm, &id, self));
             // A reused cell may come from a hovered row.
-            cell.ivars().button.get()?.setHidden(true);
+            cell.ivars().button.get()?.set_shown(false);
             return Some(Retained::into_super(cell));
         }
         let rows = self.ivars().rows.borrow();
@@ -302,7 +302,8 @@ define_class!(
         fn prepare_for_reuse(&self) {
             // SAFETY: forwards to the superclass implementation.
             let _: () = unsafe { msg_send![super(self), prepareForReuse] };
-            self.ivars().hovered.set(false);
+            // The pointer may have left while the row was off screen, with no `mouseExited:`.
+            self.set_hovered(false);
         }
     }
 );
@@ -329,7 +330,7 @@ impl RowView {
             if let Some(add) = v.downcast_ref::<AddCell>()
                 && let Some(b) = add.ivars().button.get()
             {
-                b.setHidden(!hovered);
+                b.set_shown(hovered);
             }
         }
     }
@@ -603,9 +604,9 @@ impl Table {
         // SAFETY: NSObject's `init`.
         let controller: Retained<Controller> = unsafe { msg_send![super(controller), init] };
         let _ = controller.ivars().table.set(Weak::from_retained(&table));
-        // SAFETY: the controller is retained by the `Ui` for the life of the process, so the
-        // table's weak data source and delegate references stay valid; it implements the
-        // actions set here.
+        // SAFETY: the table's data source, delegate and target are weak. The controller lives
+        // in the returned `Table` next to the table view, and the installed `Ui` holds both
+        // tables until exit, so the references stay valid. It implements the actions set here.
         unsafe {
             table.setDataSource(Some(ProtocolObject::from_ref(&*controller)));
             table.setDelegate(Some(ProtocolObject::from_ref(&*controller)));
@@ -671,5 +672,54 @@ impl Table {
     pub fn deselect(&self) {
         // SAFETY: a nil sender is allowed.
         unsafe { self.table.deselectAll(None) };
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use requiem_core::{ProviderId, TrackId};
+
+    use super::*;
+
+    fn track(title: &str, artists: &[&str], album: Option<&str>, secs: Option<u64>) -> Track {
+        Track {
+            id: TrackId {
+                provider: ProviderId("test".into()),
+                id: title.into(),
+            },
+            title: title.into(),
+            artists: artists.iter().map(|a| (*a).into()).collect(),
+            album: album.map(Into::into),
+            duration: secs.map(Duration::from_secs),
+            artwork_url: None,
+        }
+    }
+
+    fn row(title: &str, artists: &str, album: &str, duration: &str) -> RowText {
+        RowText {
+            title: title.into(),
+            artists: artists.into(),
+            album: album.into(),
+            duration: duration.into(),
+        }
+    }
+
+    #[test]
+    fn rows_format_each_column_and_blank_missing_fields() {
+        let rows = rows(&[
+            track("One", &["A", "B"], Some("LP"), Some(225)),
+            track("Two", &[], None, None),
+            track("Long", &["C"], None, Some(3725)),
+        ]);
+        assert_eq!(
+            rows,
+            vec![
+                row("One", "A, B", "LP", "3:45"),
+                row("Two", "", "", ""),
+                row("Long", "C", "", "1:02:05"),
+            ]
+        );
     }
 }

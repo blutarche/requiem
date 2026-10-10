@@ -190,7 +190,8 @@ impl Ui {
             "Search songs, artists, albums",
             Some(Icon::Search),
         );
-        // SAFETY: the delegate is the app delegate, alive for the life of the process.
+        // SAFETY: the field's delegate is weak. It is the app delegate, which `app::run` holds
+        // in a local until `app.run()`, which never returns.
         unsafe { search.text.setDelegate(Some(delegate)) };
         let status = widgets::placed_label(
             mtm,
@@ -675,5 +676,68 @@ impl Patch {
             toast: any(Dirty::TOAST).then(|| s.toast.clone()),
             banner: any(Dirty::CONNECTION).then(|| s.banner()),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use requiem_core::{Event, PlayState};
+
+    use super::*;
+    use crate::demo;
+
+    #[test]
+    fn patch_copies_only_dirty_regions() {
+        let (vm, _) = demo::start();
+        let p = Patch::new(Dirty::VOLUME, vm.ui());
+        assert_eq!(p.volume, Some(70));
+        assert!(p.results.is_none() && p.search_status.is_none() && p.queue.is_none());
+        assert!(p.now_playing.is_none() && p.elapsed.is_none() && p.progress.is_none());
+        assert!(p.playing.is_none() && p.toast.is_none() && p.banner.is_none());
+    }
+
+    #[test]
+    fn patch_of_everything_matches_the_state() {
+        let (vm, _) = demo::start();
+        let p = Patch::new(Dirty::ALL, vm.ui());
+        let (rows, empty) = p.results.unwrap();
+        assert_eq!(rows.len(), 30);
+        assert_eq!(empty, None);
+        assert_eq!(p.search_status, Some(None));
+        let (queue, current) = p.queue.unwrap();
+        assert_eq!((queue.len(), current), (8, Some(2)));
+        let now = p.now_playing.unwrap();
+        assert_eq!(
+            now.track,
+            Some(("Night Drive Home".into(), "Hollow Coast".into()))
+        );
+        assert_eq!(now.total, "3:45");
+        assert_eq!(p.elapsed.as_deref(), Some("1:23"));
+        assert!((p.progress.unwrap() - 83.0 / 225.0).abs() < 1e-9);
+        assert_eq!(p.playing, Some(true));
+        assert_eq!(p.toast, Some(None));
+        assert_eq!(p.banner, Some(None));
+    }
+
+    #[test]
+    fn state_change_refreshes_the_bar() {
+        let (mut vm, _) = demo::start();
+        vm.take_dirty();
+        vm.apply(Event::State(PlayState::Stopped));
+        let p = Patch::new(vm.take_dirty(), vm.ui());
+        assert_eq!(p.playing, Some(false));
+        let now = p.now_playing.unwrap();
+        assert_eq!((now.track, now.total.as_str()), (None, ""));
+        assert_eq!(p.elapsed.as_deref(), Some(""));
+        assert_eq!(p.progress, Some(0.0));
+        assert!(p.results.is_none() && p.queue.is_none());
+    }
+
+    #[test]
+    fn empty_results_carry_their_empty_state() {
+        let (vm, _) = demo::start_in(crate::args::View::Empty);
+        let (rows, empty) = Patch::new(Dirty::RESULTS, vm.ui()).results.unwrap();
+        assert!(rows.is_empty());
+        assert_eq!(empty.unwrap().action, "Start a search");
     }
 }

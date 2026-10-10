@@ -8,14 +8,14 @@ use objc2::runtime::{AnyObject, Sel};
 use objc2::{AnyThread, DefinedClass, MainThreadOnly, Message, define_class, msg_send};
 use objc2_app_kit::{
     NSAttributedStringNSStringDrawing, NSAutoresizingMaskOptions, NSBezierPath, NSButton,
-    NSCellImagePosition, NSColor, NSControl, NSEvent, NSFocusRingType, NSFont, NSImageScaling,
-    NSImageView, NSLineBreakMode, NSResponder, NSTextAlignment, NSTextField, NSTrackingArea,
-    NSTrackingAreaOptions, NSView,
+    NSCellImagePosition, NSColor, NSControl, NSEvent, NSEventMask, NSEventTrackingRunLoopMode,
+    NSEventType, NSFocusRingType, NSFont, NSImageScaling, NSImageView, NSLineBreakMode,
+    NSResponder, NSTextAlignment, NSTextField, NSTrackingArea, NSTrackingAreaOptions, NSView,
 };
 use objc2_core_foundation::CGFloat;
 use objc2_foundation::{
-    MainThreadMarker, NSAttributedString, NSDictionary, NSNotification, NSPoint, NSRect, NSSize,
-    NSString,
+    MainThreadMarker, NSAttributedString, NSDate, NSDictionary, NSNotification, NSPoint, NSRect,
+    NSSize, NSString,
 };
 
 use super::theme::{self, Icon, Weight};
@@ -131,8 +131,8 @@ pub fn icon_view(
     tint: &NSColor,
     frame: NSRect,
 ) -> Retained<NSImageView> {
-    let v = NSImageView::imageViewWithImage(&icon.image(size), mtm);
-    v.setFrame(frame);
+    let v = NSImageView::initWithFrame(NSImageView::alloc(mtm), frame);
+    v.setImage(icon.image(size).as_deref());
     v.setImageScaling(NSImageScaling::ScaleNone);
     v.setContentTintColor(Some(tint));
     v
@@ -223,6 +223,15 @@ define_class!(
         fn accepts_first_mouse(&self, _event: Option<&NSEvent>) -> bool {
             true
         }
+
+        /// Also called when an ancestor is hidden. A hidden view gets no `mouseExited:`, so
+        /// without this the hover background would come back with the view.
+        #[unsafe(method(viewDidHide))]
+        fn view_did_hide(&self) {
+            // SAFETY: forwards to the superclass implementation.
+            let _: () = unsafe { msg_send![super(self), viewDidHide] };
+            self.clear_hover();
+        }
     }
 );
 
@@ -290,12 +299,28 @@ impl HoverButton {
     }
 
     pub fn set_icon(&self, icon: Icon, size: CGFloat) {
-        self.setImage(Some(&icon.image(size)));
+        self.setImage(icon.image(size).as_deref());
+    }
+
+    /// Shows or hides the button; hiding also drops its hover state.
+    pub fn set_shown(&self, shown: bool) {
+        if !shown {
+            self.clear_hover();
+        }
+        self.setHidden(!shown);
+    }
+
+    fn clear_hover(&self) {
+        if self.ivars().hovered.replace(false) {
+            self.paint();
+        }
     }
 
     pub fn set_action(&self, target: &AnyObject, action: Sel) {
-        // SAFETY: the target is the app delegate or a table controller, both retained by the
-        // `Ui` for the life of the process, and each implements `action`.
+        // SAFETY: the target implements `action` and outlives the button: it is either the
+        // app delegate, which `app::run` holds until `app.run()`, which never returns, or a
+        // table controller, which its `Table` holds for as long as the installed `Ui` lives:
+        // until exit.
         unsafe {
             self.setTarget(Some(target));
             self.setAction(Some(action));
@@ -662,26 +687,8 @@ define_class!(
 
         #[unsafe(method(mouseDown:))]
         fn mouse_down(&self, event: &NSEvent) {
-            if !self.ivars().enabled.get() {
-                return;
-            }
-            self.ivars().dragging.set(true);
-            self.track_mouse(event, false);
-        }
-
-        #[unsafe(method(mouseDragged:))]
-        fn mouse_dragged(&self, event: &NSEvent) {
-            if self.ivars().dragging.get() {
-                self.track_mouse(event, false);
-            }
-        }
-
-        #[unsafe(method(mouseUp:))]
-        fn mouse_up(&self, event: &NSEvent) {
-            if self.ivars().dragging.get() {
-                self.track_mouse(event, true);
-                self.ivars().dragging.set(false);
-                self.setNeedsDisplay(true);
+            if self.ivars().enabled.get() {
+                self.drag(event);
             }
         }
 
@@ -758,6 +765,33 @@ impl Slider {
         )
     }
 
+    /// Follows the drag to its mouse-up in a local event loop, as AppKit's own controls do, so
+    /// `dragging` cannot outlive the gesture even if the window loses focus mid-drag.
+    fn drag(&self, down: &NSEvent) {
+        self.ivars().dragging.set(true);
+        self.track_mouse(down, false);
+        if let Some(window) = self.window() {
+            let mask = NSEventMask::LeftMouseDragged | NSEventMask::LeftMouseUp;
+            let forever = NSDate::distantFuture();
+            // SAFETY: the run-loop-mode static is an immutable framework constant.
+            let mode = unsafe { NSEventTrackingRunLoopMode };
+            while let Some(ev) = window.nextEventMatchingMask_untilDate_inMode_dequeue(
+                mask,
+                Some(&forever),
+                mode,
+                true,
+            ) {
+                let up = ev.r#type() == NSEventType::LeftMouseUp;
+                self.track_mouse(&ev, up);
+                if up {
+                    break;
+                }
+            }
+        }
+        self.ivars().dragging.set(false);
+        self.setNeedsDisplay(true);
+    }
+
     fn track_mouse(&self, event: &NSEvent, done: bool) {
         let p = self.convertPoint_fromView(event.locationInWindow(), None);
         let (x0, w, _) = self.track();
@@ -777,7 +811,7 @@ impl Slider {
     }
 }
 
-/// Centred icon, heading and subtext for an empty list.
+/// Centred icon, heading, subtext and primary action for an empty list.
 pub struct EmptyState {
     pub view: Retained<NSView>,
     /// Fixed height, so resizing moves the block without squeezing its rows together.
@@ -854,7 +888,7 @@ impl EmptyState {
     }
 
     pub fn set(&self, icon: Icon, heading: &str, sub: &str, action: &str) {
-        self.icon.setImage(Some(&icon.image(32.0)));
+        self.icon.setImage(icon.image(32.0).as_deref());
         set_text(&self.heading, heading);
         set_text(&self.sub, sub);
         let w = self.action.set_label(action);

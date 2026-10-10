@@ -264,13 +264,40 @@ impl Icon {
         }
     }
 
-    /// A template image at `size` points; tint it with `contentTintColor`.
-    pub fn image(self, size: CGFloat) -> Retained<NSImage> {
+    /// A template image at `size` points; tint it with `contentTintColor`. `None`, logged,
+    /// if the SVG does not decode: callers run inside AppKit callbacks, where a panic would
+    /// abort, and a missing icon is the lesser failure.
+    pub fn image(self, size: CGFloat) -> Option<Retained<NSImage>> {
         let data = NSData::with_bytes(self.svg());
-        let img = NSImage::initWithData(NSImage::alloc(), &data)
-            .unwrap_or_else(|| panic!("embedded icon {self:?} does not decode"));
+        let Some(img) = NSImage::initWithData(NSImage::alloc(), &data) else {
+            eprintln!("requiem-gui: embedded icon {self:?} does not decode");
+            return None;
+        };
         img.setTemplate(true);
         img.setSize(NSSize::new(size, size));
-        img
+        Some(img)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn every_icon_decodes() {
+        for icon in [
+            Icon::Play,
+            Icon::Pause,
+            Icon::SkipBack,
+            Icon::SkipForward,
+            Icon::Search,
+            Icon::ListMusic,
+            Icon::Volume,
+            Icon::Plus,
+            Icon::X,
+            Icon::Music,
+        ] {
+            assert!(icon.image(16.0).is_some(), "{icon:?}");
+        }
     }
 }

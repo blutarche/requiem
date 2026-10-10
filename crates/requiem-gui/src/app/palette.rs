@@ -71,6 +71,14 @@ define_class!(
             self.ivars().hovered.set(false);
             ui::with(|ui| ui.palette.repaint());
         }
+
+        /// Also called when the palette closes. A hidden view gets no `mouseExited:`.
+        #[unsafe(method(viewDidHide))]
+        fn view_did_hide(&self) {
+            // SAFETY: forwards to the superclass implementation.
+            let _: () = unsafe { msg_send![super(self), viewDidHide] };
+            self.ivars().hovered.set(false);
+        }
     }
 );
 
@@ -123,7 +131,8 @@ impl Palette {
             "Type a command…",
             Some(Icon::Search),
         );
-        // SAFETY: the delegate is the app delegate, alive for the life of the process.
+        // SAFETY: the field's delegate is weak. It is the app delegate, which `app::run` holds
+        // in a local until `app.run()`, which never returns.
         unsafe { field.text.setDelegate(Some(delegate)) };
         panel.addSubview(&field.ring);
 

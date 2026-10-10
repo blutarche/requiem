@@ -3,11 +3,11 @@
 use std::cell::RefCell;
 use std::io;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 use std::thread;
 use std::time::Duration;
 
-use crossbeam_channel::{Sender, unbounded};
+use crossbeam_channel::{Sender, TrySendError, bounded};
 use dispatch2::DispatchQueue;
 use requiem_core::{Command, Event};
 use requiem_ipc::{Client, Incoming, Role};
@@ -17,6 +17,9 @@ use crate::demo;
 use crate::vm::Link;
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(3);
+/// Commands waiting for the writer thread. Beyond this the daemon is not keeping up, and
+/// newer commands are dropped rather than queued without bound.
+const COMMAND_QUEUE: usize = 64;
 const BACKOFF: [Duration; 4] = [
     Duration::from_millis(500),
     Duration::from_secs(1),
@@ -43,8 +46,7 @@ impl Backend {
         match self {
             Backend::Demo(d) => d.borrow_mut().apply(cmd),
             Backend::Live(l) => {
-                // The writer outlives the UI; a send error can only happen at exit.
-                let _ = l.tx.send(cmd);
+                enqueue(&l.tx, cmd);
                 Vec::new()
             }
         }
@@ -62,7 +64,7 @@ impl Live {
     /// the main thread, one dispatch per drained batch.
     pub fn start() -> Live {
         let slot: Slot = Arc::default();
-        let (tx, rx) = unbounded::<Command>();
+        let (tx, rx) = bounded::<Command>(COMMAND_QUEUE);
         let writer = Arc::clone(&slot);
         thread::Builder::new()
             .name("requiem-gui-writer".into())
@@ -87,6 +89,24 @@ impl Live {
             .spawn(move || connection(daemon_path(), slot))
             .expect("spawn connection thread");
         Live { tx }
+    }
+}
+
+/// Never blocks the main thread: a full queue drops the command.
+fn enqueue(tx: &Sender<Command>, cmd: Command) {
+    match tx.try_send(cmd) {
+        Ok(()) => {}
+        Err(TrySendError::Full(_)) => debug(|| "command queue full; dropped a command".into()),
+        // The writer outlives the UI; it is gone only at exit.
+        Err(TrySendError::Disconnected(_)) => {}
+    }
+}
+
+/// A stderr line when `REQUIEM_LOG=debug`, as in the other crates.
+fn debug(msg: impl FnOnce() -> String) {
+    static ON: OnceLock<bool> = OnceLock::new();
+    if *ON.get_or_init(|| std::env::var("REQUIEM_LOG").is_ok_and(|v| v == "debug")) {
+        eprintln!("requiem-gui: {}", msg());
     }
 }
 
@@ -158,6 +178,16 @@ fn post(batch: Vec<Msg>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn full_queue_drops_instead_of_blocking() {
+        let (tx, rx) = bounded(1);
+        enqueue(&tx, Command::Next);
+        enqueue(&tx, Command::Prev);
+        assert_eq!(rx.try_iter().collect::<Vec<_>>(), vec![Command::Next]);
+        drop(rx);
+        enqueue(&tx, Command::Next);
+    }
 
     #[test]
     fn daemon_is_found_next_to_the_gui() {
