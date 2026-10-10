@@ -10,3 +10,4 @@ Native desktop client for **Spotify** and **YouTube Music** — built to stay op
 
 - Spotify playback requires a **Spotify Premium** account.
 - requiem is an unofficial client. It is not affiliated with or endorsed by Spotify, YouTube, or Google.
+- YouTube Music playback is anonymous and ad-free. That breaks YouTube's Terms of Service; you use it at your own risk, and YouTube may break it at any time.

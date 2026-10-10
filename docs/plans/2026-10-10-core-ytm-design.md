@@ -96,7 +96,7 @@ CLI (stdin) ──Command──► Session actor ──Event──► subscriber
 ### requiem-core
 
 ```rust
-pub struct ProviderId(pub &'static str);              // "ytmusic"
+pub struct ProviderId(pub String);                    // "ytmusic"
 pub struct TrackId { pub provider: ProviderId, pub id: String }
 pub struct Track { pub id: TrackId, pub title: String, pub artists: Vec<String>,
                    pub album: Option<String>, pub duration: Option<Duration>,
@@ -125,15 +125,17 @@ pub enum ProviderError {
 }
 
 pub trait Engine: Send {            // every method only enqueues; none blocks
-    fn load(&mut self, gen: u64, src: AudioSource);
+    fn load(&mut self, r#gen: u64, src: AudioSource);  // `gen` is reserved in edition 2024
     fn pause(&mut self); fn resume(&mut self);
     fn seek(&mut self, to: Duration);
     fn set_volume(&mut self, v: f32);   // 0.0..=1.0
     fn stop(&mut self);
 }
-// Engine constructor takes a Sender<EngineEvent>; every event carries the load generation.
+// Engine constructor takes an EngineEventSink = Arc<dyn Fn(EngineEvent) + Send + Sync>;
+// every event carries the load generation.
 pub enum EngineEvent { Started { gen, duration: Option<Duration> }, Position { gen, at: Duration },
-                       Buffering { gen, on: bool }, Ended { gen }, Failed { gen, error: String } }
+                       Buffering { gen, on: bool }, Ended { gen },
+                       Failed { gen, kind: FailureKind /* Stream | Decode | Output */, detail: String } }
 ```
 
 `Command` and `Event` derive `Serialize` and `Deserialize`:
@@ -145,7 +147,8 @@ pub enum EngineEvent { Started { gen, duration: Option<Duration> }, Position { g
 
 **Queue rules:**
 
-- The queue is an ordered list plus a current index. `Enqueue Replace` clears the list, and `PlayIndex` jumps to an entry.
+- The queue is an ordered list plus a current index. `Enqueue Replace` replaces the list and clears the current index; the playing track keeps playing until it ends (then playback stops) or `PlayIndex` jumps to an entry.
+- `QueueChanged` is emitted on every list change and whenever the current index moves. `Seek` emits no event; the next `Position` reflects it.
 - `Next` past the end stops playback.
 - `Prev` restarts the current track if more than 3 s have played or it is the first track; otherwise it goes to the previous track.
 - When a track starts, the actor pre-resolves the next one. Only the URL and metadata are fetched, never audio bytes.
@@ -156,6 +159,7 @@ pub enum EngineEvent { Started { gen, duration: Option<Duration> }, Position { g
 - Every resolve, including pre-resolve, is stamped `(queue_gen, index, track_id)`. The actor drops any result whose stamp no longer matches.
 - Every `Engine::load` carries a load generation, and the actor ignores `EngineEvent`s from older loads. In particular, an old `Ended` never advances the queue.
 - A failed pre-resolve isn't a strike against the track. That track is resolved again when it actually starts.
+- Strikes count consecutive failures of tracks whose start was attempted, whether the resolve or the engine failed. They reset when a track starts or playback stops.
 
 ### requiem-provider-ytmusic
 
@@ -186,7 +190,7 @@ pub enum EngineEvent { Started { gen, duration: Option<Duration> }, Position { g
   - **Range invariants:** a partial read must be `206` with a `Content-Range` whose start, end and total match the request and the known length, and a body of exactly that length. A `200` to a ranged request, or any mismatch, is an error.
   - **Transient errors** (timeout, connection reset): retry the same range once after 1 s.
   - **403 or 410:** re-resolve through the refresh path (URLs expire and embed the client IP, which changes after sleep or IPv6 address rotation). At most 3 refreshes per track, at least 10 s apart.
-  - **Continuity:** if the refreshed format has the same itag and contentLength, resume at the same byte offset. Otherwise the decode thread reopens the new source and seeks to the current time position. If neither works, the track fails.
+  - **Continuity:** if the refreshed format has the same itag and contentLength, resume at the same byte offset. Otherwise the read fails and so does the track (v0.1: reopening and seeking by time needs engine support and is deferred).
   - A 403 on the first byte of a freshly resolved URL, after one retry, is `ClientBroken`.
 - **Resolve flow.** Run the player call, classify it, pick a format by D6, and return a lazy `AudioSource::Encoded`.
 
