@@ -19,7 +19,7 @@ use parse::{PROVIDER, StreamFormat};
 use range::{HttpRangeSource, RangeConfig};
 use transport::UreqTransport;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum IpFamily {
     #[default]
     Any,
@@ -42,9 +42,10 @@ pub struct YtMusicProvider {
 impl YtMusicProvider {
     pub fn new(opts: YtMusicOptions) -> YtMusicProvider {
         Self {
-            client: Arc::new(InnertubeClient::new(Arc::new(UreqTransport::new(
+            client: Arc::new(InnertubeClient::new(
+                Arc::new(UreqTransport::new()),
                 opts.ip_family,
-            )))),
+            )),
             prefer_aac: opts.prefer_aac,
         }
     }
@@ -53,16 +54,17 @@ impl YtMusicProvider {
         &self,
         video_id: &str,
     ) -> Result<(StreamFormat, HttpRangeSource), ProviderError> {
-        let format = self.client.resolve(video_id, self.prefer_aac)?;
+        let (format, family) = self.client.resolve(video_id, self.prefer_aac)?;
         let source = HttpRangeSource::new(
             format.url.clone(),
             format.itag,
             format.content_length,
-            self.client.fetcher(),
+            self.client.fetcher(family),
             Arc::new(ClientRefresher {
                 client: self.client.clone(),
                 video_id: video_id.to_owned(),
                 prefer_aac: self.prefer_aac,
+                family,
             }),
             RangeConfig::default(),
         );

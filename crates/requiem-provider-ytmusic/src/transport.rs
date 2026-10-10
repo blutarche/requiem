@@ -10,7 +10,7 @@ use ureq::config::IpFamily as UreqIpFamily;
 
 use crate::IpFamily;
 use crate::clients::{MUSIC_UA, STREAM_UA};
-use crate::range::{FetchError, RangeFetcher, RangeResponse};
+use crate::range::{FetchError, RangeResponse};
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 const IO_TIMEOUT: Duration = Duration::from_secs(10);
@@ -22,22 +22,40 @@ pub(crate) struct HttpResponse {
     pub body: Vec<u8>,
 }
 
-pub(crate) trait Transport: RangeFetcher {
+pub(crate) trait Transport: Send + Sync {
     /// Statuses are returned as values; only transport failures are errors.
     fn post_json(
         &self,
+        family: IpFamily,
         url: &str,
         headers: &[(&str, &str)],
         body: &str,
     ) -> Result<HttpResponse, ProviderError>;
 
-    /// Drops pooled connections (a fresh agent).
+    /// GET `url` with `Range: bytes=start-end_inclusive` on `family`.
+    fn fetch_on(
+        &self,
+        family: IpFamily,
+        url: &str,
+        start: u64,
+        end_inclusive: u64,
+    ) -> Result<RangeResponse, FetchError>;
+
+    /// Drops pooled connections (fresh agents).
     fn reset(&self);
 }
 
+/// One agent per family, built lazily: ureq fixes the family at agent construction.
 pub(crate) struct UreqTransport {
-    agent: Mutex<Agent>,
-    ip_family: IpFamily,
+    agents: Mutex<[Option<Agent>; 3]>,
+}
+
+fn slot(family: IpFamily) -> usize {
+    match family {
+        IpFamily::Any => 0,
+        IpFamily::V4 => 1,
+        IpFamily::V6 => 2,
+    }
 }
 
 fn build_agent(ip_family: IpFamily) -> Agent {
@@ -59,15 +77,17 @@ fn build_agent(ip_family: IpFamily) -> Agent {
 }
 
 impl UreqTransport {
-    pub(crate) fn new(ip_family: IpFamily) -> Self {
+    pub(crate) fn new() -> Self {
         Self {
-            agent: Mutex::new(build_agent(ip_family)),
-            ip_family,
+            agents: Mutex::new([None, None, None]),
         }
     }
 
-    fn agent(&self) -> Agent {
-        self.agent.lock().unwrap_or_else(|e| e.into_inner()).clone()
+    fn agent(&self, family: IpFamily) -> Agent {
+        let mut agents = self.agents.lock().unwrap_or_else(|e| e.into_inner());
+        agents[slot(family)]
+            .get_or_insert_with(|| build_agent(family))
+            .clone()
     }
 }
 
@@ -80,12 +100,13 @@ fn read_limited(body: ureq::Body, limit: u64) -> std::io::Result<Vec<u8>> {
 impl Transport for UreqTransport {
     fn post_json(
         &self,
+        family: IpFamily,
         url: &str,
         headers: &[(&str, &str)],
         body: &str,
     ) -> Result<HttpResponse, ProviderError> {
         let mut req = self
-            .agent()
+            .agent(family)
             .post(url)
             .header("Content-Type", "application/json");
         for (k, v) in headers {
@@ -100,21 +121,16 @@ impl Transport for UreqTransport {
         Ok(HttpResponse { status, body })
     }
 
-    fn reset(&self) {
-        *self.agent.lock().unwrap_or_else(|e| e.into_inner()) = build_agent(self.ip_family);
-    }
-}
-
-impl RangeFetcher for UreqTransport {
-    fn fetch(
+    fn fetch_on(
         &self,
+        family: IpFamily,
         url: &str,
         start: u64,
         end_inclusive: u64,
     ) -> Result<RangeResponse, FetchError> {
         let transient = |e: &dyn std::fmt::Display| FetchError::Transient(e.to_string());
         let resp = self
-            .agent()
+            .agent(family)
             .get(url)
             .header("Range", format!("bytes={start}-{end_inclusive}"))
             .header("User-Agent", STREAM_UA)
@@ -134,5 +150,9 @@ impl RangeFetcher for UreqTransport {
             content_range,
             body,
         })
+    }
+
+    fn reset(&self) {
+        *self.agents.lock().unwrap_or_else(|e| e.into_inner()) = [None, None, None];
     }
 }

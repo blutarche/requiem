@@ -86,3 +86,19 @@ fn live_stream_opus() {
 fn live_stream_aac() {
     stream(true, FormatHint::Mp4Aac);
 }
+
+#[test]
+#[ignore]
+fn live_any_family_falls_back() {
+    let p = provider(false, IpFamily::Any);
+    let track = p.search(QUERY, 5).unwrap().remove(0);
+    let (format, mut src) = p.open(&track.id.id).unwrap();
+    let mut got = 0usize;
+    let mut buf = vec![0u8; 64 * 1024];
+    while got < 2 * 1024 * 1024 {
+        let n = src.read(&mut buf).unwrap();
+        assert!(n > 0, "EOF after {got} bytes");
+        got += n;
+    }
+    println!("Any: itag {}, read {got} bytes", format.itag);
+}
