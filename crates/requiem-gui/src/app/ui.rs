@@ -3,17 +3,19 @@
 
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
+use std::time::{Duration, Instant};
 
 use dispatch2::{DispatchQueue, DispatchTime};
 use objc2::rc::Retained;
 use objc2::runtime::{AnyObject, ProtocolObject};
 use objc2::{MainThreadOnly, sel};
 use objc2_app_kit::{
-    NSApplication, NSBackingStoreType, NSTextAlignment, NSTextField, NSTextFieldDelegate, NSView,
-    NSWindow, NSWindowStyleMask, NSWindowTitleVisibility,
+    NSAnimatablePropertyContainer, NSApplication, NSBackingStoreType, NSTextAlignment, NSTextField,
+    NSTextFieldDelegate, NSView, NSWindow, NSWindowOcclusionState, NSWindowStyleMask,
+    NSWindowTitleVisibility,
 };
 use objc2_core_foundation::CGFloat;
-use objc2_foundation::{MainThreadMarker, NSSize, NSString};
+use objc2_foundation::{MainThreadMarker, NSPoint, NSSize, NSString};
 
 use super::Delegate;
 use super::backend::{Backend, Msg};
@@ -25,7 +27,10 @@ use super::widgets::{
     self, EmptyState, FLEX_H, FLEX_W, Field, HoverButton, NavItem, PIN_BOTTOM, PIN_LEFT, PIN_RIGHT,
     PIN_TOP, rect,
 };
-use crate::vm::{self, Banner, Dirty, EmptyText, Intent, PaletteAction, Toast, UiState, Vm};
+use crate::vm::{
+    self, Banner, Controls, Dirty, EmptyAction, EmptyText, Intent, PaletteAction, Toast, UiState,
+    Vm,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AppView {
@@ -59,12 +64,22 @@ const PAD: CGFloat = 24.0;
 const TOP: CGFloat = 20.0;
 const STATUS_H: CGFloat = 26.0;
 const TOAST_H: CGFloat = 40.0;
+/// Tall enough for a compact button.
+const TOAST_ACTION_H: CGFloat = 48.0;
+const TOAST_BUTTON_H: CGFloat = 32.0;
+/// How far below its place a toast starts as it fades in.
+const TOAST_RISE: CGFloat = 8.0;
+/// How long "Quit and Stop Music" waits for the player's goodbye.
+const QUIT_GRACE: Duration = Duration::from_secs(3);
 
 struct ToastView {
     view: Retained<NSView>,
     accent: Retained<NSView>,
     label: Retained<NSTextField>,
+    action: Retained<HoverButton>,
     id: Cell<u64>,
+    /// False from the start of the exit; the view hides once the exit ends.
+    shown: Cell<bool>,
 }
 
 pub struct Ui {
@@ -79,6 +94,8 @@ pub struct Ui {
     main: Retained<NSView>,
     banner: Retained<NSView>,
     banner_label: Retained<NSTextField>,
+    /// False from the start of the fade-out; the view hides once it ends.
+    banner_shown: Cell<bool>,
     search_page: Retained<NSView>,
     pub search: Field,
     status: Retained<NSTextField>,
@@ -91,6 +108,8 @@ pub struct Ui {
     bar: PlayerBar,
     toast: ToastView,
     pub palette: Palette,
+    /// The banner deadline a `tick` is already scheduled for.
+    tick_at: Cell<Option<Instant>>,
 }
 
 impl Ui {
@@ -121,6 +140,9 @@ impl Ui {
         window.setTitlebarAppearsTransparent(true);
         window.setContentMinSize(NSSize::new(MIN_W, MIN_H));
         window.setBackgroundColor(Some(&theme::bg()));
+        // Tab moves between the field and the table, and through the buttons with keyboard
+        // navigation on.
+        window.setAutorecalculatesKeyViewLoop(true);
         window.center();
 
         let root = widgets::panel(
@@ -196,7 +218,7 @@ impl Ui {
         let status = widgets::placed_label(
             mtm,
             "",
-            &theme::font(13.0, Weight::Regular),
+            &theme::font(12.0, Weight::Regular),
             &theme::muted(),
             PAD,
             field_y - STATUS_H / 2.0 - 4.0,
@@ -206,7 +228,7 @@ impl Ui {
         status.setHidden(true);
         let list = rect(PAD, 0.0, mw - 2.0 * PAD, field_y - 16.0);
         let results = Table::new(mtm, list, Kind::Results);
-        let results_empty = EmptyState::new(mtm, list, Icon::Search, target);
+        let results_empty = EmptyState::new(mtm, list, Icon::Search, target, sel!(emptyAction:));
         search_page.addSubview(&search.ring);
         search_page.addSubview(&status);
         search_page.addSubview(&results.view);
@@ -229,7 +251,7 @@ impl Ui {
         let queue_count = widgets::placed_label(
             mtm,
             "",
-            &theme::font(13.0, Weight::Regular),
+            &theme::font(12.0, Weight::Regular),
             &theme::muted(),
             mw - PAD - 200.0,
             head_y,
@@ -238,7 +260,7 @@ impl Ui {
         );
         queue_count.setAlignment(NSTextAlignment::Right);
         let queue = Table::new(mtm, list, Kind::Queue);
-        let queue_empty = EmptyState::new(mtm, list, Icon::ListMusic, target);
+        let queue_empty = EmptyState::new(mtm, list, Icon::ListMusic, target, sel!(focusSearch:));
         queue_empty.set(
             Icon::ListMusic,
             "Queue is empty",
@@ -261,7 +283,7 @@ impl Ui {
         let banner_label = widgets::placed_label(
             mtm,
             "",
-            &theme::font(13.0, Weight::Medium),
+            &theme::font(12.0, Weight::Medium),
             &theme::ink_2(),
             PAD,
             BANNER_H / 2.0,
@@ -292,6 +314,7 @@ impl Ui {
             main,
             banner,
             banner_label,
+            banner_shown: Cell::new(false),
             search_page,
             search,
             status,
@@ -304,6 +327,7 @@ impl Ui {
             bar,
             toast,
             palette,
+            tick_at: Cell::new(None),
         });
         let query = ui.vm.borrow().ui().query.clone();
         ui.search.set_value(&query);
@@ -322,37 +346,50 @@ impl Ui {
         widgets::round(&view, theme::RADIUS);
         widgets::border(&view, &theme::line_2(), 1.0);
         let accent = widgets::panel(mtm, rect(0.0, 0.0, 3.0, TOAST_H), FLEX_H, &theme::bad());
+        // Both vertical margins flex, so the rows stay centred as the height changes.
+        let centred = PIN_TOP | PIN_BOTTOM;
         let label = widgets::placed_label(
             mtm,
             "",
-            &theme::font(13.0, Weight::Regular),
+            &theme::font(14.0, Weight::Regular),
             &theme::ink_2(),
             16.0,
             TOAST_H / 2.0,
             w - 16.0 - 40.0,
-            FLEX_W,
+            FLEX_W | centred,
         );
+        let action = HoverButton::secondary(
+            mtm,
+            rect(0.0, (TOAST_H - TOAST_BUTTON_H) / 2.0, 0.0, TOAST_BUTTON_H),
+        );
+        action.setAutoresizingMask(PIN_RIGHT | centred);
+        action.set_action(target, sel!(toastAction:));
+        action.setHidden(true);
         let close = HoverButton::new(
             mtm,
             rect(w - 32.0, (TOAST_H - 24.0) / 2.0, 24.0, 24.0),
             Icon::X,
-            14.0,
+            16.0,
             &theme::muted(),
             None,
             &theme::line_2(),
             theme::RADIUS,
         );
-        close.setAutoresizingMask(PIN_RIGHT);
+        close.setAutoresizingMask(PIN_RIGHT | centred);
         close.set_action(target, sel!(closeToast:));
+        widgets::describe(&close, "Dismiss", None);
         view.addSubview(&accent);
         view.addSubview(&label);
+        view.addSubview(&action);
         view.addSubview(&close);
         view.setHidden(true);
         ToastView {
             view,
             accent,
             label,
+            action,
             id: Cell::new(0),
+            shown: Cell::new(false),
         }
     }
 
@@ -366,12 +403,58 @@ impl Ui {
         self.queue_page.setHidden(view != AppView::Queue);
         self.nav_search.set_active(view == AppView::Search);
         self.nav_queue.set_active(view == AppView::Queue);
+        if view == AppView::Search && self.vm.borrow().ui().results.is_empty() {
+            self.window.makeFirstResponder(Some(&self.search.text));
+            return;
+        }
         let table = match view {
             AppView::Search => &self.results.table,
             AppView::Queue => &self.queue.table,
         };
         // Keeps Space and the arrow keys from landing in a hidden text field.
         self.window.makeFirstResponder(Some(table));
+    }
+
+    /// The results table has focus with its first row selected.
+    pub fn results_at_top(&self) -> bool {
+        let focused = self
+            .window
+            .firstResponder()
+            .is_some_and(|r| std::ptr::eq::<AnyObject>(r.as_ref(), self.results.table.as_ref()));
+        self.view.get() == AppView::Search && focused && self.results.selected_row() == Some(0)
+    }
+
+    /// Whether the visible table has a row that Return (or with `append`, Cmd+Return) acts on.
+    pub fn has_selection(&self, append: bool) -> bool {
+        match self.view.get() {
+            AppView::Search => self.results.selected_row().is_some(),
+            AppView::Queue => !append && self.queue.selected_row().is_some(),
+        }
+    }
+
+    /// Whether something plays, and which controls are live; for the menus.
+    pub fn playback(&self) -> (bool, Controls) {
+        let vm = self.vm.borrow();
+        (vm.ui().is_playing(), vm.ui().controls())
+    }
+
+    /// Stops the player, then the window closes on its goodbye. Without a connected player
+    /// the window just closes.
+    pub fn quit_and_stop(&self) {
+        let app = NSApplication::sharedApplication(self.mtm);
+        let connected = self.vm.borrow().ui().connection == vm::Connection::Connected;
+        if !connected || !self.backend.stop_player() {
+            app.terminate(None);
+            return;
+        }
+        // A player that never says goodbye still lets the window go.
+        if let Ok(when) = DispatchTime::try_from(QUIT_GRACE) {
+            let _ = DispatchQueue::main().after(when, || {
+                if let Some(mtm) = MainThreadMarker::new() {
+                    NSApplication::sharedApplication(mtm).terminate(None);
+                }
+            });
+        }
     }
 
     pub fn focus_search(&self) {
@@ -381,6 +464,14 @@ impl Ui {
 
     pub fn open_palette(&self) {
         if !self.palette.is_open() {
+            self.palette.open();
+        }
+    }
+
+    pub fn toggle_palette(&self) {
+        if self.palette.is_open() {
+            self.close_palette();
+        } else {
             self.palette.open();
         }
     }
@@ -404,6 +495,8 @@ impl Ui {
             PaletteAction::PlayPause => self.intent(Intent::Toggle),
             PaletteAction::Next => self.intent(Intent::Next),
             PaletteAction::Previous => self.intent(Intent::Prev),
+            PaletteAction::PlaySelected => self.activate_selection(false),
+            PaletteAction::AddToQueue => self.activate_selection(true),
             PaletteAction::FocusSearch => self.focus_search(),
             PaletteAction::ShowSearch => self.show(AppView::Search),
             PaletteAction::ShowQueue => self.show(AppView::Queue),
@@ -414,14 +507,34 @@ impl Ui {
 
     pub fn intent(&self, intent: Intent) {
         let cmds = self.vm.borrow_mut().intent(intent);
-        for cmd in cmds {
-            let events = self.backend.send(cmd);
-            let mut vm = self.vm.borrow_mut();
-            for ev in events {
-                vm.apply(ev);
-            }
-        }
+        self.send(cmds);
         self.render();
+    }
+
+    /// Sends `cmds`, then whatever the view model raised in answer: the demo backend answers
+    /// at once, and its events can raise more.
+    fn send(&self, mut cmds: Vec<requiem_core::Command>) {
+        while !cmds.is_empty() {
+            for cmd in cmds {
+                let events = self.backend.send(cmd);
+                let mut vm = self.vm.borrow_mut();
+                for ev in events {
+                    vm.apply(ev);
+                }
+            }
+            cmds = self.vm.borrow_mut().take_commands();
+        }
+    }
+
+    /// The results empty state's button: "Start a search" runs the typed query, or focuses
+    /// the empty field; "Edit search" focuses the field.
+    pub fn empty_action(&self) {
+        let action = self.vm.borrow().ui().results_empty().map(|e| e.action);
+        if action == Some(EmptyAction::StartSearch) && !self.search.value().trim().is_empty() {
+            self.search_submitted();
+        } else {
+            self.focus_search();
+        }
     }
 
     pub fn search_submitted(&self) {
@@ -441,17 +554,32 @@ impl Ui {
                 }
             }
             AppView::Queue => {
-                if let Some(i) = self.queue.selected_row() {
-                    self.intent(Intent::PlayQueue(i));
+                if let Some(i) = self.queue.selected_row().filter(|_| !append) {
+                    self.play_queue(i);
                 }
             }
         }
     }
 
+    /// Plays queue row `i` and drops the selection, so the current-row marker is what
+    /// stands out.
+    pub fn play_queue(&self, i: usize) {
+        self.intent(Intent::PlayQueue(i));
+        self.queue.deselect();
+    }
+
     pub fn seek_fraction(&self, fraction: f64) {
-        let d = self.vm.borrow().ui().duration;
-        if let Some(d) = d {
-            self.intent(Intent::SeekTo(d.mul_f64(fraction.clamp(0.0, 1.0))));
+        let to = self.vm.borrow().ui().seek_target(fraction);
+        if let Some(to) = to {
+            self.intent(Intent::SeekTo(to));
+        }
+    }
+
+    /// Shows where a seek-bar drag would land in the elapsed label.
+    pub fn preview_seek(&self, fraction: f64) {
+        let to = self.vm.borrow().ui().seek_target(fraction);
+        if let Some(to) = to {
+            self.bar.preview_seek(&vm::fmt_time(to));
         }
     }
 
@@ -463,6 +591,11 @@ impl Ui {
         self.dismiss_toast(self.toast.id.get());
     }
 
+    /// The toast's action button; the view model checks the toast is still the one shown.
+    pub fn toast_action(&self) {
+        self.intent(Intent::Undo);
+    }
+
     fn dismiss_toast(&self, id: u64) {
         self.vm.borrow_mut().dismiss_toast(id);
         self.render();
@@ -470,7 +603,7 @@ impl Ui {
 
     pub fn receive(&self, batch: Vec<Msg>) {
         let mut raise = false;
-        {
+        let cmds = {
             let mut vm = self.vm.borrow_mut();
             for m in batch {
                 match m {
@@ -479,7 +612,9 @@ impl Ui {
                     Msg::Raise => raise = true,
                 }
             }
-        }
+            vm.take_commands()
+        };
+        self.send(cmds);
         self.render();
         if raise {
             self.raise();
@@ -496,17 +631,68 @@ impl Ui {
         self.window.makeKeyAndOrderFront(None);
     }
 
-    /// Pushes the view model's changed regions into the views.
+    /// Pushes the view model's changed regions into the views. While the window can't be
+    /// seen they pile up in the view model, for `catch_up`.
     pub fn render(&self) {
+        if self.on_screen() {
+            self.render_now();
+        } else {
+            self.schedule_tick();
+        }
+    }
+
+    /// Renders what changed while the window couldn't be seen, once it can.
+    pub fn catch_up(&self) {
+        if self.on_screen() {
+            self.render_now();
+        }
+    }
+
+    /// `render`, whether or not the window can be seen.
+    pub fn render_now(&self) {
         let patch = {
             let mut vm = self.vm.borrow_mut();
             let dirty = vm.take_dirty();
-            if dirty.is_empty() {
-                return;
-            }
-            Patch::new(dirty, vm.ui())
+            (!dirty.is_empty()).then(|| Patch::new(dirty, vm.ui()))
         };
-        self.apply(patch);
+        if let Some(patch) = patch {
+            self.apply(patch);
+        }
+        self.schedule_tick();
+    }
+
+    /// Not hidden, minimized or fully covered.
+    fn on_screen(&self) -> bool {
+        let w = &self.window;
+        w.isVisible()
+            && !w.isMiniaturized()
+            && !NSApplication::sharedApplication(self.mtm).isHidden()
+            && w.occlusionState().contains(NSWindowOcclusionState::Visible)
+    }
+
+    /// Wakes the view model when the banner is due to change on its own.
+    fn schedule_tick(&self) {
+        let next = self.vm.borrow().next_tick();
+        if next == self.tick_at.get() {
+            return;
+        }
+        self.tick_at.set(next);
+        let Some(at) = next else { return };
+        let wait = at.saturating_duration_since(Instant::now());
+        if let Ok(when) = DispatchTime::try_from(wait) {
+            let _ = DispatchQueue::main().after(when, move || {
+                with(|ui| ui.tick(at));
+            });
+        }
+    }
+
+    fn tick(&self, at: Instant) {
+        if self.tick_at.get() != Some(at) {
+            return;
+        }
+        self.tick_at.set(None);
+        self.vm.borrow_mut().tick();
+        self.render();
     }
 
     fn apply(&self, p: Patch) {
@@ -530,8 +716,11 @@ impl Ui {
             self.results_empty.view.setHidden(has_rows);
             if let Some(e) = empty {
                 self.results_empty
-                    .set(Icon::Search, &e.heading, &e.sub, e.action);
+                    .set(Icon::Search, &e.heading, &e.sub, e.action.label());
             }
+        }
+        if let Some(badge) = p.queue_badge {
+            self.nav_queue.set_count(badge.as_deref());
         }
         if let Some((rows, current)) = p.queue {
             let n = rows.len();
@@ -563,6 +752,11 @@ impl Ui {
         if let Some(v) = p.volume {
             self.bar.set_volume(v);
         }
+        if let Some(c) = p.controls {
+            self.bar.set_controls(c);
+            self.results.set_enabled(c.player);
+            self.queue.set_enabled(c.player);
+        }
         if let Some(t) = p.toast {
             self.show_toast(t);
         }
@@ -587,8 +781,11 @@ impl Ui {
     fn show_banner(&self, banner: Option<Banner>) {
         let b = self.main.bounds();
         let shown = banner.is_some();
-        if let Some(banner) = banner {
-            widgets::set_text(&self.banner_label, banner.text);
+        if let Some(banner) = &banner {
+            widgets::set_text(&self.banner_label, &banner.text);
+            // The stuck banner can outgrow a narrow window.
+            self.banner_label
+                .setToolTip(Some(&NSString::from_str(&banner.text)));
             let c = if banner.error {
                 theme::bad()
             } else {
@@ -596,39 +793,148 @@ impl Ui {
             };
             self.banner_label.setTextColor(Some(&c));
         }
-        self.banner.setHidden(!shown);
         let h = b.size.height - if shown { BANNER_H } else { 0.0 };
         let page = rect(0.0, 0.0, b.size.width, h);
-        self.search_page.setFrame(page);
-        self.queue_page.setFrame(page);
+        let place_pages = || {
+            self.search_page.animator().setFrame(page);
+            self.queue_page.animator().setFrame(page);
+        };
+        let changed = self.banner_shown.replace(shown) != shown;
+        let shift = if changed && !widgets::reduce_motion() {
+            widgets::STANDARD
+        } else {
+            Duration::ZERO
+        };
+        widgets::animate(&self.main, shift, widgets::EASE_IN_OUT, place_pages, || {});
+        if !changed {
+            return;
+        }
+        let banner = &self.banner;
+        if shown {
+            banner.setAlphaValue(0.0);
+            banner.setHidden(false);
+        }
+        widgets::animate(
+            banner,
+            widgets::STANDARD,
+            widgets::EASE_OUT,
+            || {
+                banner
+                    .animator()
+                    .setAlphaValue(if shown { 1.0 } else { 0.0 })
+            },
+            move || {
+                if !shown {
+                    with(|ui| {
+                        if !ui.banner_shown.get() {
+                            ui.banner.setHidden(true);
+                        }
+                    });
+                }
+            },
+        );
     }
 
     fn show_toast(&self, toast: Option<Toast>) {
         let t = &self.toast;
         let Some(toast) = toast else {
-            t.view.setHidden(true);
+            if t.shown.replace(false) {
+                self.leave_toast();
+            }
             return;
         };
+        let swap = t.shown.replace(true);
+        if swap {
+            widgets::crossfade(&t.view, widgets::MICRO);
+        }
         t.id.set(toast.id);
         widgets::set_text(&t.label, &toast.text);
         t.accent.setHidden(!toast.error);
         let text_w = t.label.fittingSize().width;
-        let w: CGFloat = (16.0 + text_w + 8.0 + 40.0).clamp(240.0, 440.0);
+        // The action sits between the text and the close button.
+        let action_w = toast.action.map_or(0.0, |a| t.action.set_label(a) + 8.0);
+        t.action.setHidden(toast.action.is_none());
+        let w: CGFloat = (16.0 + text_w + 8.0 + action_w + 40.0).clamp(240.0, 440.0 + action_w);
+        let h = if toast.action.is_some() {
+            TOAST_ACTION_H
+        } else {
+            TOAST_H
+        };
         let root = self.root.bounds();
-        t.view.setFrame(rect(
-            root.size.width - 16.0 - w,
-            PlayerBar::H + 16.0,
-            w,
-            TOAST_H,
-        ));
+        t.view
+            .setFrame(rect(root.size.width - 16.0 - w, PlayerBar::H + 16.0, w, h));
+        if action_w > 0.0 {
+            t.action.setFrame(rect(
+                w - 40.0 - action_w,
+                (h - TOAST_BUTTON_H) / 2.0,
+                action_w - 8.0,
+                TOAST_BUTTON_H,
+            ));
+        }
         t.label.setToolTip(Some(&NSString::from_str(&toast.text)));
-        t.view.setHidden(false);
+        if !swap {
+            self.enter_toast();
+        }
         let id = toast.id;
         if let Ok(when) = DispatchTime::try_from(vm::TOAST_DURATION) {
             let _ = DispatchQueue::main().after(when, move || {
                 with(|ui| ui.dismiss_toast(id));
             });
         }
+    }
+
+    /// Fades the toast in as it rises into the frame it was given.
+    fn enter_toast(&self) {
+        let v = &self.toast.view;
+        let at = v.frame().origin;
+        let rise = if widgets::reduce_motion() {
+            0.0
+        } else {
+            TOAST_RISE
+        };
+        v.setAlphaValue(0.0);
+        v.setFrameOrigin(NSPoint::new(at.x, at.y - rise));
+        v.setHidden(false);
+        widgets::animate(
+            v,
+            widgets::STANDARD,
+            widgets::EASE_OUT,
+            || {
+                v.animator().setAlphaValue(1.0);
+                v.animator().setFrameOrigin(at);
+            },
+            || {},
+        );
+    }
+
+    /// The reverse of `enter_toast`, then hides it unless another toast came meanwhile.
+    fn leave_toast(&self) {
+        let t = &self.toast;
+        let v = &t.view;
+        let at = v.frame().origin;
+        let fall = if widgets::reduce_motion() {
+            0.0
+        } else {
+            TOAST_RISE
+        };
+        let id = t.id.get();
+        widgets::animate(
+            v,
+            widgets::STANDARD,
+            widgets::EASE_OUT,
+            || {
+                v.animator().setAlphaValue(0.0);
+                v.animator().setFrameOrigin(NSPoint::new(at.x, at.y - fall));
+            },
+            move || {
+                with(|ui| {
+                    let t = &ui.toast;
+                    if t.id.get() == id && !t.shown.get() {
+                        t.view.setHidden(true);
+                    }
+                });
+            },
+        );
     }
 }
 
@@ -644,11 +950,13 @@ struct Patch {
     results: Option<(Vec<table::RowText>, Option<EmptyText>)>,
     search_status: Option<Option<(String, bool)>>,
     queue: Option<(Vec<table::RowText>, Option<usize>)>,
+    queue_badge: Option<Option<String>>,
     now_playing: Option<NowPlaying>,
     elapsed: Option<String>,
     progress: Option<f64>,
     playing: Option<bool>,
     volume: Option<u8>,
+    controls: Option<Controls>,
     toast: Option<Option<Toast>>,
     banner: Option<Option<Banner>>,
 }
@@ -660,6 +968,7 @@ impl Patch {
             results: any(Dirty::RESULTS).then(|| (table::rows(&s.results), s.results_empty())),
             search_status: any(Dirty::SEARCH_STATUS).then(|| s.search_status_text()),
             queue: any(Dirty::QUEUE).then(|| (table::rows(&s.queue), s.current)),
+            queue_badge: any(Dirty::QUEUE).then(|| s.queue_badge()),
             now_playing: (any(Dirty::NOW_PLAYING) || any(Dirty::STATE)).then(|| NowPlaying {
                 track: s
                     .now_playing
@@ -673,8 +982,11 @@ impl Patch {
                 .then(|| s.progress()),
             playing: any(Dirty::STATE).then(|| s.is_playing()),
             volume: any(Dirty::VOLUME).then_some(s.volume),
+            controls: d
+                .intersects(Dirty::CONNECTION | Dirty::QUEUE | Dirty::NOW_PLAYING | Dirty::STATE)
+                .then(|| s.controls()),
             toast: any(Dirty::TOAST).then(|| s.toast.clone()),
-            banner: any(Dirty::CONNECTION).then(|| s.banner()),
+            banner: any(Dirty::CONNECTION).then(|| s.banner.clone()),
         }
     }
 }
@@ -692,8 +1004,10 @@ mod tests {
         let p = Patch::new(Dirty::VOLUME, vm.ui());
         assert_eq!(p.volume, Some(70));
         assert!(p.results.is_none() && p.search_status.is_none() && p.queue.is_none());
+        assert!(p.queue_badge.is_none());
         assert!(p.now_playing.is_none() && p.elapsed.is_none() && p.progress.is_none());
         assert!(p.playing.is_none() && p.toast.is_none() && p.banner.is_none());
+        assert!(p.controls.is_none());
     }
 
     #[test]
@@ -706,6 +1020,7 @@ mod tests {
         assert_eq!(p.search_status, Some(None));
         let (queue, current) = p.queue.unwrap();
         assert_eq!((queue.len(), current), (8, Some(2)));
+        assert_eq!(p.queue_badge, Some(Some("8".into())));
         let now = p.now_playing.unwrap();
         assert_eq!(
             now.track,
@@ -717,6 +1032,12 @@ mod tests {
         assert_eq!(p.playing, Some(true));
         assert_eq!(p.toast, Some(None));
         assert_eq!(p.banner, Some(None));
+        let on = Controls {
+            transport: true,
+            seek: true,
+            player: true,
+        };
+        assert_eq!(p.controls, Some(on));
     }
 
     #[test]
@@ -738,6 +1059,6 @@ mod tests {
         let (vm, _) = demo::start_in(crate::args::View::Empty);
         let (rows, empty) = Patch::new(Dirty::RESULTS, vm.ui()).results.unwrap();
         assert!(rows.is_empty());
-        assert_eq!(empty.unwrap().action, "Start a search");
+        assert_eq!(empty.unwrap().action, EmptyAction::StartSearch);
     }
 }

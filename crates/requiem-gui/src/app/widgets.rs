@@ -2,24 +2,105 @@
 //! so they cost no backing store; only the seek bar draws.
 
 use std::cell::{Cell, OnceCell};
+use std::ptr::NonNull;
+use std::time::Duration;
 
+use block2::{RcBlock, StackBlock};
 use objc2::rc::{Retained, Weak};
 use objc2::runtime::{AnyObject, Sel};
 use objc2::{AnyThread, DefinedClass, MainThreadOnly, Message, define_class, msg_send};
 use objc2_app_kit::{
+    NSAccessibility, NSAccessibilityButtonRole, NSAccessibilitySliderRole, NSAnimationContext,
     NSAttributedStringNSStringDrawing, NSAutoresizingMaskOptions, NSBezierPath, NSButton,
     NSCellImagePosition, NSColor, NSControl, NSEvent, NSEventMask, NSEventTrackingRunLoopMode,
     NSEventType, NSFocusRingType, NSFont, NSImageScaling, NSImageView, NSLineBreakMode,
     NSResponder, NSTextAlignment, NSTextField, NSTrackingArea, NSTrackingAreaOptions, NSView,
+    NSWorkspace,
 };
 use objc2_core_foundation::CGFloat;
 use objc2_foundation::{
-    MainThreadMarker, NSAttributedString, NSDate, NSDictionary, NSNotification, NSPoint, NSRect,
-    NSSize, NSString,
+    MainThreadMarker, NSAttributedString, NSDate, NSDictionary, NSNotification, NSNumber,
+    NSObjectProtocol, NSPoint, NSRect, NSSize, NSString, ns_string,
 };
+use objc2_quartz_core::{CAMediaTiming, CAMediaTimingFunction, CATransition, kCATransitionFade};
 
 use super::theme::{self, Icon, Weight};
 use super::ui::{self, AppView};
+use crate::vm::{Intent, SEEK_STEP_SECS, VOLUME_STEP};
+
+/// The opacity of a disabled control.
+pub const DIMMED: CGFloat = 0.4;
+/// The keyboard focus ring's width.
+const RING_W: CGFloat = 2.0;
+
+/// Cubic Bézier control points of a timing curve.
+pub type Curve = [f32; 4];
+pub const EASE_OUT: Curve = [0.23, 1.0, 0.32, 1.0];
+pub const EASE_IN_OUT: Curve = [0.77, 0.0, 0.175, 1.0];
+/// Small swaps: a toast's text, an icon.
+pub const MICRO: Duration = Duration::from_millis(120);
+/// Things entering, leaving or moving.
+pub const STANDARD: Duration = Duration::from_millis(200);
+
+/// The user's Reduce Motion setting; read per animation, as it can change at any time.
+pub fn reduce_motion() -> bool {
+    NSWorkspace::sharedWorkspace().accessibilityDisplayShouldReduceMotion()
+}
+
+/// Whether changes to `view` would be seen animating. A snapshot's window is never shown.
+fn on_screen(view: &NSView) -> bool {
+    view.window().is_some_and(|w| w.isVisible())
+}
+
+fn timing(curve: Curve) -> Retained<CAMediaTimingFunction> {
+    let [x1, y1, x2, y2] = curve;
+    CAMediaTimingFunction::functionWithControlPoints(x1, y1, x2, y2)
+}
+
+/// Animates the changes `changes` makes through views' `animator()` proxies over `duration`,
+/// then runs `done`. With a zero duration, or off screen, both take effect at once, before
+/// this returns.
+pub fn animate(
+    view: &NSView,
+    duration: Duration,
+    curve: Curve,
+    changes: impl Fn(),
+    done: impl Fn() + 'static,
+) {
+    if duration.is_zero() || !on_screen(view) {
+        NSAnimationContext::beginGrouping();
+        NSAnimationContext::currentContext().setDuration(0.0);
+        changes();
+        NSAnimationContext::endGrouping();
+        done();
+        return;
+    }
+    let timing = timing(curve);
+    let group = StackBlock::new(|ctx: NonNull<NSAnimationContext>| {
+        // SAFETY: AppKit passes the live context of the group it is running.
+        let ctx = unsafe { ctx.as_ref() };
+        ctx.setDuration(duration.as_secs_f64());
+        ctx.setTimingFunction(Some(&timing));
+        ctx.setAllowsImplicitAnimation(true);
+        changes();
+    });
+    let done = RcBlock::new(done);
+    NSAnimationContext::runAnimationGroup_completionHandler(&group, Some(&done));
+}
+
+/// Cross-fades `view` from how it looks now to how the changes made next leave it.
+pub fn crossfade(view: &NSView, duration: Duration) {
+    if !on_screen(view) {
+        return;
+    }
+    let Some(layer) = view.layer() else { return };
+    let fade = CATransition::animation();
+    // SAFETY: the transition-type static is an immutable framework constant.
+    fade.setType(unsafe { kCATransitionFade });
+    fade.setDuration(duration.as_secs_f64());
+    fade.setTimingFunction(Some(&timing(EASE_OUT)));
+    layer.addAnimation_forKey(&fade, Some(ns_string!("crossfade")));
+}
 
 pub fn rect(x: CGFloat, y: CGFloat, w: CGFloat, h: CGFloat) -> NSRect {
     NSRect::new(NSPoint::new(x, y), NSSize::new(w, h))
@@ -124,6 +205,14 @@ pub fn set_text(l: &NSTextField, text: &str) {
     }
 }
 
+/// `set_text` that cross-fades a change.
+pub fn fade_text(l: &NSTextField, text: &str, duration: Duration) {
+    if l.stringValue().to_string() != text {
+        crossfade(l, duration);
+        l.setStringValue(&NSString::from_str(text));
+    }
+}
+
 pub fn icon_view(
     mtm: MainThreadMarker,
     icon: Icon,
@@ -136,6 +225,23 @@ pub fn icon_view(
     v.setImageScaling(NSImageScaling::ScaleNone);
     v.setContentTintColor(Some(tint));
     v
+}
+
+/// The tooltip, and the accessibility label (`label`, or the tooltip when `None`).
+pub fn describe(v: &NSView, tip: &str, label: Option<&str>) {
+    v.setToolTip(Some(&NSString::from_str(tip)));
+    v.setAccessibilityLabel(Some(&NSString::from_str(label.unwrap_or(tip))));
+}
+
+/// Makes `v` one accessibility button named `label`; its subviews stay out of the tree.
+fn as_button(v: &NSView, label: &str) {
+    v.setAccessibilityElement(true);
+    // SAFETY: the role static is an immutable framework constant.
+    v.setAccessibilityRole(Some(unsafe { NSAccessibilityButtonRole }));
+    v.setAccessibilityLabel(Some(&NSString::from_str(label)));
+    for sub in v.subviews().iter() {
+        sub.setAccessibilityElement(false);
+    }
 }
 
 /// Attributes for drawn or attributed text.
@@ -195,11 +301,18 @@ pub fn track_hover(v: &NSView, extra: NSTrackingAreaOptions) {
 pub struct ButtonIvars {
     normal: Option<Retained<NSColor>>,
     hover: Retained<NSColor>,
+    /// A secondary button's resting 1 px border.
+    line: Option<Retained<NSColor>>,
+    /// Text-button titles.
+    title_color: Retained<NSColor>,
+    /// Keyboard focus, drawn as a 2 px border in `ring`.
+    ring: Retained<NSColor>,
     hovered: Cell<bool>,
+    focused: Cell<bool>,
 }
 
 define_class!(
-    /// A borderless icon or text button with a hover background.
+    /// A borderless icon or text button with a hover background and its own focus ring.
     // SAFETY: NSButton has no subclassing requirements; no Drop impl.
     #[unsafe(super(NSButton, NSControl, NSView, NSResponder, objc2_foundation::NSObject))]
     #[thread_kind = MainThreadOnly]
@@ -232,6 +345,29 @@ define_class!(
             let _: () = unsafe { msg_send![super(self), viewDidHide] };
             self.clear_hover();
         }
+
+        /// Buttons take focus only with keyboard navigation turned on in System Settings.
+        #[unsafe(method(becomeFirstResponder))]
+        fn become_first_responder(&self) -> bool {
+            // SAFETY: forwards to the superclass implementation.
+            let ok: bool = unsafe { msg_send![super(self), becomeFirstResponder] };
+            if ok {
+                self.ivars().focused.set(true);
+                self.paint();
+            }
+            ok
+        }
+
+        #[unsafe(method(resignFirstResponder))]
+        fn resign_first_responder(&self) -> bool {
+            // SAFETY: forwards to the superclass implementation.
+            let ok: bool = unsafe { msg_send![super(self), resignFirstResponder] };
+            if ok {
+                self.ivars().focused.set(false);
+                self.paint();
+            }
+            ok
+        }
     }
 );
 
@@ -256,7 +392,7 @@ impl HoverButton {
         this
     }
 
-    /// A primary text button: accent fill, ink title. `set_label` sizes its width.
+    /// A primary text button: accent fill, white title. `set_label` sizes its width.
     pub fn primary(mtm: MainThreadMarker, frame: NSRect) -> Retained<Self> {
         let this = Self::filled(
             mtm,
@@ -269,6 +405,17 @@ impl HoverButton {
         this
     }
 
+    /// A secondary text button: transparent with a 1 px line. `set_label` sizes its width.
+    pub fn secondary(mtm: MainThreadMarker, frame: NSRect) -> Retained<Self> {
+        let this = Self::alloc(mtm).set_ivars(ButtonIvars {
+            line: Some(theme::line_2()),
+            ..Self::ivars_for(None, &theme::line_2())
+        });
+        let this = Self::init(this, frame, theme::RADIUS);
+        this.setImagePosition(NSCellImagePosition::NoImage);
+        this
+    }
+
     fn filled(
         mtm: MainThreadMarker,
         frame: NSRect,
@@ -276,11 +423,33 @@ impl HoverButton {
         hover: &NSColor,
         radius: CGFloat,
     ) -> Retained<Self> {
-        let this = Self::alloc(mtm).set_ivars(ButtonIvars {
+        let this = Self::alloc(mtm).set_ivars(Self::ivars_for(normal, hover));
+        Self::init(this, frame, radius)
+    }
+
+    fn ivars_for(normal: Option<&NSColor>, hover: &NSColor) -> ButtonIvars {
+        // An accent ring would vanish into an accent fill.
+        let on_accent = normal.is_some_and(|c| c.isEqual(Some(&theme::accent())));
+        ButtonIvars {
             normal: normal.map(|c| c.retain()),
             hover: hover.retain(),
+            line: None,
+            title_color: if on_accent {
+                theme::white()
+            } else {
+                theme::ink()
+            },
+            ring: if on_accent {
+                theme::ink()
+            } else {
+                theme::accent()
+            },
             hovered: Cell::new(false),
-        });
+            focused: Cell::new(false),
+        }
+    }
+
+    fn init(this: objc2::rc::PartialInit<Self>, frame: NSRect, radius: CGFloat) -> Retained<Self> {
         // SAFETY: `initWithFrame:` is NSButton's designated initializer.
         let this: Retained<Self> = unsafe { msg_send![super(this), initWithFrame: frame] };
         this.setBordered(false);
@@ -293,13 +462,27 @@ impl HoverButton {
 
     /// Sets a text button's title and returns the width it needs: the text plus 12 px a side.
     pub fn set_label(&self, title: &str) -> CGFloat {
-        let s = attributed(title, &theme::font(14.0, Weight::Medium), &theme::ink());
+        let s = attributed(
+            title,
+            &theme::font(14.0, Weight::Medium),
+            &self.ivars().title_color,
+        );
         self.setAttributedTitle(&s);
         s.size().width.ceil() + 24.0
     }
 
     pub fn set_icon(&self, icon: Icon, size: CGFloat) {
         self.setImage(icon.image(size).as_deref());
+    }
+
+    /// Dims a disabled button, which takes no clicks and shows no hover.
+    pub fn set_enabled(&self, enabled: bool) {
+        if self.isEnabled() == enabled {
+            return;
+        }
+        self.setEnabled(enabled);
+        self.setAlphaValue(if enabled { 1.0 } else { DIMMED });
+        self.paint();
     }
 
     /// Shows or hides the button; hiding also drops its hover state.
@@ -329,12 +512,19 @@ impl HoverButton {
 
     fn paint(&self) {
         let iv = self.ivars();
-        let c = if iv.hovered.get() {
+        let c = if iv.hovered.get() && self.isEnabled() {
             Some(&*iv.hover)
         } else {
             iv.normal.as_deref()
         };
         fill(self, c);
+        if iv.focused.get() {
+            border(self, &iv.ring, RING_W);
+        } else if let Some(line) = &iv.line {
+            border(self, line, 1.0);
+        } else if let Some(layer) = self.layer() {
+            layer.setBorderWidth(0.0);
+        }
     }
 }
 
@@ -344,10 +534,11 @@ pub struct NavIvars {
     hovered: Cell<bool>,
     icon: OnceCell<Retained<NSImageView>>,
     label: OnceCell<Retained<NSTextField>>,
+    count: OnceCell<Retained<NSTextField>>,
 }
 
 define_class!(
-    /// A sidebar entry: icon and label, accent-soft when active.
+    /// A sidebar entry: icon, label and an optional count, accent-soft when active.
     // SAFETY: NSView has no subclassing requirements; no Drop impl.
     #[unsafe(super(NSView, NSResponder, objc2_foundation::NSObject))]
     #[thread_kind = MainThreadOnly]
@@ -378,6 +569,13 @@ define_class!(
             true
         }
 
+        #[unsafe(method(accessibilityPerformPress))]
+        fn accessibility_perform_press(&self) -> bool {
+            let target = self.ivars().target;
+            ui::with(|ui| ui.show(target));
+            true
+        }
+
         /// Clicks on the icon or label land on the item itself.
         #[unsafe(method_id(hitTest:))]
         fn hit_test(&self, point: NSPoint) -> Option<Retained<NSView>> {
@@ -405,6 +603,7 @@ impl NavItem {
             hovered: Cell::new(false),
             icon: OnceCell::new(),
             label: OnceCell::new(),
+            count: OnceCell::new(),
         });
         // SAFETY: `initWithFrame:` is NSView's designated initializer.
         let this: Retained<Self> = unsafe { msg_send![super(this), initWithFrame: frame] };
@@ -414,9 +613,9 @@ impl NavItem {
         let icon = icon_view(
             mtm,
             icon,
-            18.0,
+            20.0,
             &theme::chrome_muted(),
-            rect(12.0, (h - 18.0) / 2.0, 18.0, 18.0),
+            rect(12.0, (h - 20.0) / 2.0, 20.0, 20.0),
         );
         let font = theme::font(14.0, Weight::Medium);
         let label = placed_label(
@@ -429,10 +628,26 @@ impl NavItem {
             frame.size.width - 52.0,
             FLEX_W,
         );
+        let count_w = 48.0;
+        let count = placed_label(
+            mtm,
+            "",
+            &theme::tabular(12.0, Weight::Regular),
+            &theme::muted(),
+            frame.size.width - 12.0 - count_w,
+            h / 2.0,
+            count_w,
+            PIN_RIGHT,
+        );
+        count.setAlignment(NSTextAlignment::Right);
+        count.setHidden(true);
         this.addSubview(&icon);
         this.addSubview(&label);
+        this.addSubview(&count);
         let _ = this.ivars().icon.set(icon);
         let _ = this.ivars().label.set(label);
+        let _ = this.ivars().count.set(count);
+        as_button(&this, text);
         track_hover(&this, NSTrackingAreaOptions::empty());
         this.paint();
         this
@@ -441,6 +656,21 @@ impl NavItem {
     pub fn set_active(&self, active: bool) {
         if self.ivars().active.replace(active) != active {
             self.paint();
+        }
+    }
+
+    /// `None` hides the count.
+    pub fn set_count(&self, count: Option<&str>) {
+        let iv = self.ivars();
+        if let (Some(l), Some(name)) = (iv.count.get(), iv.label.get()) {
+            set_text(l, count.unwrap_or_default());
+            l.setHidden(count.is_none());
+            let name = name.stringValue().to_string();
+            let label = match count {
+                Some(n) => format!("{name}, {n}"),
+                None => name,
+            };
+            self.setAccessibilityLabel(Some(&NSString::from_str(&label)));
         }
     }
 
@@ -612,11 +842,7 @@ impl Field {
             cell.setScrollable(true);
             cell.setWraps(false);
         }
-        text.setPlaceholderAttributedString(Some(&attributed(
-            placeholder,
-            &font,
-            &theme::muted_2(),
-        )));
+        text.setPlaceholderAttributedString(Some(&attributed(placeholder, &font, &theme::muted())));
         text.setAutoresizingMask(FLEX_W);
         boxv.addSubview(&text);
         Field { ring, text }
@@ -637,10 +863,19 @@ impl Field {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SliderKind {
-    /// Seeks on mouse-up.
+    /// Previews the target time while dragging; seeks on mouse-up.
     Seek,
     /// Sets the volume while dragging.
     Volume,
+}
+
+impl SliderKind {
+    fn label(self) -> &'static str {
+        match self {
+            SliderKind::Seek => "Seek",
+            SliderKind::Volume => "Volume",
+        }
+    }
 }
 
 pub struct SliderIvars {
@@ -708,6 +943,30 @@ define_class!(
         fn accepts_first_mouse(&self, _event: Option<&NSEvent>) -> bool {
             true
         }
+
+        /// Percent, as VoiceOver reads it.
+        #[unsafe(method_id(accessibilityValue))]
+        fn accessibility_value(&self) -> Option<Retained<AnyObject>> {
+            let pct = (self.ivars().value.get() * 100.0).round();
+            Some(Retained::into_super(Retained::into_super(Retained::into_super(
+                NSNumber::new_f64(pct),
+            ))))
+        }
+
+        #[unsafe(method(isAccessibilityEnabled))]
+        fn accessibility_enabled(&self) -> bool {
+            self.ivars().enabled.get()
+        }
+
+        #[unsafe(method(accessibilityPerformIncrement))]
+        fn accessibility_increment(&self) -> bool {
+            self.step(1)
+        }
+
+        #[unsafe(method(accessibilityPerformDecrement))]
+        fn accessibility_decrement(&self) -> bool {
+            self.step(-1)
+        }
     }
 );
 
@@ -731,7 +990,24 @@ impl Slider {
         let this: Retained<Self> = unsafe { msg_send![super(this), initWithFrame: frame] };
         this.setAutoresizingMask(mask);
         track_hover(&this, NSTrackingAreaOptions::EnabledDuringMouseDrag);
+        this.setAccessibilityElement(true);
+        // SAFETY: the role static is an immutable framework constant.
+        this.setAccessibilityRole(Some(unsafe { NSAccessibilitySliderRole }));
+        describe(&this, kind.label(), None);
         this
+    }
+
+    /// One keyboard-sized step, as the Left/Right and Cmd+Up/Down keys take.
+    fn step(&self, dir: i8) -> bool {
+        if !self.ivars().enabled.get() {
+            return false;
+        }
+        let intent = match self.ivars().kind {
+            SliderKind::Seek => Intent::SeekBy(i64::from(dir) * SEEK_STEP_SECS),
+            SliderKind::Volume => Intent::VolumeBy(i16::from(dir) * VOLUME_STEP),
+        };
+        ui::with(|ui| ui.intent(intent));
+        true
     }
 
     /// Ignored mid-drag. Redraws only when the fill moves by at least half a point.
@@ -748,8 +1024,14 @@ impl Slider {
         }
     }
 
+    pub fn is_dragging(&self) -> bool {
+        self.ivars().dragging.get()
+    }
+
+    /// Dims a disabled slider, which takes no input and shows no knob.
     pub fn set_enabled(&self, enabled: bool) {
         if self.ivars().enabled.replace(enabled) != enabled {
+            self.setAlphaValue(if enabled { 1.0 } else { DIMMED });
             self.setNeedsDisplay(true);
         }
     }
@@ -782,6 +1064,10 @@ impl Slider {
                 true,
             ) {
                 let up = ev.r#type() == NSEventType::LeftMouseUp;
+                if up {
+                    // The seek's own update replaces the preview.
+                    self.ivars().dragging.set(false);
+                }
                 self.track_mouse(&ev, up);
                 if up {
                     break;
@@ -803,7 +1089,9 @@ impl Slider {
             SliderKind::Seek if done => {
                 ui::with(|ui| ui.seek_fraction(v));
             }
-            SliderKind::Seek => {}
+            SliderKind::Seek => {
+                ui::with(|ui| ui.preview_seek(v));
+            }
             SliderKind::Volume => {
                 ui::with(|ui| ui.set_volume((v * 100.0).round() as u8));
             }
@@ -826,8 +1114,14 @@ impl EmptyState {
     const BUTTON_H: CGFloat = 36.0;
     const GROUP_H: CGFloat = 136.0;
 
-    /// The action button sends `focusSearch:` to `target`.
-    pub fn new(mtm: MainThreadMarker, frame: NSRect, icon: Icon, target: &AnyObject) -> EmptyState {
+    /// The action button sends `action` to `target`.
+    pub fn new(
+        mtm: MainThreadMarker,
+        frame: NSRect,
+        icon: Icon,
+        target: &AnyObject,
+        action: Sel,
+    ) -> EmptyState {
         let view = view(mtm, frame, FLEX_W | FLEX_H);
         let (w, h) = (frame.size.width, frame.size.height);
         let gh = Self::GROUP_H;
@@ -869,9 +1163,10 @@ impl EmptyState {
             FLEX_W,
         );
         sub.setAlignment(NSTextAlignment::Center);
+        let action_sel = action;
         let action = HoverButton::primary(mtm, rect(0.0, 0.0, 0.0, Self::BUTTON_H));
         action.setAutoresizingMask(centred);
-        action.set_action(target, objc2::sel!(focusSearch:));
+        action.set_action(target, action_sel);
         group.addSubview(&iconv);
         group.addSubview(&heading);
         group.addSubview(&sub);

@@ -1,5 +1,7 @@
 //! Blutarche Studio design tokens (dark), embedded Inter, and Lucide icons.
 
+use std::cell::RefCell;
+use std::collections::HashMap;
 use std::ptr;
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -35,6 +37,7 @@ pub fn mix(base: u32, top: u32, alpha: CGFloat) -> Retained<NSColor> {
 pub const BG: u32 = 0x0A0A0C;
 pub const BG_2: u32 = 0x121216;
 pub const BG_3: u32 = 0x1A1A20;
+pub const LINE_2: u32 = 0x34343F;
 pub const ACCENT: u32 = 0x7C70F5;
 /// Alphas of `accent_soft` and `selection`.
 pub const SOFT: CGFloat = 0.10;
@@ -56,7 +59,7 @@ pub fn line() -> Retained<NSColor> {
     rgb(0x24242C)
 }
 pub fn line_2() -> Retained<NSColor> {
-    rgb(0x34343F)
+    rgb(LINE_2)
 }
 pub fn line_hi() -> Retained<NSColor> {
     rgb(0x43434F)
@@ -119,6 +122,10 @@ pub fn warn() -> Retained<NSColor> {
 /// Palette backdrop: bg at 60%.
 pub fn scrim() -> Retained<NSColor> {
     rgba(0x0A0A0C, 0.60)
+}
+/// Text on primary buttons.
+pub fn white() -> Retained<NSColor> {
+    rgb(0xFFFFFF)
 }
 /// The icon on the accent play button.
 pub fn on_accent() -> Retained<NSColor> {
@@ -234,7 +241,7 @@ pub fn tabular(size: CGFloat, weight: Weight) -> Retained<NSFont> {
     NSFont::fontWithDescriptor_size(&desc, size).unwrap_or(base)
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Icon {
     Play,
     Pause,
@@ -246,6 +253,7 @@ pub enum Icon {
     Plus,
     X,
     Music,
+    Check,
 }
 
 impl Icon {
@@ -261,13 +269,30 @@ impl Icon {
             Icon::Plus => include_bytes!("../../assets/icons/plus.svg"),
             Icon::X => include_bytes!("../../assets/icons/x.svg"),
             Icon::Music => include_bytes!("../../assets/icons/music.svg"),
+            Icon::Check => include_bytes!("../../assets/icons/check.svg"),
         }
     }
 
     /// A template image at `size` points; tint it with `contentTintColor`. `None`, logged,
     /// if the SVG does not decode: callers run inside AppKit callbacks, where a panic would
-    /// abort, and a missing icon is the lesser failure.
+    /// abort, and a missing icon is the lesser failure. Shared per icon and size, so callers
+    /// must not change it.
     pub fn image(self, size: CGFloat) -> Option<Retained<NSImage>> {
+        /// Keyed by icon and the size's bits.
+        type Images = HashMap<(Icon, u64), Option<Retained<NSImage>>>;
+        thread_local! {
+            static IMAGES: RefCell<Images> = RefCell::new(HashMap::new());
+        }
+        IMAGES.with(|images| {
+            images
+                .borrow_mut()
+                .entry((self, size.to_bits()))
+                .or_insert_with(|| self.decode(size))
+                .clone()
+        })
+    }
+
+    fn decode(self, size: CGFloat) -> Option<Retained<NSImage>> {
         let data = NSData::with_bytes(self.svg());
         let Some(img) = NSImage::initWithData(NSImage::alloc(), &data) else {
             eprintln!("requiem-gui: embedded icon {self:?} does not decode");
@@ -296,8 +321,19 @@ mod tests {
             Icon::Plus,
             Icon::X,
             Icon::Music,
+            Icon::Check,
         ] {
             assert!(icon.image(16.0).is_some(), "{icon:?}");
         }
+    }
+
+    #[test]
+    fn icons_are_decoded_once_per_size() {
+        let a = Icon::Plus.image(16.0).unwrap();
+        let b = Icon::Plus.image(16.0).unwrap();
+        let big = Icon::Plus.image(20.0).unwrap();
+        assert!(ptr::eq(&*a, &*b));
+        assert!(!ptr::eq(&*a, &*big));
+        assert_eq!(big.size(), NSSize::new(20.0, 20.0));
     }
 }

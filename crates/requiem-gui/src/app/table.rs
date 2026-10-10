@@ -2,22 +2,24 @@
 //! headers.
 
 use std::cell::{Cell, OnceCell, RefCell};
+use std::time::Duration;
 
+use dispatch2::{DispatchQueue, DispatchTime, MainThreadBound};
 use objc2::rc::{Retained, Weak};
 use objc2::runtime::{AnyObject, NSObject, ProtocolObject};
-use objc2::{DefinedClass, MainThreadOnly, define_class, msg_send, sel};
+use objc2::{DefinedClass, MainThreadOnly, Message, define_class, msg_send, sel};
 use objc2_app_kit::{
     NSAttributedStringNSStringDrawing, NSBezierPath, NSBorderType, NSControlTextEditingDelegate,
     NSEvent, NSFocusRingType, NSResponder, NSScrollView, NSTableColumn,
     NSTableColumnResizingOptions, NSTableRowView, NSTableView, NSTableViewColumnAutoresizingStyle,
     NSTableViewDataSource, NSTableViewDelegate, NSTableViewSelectionHighlightStyle,
     NSTableViewStyle, NSTextAlignment, NSTextField, NSTrackingAreaOptions,
-    NSUserInterfaceItemIdentification, NSView,
+    NSUserInterfaceItemIdentification, NSView, NSViewFrameDidChangeNotification,
 };
 use objc2_core_foundation::CGFloat;
 use objc2_foundation::{
-    MainThreadMarker, NSAttributedString, NSIndexSet, NSInteger, NSNotification, NSObjectProtocol,
-    NSPoint, NSRect, NSSize, NSString,
+    MainThreadMarker, NSAttributedString, NSIndexSet, NSInteger, NSNotification,
+    NSNotificationCenter, NSObjectProtocol, NSPoint, NSRect, NSSize, NSString,
 };
 use requiem_core::Track;
 
@@ -94,6 +96,8 @@ pub struct ControllerIvars {
     kind: Kind,
     rows: RefCell<Vec<RowText>>,
     current: Cell<Option<usize>>,
+    /// Whether the rows' "+" buttons take clicks.
+    enabled: Cell<bool>,
     table: OnceCell<Weak<NSTableView>>,
 }
 
@@ -148,6 +152,7 @@ define_class!(
                 iv.odd.set(row % 2 == 1);
                 iv.current.set(usize::try_from(row).ok() == self.ivars().current.get());
                 iv.selected.set(table.selectedRow() == row);
+                iv.focused.set(table.downcast_ref::<KeyTable>().is_some_and(KeyTable::focused));
                 rv.paint();
             }
         }
@@ -165,27 +170,28 @@ define_class!(
     }
 
     impl Controller {
-        #[unsafe(method(rowClicked:))]
-        fn row_clicked(&self, _sender: Option<&AnyObject>) {
-            let Some(table) = self.table() else { return };
-            if let (Kind::Queue, Ok(row)) = (self.ivars().kind, usize::try_from(table.clickedRow())) {
-                ui::with(|ui| ui.intent(Intent::PlayQueue(row)));
-            }
-        }
-
         #[unsafe(method(rowDoubleClicked:))]
         fn row_double_clicked(&self, _sender: Option<&AnyObject>) {
             let Some(table) = self.table() else { return };
-            if let (Kind::Results, Ok(row)) = (self.ivars().kind, usize::try_from(table.clickedRow())) {
-                ui::with(|ui| ui.intent(Intent::PlayResult(row)));
-            }
+            let Ok(row) = usize::try_from(table.clickedRow()) else { return };
+            match self.ivars().kind {
+                Kind::Results => ui::with(|ui| ui.intent(Intent::PlayResult(row))),
+                Kind::Queue => ui::with(|ui| ui.play_queue(row)),
+            };
         }
 
         #[unsafe(method(addClicked:))]
         fn add_clicked(&self, sender: Option<&NSView>) {
             let (Some(table), Some(sender)) = (self.table(), sender) else { return };
-            if let Ok(row) = usize::try_from(table.rowForView(sender)) {
-                ui::with(|ui| ui.intent(Intent::AppendResult(row)));
+            let row = table.rowForView(sender);
+            let Ok(index) = usize::try_from(row) else { return };
+            ui::with(|ui| ui.intent(Intent::AppendResult(index)));
+            let col = table.columnWithIdentifier(&NSString::from_str(Col::Add.id()));
+            if let Some(cell) = table
+                .viewAtColumn_row_makeIfNecessary(col, row, false)
+                .and_then(|v| v.downcast::<AddCell>().ok())
+            {
+                cell.confirm();
             }
         }
     }
@@ -218,9 +224,14 @@ impl Controller {
             // SAFETY: views under the "add" identifier are only ever `AddCell`s.
             let reused = unsafe { table.makeViewWithIdentifier_owner(&id, Some(self)) }
                 .and_then(|v| v.downcast::<AddCell>().ok());
-            let cell = reused.unwrap_or_else(|| AddCell::new(mtm, &id, self));
-            // A reused cell may come from a hovered row.
-            cell.ivars().button.get()?.set_shown(false);
+            let target = (self.ivars().kind == Kind::Results).then_some(self);
+            let cell = reused.unwrap_or_else(|| AddCell::new(mtm, &id, target));
+            // A reused cell may come from a hovered or just-added row.
+            cell.set_added(false);
+            if let Some(button) = cell.ivars().button.get() {
+                button.set_shown(false);
+                button.set_enabled(self.ivars().enabled.get());
+            }
             return Some(Retained::into_super(cell));
         }
         let rows = self.ivars().rows.borrow();
@@ -247,6 +258,67 @@ impl Controller {
     }
 }
 
+pub struct KeyTableIvars {
+    focused: Cell<bool>,
+}
+
+define_class!(
+    /// A table that tells its rows when it holds keyboard focus. It draws no focus ring;
+    /// the selected row turns from neutral to accent instead.
+    // SAFETY: NSTableView has no subclassing requirements; no Drop impl.
+    #[unsafe(super(NSTableView, objc2_app_kit::NSControl, NSView, NSResponder, NSObject))]
+    #[thread_kind = MainThreadOnly]
+    #[ivars = KeyTableIvars]
+    pub struct KeyTable;
+
+    impl KeyTable {
+        #[unsafe(method(becomeFirstResponder))]
+        fn become_first_responder(&self) -> bool {
+            // SAFETY: forwards to the superclass implementation.
+            let ok: bool = unsafe { msg_send![super(self), becomeFirstResponder] };
+            if ok {
+                self.set_focused(true);
+            }
+            ok
+        }
+
+        #[unsafe(method(resignFirstResponder))]
+        fn resign_first_responder(&self) -> bool {
+            // SAFETY: forwards to the superclass implementation.
+            let ok: bool = unsafe { msg_send![super(self), resignFirstResponder] };
+            if ok {
+                self.set_focused(false);
+            }
+            ok
+        }
+    }
+);
+
+impl KeyTable {
+    fn new_table(mtm: MainThreadMarker, frame: NSRect) -> Retained<NSTableView> {
+        let this = Self::alloc(mtm).set_ivars(KeyTableIvars {
+            focused: Cell::new(false),
+        });
+        // SAFETY: `initWithFrame:` is NSView's designated initializer.
+        let this: Retained<Self> = unsafe { msg_send![super(this), initWithFrame: frame] };
+        Retained::into_super(this)
+    }
+
+    fn focused(&self) -> bool {
+        self.ivars().focused.get()
+    }
+
+    fn set_focused(&self, focused: bool) {
+        if self.ivars().focused.replace(focused) == focused {
+            return;
+        }
+        for_visible_rows(self, |_, rv| {
+            rv.ivars().focused.set(focused);
+            rv.paint();
+        });
+    }
+}
+
 fn for_visible_rows(table: &NSTableView, mut f: impl FnMut(NSInteger, &RowView)) {
     let range = table.rowsInRect(table.visibleRect());
     for row in range.location..range.location + range.length {
@@ -264,6 +336,8 @@ pub struct RowIvars {
     hovered: Cell<bool>,
     selected: Cell<bool>,
     current: Cell<bool>,
+    /// The table holds keyboard focus.
+    focused: Cell<bool>,
 }
 
 define_class!(
@@ -315,6 +389,7 @@ impl RowView {
             hovered: Cell::new(false),
             selected: Cell::new(false),
             current: Cell::new(false),
+            focused: Cell::new(false),
         });
         // SAFETY: `initWithFrame:` is the designated initializer.
         let this: Retained<Self> = unsafe { msg_send![super(this), initWithFrame: NSRect::ZERO] };
@@ -337,27 +412,39 @@ impl RowView {
 
     fn paint(&self) {
         let iv = self.ivars();
-        let base = if iv.hovered.get() {
+        let selected = iv.selected.get();
+        let base = if selected && !iv.focused.get() {
+            // Selection without keyboard focus is neutral, as in AppKit.
+            theme::LINE_2
+        } else if iv.hovered.get() {
             theme::BG_3
         } else if iv.odd.get() {
             theme::BG_2
         } else {
             theme::BG
         };
-        let color = if iv.selected.get() {
-            theme::mix(base, theme::ACCENT, theme::SELECTED)
-        } else if iv.current.get() {
-            theme::mix(base, theme::ACCENT, theme::SOFT)
-        } else {
-            theme::mix(base, base, 0.0)
+        let accent = match (selected && iv.focused.get(), iv.current.get()) {
+            // Selection over the current row's accent-soft tint, so the row stays marked.
+            (true, true) => 1.0 - (1.0 - theme::SELECTED) * (1.0 - theme::SOFT),
+            (true, false) => theme::SELECTED,
+            (false, true) => theme::SOFT,
+            (false, false) => 0.0,
         };
-        widgets::fill(self, Some(&color));
+        widgets::fill(self, Some(&theme::mix(base, theme::ACCENT, accent)));
+        for v in self.subviews().iter() {
+            if let Some(cell) = v.downcast_ref::<TextCell>() {
+                cell.set_row_selected(selected);
+            }
+        }
     }
 }
 
 pub struct TextCellIvars {
     label: OnceCell<Retained<NSTextField>>,
     bar: OnceCell<Retained<NSView>>,
+    /// Muted text, raised to ink-2 on a selected row.
+    secondary: bool,
+    row_selected: Cell<bool>,
 }
 
 define_class!(
@@ -375,6 +462,8 @@ impl TextCell {
         let this = Self::alloc(mtm).set_ivars(TextCellIvars {
             label: OnceCell::new(),
             bar: OnceCell::new(),
+            secondary: col != Col::Title,
+            row_selected: Cell::new(false),
         });
         let w = 200.0;
         // SAFETY: `initWithFrame:` is NSView's designated initializer.
@@ -416,6 +505,21 @@ impl TextCell {
         let _ = this.ivars().label.set(label);
         this
     }
+
+    fn set_row_selected(&self, selected: bool) {
+        let iv = self.ivars();
+        if !iv.secondary || iv.row_selected.replace(selected) == selected {
+            return;
+        }
+        if let Some(l) = iv.label.get() {
+            let c = if selected {
+                theme::ink_2()
+            } else {
+                theme::muted()
+            };
+            l.setTextColor(Some(&c));
+        }
+    }
 }
 
 fn add_rule(mtm: MainThreadMarker, cell: &NSView, w: CGFloat) {
@@ -430,11 +534,15 @@ fn add_rule(mtm: MainThreadMarker, cell: &NSView, w: CGFloat) {
 
 pub struct AddCellIvars {
     button: OnceCell<Retained<HoverButton>>,
+    /// Showing the check that confirms an add.
+    added: Cell<bool>,
+    /// Bumped on every change, so a stale revert leaves a newer check alone.
+    generation: Cell<u64>,
 }
 
 define_class!(
-    /// The results table's cell before Time: a "+" ghost button shown while the row is
-    /// hovered.
+    /// The cell before Time: in results, a "+" ghost button shown while the row is hovered;
+    /// in the queue, empty, so both tables keep the same columns.
     // SAFETY: NSView has no subclassing requirements; no Drop impl.
     #[unsafe(super(NSView, NSResponder, NSObject))]
     #[thread_kind = MainThreadOnly]
@@ -443,9 +551,12 @@ define_class!(
 );
 
 impl AddCell {
-    fn new(mtm: MainThreadMarker, id: &NSString, target: &Controller) -> Retained<Self> {
+    /// Without a `target` the cell has no button.
+    fn new(mtm: MainThreadMarker, id: &NSString, target: Option<&Controller>) -> Retained<Self> {
         let this = Self::alloc(mtm).set_ivars(AddCellIvars {
             button: OnceCell::new(),
+            added: Cell::new(false),
+            generation: Cell::new(0),
         });
         let w = ADD_W;
         // SAFETY: `initWithFrame:` is NSView's designated initializer.
@@ -453,11 +564,13 @@ impl AddCell {
             unsafe { msg_send![super(this), initWithFrame: rect(0.0, 0.0, w, ROW_H)] };
         this.setIdentifier(Some(id));
         this.setWantsLayer(true);
+        add_rule(mtm, &this, w);
+        let Some(target) = target else { return this };
         let b = HoverButton::new(
             mtm,
             rect((w - 28.0) / 2.0, (ROW_H - 28.0) / 2.0, 28.0, 28.0),
             Icon::Plus,
-            16.0,
+            ADD_ICON,
             &theme::muted(),
             None,
             &theme::line_2(),
@@ -465,11 +578,52 @@ impl AddCell {
         );
         b.setAutoresizingMask(widgets::PIN_RIGHT | PIN_LEFT | PIN_TOP | PIN_BOTTOM);
         b.set_action(target, sel!(addClicked:));
+        widgets::describe(&b, "Add to queue (⌘↩)", Some("Add to queue"));
         b.setHidden(true);
         this.addSubview(&b);
-        add_rule(mtm, &this, w);
         let _ = this.ivars().button.set(b);
         this
+    }
+
+    /// Swaps "+" for a check for `ADDED_FOR`, fading both ways.
+    fn confirm(&self) {
+        self.fade_added(true);
+        let generation = self.ivars().generation.get();
+        let Ok(when) = DispatchTime::try_from(ADDED_FOR) else {
+            return;
+        };
+        let cell = MainThreadBound::new(self.retain(), self.mtm());
+        let _ = DispatchQueue::main().after(when, move || {
+            cell.get_on_main(|cell| {
+                if cell.ivars().generation.get() == generation {
+                    cell.fade_added(false);
+                }
+            });
+        });
+    }
+
+    fn fade_added(&self, added: bool) {
+        if let Some(b) = self.ivars().button.get() {
+            widgets::crossfade(b, widgets::MICRO);
+        }
+        self.set_added(added);
+    }
+
+    fn set_added(&self, added: bool) {
+        let iv = self.ivars();
+        iv.generation.set(iv.generation.get() + 1);
+        if iv.added.replace(added) == added {
+            return;
+        }
+        if let Some(b) = iv.button.get() {
+            let (icon, tint) = if added {
+                (Icon::Check, theme::accent())
+            } else {
+                (Icon::Plus, theme::muted())
+            };
+            b.set_icon(icon, ADD_ICON);
+            b.setContentTintColor(Some(&tint));
+        }
     }
 }
 
@@ -490,6 +644,11 @@ define_class!(
     pub struct ColumnHeader;
 
     impl ColumnHeader {
+        #[unsafe(method(clipFrameChanged:))]
+        fn clip_frame_changed(&self, _notification: &NSNotification) {
+            self.fit_columns();
+        }
+
         #[unsafe(method(drawRect:))]
         fn draw_rect(&self, _dirty: NSRect) {
             let b = self.bounds();
@@ -506,8 +665,9 @@ define_class!(
                 &theme::muted_2(),
                 Some(0.12 * size),
             );
+            let columns = table.tableColumns();
             for (i, (title, right)) in self.ivars().titles.iter().enumerate() {
-                if title.is_empty() {
+                if title.is_empty() || columns.objectAtIndex(i).isHidden() {
                     continue;
                 }
                 let col = table.rectOfColumn(i as NSInteger);
@@ -531,8 +691,71 @@ define_class!(
     }
 );
 
+impl ColumnHeader {
+    /// Sizes the text columns to the visible width: title, artists and album at 46/30/24,
+    /// with album dropped below `ALBUM_MIN_W`. Runs whenever the clip view resizes, which
+    /// covers window resizes and a legacy scroller appearing.
+    fn fit_columns(&self) {
+        let Some(table) = self.ivars().table.get().and_then(Weak::load) else {
+            return;
+        };
+        let Some(scroll) = table.enclosingScrollView() else {
+            return;
+        };
+        let widths = column_widths(scroll.contentSize().width);
+        for c in table.tableColumns().iter() {
+            match Col::from_id(&c.identifier().to_string()) {
+                Some(Col::Title) => c.setWidth(widths.title),
+                Some(Col::Artists) => c.setWidth(widths.artists),
+                Some(Col::Album) => {
+                    c.setHidden(widths.album.is_none());
+                    if let Some(w) = widths.album {
+                        c.setWidth(w);
+                    }
+                }
+                _ => {}
+            }
+        }
+        self.setNeedsDisplay(true);
+    }
+}
+
 const ADD_W: CGFloat = 44.0;
+const ADD_ICON: CGFloat = 16.0;
 const DURATION_W: CGFloat = 80.0;
+/// Narrower tables drop the album column.
+const ALBUM_MIN_W: CGFloat = 640.0;
+/// How long a "+" shows its check after an add.
+const ADDED_FOR: Duration = Duration::from_millis(1200);
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct Widths {
+    title: CGFloat,
+    artists: CGFloat,
+    album: Option<CGFloat>,
+}
+
+/// Text-column widths for a table `width` wide. They fill what the fixed columns leave,
+/// rounding into the last, so the columns end flush with the table.
+fn column_widths(width: CGFloat) -> Widths {
+    let flex = (width - ADD_W - DURATION_W).max(0.0);
+    if width < ALBUM_MIN_W {
+        let title = (flex * 46.0 / 76.0).floor();
+        Widths {
+            title,
+            artists: flex - title,
+            album: None,
+        }
+    } else {
+        let title = (flex * 0.46).floor();
+        let artists = (flex * 0.30).floor();
+        Widths {
+            title,
+            artists,
+            album: Some(flex - title - artists),
+        }
+    }
+}
 
 pub struct Table {
     /// Header and scroll view.
@@ -545,37 +768,31 @@ pub struct Table {
 impl Table {
     pub fn new(mtm: MainThreadMarker, frame: NSRect, kind: Kind) -> Table {
         let (w, h) = (frame.size.width, frame.size.height);
-        let table = NSTableView::initWithFrame(NSTableView::alloc(mtm), rect(0.0, 0.0, w, h));
+        let table = KeyTable::new_table(mtm, rect(0.0, 0.0, w, h));
         table.setStyle(NSTableViewStyle::Plain);
         table.setSelectionHighlightStyle(NSTableViewSelectionHighlightStyle::None);
         table.setIntercellSpacing(NSSize::new(0.0, 0.0));
         table.setRowHeight(ROW_H);
         table.setBackgroundColor(&objc2_app_kit::NSColor::clearColor());
         table.setUsesAlternatingRowBackgroundColors(false);
-        table.setColumnAutoresizingStyle(
-            NSTableViewColumnAutoresizingStyle::UniformColumnAutoresizingStyle,
-        );
+        // `ColumnHeader::fit_columns` sizes the columns.
+        table.setColumnAutoresizingStyle(NSTableViewColumnAutoresizingStyle::NoColumnAutoresizing);
         table.setAllowsColumnResizing(false);
         table.setAllowsColumnReordering(false);
         table.setAllowsMultipleSelection(false);
         table.setAllowsEmptySelection(true);
         table.setFocusRingType(NSFocusRingType::None);
 
-        let fixed = DURATION_W + if kind == Kind::Results { ADD_W } else { 0.0 };
-        let flex = w - fixed;
         // Time stays the last column, flush with the table's right edge in both tables.
         let cols: &[(Col, &str, CGFloat)] = &[
-            (Col::Title, "Title", (flex * 0.42).floor()),
-            (Col::Artists, "Artists", (flex * 0.29).floor()),
-            (Col::Album, "Album", (flex * 0.29).floor()),
+            (Col::Title, "Title", 0.0),
+            (Col::Artists, "Artists", 0.0),
+            (Col::Album, "Album", 0.0),
             (Col::Add, "", ADD_W),
             (Col::Duration, "Time", DURATION_W),
         ];
         let mut titles = Vec::with_capacity(cols.len());
         for &(col, title, width) in cols {
-            if col == Col::Add && kind == Kind::Queue {
-                continue;
-            }
             let c = NSTableColumn::initWithIdentifier(
                 NSTableColumn::alloc(mtm),
                 &NSString::from_str(col.id()),
@@ -587,8 +804,8 @@ impl Table {
                 c.setMaxWidth(width);
                 c.setResizingMask(NSTableColumnResizingOptions::NoResizing);
             } else {
-                c.setMinWidth(80.0);
-                c.setResizingMask(NSTableColumnResizingOptions::AutoresizingMask);
+                c.setMinWidth(0.0);
+                c.setResizingMask(NSTableColumnResizingOptions::NoResizing);
             }
             table.addTableColumn(&c);
         }
@@ -599,6 +816,7 @@ impl Table {
             kind,
             rows: RefCell::new(Vec::new()),
             current: Cell::new(None),
+            enabled: Cell::new(true),
             table: OnceCell::new(),
         });
         // SAFETY: NSObject's `init`.
@@ -611,10 +829,7 @@ impl Table {
             table.setDataSource(Some(ProtocolObject::from_ref(&*controller)));
             table.setDelegate(Some(ProtocolObject::from_ref(&*controller)));
             table.setTarget(Some(&controller));
-            match kind {
-                Kind::Results => table.setDoubleAction(Some(sel!(rowDoubleClicked:))),
-                Kind::Queue => table.setAction(Some(sel!(rowClicked:))),
-            }
+            table.setDoubleAction(Some(sel!(rowDoubleClicked:)));
         }
 
         let view = widgets::view(mtm, frame, FLEX_W | FLEX_H);
@@ -641,6 +856,18 @@ impl Table {
         scroll.contentView().setDrawsBackground(false);
         scroll.setFocusRingType(NSFocusRingType::None);
         view.addSubview(&scroll);
+        let clip = scroll.contentView();
+        // SAFETY: the header implements the selector, and it lives as long as the table, in
+        // the installed `Ui`, until exit; the observation goes with it.
+        unsafe {
+            NSNotificationCenter::defaultCenter().addObserver_selector_name_object(
+                &header,
+                sel!(clipFrameChanged:),
+                Some(NSViewFrameDidChangeNotification),
+                Some(&clip),
+            );
+        }
+        header.fit_columns();
         Table {
             view,
             header,
@@ -654,6 +881,23 @@ impl Table {
         self.table.reloadData();
         // Column widths settle when the table tiles.
         self.header.setNeedsDisplay(true);
+    }
+
+    /// Dims and disables the rows' "+" buttons; playing rows goes through the view model,
+    /// which drops it while disconnected.
+    pub fn set_enabled(&self, enabled: bool) {
+        if self.controller.ivars().enabled.replace(enabled) == enabled {
+            return;
+        }
+        for_visible_rows(&self.table, |_, rv| {
+            for v in rv.subviews().iter() {
+                if let Some(add) = v.downcast_ref::<AddCell>()
+                    && let Some(b) = add.ivars().button.get()
+                {
+                    b.set_enabled(enabled);
+                }
+            }
+        });
     }
 
     pub fn selected_row(&self) -> Option<usize> {
@@ -704,6 +948,27 @@ mod tests {
             album: album.into(),
             duration: duration.into(),
         }
+    }
+
+    #[test]
+    fn columns_split_46_30_24_and_fill_the_table() {
+        let w = column_widths(800.0);
+        assert_eq!(w.title, 310.0);
+        assert_eq!(w.artists, 202.0);
+        assert_eq!(w.album, Some(164.0));
+        assert_eq!(
+            w.title + w.artists + w.album.unwrap() + ADD_W + DURATION_W,
+            800.0
+        );
+    }
+
+    #[test]
+    fn narrow_tables_drop_the_album_column() {
+        let w = column_widths(ALBUM_MIN_W - 1.0);
+        assert_eq!(w.album, None);
+        assert_eq!(w.title + w.artists + ADD_W + DURATION_W, ALBUM_MIN_W - 1.0);
+        assert!(w.title > w.artists);
+        assert!(column_widths(ALBUM_MIN_W).album.is_some());
     }
 
     #[test]

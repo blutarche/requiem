@@ -1,14 +1,14 @@
 //! `--demo`: fixed fake data and a stand-in for the daemon, so screenshots are deterministic.
 //! All names are made up.
 
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use requiem_core::{
     Command, EnqueueMode, Event, PlayState, ProviderId, SeekTarget, Track, TrackId,
 };
 
 use crate::args::View;
-use crate::vm::{Intent, Link, Vm};
+use crate::vm::{BANNER_GRACE, Intent, Link, Vm};
 
 pub const QUERY: &str = "night drive";
 
@@ -299,7 +299,7 @@ impl Daemon {
         self.current.and_then(|c| self.queue.get(c).cloned())
     }
 
-    fn queue_changed(&self) -> Event {
+    pub fn queue_changed(&self) -> Event {
         Event::QueueChanged {
             tracks: self.queue.clone(),
             current: self.current,
@@ -355,7 +355,8 @@ pub fn start() -> (Vm, Daemon) {
 /// `start`, staged for a demo-only `view`: `Empty` skips the search; `Disconnected`,
 /// `OutOfDate` and `Toast` add their banner or toast. Other views get the plain start.
 pub fn start_in(view: View) -> (Vm, Daemon) {
-    let mut vm = Vm::new();
+    let t0 = Instant::now();
+    let mut vm = Vm::new_at(t0);
     let mut daemon = Daemon::default();
     vm.link(Link::Demo);
     for ev in daemon.snapshot() {
@@ -369,12 +370,19 @@ pub fn start_in(view: View) -> (Vm, Daemon) {
         }
     }
     match view {
-        View::Disconnected => vm.link(Link::Lost("demo".into())),
+        View::Disconnected => {
+            // Past the grace, as a real outage would be by the time its banner shows.
+            vm.link_at(Link::Lost("demo".into()), t0);
+            vm.tick_at(t0 + BANNER_GRACE);
+        }
         View::OutOfDate => vm.link(Link::OutOfDate),
-        View::Toast => vm.apply(Event::TrackFailed {
-            track: daemon.results[FAILED].clone(),
-            error: "video unavailable".into(),
-        }),
+        View::Toast => {
+            vm.apply(Event::TrackFailed {
+                track: daemon.results[FAILED].clone(),
+                error: "video unavailable".into(),
+            });
+            vm.apply(daemon.queue_changed());
+        }
         View::Search | View::Queue | View::Palette | View::Empty => {}
     }
     (vm, daemon)
@@ -383,7 +391,7 @@ pub fn start_in(view: View) -> (Vm, Daemon) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::vm::{Connection, SearchStatus};
+    use crate::vm::{Connection, EmptyAction, SearchStatus};
 
     fn run(vm: &mut Vm, daemon: &mut Daemon, intent: Intent) {
         for cmd in vm.intent(intent) {
@@ -419,29 +427,29 @@ mod tests {
         assert_eq!(ui.search, SearchStatus::Idle);
         let empty = ui.results_empty().unwrap();
         assert_eq!(empty.heading, "Search YouTube Music");
-        assert_eq!(empty.action, "Start a search");
+        assert_eq!(empty.action, EmptyAction::StartSearch);
         assert_eq!(ui.state, PlayState::Playing);
     }
 
     #[test]
     fn staged_banners_and_toast() {
         let (vm, _) = start_in(View::Disconnected);
-        let b = vm.ui().banner().unwrap();
+        let b = vm.ui().banner.clone().unwrap();
         assert!(b.text.starts_with("Player disconnected") && !b.error);
         assert!(vm.ui().toast.is_none());
 
         let (vm, _) = start_in(View::OutOfDate);
-        let b = vm.ui().banner().unwrap();
-        assert!(b.text.contains("out of date") && b.error);
+        let b = vm.ui().banner.clone().unwrap();
+        assert!(b.text.starts_with("An older requiem player") && b.error);
 
         let (vm, _) = start_in(View::Toast);
         let t = vm.ui().toast.clone().unwrap();
         assert!(t.error);
         assert_eq!(
             t.text,
-            "Couldn't play “Fever in the Valley”: video unavailable"
+            "Couldn't play “Fever in the Valley”: video unavailable. Skipped to the next track."
         );
-        assert!(vm.ui().banner().is_none());
+        assert!(vm.ui().banner.is_none());
         assert_eq!(vm.ui().results.len(), 30);
     }
 

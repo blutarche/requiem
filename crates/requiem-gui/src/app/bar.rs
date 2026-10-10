@@ -13,25 +13,34 @@ use super::theme::{self, Icon, Weight};
 use super::widgets::{
     self, FLEX_W, HoverButton, PIN_BOTTOM, PIN_LEFT, PIN_RIGHT, PIN_TOP, Slider, SliderKind, rect,
 };
+use crate::vm::Controls;
 
 pub struct PlayerBar {
     pub view: Retained<NSView>,
     title: Retained<NSTextField>,
     artists: Retained<NSTextField>,
+    prev: Retained<HoverButton>,
     play: Retained<HoverButton>,
+    next: Retained<HoverButton>,
     seek: Retained<Slider>,
     elapsed: Retained<NSTextField>,
     total: Retained<NSTextField>,
     volume: Retained<Slider>,
+    volume_icon: Retained<NSView>,
     playing: Cell<bool>,
 }
 
 impl PlayerBar {
     pub const H: CGFloat = 72.0;
     const CENTER_W: CGFloat = 520.0;
-    const TIME_W: CGFloat = 64.0;
+    /// Fits "Buffering…".
+    const TIME_W: CGFloat = 72.0;
     const PLAY: CGFloat = 36.0;
     const SKIP: CGFloat = 32.0;
+    const ICON: CGFloat = 20.0;
+    /// The title's centre with an artist line below it, and alone.
+    const TITLE_Y: CGFloat = 45.0;
+    const TITLE_ALONE_Y: CGFloat = Self::H / 2.0;
 
     pub fn new(mtm: MainThreadMarker, width: CGFloat, target: &AnyObject) -> PlayerBar {
         let h = Self::H;
@@ -58,7 +67,7 @@ impl PlayerBar {
             &theme::font(14.0, Weight::SemiBold),
             &theme::ink(),
             20.0,
-            45.0,
+            Self::TITLE_Y,
             left_w,
             FLEX_W | PIN_LEFT,
         );
@@ -84,44 +93,6 @@ impl PlayerBar {
         let mid = cw / 2.0;
         let row_y = 46.0;
         let centred = PIN_LEFT | PIN_RIGHT;
-        let ghost = |icon, x| {
-            let b = HoverButton::new(
-                mtm,
-                rect(x, row_y - Self::SKIP / 2.0, Self::SKIP, Self::SKIP),
-                icon,
-                18.0,
-                &theme::muted(),
-                None,
-                &theme::bg_3(),
-                theme::RADIUS,
-            );
-            b.setAutoresizingMask(centred);
-            b
-        };
-        let prev = ghost(Icon::SkipBack, mid - Self::PLAY / 2.0 - 12.0 - Self::SKIP);
-        let next = ghost(Icon::SkipForward, mid + Self::PLAY / 2.0 + 12.0);
-        let play = HoverButton::new(
-            mtm,
-            rect(
-                mid - Self::PLAY / 2.0,
-                row_y - Self::PLAY / 2.0,
-                Self::PLAY,
-                Self::PLAY,
-            ),
-            Icon::Play,
-            18.0,
-            &theme::on_accent(),
-            Some(&theme::accent()),
-            &theme::accent_hi(),
-            Self::PLAY / 2.0,
-        );
-        play.setAutoresizingMask(centred);
-        prev.set_action(target, sel!(prev:));
-        play.set_action(target, sel!(toggle:));
-        next.set_action(target, sel!(next:));
-        center.addSubview(&prev);
-        center.addSubview(&play);
-        center.addSubview(&next);
 
         let seek_y = 19.0;
         let tw = Self::TIME_W;
@@ -147,15 +118,65 @@ impl PlayerBar {
             tw,
             PIN_RIGHT,
         );
+        // 24 pt tall for an easy grab; it reaches under the transport buttons, which sit
+        // above it and keep their clicks.
+        let seek_h = 24.0;
         let seek = Slider::new(
             mtm,
-            rect(tw + 6.0, seek_y - 8.0, cw - 2.0 * (tw + 6.0), 16.0),
+            rect(
+                tw + 6.0,
+                seek_y - seek_h / 2.0,
+                cw - 2.0 * (tw + 6.0),
+                seek_h,
+            ),
             FLEX_W,
             SliderKind::Seek,
         );
         center.addSubview(&elapsed);
         center.addSubview(&seek);
         center.addSubview(&total);
+
+        let ghost = |icon, x| {
+            let b = HoverButton::new(
+                mtm,
+                rect(x, row_y - Self::SKIP / 2.0, Self::SKIP, Self::SKIP),
+                icon,
+                Self::ICON,
+                &theme::muted(),
+                None,
+                &theme::bg_3(),
+                theme::RADIUS,
+            );
+            b.setAutoresizingMask(centred);
+            b
+        };
+        let prev = ghost(Icon::SkipBack, mid - Self::PLAY / 2.0 - 12.0 - Self::SKIP);
+        let next = ghost(Icon::SkipForward, mid + Self::PLAY / 2.0 + 12.0);
+        let play = HoverButton::new(
+            mtm,
+            rect(
+                mid - Self::PLAY / 2.0,
+                row_y - Self::PLAY / 2.0,
+                Self::PLAY,
+                Self::PLAY,
+            ),
+            Icon::Play,
+            Self::ICON,
+            &theme::on_accent(),
+            Some(&theme::accent()),
+            &theme::accent_hi(),
+            Self::PLAY / 2.0,
+        );
+        play.setAutoresizingMask(centred);
+        prev.set_action(target, sel!(prev:));
+        play.set_action(target, sel!(toggle:));
+        next.set_action(target, sel!(next:));
+        widgets::describe(&prev, "Previous", None);
+        widgets::describe(&play, "Play", None);
+        widgets::describe(&next, "Next", None);
+        center.addSubview(&prev);
+        center.addSubview(&play);
+        center.addSubview(&next);
         view.addSubview(&center);
 
         let vw = 112.0;
@@ -168,6 +189,7 @@ impl PlayerBar {
             rect(vx - 26.0, (h - 16.0) / 2.0, 16.0, 16.0),
         );
         vicon.setAutoresizingMask(PIN_RIGHT);
+        let vicon: Retained<NSView> = Retained::into_super(Retained::into_super(vicon));
         let volume = Slider::new(
             mtm,
             rect(vx, h / 2.0 - 8.0, vw, 16.0),
@@ -181,34 +203,65 @@ impl PlayerBar {
             view,
             title,
             artists,
+            prev,
             play,
+            next,
             seek,
             elapsed,
             total,
             volume,
+            volume_icon: vicon,
             playing: Cell::new(false),
         }
     }
 
     /// `None` when nothing is loaded.
     pub fn set_track(&self, track: Option<(&str, &str)>, total: &str) {
-        match track {
+        let artists = match track {
             Some((title, artists)) => {
-                widgets::set_text(&self.title, title);
+                widgets::fade_text(&self.title, title, widgets::STANDARD);
                 self.title.setTextColor(Some(&theme::ink()));
-                widgets::set_text(&self.artists, artists);
+                artists
             }
             None => {
-                widgets::set_text(&self.title, "Nothing playing");
+                widgets::fade_text(&self.title, "Nothing playing", widgets::STANDARD);
                 self.title.setTextColor(Some(&theme::muted()));
-                widgets::set_text(&self.artists, "");
+                ""
             }
+        };
+        widgets::fade_text(&self.artists, artists, widgets::STANDARD);
+        let mid = if artists.is_empty() {
+            Self::TITLE_ALONE_Y
+        } else {
+            Self::TITLE_Y
+        };
+        let f = self.title.frame();
+        let y = (mid - f.size.height / 2.0).round();
+        if f.origin.y != y {
+            self.title
+                .setFrameOrigin(objc2_foundation::NSPoint::new(f.origin.x, y));
         }
         widgets::set_text(&self.total, total);
-        self.seek.set_enabled(track.is_some());
     }
 
+    pub fn set_controls(&self, c: Controls) {
+        for b in [&self.prev, &self.play, &self.next] {
+            b.set_enabled(c.transport);
+        }
+        self.seek.set_enabled(c.seek);
+        self.volume.set_enabled(c.player);
+        self.volume_icon
+            .setAlphaValue(if c.player { 1.0 } else { widgets::DIMMED });
+    }
+
+    /// Ignored while the seek bar is dragged, which shows its target time instead.
     pub fn set_elapsed(&self, text: &str) {
+        if !self.seek.is_dragging() {
+            widgets::set_text(&self.elapsed, text);
+        }
+    }
+
+    pub fn preview_seek(&self, text: &str) {
         widgets::set_text(&self.elapsed, text);
     }
 
@@ -218,8 +271,13 @@ impl PlayerBar {
 
     pub fn set_playing(&self, playing: bool) {
         if self.playing.replace(playing) != playing {
-            let icon = if playing { Icon::Pause } else { Icon::Play };
-            self.play.set_icon(icon, 18.0);
+            let (icon, name) = if playing {
+                (Icon::Pause, "Pause")
+            } else {
+                (Icon::Play, "Play")
+            };
+            self.play.set_icon(icon, Self::ICON);
+            widgets::describe(&self.play, name, None);
         }
     }
 
