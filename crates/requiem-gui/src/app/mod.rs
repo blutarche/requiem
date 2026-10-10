@@ -29,7 +29,7 @@ use objc2_foundation::{MainThreadMarker, NSNotification, NSString};
 
 use crate::args::{Args, View};
 use crate::demo;
-use crate::vm::{Intent, SEEK_STEP_SECS, VOLUME_STEP, Vm};
+use crate::vm::{Intent, QueueEdit, SEEK_STEP_SECS, VOLUME_STEP, Vm};
 use backend::{Backend, Live};
 use ui::{AppView, Ui};
 
@@ -178,6 +178,27 @@ define_class!(
             ui::with(|ui| ui.quit_and_stop());
         }
 
+        #[unsafe(method(removeFromQueue:))]
+        fn remove_from_queue(&self, _sender: Option<&AnyObject>) {
+            edit_selected(QueueEdit::Remove);
+        }
+
+        // Not `moveUp:`/`moveDown:`, which text views answer along the responder chain.
+        #[unsafe(method(moveTrackUp:))]
+        fn move_track_up(&self, _sender: Option<&AnyObject>) {
+            edit_selected(QueueEdit::MoveUp);
+        }
+
+        #[unsafe(method(moveTrackDown:))]
+        fn move_track_down(&self, _sender: Option<&AnyObject>) {
+            edit_selected(QueueEdit::MoveDown);
+        }
+
+        #[unsafe(method(clearQueue:))]
+        fn clear_queue(&self, _sender: Option<&AnyObject>) {
+            ui::with(|ui| ui.edit_queue(QueueEdit::Clear));
+        }
+
         #[unsafe(method(validateMenuItem:))]
         fn validate_menu_item(&self, item: &NSMenuItem) -> bool {
             ui::with(|ui| validate(ui, item)).unwrap_or(true)
@@ -192,8 +213,16 @@ impl Delegate {
     }
 }
 
-/// Enables our menu items. Arrow, Return and volume items step aside while a text field has
-/// focus, so its own editing keys work, and Return also for a focused button.
+fn edit_selected(edit: fn(usize) -> QueueEdit) {
+    ui::with(|ui| {
+        if let Some(e) = ui.selected_edit(edit) {
+            ui.edit_queue(e);
+        }
+    });
+}
+
+/// Enables our menu items. Arrow, Return, Delete and volume items step aside while a text
+/// field has focus, so its own editing keys work, and Return also for a focused button.
 fn validate(ui: &Ui, item: &NSMenuItem) -> bool {
     let Some(action) = item.action() else {
         return true;
@@ -217,8 +246,25 @@ fn validate(ui: &Ui, item: &NSMenuItem) -> bool {
     } else if action == sel!(playSelected:) || action == sel!(addToQueue:) {
         let append = action == sel!(addToQueue:);
         !in_text && !on_button && can.player && ui.has_selection(append)
+    } else if let Some(edit) = row_edit(action) {
+        // For Remove, the key monitor's conditions for Delete, which its item only shows.
+        !in_text && ui.selected_edit(edit).is_some_and(|e| ui.can_edit(e))
+    } else if action == sel!(clearQueue:) {
+        ui.can_edit(QueueEdit::Clear)
     } else {
         true
+    }
+}
+
+fn row_edit(action: Sel) -> Option<fn(usize) -> QueueEdit> {
+    if action == sel!(removeFromQueue:) {
+        Some(QueueEdit::Remove)
+    } else if action == sel!(moveTrackUp:) {
+        Some(QueueEdit::MoveUp)
+    } else if action == sel!(moveTrackDown:) {
+        Some(QueueEdit::MoveDown)
+    } else {
+        None
     }
 }
 
@@ -262,8 +308,10 @@ fn field_command(ui: &Ui, control: &NSControl, text: &NSTextView, command: Sel) 
 
 const KEY_RETURN: u16 = 36;
 const KEY_SPACE: u16 = 49;
+const KEY_DELETE: u16 = 51;
 const KEY_ESCAPE: u16 = 53;
 const KEY_ENTER: u16 = 76;
+const KEY_FORWARD_DELETE: u16 = 117;
 const KEY_LEFT: u16 = 123;
 const KEY_RIGHT: u16 = 124;
 const KEY_UP: u16 = 126;
@@ -302,6 +350,15 @@ fn key_down(ui: &Ui, event: &NSEvent) -> bool {
         KEY_RIGHT if plain => ui.intent(Intent::SeekBy(SEEK_STEP_SECS)),
         KEY_UP if plain && ui.results_at_top() => ui.focus_search(),
         KEY_RETURN | KEY_ENTER if (plain || cmd) && !on_button => ui.activate_selection(cmd),
+        KEY_DELETE | KEY_FORWARD_DELETE if plain => {
+            match ui
+                .selected_edit(QueueEdit::Remove)
+                .filter(|&e| ui.can_edit(e))
+            {
+                Some(e) => ui.edit_queue(e),
+                None => return false,
+            }
+        }
         _ => return false,
     }
     true
@@ -434,6 +491,26 @@ fn menu_bar(mtm: MainThreadMarker, target: &Delegate) -> (Retained<NSMenu>, Reta
                 NSEventModifierFlags::empty(),
             ),
             item("Add to Queue", Some(sel!(addToQueue:)), "\r", true),
+            sep(),
+            // Shown only, like Return: the key monitor handles Delete.
+            with_mods(
+                item(
+                    "Remove from Queue",
+                    Some(sel!(removeFromQueue:)),
+                    "\u{8}",
+                    true,
+                ),
+                NSEventModifierFlags::empty(),
+            ),
+            with_mods(
+                item("Move Up", Some(sel!(moveTrackUp:)), UP_ARROW, true),
+                cmd_opt,
+            ),
+            with_mods(
+                item("Move Down", Some(sel!(moveTrackDown:)), DOWN_ARROW, true),
+                cmd_opt,
+            ),
+            item("Clear Queue", Some(sel!(clearQueue:)), "", true),
             sep(),
             item("Volume Up", Some(sel!(volumeUp:)), UP_ARROW, true),
             item("Volume Down", Some(sel!(volumeDown:)), DOWN_ARROW, true),

@@ -286,10 +286,67 @@ impl Daemon {
                 self.volume = v.min(100);
                 vec![Event::Volume(self.volume)]
             }
-            Command::Remove(_) | Command::Move { .. } | Command::Clear | Command::Shutdown => {
-                Vec::new()
+            Command::Remove(i) => self.remove(i),
+            Command::Move { from, to } => self.move_track(from, to),
+            Command::Clear => {
+                self.queue.clear();
+                self.current = None;
+                let mut evs = self.stop();
+                evs.push(self.queue_changed());
+                evs
             }
+            Command::Shutdown => Vec::new(),
         }
+    }
+
+    /// As the session: removing the playing track plays the next one, if any.
+    fn remove(&mut self, i: usize) -> Vec<Event> {
+        if i >= self.queue.len() {
+            return Vec::new();
+        }
+        self.queue.remove(i);
+        match self.current {
+            Some(c) if c == i => {
+                let more = i < self.queue.len();
+                if more && matches!(self.state, PlayState::Playing | PlayState::Buffering) {
+                    return self.start(i);
+                }
+                self.current = if more { i.checked_sub(1) } else { None };
+                let mut evs = if self.state == PlayState::Stopped {
+                    Vec::new()
+                } else {
+                    self.stop()
+                };
+                evs.push(self.queue_changed());
+                evs
+            }
+            Some(c) if i < c => {
+                self.current = Some(c - 1);
+                vec![self.queue_changed()]
+            }
+            _ => vec![self.queue_changed()],
+        }
+    }
+
+    fn move_track(&mut self, from: usize, to: usize) -> Vec<Event> {
+        let len = self.queue.len();
+        if from >= len || to >= len || from == to {
+            return Vec::new();
+        }
+        let track = self.queue.remove(from);
+        self.queue.insert(to, track);
+        self.current = self.current.map(|c| {
+            if c == from {
+                to
+            } else if from < c && c <= to {
+                c - 1
+            } else if to <= c && c < from {
+                c + 1
+            } else {
+                c
+            }
+        });
+        vec![self.queue_changed()]
     }
 
     fn playing(&self) -> Option<Track> {
@@ -391,7 +448,7 @@ pub fn start_in(view: View) -> (Vm, Daemon) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::vm::{Connection, EmptyAction, SearchStatus};
+    use crate::vm::{Connection, EmptyAction, QueueEdit, SearchStatus};
 
     fn run(vm: &mut Vm, daemon: &mut Daemon, intent: Intent) {
         for cmd in vm.intent(intent) {
@@ -520,5 +577,48 @@ mod tests {
         assert_eq!(vm.ui().volume, 60);
         run(&mut vm, &mut d, Intent::SetVolume(5));
         assert_eq!(vm.ui().volume, 5);
+    }
+
+    fn edit(vm: &mut Vm, d: &mut Daemon, edit: QueueEdit, selected: Option<usize>) {
+        run(vm, d, Intent::EditQueue { edit, selected });
+    }
+
+    #[test]
+    fn queue_edits_keep_the_current_track() {
+        let (mut vm, mut d) = start();
+        let titles =
+            |vm: &Vm| -> Vec<String> { vm.ui().queue.iter().map(|t| t.title.clone()).collect() };
+        let before = titles(&vm);
+        edit(&mut vm, &mut d, QueueEdit::Remove(0), Some(0));
+        assert_eq!(titles(&vm), before[1..]);
+        assert_eq!(vm.ui().current, Some(1));
+        assert_eq!(vm.take_queue_selection(), Some(0));
+        edit(&mut vm, &mut d, QueueEdit::MoveDown(1), Some(1));
+        assert_eq!(vm.ui().current, Some(2));
+        assert_eq!(vm.take_queue_selection(), Some(2));
+        assert_eq!(vm.ui().now_playing.as_ref(), Some(&vm.ui().queue[2]));
+        // Removing the playing track plays the next.
+        edit(&mut vm, &mut d, QueueEdit::Remove(2), Some(2));
+        assert_eq!(vm.ui().current, Some(2));
+        assert_eq!(vm.ui().now_playing.as_ref(), Some(&vm.ui().queue[2]));
+        assert_eq!(vm.ui().state, PlayState::Playing);
+    }
+
+    #[test]
+    fn clear_and_undo() {
+        let (mut vm, mut d) = start();
+        let queue = vm.ui().queue.clone();
+        edit(&mut vm, &mut d, QueueEdit::Clear, None);
+        assert!(vm.ui().queue.is_empty());
+        assert_eq!(vm.ui().state, PlayState::Stopped);
+        run(&mut vm, &mut d, Intent::Undo);
+        for cmd in vm.take_commands() {
+            for ev in d.apply(cmd) {
+                vm.apply(ev);
+            }
+        }
+        assert_eq!(vm.ui().queue, queue);
+        assert_eq!(vm.ui().current, Some(2));
+        assert_eq!(vm.ui().elapsed_text(), "1:23");
     }
 }

@@ -28,8 +28,8 @@ use super::widgets::{
     PIN_TOP, rect,
 };
 use crate::vm::{
-    self, Banner, Controls, Dirty, EmptyAction, EmptyText, Intent, PaletteAction, Toast, UiState,
-    Vm,
+    self, Banner, Controls, Dirty, EmptyAction, EmptyText, Intent, PaletteAction, QueueEdit, Toast,
+    UiState, Vm,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -509,6 +509,7 @@ impl Ui {
             PaletteAction::ShowQueue => self.show(AppView::Queue),
             PaletteAction::VolumeUp => self.intent(Intent::VolumeBy(vm::VOLUME_STEP)),
             PaletteAction::VolumeDown => self.intent(Intent::VolumeBy(-vm::VOLUME_STEP)),
+            PaletteAction::ClearQueue => self.edit_queue(QueueEdit::Clear),
         }
     }
 
@@ -566,6 +567,24 @@ impl Ui {
                 }
             }
         }
+    }
+
+    /// `edit` applied to the selected queue row, while the Queue view shows one.
+    pub fn selected_edit(&self, edit: fn(usize) -> QueueEdit) -> Option<QueueEdit> {
+        if self.view.get() != AppView::Queue {
+            return None;
+        }
+        self.queue.selected_row().map(edit)
+    }
+
+    /// Whether `edit` would send anything.
+    pub fn can_edit(&self, edit: QueueEdit) -> bool {
+        self.vm.borrow().ui().edit_command(edit).is_some()
+    }
+
+    pub fn edit_queue(&self, edit: QueueEdit) {
+        let selected = self.queue.selected_row();
+        self.intent(Intent::EditQueue { edit, selected });
     }
 
     /// Plays queue row `i` and drops the selection, so the current-row marker is what
@@ -657,13 +676,17 @@ impl Ui {
 
     /// `render`, whether or not the window can be seen.
     pub fn render_now(&self) {
-        let patch = {
+        let (patch, select) = {
             let mut vm = self.vm.borrow_mut();
             let dirty = vm.take_dirty();
-            (!dirty.is_empty()).then(|| Patch::new(dirty, vm.ui()))
+            let patch = (!dirty.is_empty()).then(|| Patch::new(dirty, vm.ui()));
+            (patch, vm.take_queue_selection())
         };
         if let Some(patch) = patch {
             self.apply(patch);
+        }
+        if let Some(row) = select {
+            self.queue.select(row);
         }
         self.schedule_tick();
     }
