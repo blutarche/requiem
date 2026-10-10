@@ -36,7 +36,7 @@ The bundle embeds Homebrew's libopus. Its minimum macOS version is whatever that
 Measured on an Apple Silicon Mac while playing (physical footprint):
 
 - player (`requiemd`, with the menu-bar icon): 19–24 MiB, about 1% CPU — mostly Opus decoding;
-- window (`requiem-gui`) while open: about 18 MiB, under 0.3% CPU.
+- window (`requiem-gui`) while open and visible: 18–20 MiB, about 0.3% CPU.
 
 `scripts/perf-check.sh [--daemon]` re-runs the gate (it plays audio at 5% volume).
 
