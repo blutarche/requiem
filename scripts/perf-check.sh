@@ -29,7 +29,8 @@ fi
 
 work="$(mktemp -d)"
 pid=""
-trap 'if [ -n "$pid" ]; then kill "$pid" 2>/dev/null || true; fi; rm -rf "$work"' EXIT
+cli_pid=""
+trap 'for p in $pid $cli_pid; do kill "$p" 2>/dev/null || true; done; rm -rf "$work"' EXIT
 script="$work/perf.script"
 log="$work/stdout.log"
 samples="$work/samples.log"
@@ -67,7 +68,6 @@ if [ "$daemon" -eq 1 ]; then
 fi
 echo quit >>"$script"
 
-cli_pid=""
 if [ "$daemon" -eq 1 ]; then
   mkdir -m 0700 "$work/sock"
   export REQUIEM_SOCKET_DIR="$work/sock"
@@ -80,7 +80,19 @@ if [ "$daemon" -eq 1 ]; then
     kill -0 "$pid" 2>/dev/null || break
     sleep 0.1
   done
-  target/release/requiem --connect --script "$script" >"$log" 2>"$work/cli-stderr.log" &
+  [ -S "$work/sock/daemon.sock" ] || { echo "daemon did not listen" >&2; exit 1; }
+  # The subshell reaps the CLI. If the CLI ends without stopping the daemon (an aborted
+  # script), the daemon gets 5 s to exit and is then killed so the sampler can finish.
+  (
+    cli_status=0
+    target/release/requiem --connect --script "$script" >"$log" 2>"$work/cli-stderr.log" || cli_status=$?
+    echo "$cli_status" >"$work/cli.status"
+    for _ in $(seq 50); do
+      case "$(ps -o stat= -p "$pid" 2>/dev/null)" in "" | Z*) exit 0 ;; esac
+      sleep 0.1
+    done
+    kill "$pid" 2>/dev/null || true
+  ) &
   cli_pid=$!
 else
   REQUIEM_LOG="${PERF_DEBUG:+debug}" target/release/requiem --script "$script" >"$log" 2>"$work/stderr.log" &
@@ -151,8 +163,9 @@ status=0
 wait "$pid" || status=$?
 pid=""
 if [ -n "$cli_pid" ]; then
-  cli_status=0
-  wait "$cli_pid" || cli_status=$?
+  wait "$cli_pid" || true
+  cli_pid=""
+  cli_status="$(cat "$work/cli.status" 2>/dev/null || echo 1)"
   if [ "$status" -eq 0 ] && [ "$cli_status" -ne 0 ]; then
     echo "requiem --connect exited with status $cli_status" >&2
     status=$cli_status
@@ -227,7 +240,7 @@ if [ "$summary" -ne 0 ]; then
   tail -n 15 "$log"
   echo "--- stderr (tail) ---"
   tail -n 25 "$work/stderr.log"
-  if [ -n "$cli_pid" ]; then
+  if [ "$daemon" -eq 1 ]; then
     echo "--- cli stderr (tail) ---"
     tail -n 25 "$work/cli-stderr.log"
   fi

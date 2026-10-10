@@ -38,6 +38,9 @@ fn parse_args() -> Result<Option<Args>, String> {
             other => return Err(format!("unknown argument {other}")),
         }
     }
+    if args.connect && args.prefer_aac {
+        return Err("--prefer-aac applies to the daemon; pass it to requiemd".into());
+    }
     Ok(Some(args))
 }
 
