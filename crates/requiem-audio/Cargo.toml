@@ -1,0 +1,15 @@
+[package]
+name = "requiem-audio"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+requiem-core.workspace = true
+symphonia.workspace = true
+symphonia-adapter-libopus.workspace = true
+cpal.workspace = true
+rubato.workspace = true
+rtrb.workspace = true
