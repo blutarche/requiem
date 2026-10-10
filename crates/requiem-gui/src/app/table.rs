@@ -5,13 +5,13 @@ use std::cell::{Cell, OnceCell, RefCell};
 
 use objc2::rc::{Retained, Weak};
 use objc2::runtime::{AnyObject, NSObject, ProtocolObject};
-use objc2::{AnyThread, DefinedClass, MainThreadOnly, define_class, msg_send, sel};
+use objc2::{DefinedClass, MainThreadOnly, define_class, msg_send, sel};
 use objc2_app_kit::{
     NSAttributedStringNSStringDrawing, NSBezierPath, NSBorderType, NSControlTextEditingDelegate,
     NSEvent, NSFocusRingType, NSResponder, NSScrollView, NSTableColumn,
     NSTableColumnResizingOptions, NSTableRowView, NSTableView, NSTableViewColumnAutoresizingStyle,
     NSTableViewDataSource, NSTableViewDelegate, NSTableViewSelectionHighlightStyle,
-    NSTableViewStyle, NSTextAlignment, NSTextField, NSTrackingArea, NSTrackingAreaOptions,
+    NSTableViewStyle, NSTextAlignment, NSTextField, NSTrackingAreaOptions,
     NSUserInterfaceItemIdentification, NSView,
 };
 use objc2_core_foundation::CGFloat;
@@ -318,20 +318,7 @@ impl RowView {
         // SAFETY: `initWithFrame:` is the designated initializer.
         let this: Retained<Self> = unsafe { msg_send![super(this), initWithFrame: NSRect::ZERO] };
         this.setIdentifier(Some(id));
-        let opts = NSTrackingAreaOptions::MouseEnteredAndExited
-            | NSTrackingAreaOptions::ActiveInActiveApp
-            | NSTrackingAreaOptions::InVisibleRect;
-        // SAFETY: the owner is the view itself, which outlives its own tracking area.
-        let area = unsafe {
-            NSTrackingArea::initWithRect_options_owner_userInfo(
-                NSTrackingArea::alloc(),
-                NSRect::ZERO,
-                opts,
-                Some(&this),
-                None,
-            )
-        };
-        this.addTrackingArea(&area);
+        widgets::track_hover(&this, NSTrackingAreaOptions::empty());
         this
     }
 
