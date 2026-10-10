@@ -276,7 +276,7 @@ Events print as one line each, except `Position`, which only shows in `status`. 
   4. one track transition;
   5. idle after the queue ends.
 
-  It samples `ps -o rss=` (macOS reports KiB, so the cap is 30720) every 500 ms, and computes CPU from the process's CPU-time delta per phase, not from averaged `%cpu` samples. It fails if peak RSS exceeds 30 MiB in any phase or CPU reaches 1% in any playback phase. The 30 MiB budget is the user's call: the plan measures a baseline early, and if the baseline breaks the budget, that goes back to the user rather than the number moving silently.
+  It samples physical footprint every 500 ms (macOS `proc_pid_rusage` `ri_phys_footprint`, Linux `Pss` from `smaps_rollup`; the cap is 30720 KiB) and reports `ps` RSS as information only: on macOS `ps` RSS includes about 10–12 MiB of shared system-framework pages that requiem cannot shrink (user decision, 2026-10-10). CPU comes from the process's CPU-time delta per phase, not from averaged `%cpu` samples. It fails if peak footprint exceeds 30 MiB in any phase or CPU reaches 1% in any playback phase. The 30 MiB budget is the user's call: the plan measures a baseline early, and if the baseline breaks the budget, that goes back to the user rather than the number moving silently.
 
 ## Risks
 

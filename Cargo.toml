@@ -24,3 +24,9 @@ requiem-core = { path = "crates/requiem-core" }
 requiem-audio = { path = "crates/requiem-audio" }
 requiem-provider-ytmusic = { path = "crates/requiem-provider-ytmusic" }
 requiem-cli = { path = "crates/requiem-cli" }
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+panic = "abort"
+strip = true
