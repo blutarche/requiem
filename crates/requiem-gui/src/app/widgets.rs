@@ -2,22 +2,27 @@
 //! so they cost no backing store; only the seek bar draws.
 
 use std::cell::{Cell, OnceCell};
+use std::ptr::NonNull;
+use std::time::Duration;
 
+use block2::{RcBlock, StackBlock};
 use objc2::rc::{Retained, Weak};
 use objc2::runtime::{AnyObject, Sel};
 use objc2::{AnyThread, DefinedClass, MainThreadOnly, Message, define_class, msg_send};
 use objc2_app_kit::{
-    NSAccessibility, NSAccessibilityButtonRole, NSAccessibilitySliderRole,
+    NSAccessibility, NSAccessibilityButtonRole, NSAccessibilitySliderRole, NSAnimationContext,
     NSAttributedStringNSStringDrawing, NSAutoresizingMaskOptions, NSBezierPath, NSButton,
     NSCellImagePosition, NSColor, NSControl, NSEvent, NSEventMask, NSEventTrackingRunLoopMode,
     NSEventType, NSFocusRingType, NSFont, NSImageScaling, NSImageView, NSLineBreakMode,
     NSResponder, NSTextAlignment, NSTextField, NSTrackingArea, NSTrackingAreaOptions, NSView,
+    NSWorkspace,
 };
 use objc2_core_foundation::CGFloat;
 use objc2_foundation::{
     MainThreadMarker, NSAttributedString, NSDate, NSDictionary, NSNotification, NSNumber,
-    NSObjectProtocol, NSPoint, NSRect, NSSize, NSString,
+    NSObjectProtocol, NSPoint, NSRect, NSSize, NSString, ns_string,
 };
+use objc2_quartz_core::{CAMediaTiming, CAMediaTimingFunction, CATransition, kCATransitionFade};
 
 use super::theme::{self, Icon, Weight};
 use super::ui::{self, AppView};
@@ -27,6 +32,75 @@ use crate::vm::{Intent, SEEK_STEP_SECS, VOLUME_STEP};
 pub const DIMMED: CGFloat = 0.4;
 /// The keyboard focus ring's width.
 const RING_W: CGFloat = 2.0;
+
+/// Cubic Bézier control points of a timing curve.
+pub type Curve = [f32; 4];
+pub const EASE_OUT: Curve = [0.23, 1.0, 0.32, 1.0];
+pub const EASE_IN_OUT: Curve = [0.77, 0.0, 0.175, 1.0];
+/// Small swaps: a toast's text, an icon.
+pub const MICRO: Duration = Duration::from_millis(120);
+/// Things entering, leaving or moving.
+pub const STANDARD: Duration = Duration::from_millis(200);
+
+/// The user's Reduce Motion setting; read per animation, as it can change at any time.
+pub fn reduce_motion() -> bool {
+    NSWorkspace::sharedWorkspace().accessibilityDisplayShouldReduceMotion()
+}
+
+/// Whether changes to `view` would be seen animating. A snapshot's window is never shown.
+fn on_screen(view: &NSView) -> bool {
+    view.window().is_some_and(|w| w.isVisible())
+}
+
+fn timing(curve: Curve) -> Retained<CAMediaTimingFunction> {
+    let [x1, y1, x2, y2] = curve;
+    CAMediaTimingFunction::functionWithControlPoints(x1, y1, x2, y2)
+}
+
+/// Animates the changes `changes` makes through views' `animator()` proxies over `duration`,
+/// then runs `done`. With a zero duration, or off screen, both take effect at once, before
+/// this returns.
+pub fn animate(
+    view: &NSView,
+    duration: Duration,
+    curve: Curve,
+    changes: impl Fn(),
+    done: impl Fn() + 'static,
+) {
+    if duration.is_zero() || !on_screen(view) {
+        NSAnimationContext::beginGrouping();
+        NSAnimationContext::currentContext().setDuration(0.0);
+        changes();
+        NSAnimationContext::endGrouping();
+        done();
+        return;
+    }
+    let timing = timing(curve);
+    let group = StackBlock::new(|ctx: NonNull<NSAnimationContext>| {
+        // SAFETY: AppKit passes the live context of the group it is running.
+        let ctx = unsafe { ctx.as_ref() };
+        ctx.setDuration(duration.as_secs_f64());
+        ctx.setTimingFunction(Some(&timing));
+        ctx.setAllowsImplicitAnimation(true);
+        changes();
+    });
+    let done = RcBlock::new(done);
+    NSAnimationContext::runAnimationGroup_completionHandler(&group, Some(&done));
+}
+
+/// Cross-fades `view` from how it looks now to how the changes made next leave it.
+pub fn crossfade(view: &NSView, duration: Duration) {
+    if !on_screen(view) {
+        return;
+    }
+    let Some(layer) = view.layer() else { return };
+    let fade = CATransition::animation();
+    // SAFETY: the transition-type static is an immutable framework constant.
+    fade.setType(unsafe { kCATransitionFade });
+    fade.setDuration(duration.as_secs_f64());
+    fade.setTimingFunction(Some(&timing(EASE_OUT)));
+    layer.addAnimation_forKey(&fade, Some(ns_string!("crossfade")));
+}
 
 pub fn rect(x: CGFloat, y: CGFloat, w: CGFloat, h: CGFloat) -> NSRect {
     NSRect::new(NSPoint::new(x, y), NSSize::new(w, h))
@@ -127,6 +201,14 @@ pub fn line_height(font: &NSFont) -> CGFloat {
 
 pub fn set_text(l: &NSTextField, text: &str) {
     if l.stringValue().to_string() != text {
+        l.setStringValue(&NSString::from_str(text));
+    }
+}
+
+/// `set_text` that cross-fades a change.
+pub fn fade_text(l: &NSTextField, text: &str, duration: Duration) {
+    if l.stringValue().to_string() != text {
+        crossfade(l, duration);
         l.setStringValue(&NSString::from_str(text));
     }
 }

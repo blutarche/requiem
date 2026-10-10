@@ -585,9 +585,9 @@ impl AddCell {
         this
     }
 
-    /// Swaps "+" for a check for `ADDED_FOR`.
+    /// Swaps "+" for a check for `ADDED_FOR`, fading both ways.
     fn confirm(&self) {
-        self.set_added(true);
+        self.fade_added(true);
         let generation = self.ivars().generation.get();
         let Ok(when) = DispatchTime::try_from(ADDED_FOR) else {
             return;
@@ -596,10 +596,17 @@ impl AddCell {
         let _ = DispatchQueue::main().after(when, move || {
             cell.get_on_main(|cell| {
                 if cell.ivars().generation.get() == generation {
-                    cell.set_added(false);
+                    cell.fade_added(false);
                 }
             });
         });
+    }
+
+    fn fade_added(&self, added: bool) {
+        if let Some(b) = self.ivars().button.get() {
+            widgets::crossfade(b, widgets::MICRO);
+        }
+        self.set_added(added);
     }
 
     fn set_added(&self, added: bool) {

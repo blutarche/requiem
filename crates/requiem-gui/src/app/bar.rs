@@ -219,17 +219,17 @@ impl PlayerBar {
     pub fn set_track(&self, track: Option<(&str, &str)>, total: &str) {
         let artists = match track {
             Some((title, artists)) => {
-                widgets::set_text(&self.title, title);
+                widgets::fade_text(&self.title, title, widgets::STANDARD);
                 self.title.setTextColor(Some(&theme::ink()));
                 artists
             }
             None => {
-                widgets::set_text(&self.title, "Nothing playing");
+                widgets::fade_text(&self.title, "Nothing playing", widgets::STANDARD);
                 self.title.setTextColor(Some(&theme::muted()));
                 ""
             }
         };
-        widgets::set_text(&self.artists, artists);
+        widgets::fade_text(&self.artists, artists, widgets::STANDARD);
         let mid = if artists.is_empty() {
             Self::TITLE_ALONE_Y
         } else {

@@ -3,18 +3,18 @@
 
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use dispatch2::{DispatchQueue, DispatchTime};
 use objc2::rc::Retained;
 use objc2::runtime::{AnyObject, ProtocolObject};
 use objc2::{MainThreadOnly, sel};
 use objc2_app_kit::{
-    NSApplication, NSBackingStoreType, NSTextAlignment, NSTextField, NSTextFieldDelegate, NSView,
-    NSWindow, NSWindowStyleMask, NSWindowTitleVisibility,
+    NSAnimatablePropertyContainer, NSApplication, NSBackingStoreType, NSTextAlignment, NSTextField,
+    NSTextFieldDelegate, NSView, NSWindow, NSWindowStyleMask, NSWindowTitleVisibility,
 };
 use objc2_core_foundation::CGFloat;
-use objc2_foundation::{MainThreadMarker, NSSize, NSString};
+use objc2_foundation::{MainThreadMarker, NSPoint, NSSize, NSString};
 
 use super::Delegate;
 use super::backend::{Backend, Msg};
@@ -66,8 +66,10 @@ const TOAST_H: CGFloat = 40.0;
 /// Tall enough for a compact button.
 const TOAST_ACTION_H: CGFloat = 48.0;
 const TOAST_BUTTON_H: CGFloat = 32.0;
+/// How far below its place a toast starts as it fades in.
+const TOAST_RISE: CGFloat = 8.0;
 /// How long "Quit and Stop Music" waits for the player's goodbye.
-const QUIT_GRACE: std::time::Duration = std::time::Duration::from_secs(3);
+const QUIT_GRACE: Duration = Duration::from_secs(3);
 
 struct ToastView {
     view: Retained<NSView>,
@@ -75,6 +77,8 @@ struct ToastView {
     label: Retained<NSTextField>,
     action: Retained<HoverButton>,
     id: Cell<u64>,
+    /// False from the start of the exit; the view hides once the exit ends.
+    shown: Cell<bool>,
 }
 
 pub struct Ui {
@@ -89,6 +93,8 @@ pub struct Ui {
     main: Retained<NSView>,
     banner: Retained<NSView>,
     banner_label: Retained<NSTextField>,
+    /// False from the start of the fade-out; the view hides once it ends.
+    banner_shown: Cell<bool>,
     search_page: Retained<NSView>,
     pub search: Field,
     status: Retained<NSTextField>,
@@ -307,6 +313,7 @@ impl Ui {
             main,
             banner,
             banner_label,
+            banner_shown: Cell::new(false),
             search_page,
             search,
             status,
@@ -381,6 +388,7 @@ impl Ui {
             label,
             action,
             id: Cell::new(0),
+            shown: Cell::new(false),
         }
     }
 
@@ -758,19 +766,60 @@ impl Ui {
             };
             self.banner_label.setTextColor(Some(&c));
         }
-        self.banner.setHidden(!shown);
         let h = b.size.height - if shown { BANNER_H } else { 0.0 };
         let page = rect(0.0, 0.0, b.size.width, h);
-        self.search_page.setFrame(page);
-        self.queue_page.setFrame(page);
+        let place_pages = || {
+            self.search_page.animator().setFrame(page);
+            self.queue_page.animator().setFrame(page);
+        };
+        let changed = self.banner_shown.replace(shown) != shown;
+        let shift = if changed && !widgets::reduce_motion() {
+            widgets::STANDARD
+        } else {
+            Duration::ZERO
+        };
+        widgets::animate(&self.main, shift, widgets::EASE_IN_OUT, place_pages, || {});
+        if !changed {
+            return;
+        }
+        let banner = &self.banner;
+        if shown {
+            banner.setAlphaValue(0.0);
+            banner.setHidden(false);
+        }
+        widgets::animate(
+            banner,
+            widgets::STANDARD,
+            widgets::EASE_OUT,
+            || {
+                banner
+                    .animator()
+                    .setAlphaValue(if shown { 1.0 } else { 0.0 })
+            },
+            move || {
+                if !shown {
+                    with(|ui| {
+                        if !ui.banner_shown.get() {
+                            ui.banner.setHidden(true);
+                        }
+                    });
+                }
+            },
+        );
     }
 
     fn show_toast(&self, toast: Option<Toast>) {
         let t = &self.toast;
         let Some(toast) = toast else {
-            t.view.setHidden(true);
+            if t.shown.replace(false) {
+                self.leave_toast();
+            }
             return;
         };
+        let swap = t.shown.replace(true);
+        if swap {
+            widgets::crossfade(&t.view, widgets::MICRO);
+        }
         t.id.set(toast.id);
         widgets::set_text(&t.label, &toast.text);
         t.accent.setHidden(!toast.error);
@@ -796,13 +845,69 @@ impl Ui {
             ));
         }
         t.label.setToolTip(Some(&NSString::from_str(&toast.text)));
-        t.view.setHidden(false);
+        if !swap {
+            self.enter_toast();
+        }
         let id = toast.id;
         if let Ok(when) = DispatchTime::try_from(vm::TOAST_DURATION) {
             let _ = DispatchQueue::main().after(when, move || {
                 with(|ui| ui.dismiss_toast(id));
             });
         }
+    }
+
+    /// Fades the toast in as it rises into the frame it was given.
+    fn enter_toast(&self) {
+        let v = &self.toast.view;
+        let at = v.frame().origin;
+        let rise = if widgets::reduce_motion() {
+            0.0
+        } else {
+            TOAST_RISE
+        };
+        v.setAlphaValue(0.0);
+        v.setFrameOrigin(NSPoint::new(at.x, at.y - rise));
+        v.setHidden(false);
+        widgets::animate(
+            v,
+            widgets::STANDARD,
+            widgets::EASE_OUT,
+            || {
+                v.animator().setAlphaValue(1.0);
+                v.animator().setFrameOrigin(at);
+            },
+            || {},
+        );
+    }
+
+    /// The reverse of `enter_toast`, then hides it unless another toast came meanwhile.
+    fn leave_toast(&self) {
+        let t = &self.toast;
+        let v = &t.view;
+        let at = v.frame().origin;
+        let fall = if widgets::reduce_motion() {
+            0.0
+        } else {
+            TOAST_RISE
+        };
+        let id = t.id.get();
+        widgets::animate(
+            v,
+            widgets::STANDARD,
+            widgets::EASE_OUT,
+            || {
+                v.animator().setAlphaValue(0.0);
+                v.animator().setFrameOrigin(NSPoint::new(at.x, at.y - fall));
+            },
+            move || {
+                with(|ui| {
+                    let t = &ui.toast;
+                    if t.id.get() == id && !t.shown.get() {
+                        t.view.setHidden(true);
+                    }
+                });
+            },
+        );
     }
 }
 
