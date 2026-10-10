@@ -2,22 +2,28 @@ use std::fs::File;
 use std::io::{self, BufReader};
 use std::process::ExitCode;
 use std::sync::{Arc, OnceLock};
+use std::time::Duration;
 
 use requiem_audio::{AudioEngine, AudioOptions};
-use requiem_cli::app;
+use requiem_cli::app::{self, Player};
+use requiem_cli::remote::RemotePlayer;
 use requiem_core::{EngineEventSink, Session, SessionConfig};
 use requiem_provider_ytmusic::{YtMusicOptions, YtMusicProvider};
 
-const USAGE: &str = "usage: requiem [--script <file>] [--prefer-aac] [--help]";
+const USAGE: &str = "usage: requiem [--script <file>] [--connect] [--prefer-aac] [--help]\n  --connect  drive the requiemd daemon (started if not running) instead of playing in-process";
+
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(3);
 
 struct Args {
     script: Option<String>,
+    connect: bool,
     prefer_aac: bool,
 }
 
 fn parse_args() -> Result<Option<Args>, String> {
     let mut args = Args {
         script: None,
+        connect: false,
         prefer_aac: false,
     };
     let mut it = std::env::args().skip(1);
@@ -25,6 +31,7 @@ fn parse_args() -> Result<Option<Args>, String> {
         match a.as_str() {
             "--help" | "-h" => return Ok(None),
             "--prefer-aac" => args.prefer_aac = true,
+            "--connect" => args.connect = true,
             "--script" => {
                 args.script = Some(it.next().ok_or("--script needs a file")?);
             }
@@ -47,6 +54,9 @@ fn main() -> ExitCode {
         }
     };
 
+    if args.connect {
+        return connect(&args);
+    }
     // The engine must exist before `Session::spawn`, whose factory cannot fail, so events
     // reach the session through a slot the factory fills.
     let slot: Arc<OnceLock<EngineEventSink>> = Arc::new(OnceLock::new());
@@ -78,19 +88,35 @@ fn main() -> ExitCode {
         SessionConfig::default(),
     );
 
+    let code = drive(&session, &args);
+    session.shutdown();
+    code
+}
+
+fn connect(args: &Args) -> ExitCode {
+    let exe = std::env::current_exe().map(|p| p.with_file_name("requiemd"));
+    let player = exe.and_then(|exe| RemotePlayer::connect_or_spawn(&exe, CONNECT_TIMEOUT));
+    match player {
+        Ok(player) => drive(&player, args),
+        Err(e) => {
+            eprintln!("error: cannot reach the daemon: {e}");
+            ExitCode::from(1)
+        }
+    }
+}
+
+fn drive(player: &dyn Player, args: &Args) -> ExitCode {
     let script = args.script.is_some();
     let result = match &args.script {
         Some(path) => match File::open(path) {
-            Ok(f) => app::run(&session, BufReader::new(f), io::stdout(), true),
+            Ok(f) => app::run(player, BufReader::new(f), io::stdout(), true),
             Err(e) => {
                 eprintln!("error: {path}: {e}");
-                session.shutdown();
                 return ExitCode::from(1);
             }
         },
-        None => app::run(&session, io::stdin().lock(), io::stdout(), script),
+        None => app::run(player, io::stdin().lock(), io::stdout(), script),
     };
-    session.shutdown();
     match result {
         Ok(code) => ExitCode::from(code),
         Err(e) => {
