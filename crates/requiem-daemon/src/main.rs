@@ -1,5 +1,3 @@
-mod idle;
-
 use std::process::ExitCode;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, OnceLock};
@@ -24,11 +22,14 @@ fn debug_enabled() -> bool {
 
 macro_rules! debug {
     ($($arg:tt)*) => {
-        if debug_enabled() {
+        if $crate::debug_enabled() {
             eprintln!("[requiemd] {}", format_args!($($arg)*));
         }
     };
 }
+
+mod idle;
+mod ui;
 
 fn idle_limit() -> Duration {
     let secs = std::env::var("REQUIEM_IDLE_EXIT_SECS")
@@ -112,18 +113,12 @@ fn main() -> ExitCode {
     let (done_tx, done_rx) = bounded::<()>(0);
     thread::scope(|scope| {
         scope.spawn(|| idle_exit(&server, &stopped, idle_limit(), &stop_tx, &done_rx));
-        run_platform(stop_rx, &server);
+        ui::run_platform(&stop_tx, stop_rx, &server);
         drop(done_tx);
     });
     debug!("shutting down");
     server.shutdown();
     ExitCode::SUCCESS
-}
-
-/// Blocks the main thread until a stop is requested. A platform UI that needs the main
-/// thread replaces the body.
-fn run_platform(stop: Receiver<()>, _server: &Server) {
-    let _ = stop.recv();
 }
 
 /// Mirrors the playback state; the daemon starts `Stopped`.
