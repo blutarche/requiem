@@ -4,7 +4,7 @@
 use std::ops::{BitOr, BitOrAssign};
 use std::time::{Duration, Instant};
 
-use requiem_core::{Command, EnqueueMode, Event, PlayState, SeekTarget, Track};
+use requiem_core::{Command, EnqueueMode, Event, PlayState, SeekTarget, Track, TrackId};
 
 pub const SEEK_STEP_SECS: i64 = 5;
 pub const VOLUME_STEP: i16 = 10;
@@ -15,6 +15,15 @@ pub const ECHO_HOLD: Duration = Duration::from_millis(500);
 /// A position this close to a local seek's target confirms it; engine ticks rarely land
 /// exactly on it.
 const SEEK_AGREES: Duration = Duration::from_secs(1);
+/// No banner for a connection this young, so a connect or reconnect under a second does not
+/// flash one.
+pub const BANNER_GRACE: Duration = Duration::from_millis(800);
+/// After this long without a connection, the banner adds the reason and what to do.
+pub const STUCK_AFTER: Duration = Duration::from_secs(30);
+
+const OUT_OF_DATE: &str = "An older requiem player is still running. Quit it from the menu \
+                           bar; this window reconnects on its own.";
+const STUCK_HINT: &str = "If this persists, quit requiem from the menu bar and reopen it.";
 
 /// Regions of the window that need refreshing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -35,11 +44,16 @@ impl Dirty {
     pub const STATE: Dirty = Dirty(1 << 6);
     pub const VOLUME: Dirty = Dirty(1 << 7);
     pub const TOAST: Dirty = Dirty(1 << 8);
+    /// The connection or its banner.
     pub const CONNECTION: Dirty = Dirty(1 << 9);
     pub const ALL: Dirty = Dirty((1 << 10) - 1);
 
     pub fn contains(self, other: Dirty) -> bool {
         self.0 & other.0 == other.0
+    }
+
+    pub fn intersects(self, other: Dirty) -> bool {
+        self.0 & other.0 != 0
     }
 
     pub fn is_empty(self) -> bool {
@@ -62,12 +76,12 @@ impl BitOrAssign for Dirty {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Connection {
-    /// The first connect is in flight.
+    /// Not connected yet; the backend retries with backoff.
     Connecting,
     Connected,
-    /// Lost or never made; the backend retries with backoff. Holds the reason.
+    /// Lost after a connection; the backend retries with backoff. Holds the reason.
     Reconnecting(String),
-    /// The daemon speaks another protocol version; no retry.
+    /// The daemon speaks another protocol version; the backend retries until it is gone.
     OutOfDate,
     /// `--demo`: fixed fake data, no daemon.
     Demo,
@@ -95,6 +109,8 @@ pub struct Toast {
     pub id: u64,
     pub text: String,
     pub error: bool,
+    /// The label of the toast's action button, if it has one.
+    pub action: Option<&'static str>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -111,11 +127,26 @@ pub enum Intent {
     SeekBy(i64),
     SetVolume(u8),
     VolumeBy(i16),
+    /// The shown toast's action: restores the queue a result replaced.
+    Undo,
+}
+
+/// Which controls take input.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Controls {
+    /// Previous, play/pause and next: connected and the queue has tracks.
+    pub transport: bool,
+    /// The seek bar: connected and a track is loaded.
+    pub seek: bool,
+    /// Volume, and playing or adding rows: connected.
+    pub player: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct UiState {
     pub connection: Connection,
+    /// Shown above the pages; it trails the connection by `BANNER_GRACE`.
+    pub banner: Option<Banner>,
     /// The last query searched for.
     pub query: String,
     pub search: SearchStatus,
@@ -135,6 +166,7 @@ impl Default for UiState {
     fn default() -> Self {
         Self {
             connection: Connection::Connecting,
+            banner: None,
             query: String::new(),
             search: SearchStatus::Idle,
             results: Vec::new(),
@@ -161,10 +193,16 @@ impl UiState {
         fmt_time(self.position)
     }
 
+    /// The track's listed duration, as its row shows it, over the engine's measured one, so
+    /// the bar and the row agree.
     pub fn total_text(&self) -> String {
-        match (&self.now_playing, self.duration) {
-            (Some(_), Some(d)) => fmt_time(d),
-            _ => String::new(),
+        match &self.now_playing {
+            Some(t) => t
+                .duration
+                .or(self.duration)
+                .map(fmt_time)
+                .unwrap_or_default(),
+            None => String::new(),
         }
     }
 
@@ -182,22 +220,21 @@ impl UiState {
         matches!(self.state, PlayState::Playing | PlayState::Buffering)
     }
 
-    pub fn banner(&self) -> Option<Banner> {
-        match self.connection {
-            Connection::Reconnecting(_) => Some(Banner {
-                text: "Player disconnected — reconnecting…",
-                error: false,
-            }),
-            Connection::OutOfDate => Some(Banner {
-                text: "Player is out of date — quit it from the menu bar",
-                error: true,
-            }),
-            _ => None,
+    pub fn controls(&self) -> Controls {
+        let live = matches!(self.connection, Connection::Connected | Connection::Demo);
+        Controls {
+            transport: live && !self.queue.is_empty(),
+            seek: live && self.now_playing.is_some(),
+            player: live,
         }
     }
 
-    /// The results area's empty state, when there are no results. Its action focuses the
-    /// search field.
+    /// The Queue nav item's count; `None` when the queue is empty.
+    pub fn queue_badge(&self) -> Option<String> {
+        (!self.queue.is_empty()).then(|| self.queue.len().to_string())
+    }
+
+    /// The results area's empty state, when there are no results.
     pub fn results_empty(&self) -> Option<EmptyText> {
         if !self.results.is_empty() {
             return None;
@@ -206,13 +243,13 @@ impl UiState {
             EmptyText {
                 heading: "No results".to_owned(),
                 sub: format!("Nothing matched “{}”", self.query),
-                action: "Edit search",
+                action: EmptyAction::EditSearch,
             }
         } else {
             EmptyText {
                 heading: "Search YouTube Music".to_owned(),
-                sub: "Type a song, artist or album".to_owned(),
-                action: "Start a search",
+                sub: "Type a song, artist or album, then press Return.".to_owned(),
+                action: EmptyAction::StartSearch,
             }
         })
     }
@@ -220,24 +257,44 @@ impl UiState {
     pub fn search_status_text(&self) -> Option<(String, bool)> {
         match &self.search {
             SearchStatus::Pending => Some(("Searching…".to_owned(), false)),
-            SearchStatus::Failed(e) => Some((format!("Search failed: {e}"), true)),
+            SearchStatus::Failed(e) => Some((
+                format!("Search failed: {e}. Press Return to try again."),
+                true,
+            )),
             SearchStatus::Idle | SearchStatus::Done => None,
         }
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Banner {
-    pub text: &'static str,
+    pub text: String,
     pub error: bool,
 }
 
-/// An empty state: heading, subtext and the label of its primary action.
+/// An empty state: heading, subtext and its primary action.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EmptyText {
     pub heading: String,
     pub sub: String,
-    pub action: &'static str,
+    pub action: EmptyAction,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EmptyAction {
+    /// Runs the search when the field has text, and focuses the field otherwise.
+    StartSearch,
+    /// Focuses the search field.
+    EditSearch,
+}
+
+impl EmptyAction {
+    pub fn label(self) -> &'static str {
+        match self {
+            EmptyAction::StartSearch => "Start a search",
+            EmptyAction::EditSearch => "Edit search",
+        }
+    }
 }
 
 #[derive(Debug, Default)]
@@ -249,6 +306,35 @@ pub struct Vm {
     dirty: Dirty,
     seek_hold: Option<Hold<Duration>>,
     volume_hold: Option<Hold<u8>>,
+    /// Commands raised by events or link changes rather than by an intent.
+    outbox: Vec<Command>,
+    /// When the current spell without a connection began; `None` while connected.
+    offline_since: Option<Instant>,
+    /// Why the last connect attempt before the first connection failed.
+    connect_error: Option<String>,
+    /// The banner already shows the reason and the hint.
+    stuck: bool,
+    /// The previous queue while the "Queue replaced" toast is shown.
+    undo: Option<Undo>,
+    /// Where to seek once the track an undo restarted begins.
+    restore: Option<Restore>,
+    /// The toast of a `TrackFailed` whose outcome the next event tells.
+    failed_toast: Option<u64>,
+}
+
+#[derive(Debug)]
+struct Undo {
+    toast: u64,
+    tracks: Vec<Track>,
+    /// The playing index and position, when a track was loaded.
+    playing: Option<(usize, Duration)>,
+}
+
+#[derive(Debug)]
+struct Restore {
+    index: usize,
+    track: TrackId,
+    position: Duration,
 }
 
 /// A local value that wins over disagreeing echoes until `until`.
@@ -282,8 +368,14 @@ fn held<T>(hold: &mut Option<Hold<T>>, agrees: impl FnOnce(&T) -> bool, now: Ins
 
 impl Vm {
     pub fn new() -> Self {
+        Self::new_at(Instant::now())
+    }
+
+    /// `new` with the clock passed in.
+    pub fn new_at(now: Instant) -> Self {
         Self {
             dirty: Dirty::ALL,
+            offline_since: Some(now),
             ..Self::default()
         }
     }
@@ -292,9 +384,37 @@ impl Vm {
         &self.ui
     }
 
-    /// Returns the regions changed since the last call, and clears them.
+    /// Returns the regions changed since the last call, and clears them. Until then changes
+    /// accumulate, so a window that skips renders while hidden loses none.
     pub fn take_dirty(&mut self) -> Dirty {
         std::mem::take(&mut self.dirty)
+    }
+
+    /// Commands to send that no intent returned: a search resent on reconnect, or the seek
+    /// that finishes an undo.
+    pub fn take_commands(&mut self) -> Vec<Command> {
+        std::mem::take(&mut self.outbox)
+    }
+
+    /// When the banner next changes on its own; call `tick` then.
+    pub fn next_tick(&self) -> Option<Instant> {
+        let since = self.offline_since?;
+        if self.ui.banner.is_none() {
+            Some(since + BANNER_GRACE)
+        } else if !self.stuck {
+            Some(since + STUCK_AFTER)
+        } else {
+            None
+        }
+    }
+
+    pub fn tick(&mut self) {
+        self.tick_at(Instant::now());
+    }
+
+    /// `tick` with the clock passed in.
+    pub fn tick_at(&mut self, now: Instant) {
+        self.refresh_banner(now);
     }
 
     pub fn apply(&mut self, ev: Event) {
@@ -303,6 +423,9 @@ impl Vm {
 
     /// `apply` with the clock passed in.
     pub fn apply_at(&mut self, ev: Event, now: Instant) {
+        // The session follows a `TrackFailed` at once with the outcome: the next track's
+        // `QueueChanged`, or a stop.
+        let failed = self.failed_toast.take();
         match ev {
             Event::SearchResults { req, tracks } => {
                 if self.pending_req == Some(req) {
@@ -323,27 +446,40 @@ impl Vm {
                 self.ui.queue = tracks;
                 self.ui.current = current;
                 self.dirty |= Dirty::QUEUE;
+                self.amend_failure(failed, "Skipped to the next track.");
             }
             Event::NowPlaying { track, duration } => {
                 self.seek_hold = None;
+                let restore = (self.restore.take())
+                    .filter(|r| r.track == track.id && self.ui.current == Some(r.index));
                 self.ui.now_playing = Some(track);
                 self.ui.duration = duration;
                 self.set_position(Duration::ZERO);
                 self.dirty |= Dirty::NOW_PLAYING | Dirty::ELAPSED | Dirty::SEEK;
+                if let Some(r) = restore {
+                    let seek = self.seek_to(r.position, now);
+                    self.outbox.extend(seek);
+                }
             }
             Event::Position(at) => {
                 if !held(&mut self.seek_hold, |&t| at.abs_diff(t) <= SEEK_AGREES, now) {
                     self.set_position(at);
                 }
             }
-            Event::State(state) => self.set_state(state),
+            Event::State(state) => {
+                if state == PlayState::Stopped {
+                    self.amend_failure(failed, "Playback stopped.");
+                }
+                self.set_state(state);
+            }
             Event::Volume(v) => {
                 if !held(&mut self.volume_hold, |&t| t == v, now) {
                     self.set_volume(v);
                 }
             }
             Event::TrackFailed { track, error } => {
-                self.toast(format!("Couldn't play “{}”: {error}", track.title), true);
+                self.toast(format!("Couldn't play “{}”: {error}.", track.title), true);
+                self.failed_toast = Some(self.last_toast);
             }
             Event::ProviderBroken { provider, detail } => {
                 self.toast(
@@ -358,96 +494,91 @@ impl Vm {
     }
 
     pub fn link(&mut self, link: Link) {
+        self.link_at(link, Instant::now());
+    }
+
+    /// `link` with the clock passed in.
+    pub fn link_at(&mut self, link: Link, now: Instant) {
         let was = std::mem::replace(&mut self.ui.connection, Connection::Connecting);
         self.ui.connection = match link {
             Link::Connected => {
-                if matches!(was, Connection::Reconnecting(_)) {
+                let outage = matches!(was, Connection::Reconnecting(_)) && self.ui.banner.is_some();
+                if outage || was == Connection::OutOfDate {
                     self.toast("Player reconnected".to_owned(), false);
                 }
                 // The snapshot that follows rebuilds player state, but omits `NowPlaying`
                 // when nothing is loaded, so stale state must not survive the reconnect.
                 self.reset_player();
-                if self.pending_req.take().is_some() {
-                    self.ui.search = SearchStatus::Idle;
-                    self.dirty |= Dirty::SEARCH_STATUS;
+                self.offline_since = None;
+                self.connect_error = None;
+                if self.pending_req.is_some() {
+                    self.resend_search();
                 }
                 Connection::Connected
             }
-            Link::Lost(reason) => {
-                if was == Connection::Connected {
-                    self.toast("Player disconnected — reconnecting".to_owned(), true);
+            Link::Lost(reason) => match was {
+                Connection::Connecting => {
+                    self.connect_error = Some(reason);
+                    Connection::Connecting
                 }
-                if self.pending_req.take().is_some() {
-                    self.ui.search = SearchStatus::Failed("player disconnected".to_owned());
-                    self.dirty |= Dirty::SEARCH_STATUS;
+                Connection::Reconnecting(_) => Connection::Reconnecting(reason),
+                _ => {
+                    self.offline_since = Some(now);
+                    self.restore = None;
+                    Connection::Reconnecting(reason)
                 }
-                Connection::Reconnecting(reason)
+            },
+            Link::OutOfDate => {
+                self.offline_since = None;
+                Connection::OutOfDate
             }
-            Link::OutOfDate => Connection::OutOfDate,
-            Link::Demo => Connection::Demo,
+            Link::Demo => {
+                self.offline_since = None;
+                Connection::Demo
+            }
         };
         if self.ui.connection != was {
             self.dirty |= Dirty::CONNECTION;
         }
+        self.refresh_banner(now);
     }
 
     pub fn intent(&mut self, intent: Intent) -> Vec<Command> {
         self.intent_at(intent, Instant::now())
     }
 
-    /// `intent` with the clock passed in.
+    /// `intent` with the clock passed in. Intents for controls that `UiState::controls`
+    /// disables send nothing.
     pub fn intent_at(&mut self, intent: Intent, now: Instant) -> Vec<Command> {
+        let can = self.ui.controls();
         match intent {
             Intent::Search(query) => {
                 let query = query.trim();
                 if query.is_empty() {
                     return Vec::new();
                 }
-                self.last_req += 1;
-                self.pending_req = Some(self.last_req);
                 self.ui.query = query.to_owned();
-                self.ui.search = SearchStatus::Pending;
-                self.dirty |= Dirty::SEARCH_STATUS;
-                vec![Command::Search {
-                    req: self.last_req,
-                    query: query.to_owned(),
-                }]
+                self.search_command()
             }
-            Intent::PlayResult(i) => match self.ui.results.get(i..) {
-                Some(rest) if !rest.is_empty() => vec![
-                    Command::Enqueue {
-                        tracks: rest.to_vec(),
-                        mode: EnqueueMode::Replace,
-                    },
-                    Command::PlayIndex(0),
-                ],
-                _ => Vec::new(),
-            },
-            Intent::AppendResult(i) => match self.ui.results.get(i) {
+            Intent::PlayResult(i) if can.player => self.play_result(i),
+            Intent::AppendResult(i) if can.player => match self.ui.results.get(i) {
                 Some(t) => vec![Command::Enqueue {
                     tracks: vec![t.clone()],
                     mode: EnqueueMode::Append,
                 }],
                 None => Vec::new(),
             },
-            Intent::PlayQueue(i) if i < self.ui.queue.len() => vec![Command::PlayIndex(i)],
-            Intent::PlayQueue(_) => Vec::new(),
-            Intent::Toggle => vec![Command::TogglePause],
-            Intent::Next => vec![Command::Next],
-            Intent::Prev => vec![Command::Prev],
-            Intent::SeekTo(to) => {
-                if self.ui.now_playing.is_none() {
-                    return Vec::new();
-                }
-                let to = self.ui.duration.map_or(to, |d| to.min(d));
-                self.set_position(to);
-                self.seek_hold = Hold::new(to, now);
-                vec![Command::Seek(SeekTarget::Absolute(to))]
+            Intent::PlayQueue(i) if can.player && i < self.ui.queue.len() => {
+                vec![Command::PlayIndex(i)]
             }
-            Intent::SeekBy(secs) => {
-                if self.ui.now_playing.is_none() {
-                    return Vec::new();
-                }
+            Intent::Toggle if can.transport => vec![Command::TogglePause],
+            Intent::Next if can.transport => vec![Command::Next],
+            Intent::Prev if can.transport => vec![Command::Prev],
+            Intent::SeekTo(to) if can.seek => {
+                let to = self.ui.duration.map_or(to, |d| to.min(d));
+                self.seek_to(to, now)
+            }
+            Intent::SeekBy(secs) if can.seek => {
                 // Mirrors the session's arithmetic so the bar moves before the daemon answers.
                 let step = Duration::from_secs(secs.unsigned_abs());
                 let to = if secs >= 0 {
@@ -460,19 +591,103 @@ impl Vm {
                 self.seek_hold = Hold::new(to, now);
                 vec![Command::Seek(SeekTarget::Relative(secs))]
             }
-            Intent::SetVolume(v) => self.volume_command(v.min(100), now),
-            Intent::VolumeBy(delta) => {
+            Intent::SetVolume(v) if can.player => self.volume_command(v.min(100), now),
+            Intent::VolumeBy(delta) if can.player => {
                 let v = (i16::from(self.ui.volume) + delta).clamp(0, 100);
                 self.volume_command(v as u8, now)
             }
+            Intent::Undo if can.player => self.undo(),
+            _ => Vec::new(),
         }
     }
 
     pub fn dismiss_toast(&mut self, id: u64) {
         if self.ui.toast.as_ref().is_some_and(|t| t.id == id) {
             self.ui.toast = None;
+            self.undo = None;
             self.dirty |= Dirty::TOAST;
         }
+    }
+
+    fn search_command(&mut self) -> Vec<Command> {
+        self.last_req += 1;
+        self.pending_req = Some(self.last_req);
+        self.ui.search = SearchStatus::Pending;
+        self.dirty |= Dirty::SEARCH_STATUS;
+        vec![Command::Search {
+            req: self.last_req,
+            query: self.ui.query.clone(),
+        }]
+    }
+
+    /// A search sent while disconnected was dropped, and one in flight when the connection
+    /// went has no answer coming; both go again under a new req.
+    fn resend_search(&mut self) {
+        let cmds = self.search_command();
+        self.outbox.extend(cmds);
+    }
+
+    fn play_result(&mut self, i: usize) -> Vec<Command> {
+        let Some(rest) = self.ui.results.get(i..).filter(|r| !r.is_empty()) else {
+            return Vec::new();
+        };
+        let cmds = vec![
+            Command::Enqueue {
+                tracks: rest.to_vec(),
+                mode: EnqueueMode::Replace,
+            },
+            Command::PlayIndex(0),
+        ];
+        if !self.ui.queue.is_empty() {
+            let tracks = self.ui.queue.clone();
+            let playing = self
+                .ui
+                .current
+                .filter(|_| self.ui.now_playing.is_some())
+                .map(|c| (c, self.ui.position));
+            self.toast_with("Queue replaced".to_owned(), false, Some("Undo"));
+            self.undo = Some(Undo {
+                toast: self.last_toast,
+                tracks,
+                playing,
+            });
+        }
+        cmds
+    }
+
+    /// Restores the queue: `Enqueue` and `PlayIndex` now, and the `Seek` once the restored
+    /// track starts. A seek sent before then reaches the previous track's decoder, because
+    /// the session loads the new one only after resolving it.
+    fn undo(&mut self) -> Vec<Command> {
+        let shown = self.ui.toast.as_ref().map(|t| t.id);
+        let Some(undo) = self.undo.take().filter(|u| Some(u.toast) == shown) else {
+            return Vec::new();
+        };
+        if let Some(id) = shown {
+            self.dismiss_toast(id);
+        }
+        self.restore = undo.playing.and_then(|(index, position)| {
+            let track = undo.tracks.get(index)?;
+            (!position.is_zero()).then(|| Restore {
+                index,
+                track: track.id.clone(),
+                position,
+            })
+        });
+        let mut cmds = vec![Command::Enqueue {
+            tracks: undo.tracks,
+            mode: EnqueueMode::Replace,
+        }];
+        if let Some((index, _)) = undo.playing {
+            cmds.push(Command::PlayIndex(index));
+        }
+        cmds
+    }
+
+    fn seek_to(&mut self, to: Duration, now: Instant) -> Vec<Command> {
+        self.set_position(to);
+        self.seek_hold = Hold::new(to, now);
+        vec![Command::Seek(SeekTarget::Absolute(to))]
     }
 
     fn volume_command(&mut self, v: u8, now: Instant) -> Vec<Command> {
@@ -485,13 +700,63 @@ impl Vm {
     }
 
     fn toast(&mut self, text: String, error: bool) {
+        self.toast_with(text, error, None);
+    }
+
+    fn toast_with(&mut self, text: String, error: bool, action: Option<&'static str>) {
         self.last_toast += 1;
+        self.undo = None;
         self.ui.toast = Some(Toast {
             id: self.last_toast,
             text,
             error,
+            action,
         });
         self.dirty |= Dirty::TOAST;
+    }
+
+    /// Adds what happened next to a `TrackFailed` toast that is still shown.
+    fn amend_failure(&mut self, failed: Option<u64>, outcome: &str) {
+        if let Some(t) = self.ui.toast.as_mut().filter(|t| Some(t.id) == failed) {
+            t.text = format!("{} {outcome}", t.text);
+            self.dirty |= Dirty::TOAST;
+        }
+    }
+
+    fn refresh_banner(&mut self, now: Instant) {
+        let waited = self.offline_since.map(|t| now.saturating_duration_since(t));
+        let (text, reason) = match &self.ui.connection {
+            Connection::Connecting => ("Connecting to player…", self.connect_error.as_deref()),
+            Connection::Reconnecting(r) => {
+                ("Player disconnected — reconnecting…", Some(r.as_str()))
+            }
+            Connection::OutOfDate => (OUT_OF_DATE, None),
+            Connection::Connected | Connection::Demo => ("", None),
+        };
+        self.stuck = waited.is_some_and(|w| w >= STUCK_AFTER);
+        let banner = match waited {
+            _ if self.ui.connection == Connection::OutOfDate => Some(Banner {
+                text: text.to_owned(),
+                error: true,
+            }),
+            Some(w) if w < BANNER_GRACE => None,
+            Some(_) if self.stuck => Some(Banner {
+                text: match reason {
+                    Some(r) => format!("{text} ({r}). {STUCK_HINT}"),
+                    None => format!("{text} {STUCK_HINT}"),
+                },
+                error: false,
+            }),
+            Some(_) => Some(Banner {
+                text: text.to_owned(),
+                error: false,
+            }),
+            None => None,
+        };
+        if banner != self.ui.banner {
+            self.ui.banner = banner;
+            self.dirty |= Dirty::CONNECTION;
+        }
     }
 
     fn set_position(&mut self, at: Duration) {
@@ -530,6 +795,7 @@ impl Vm {
     fn reset_player(&mut self) {
         self.seek_hold = None;
         self.volume_hold = None;
+        self.restore = None;
         self.ui.queue.clear();
         self.ui.current = None;
         self.ui.now_playing = None;
@@ -568,6 +834,8 @@ pub enum PaletteAction {
     PlayPause,
     Next,
     Previous,
+    PlaySelected,
+    AddToQueue,
     FocusSearch,
     ShowSearch,
     ShowQueue,
@@ -576,10 +844,12 @@ pub enum PaletteAction {
 }
 
 impl PaletteAction {
-    pub const ALL: [PaletteAction; 8] = [
+    pub const ALL: [PaletteAction; 10] = [
         PaletteAction::PlayPause,
         PaletteAction::Next,
         PaletteAction::Previous,
+        PaletteAction::PlaySelected,
+        PaletteAction::AddToQueue,
         PaletteAction::FocusSearch,
         PaletteAction::ShowSearch,
         PaletteAction::ShowQueue,
@@ -592,6 +862,8 @@ impl PaletteAction {
             PaletteAction::PlayPause => "Play/Pause",
             PaletteAction::Next => "Next",
             PaletteAction::Previous => "Previous",
+            PaletteAction::PlaySelected => "Play selected",
+            PaletteAction::AddToQueue => "Add to queue",
             PaletteAction::FocusSearch => "Focus search",
             PaletteAction::ShowSearch => "Show search",
             PaletteAction::ShowQueue => "Show queue",
@@ -600,13 +872,19 @@ impl PaletteAction {
         }
     }
 
+    /// The key that runs the action outside the palette, as the menus show it.
     pub fn shortcut(self) -> &'static str {
         match self {
             PaletteAction::PlayPause => "Space",
+            PaletteAction::Next => "⌘→",
+            PaletteAction::Previous => "⌘←",
+            PaletteAction::PlaySelected => "↩",
+            PaletteAction::AddToQueue => "⌘↩",
             PaletteAction::FocusSearch => "⌘F",
             PaletteAction::ShowSearch => "⌘1",
             PaletteAction::ShowQueue => "⌘2",
-            _ => "",
+            PaletteAction::VolumeUp => "⌘↑",
+            PaletteAction::VolumeDown => "⌘↓",
         }
     }
 
@@ -776,7 +1054,10 @@ mod tests {
         assert!(vm.take_dirty().contains(Dirty::SEARCH_STATUS));
         assert_eq!(
             vm.ui().search_status_text(),
-            Some(("Search failed: network error: timeout".into(), true))
+            Some((
+                "Search failed: network error: timeout. Press Return to try again.".into(),
+                true
+            ))
         );
     }
 
@@ -904,7 +1185,7 @@ mod tests {
         });
         let t = vm.ui().toast.clone().unwrap();
         assert!(t.error);
-        assert_eq!(t.text, "Couldn't play “Title a”: unplayable: private");
+        assert_eq!(t.text, "Couldn't play “Title a”: unplayable: private.");
         assert_eq!(vm.take_dirty(), Dirty::TOAST);
     }
 
@@ -991,6 +1272,10 @@ mod tests {
     #[test]
     fn transport_intents_map_to_commands() {
         let mut vm = connected();
+        vm.apply(Event::QueueChanged {
+            tracks: tracks(2),
+            current: Some(0),
+        });
         assert_eq!(vm.intent(Intent::Toggle), vec![Command::TogglePause]);
         assert_eq!(vm.intent(Intent::Next), vec![Command::Next]);
         assert_eq!(vm.intent(Intent::Prev), vec![Command::Prev]);
@@ -1168,38 +1453,112 @@ mod tests {
         vm.link(Link::Connected);
         assert_eq!(vm.ui().connection, Connection::Connected);
         assert!(vm.ui().toast.is_none());
-        assert!(vm.ui().banner().is_none());
+        assert!(vm.ui().banner.is_none());
         assert!(vm.take_dirty().contains(Dirty::CONNECTION));
     }
 
     #[test]
-    fn losing_connection_toasts_once_and_shows_banner() {
+    fn losing_connection_raises_no_toast() {
         let mut vm = playing(225);
         vm.link(Link::Lost("daemon closed the connection".into()));
         assert_eq!(
             vm.ui().connection,
             Connection::Reconnecting("daemon closed the connection".into())
         );
-        let t = vm.ui().toast.clone().unwrap();
-        assert!(t.error);
-        assert_eq!(
-            vm.ui().banner(),
-            Some(Banner {
-                text: "Player disconnected — reconnecting…",
-                error: false
-            })
-        );
-        assert!(vm.take_dirty().contains(Dirty::CONNECTION | Dirty::TOAST));
-        // A failed retry reports Lost again; no second toast.
-        vm.link(Link::Lost("connection refused".into()));
-        assert_eq!(vm.ui().toast.as_ref().unwrap().id, t.id);
+        assert!(vm.ui().toast.is_none());
+        assert!(vm.take_dirty().contains(Dirty::CONNECTION));
     }
 
     #[test]
-    fn initial_connect_failure_shows_banner_without_toast() {
-        let mut vm = Vm::new();
-        vm.link(Link::Lost("not found".into()));
-        assert!(vm.ui().banner().is_some());
+    fn reconnecting_banner_waits_out_the_grace() {
+        let mut vm = playing(225);
+        let t0 = Instant::now();
+        let ms = |n| t0 + Duration::from_millis(n);
+        vm.link_at(Link::Lost("gone".into()), t0);
+        assert_eq!(vm.ui().banner, None);
+        assert_eq!(vm.next_tick(), Some(t0 + BANNER_GRACE));
+        vm.take_dirty();
+        vm.tick_at(ms(799));
+        assert_eq!(vm.ui().banner, None);
+        assert!(vm.take_dirty().is_empty());
+        vm.tick_at(ms(800));
+        assert_eq!(
+            vm.ui().banner,
+            Some(Banner {
+                text: "Player disconnected — reconnecting…".into(),
+                error: false
+            })
+        );
+        assert_eq!(vm.take_dirty(), Dirty::CONNECTION);
+        assert_eq!(vm.next_tick(), Some(t0 + STUCK_AFTER));
+    }
+
+    #[test]
+    fn retries_keep_the_outage_clock_and_add_the_reason_after_30s() {
+        let mut vm = playing(225);
+        let t0 = Instant::now();
+        let s = |n| t0 + Duration::from_secs(n);
+        vm.link_at(Link::Lost("gone".into()), t0);
+        // Each failed retry reports Lost again with the latest reason.
+        vm.link_at(Link::Lost("connection refused".into()), s(4));
+        vm.link_at(Link::Lost("connection refused".into()), s(29));
+        assert_eq!(
+            vm.ui().banner.as_ref().map(|b| b.text.as_str()),
+            Some("Player disconnected — reconnecting…")
+        );
+        vm.tick_at(s(30));
+        assert_eq!(
+            vm.ui().banner,
+            Some(Banner {
+                text: "Player disconnected — reconnecting… (connection refused). If this \
+                       persists, quit requiem from the menu bar and reopen it."
+                    .into(),
+                error: false
+            })
+        );
+        assert_eq!(vm.next_tick(), None);
+        assert!(vm.ui().toast.is_none());
+    }
+
+    #[test]
+    fn connecting_banner_after_the_grace_and_reason_after_30s() {
+        let t0 = Instant::now();
+        let mut vm = Vm::new_at(t0);
+        assert_eq!(vm.ui().banner, None);
+        vm.tick_at(t0 + BANNER_GRACE);
+        assert_eq!(
+            vm.ui().banner,
+            Some(Banner {
+                text: "Connecting to player…".into(),
+                error: false
+            })
+        );
+        // A failed first connect is still connecting: nothing was disconnected.
+        vm.link_at(Link::Lost("not found".into()), t0 + Duration::from_secs(3));
+        assert_eq!(vm.ui().connection, Connection::Connecting);
+        vm.tick_at(t0 + STUCK_AFTER);
+        assert_eq!(
+            vm.ui().banner.as_ref().map(|b| b.text.as_str()),
+            Some(
+                "Connecting to player… (not found). If this persists, quit requiem from the \
+                 menu bar and reopen it."
+            )
+        );
+        assert!(vm.ui().toast.is_none());
+    }
+
+    #[test]
+    fn quick_connect_shows_no_banner_or_toast() {
+        let t0 = Instant::now();
+        let mut vm = Vm::new_at(t0);
+        vm.link_at(Link::Connected, t0 + Duration::from_millis(50));
+        assert_eq!(vm.ui().banner, None);
+        assert_eq!(vm.next_tick(), None);
+
+        let mut vm = playing(225);
+        vm.link_at(Link::Lost("gone".into()), t0);
+        vm.link_at(Link::Connected, t0 + Duration::from_millis(700));
+        assert_eq!(vm.ui().banner, None);
         assert!(vm.ui().toast.is_none());
     }
 
@@ -1210,9 +1569,12 @@ mod tests {
             tracks: tracks(3),
             current: Some(1),
         });
-        vm.link(Link::Lost("gone".into()));
+        let t0 = Instant::now();
+        vm.link_at(Link::Lost("gone".into()), t0);
+        vm.tick_at(t0 + Duration::from_secs(2));
         vm.take_dirty();
-        vm.link(Link::Connected);
+        vm.link_at(Link::Connected, t0 + Duration::from_secs(3));
+        assert_eq!(vm.ui().banner, None);
         let ui = vm.ui();
         assert_eq!(ui.connection, Connection::Connected);
         assert!(ui.now_playing.is_none());
@@ -1254,25 +1616,49 @@ mod tests {
     }
 
     #[test]
-    fn disconnect_fails_pending_search_and_reconnect_idles_it() {
+    fn pending_search_survives_disconnect_and_is_resent() {
         let mut vm = connected();
         let req = search_req(&mut vm, "a");
         vm.link(Link::Lost("gone".into()));
+        assert_eq!(vm.ui().search, SearchStatus::Pending);
+        assert!(vm.take_commands().is_empty());
+        vm.link(Link::Connected);
+        assert_eq!(vm.ui().search, SearchStatus::Pending);
+        let resent = vm.take_commands();
         assert_eq!(
-            vm.ui().search,
-            SearchStatus::Failed("player disconnected".into())
+            resent,
+            vec![Command::Search {
+                req: req + 1,
+                query: "a".into()
+            }]
         );
-        // The old daemon's answer can no longer arrive; a stray one is ignored.
+        // An answer to the old req is ignored.
         vm.apply(Event::SearchResults {
             req,
             tracks: tracks(1),
         });
         assert!(vm.ui().results.is_empty());
+        vm.apply(Event::SearchResults {
+            req: req + 1,
+            tracks: tracks(2),
+        });
+        assert_eq!(vm.ui().results.len(), 2);
+    }
 
-        let mut vm = connected();
-        search_req(&mut vm, "a");
+    #[test]
+    fn search_before_the_first_connect_is_sent_on_connect() {
+        let mut vm = Vm::new();
+        search_req(&mut vm, "night drive");
         vm.link(Link::Connected);
-        assert_eq!(vm.ui().search, SearchStatus::Idle);
+        assert_eq!(vm.ui().search, SearchStatus::Pending);
+        assert_eq!(
+            vm.take_commands(),
+            vec![Command::Search {
+                req: 2,
+                query: "night drive".into()
+            }]
+        );
+        assert!(vm.take_commands().is_empty());
     }
 
     #[test]
@@ -1284,12 +1670,30 @@ mod tests {
         assert_eq!(vm.take_dirty(), Dirty::CONNECTION);
         assert!(vm.ui().toast.is_none());
         assert_eq!(
-            vm.ui().banner(),
+            vm.ui().banner,
             Some(Banner {
-                text: "Player is out of date — quit it from the menu bar",
+                text: "An older requiem player is still running. Quit it from the menu bar; \
+                       this window reconnects on its own."
+                    .into(),
                 error: true
             })
         );
+        assert_eq!(vm.next_tick(), None);
+    }
+
+    #[test]
+    fn out_of_date_retries_until_a_connection_replaces_it() {
+        let mut vm = Vm::new();
+        vm.link(Link::OutOfDate);
+        // Each retry against the old player reports it again; nothing changes.
+        vm.take_dirty();
+        vm.link(Link::OutOfDate);
+        assert!(vm.take_dirty().is_empty());
+        vm.link(Link::Connected);
+        assert_eq!(vm.ui().connection, Connection::Connected);
+        assert_eq!(vm.ui().banner, None);
+        assert_eq!(vm.ui().toast.as_ref().unwrap().text, "Player reconnected");
+        assert!(vm.take_dirty().contains(Dirty::CONNECTION));
     }
 
     #[test]
@@ -1297,7 +1701,7 @@ mod tests {
         let mut vm = playing(225);
         vm.link(Link::OutOfDate);
         assert_eq!(vm.ui().connection, Connection::OutOfDate);
-        assert!(vm.ui().banner().is_some_and(|b| b.error));
+        assert!(vm.ui().banner.as_ref().is_some_and(|b| b.error));
         // No toast: the banner says it, and no reconnect follows.
         assert!(vm.ui().toast.is_none());
         assert!(vm.ui().now_playing.is_some());
@@ -1311,7 +1715,7 @@ mod tests {
         let mut vm = Vm::new();
         vm.link(Link::Demo);
         assert_eq!(vm.ui().connection, Connection::Demo);
-        assert!(vm.ui().banner().is_none());
+        assert!(vm.ui().banner.is_none());
     }
 
     #[test]
@@ -1321,8 +1725,8 @@ mod tests {
             vm.ui().results_empty(),
             Some(EmptyText {
                 heading: "Search YouTube Music".into(),
-                sub: "Type a song, artist or album".into(),
-                action: "Start a search",
+                sub: "Type a song, artist or album, then press Return.".into(),
+                action: EmptyAction::StartSearch,
             })
         );
         let req = search_req(&mut vm, "zzz");
@@ -1335,7 +1739,7 @@ mod tests {
             Some(EmptyText {
                 heading: "No results".into(),
                 sub: "Nothing matched “zzz”".into(),
-                action: "Edit search",
+                action: EmptyAction::EditSearch,
             })
         );
         assert_eq!(with_results(1).ui().results_empty(), None);
@@ -1380,7 +1784,300 @@ mod tests {
             PaletteAction::filter("search"),
             vec![PaletteAction::FocusSearch, PaletteAction::ShowSearch]
         );
+        assert_eq!(
+            PaletteAction::filter("play"),
+            vec![PaletteAction::PlayPause, PaletteAction::PlaySelected]
+        );
         assert!(PaletteAction::filter("xyz").is_empty());
+    }
+
+    #[test]
+    fn palette_shortcuts_match_the_menus() {
+        let keys: Vec<_> = PaletteAction::ALL.iter().map(|a| a.shortcut()).collect();
+        assert_eq!(
+            keys,
+            ["Space", "⌘→", "⌘←", "↩", "⌘↩", "⌘F", "⌘1", "⌘2", "⌘↑", "⌘↓"]
+        );
+    }
+
+    #[test]
+    fn total_time_agrees_with_the_listed_duration() {
+        let mut vm = connected();
+        vm.apply(Event::NowPlaying {
+            track: track("a", 159),
+            duration: Some(Duration::from_millis(158_600)),
+        });
+        assert_eq!(vm.ui().total_text(), "2:39");
+        // Progress and seeking keep the engine's duration.
+        vm.apply(Event::Position(Duration::from_millis(79_300)));
+        assert!((vm.ui().progress() - 0.5).abs() < 1e-9);
+        let mut t = track("b", 0);
+        t.duration = None;
+        vm.apply(Event::NowPlaying {
+            track: t,
+            duration: Some(Duration::from_secs(61)),
+        });
+        assert_eq!(vm.ui().total_text(), "1:01");
+    }
+
+    #[test]
+    fn controls_follow_the_connection_queue_and_track() {
+        let off = Controls {
+            transport: false,
+            seek: false,
+            player: false,
+        };
+        let mut vm = Vm::new();
+        assert_eq!(vm.ui().controls(), off);
+        vm.link(Link::Connected);
+        assert_eq!(
+            vm.ui().controls(),
+            Controls {
+                transport: false,
+                seek: false,
+                player: true
+            }
+        );
+        vm.apply(Event::QueueChanged {
+            tracks: tracks(2),
+            current: Some(0),
+        });
+        assert!(vm.ui().controls().transport && !vm.ui().controls().seek);
+        vm.apply(Event::NowPlaying {
+            track: track("0", 200),
+            duration: Some(Duration::from_secs(200)),
+        });
+        let on = Controls {
+            transport: true,
+            seek: true,
+            player: true,
+        };
+        assert_eq!(vm.ui().controls(), on);
+        vm.link(Link::Lost("gone".into()));
+        assert_eq!(vm.ui().controls(), off);
+        vm.link(Link::OutOfDate);
+        assert_eq!(vm.ui().controls(), off);
+        let (demo, _) = crate::demo::start();
+        assert_eq!(demo.ui().controls(), on);
+    }
+
+    #[test]
+    fn disabled_controls_send_nothing() {
+        let mut vm = with_results(3);
+        // Connected with an empty queue: no transport.
+        assert!(vm.intent(Intent::Toggle).is_empty());
+        assert!(vm.intent(Intent::Next).is_empty());
+        assert!(vm.intent(Intent::Prev).is_empty());
+        vm.link(Link::Lost("gone".into()));
+        for i in [
+            Intent::PlayResult(0),
+            Intent::AppendResult(0),
+            Intent::PlayQueue(0),
+            Intent::SetVolume(10),
+            Intent::VolumeBy(-10),
+            Intent::Undo,
+        ] {
+            assert!(vm.intent(i.clone()).is_empty(), "{i:?}");
+        }
+        // Searching stays open; the search is sent again on connect.
+        assert_eq!(search_req(&mut vm, "b"), 2);
+    }
+
+    #[test]
+    fn queue_badge_counts_tracks() {
+        let mut vm = connected();
+        assert_eq!(vm.ui().queue_badge(), None);
+        vm.apply(Event::QueueChanged {
+            tracks: tracks(5),
+            current: None,
+        });
+        assert_eq!(vm.ui().queue_badge().as_deref(), Some("5"));
+        assert_eq!(vm.take_dirty(), Dirty::QUEUE);
+    }
+
+    /// Playing the third of three queued tracks at 1:01, with results to replace them.
+    fn replaced() -> (Vm, Vec<Track>) {
+        let mut vm = with_results(4);
+        let old = tracks(3);
+        vm.apply(Event::QueueChanged {
+            tracks: old.clone(),
+            current: Some(2),
+        });
+        vm.apply(Event::NowPlaying {
+            track: old[2].clone(),
+            duration: old[2].duration,
+        });
+        vm.apply(Event::Position(Duration::from_secs(61)));
+        vm.intent(Intent::PlayResult(1));
+        (vm, old)
+    }
+
+    #[test]
+    fn replacing_a_queue_offers_undo() {
+        let (vm, _) = replaced();
+        let t = vm.ui().toast.clone().unwrap();
+        assert_eq!(
+            (t.text.as_str(), t.error, t.action),
+            ("Queue replaced", false, Some("Undo"))
+        );
+        // Nothing to undo when the queue was empty.
+        let mut vm = with_results(4);
+        vm.intent(Intent::PlayResult(1));
+        assert!(vm.ui().toast.is_none());
+    }
+
+    #[test]
+    fn undo_restores_queue_track_and_position() {
+        let (mut vm, old) = replaced();
+        vm.take_dirty();
+        assert_eq!(
+            vm.intent(Intent::Undo),
+            vec![
+                Command::Enqueue {
+                    tracks: old.clone(),
+                    mode: EnqueueMode::Replace
+                },
+                Command::PlayIndex(2)
+            ]
+        );
+        assert!(vm.ui().toast.is_none());
+        assert!(vm.intent(Intent::Undo).is_empty());
+        // The session's answer: the queue, then the restored track once it starts.
+        vm.apply(Event::QueueChanged {
+            tracks: old.clone(),
+            current: Some(2),
+        });
+        assert!(vm.take_commands().is_empty());
+        vm.apply(Event::NowPlaying {
+            track: old[2].clone(),
+            duration: old[2].duration,
+        });
+        assert_eq!(
+            vm.take_commands(),
+            vec![Command::Seek(SeekTarget::Absolute(Duration::from_secs(61)))]
+        );
+        assert_eq!(vm.ui().elapsed_text(), "1:01");
+        // Held against the zero positions the daemon sends before it seeks.
+        vm.apply(Event::Position(Duration::ZERO));
+        assert_eq!(vm.ui().elapsed_text(), "1:01");
+    }
+
+    #[test]
+    fn undo_seek_is_dropped_if_another_track_starts() {
+        let (mut vm, old) = replaced();
+        vm.intent(Intent::Undo);
+        vm.apply(Event::QueueChanged {
+            tracks: old.clone(),
+            current: Some(0),
+        });
+        vm.apply(Event::NowPlaying {
+            track: old[0].clone(),
+            duration: old[0].duration,
+        });
+        assert!(vm.take_commands().is_empty());
+    }
+
+    #[test]
+    fn undo_ends_with_its_toast() {
+        let (mut vm, _) = replaced();
+        let id = vm.ui().toast.as_ref().unwrap().id;
+        vm.dismiss_toast(id);
+        assert!(vm.intent(Intent::Undo).is_empty());
+
+        let (mut vm, _) = replaced();
+        vm.apply(Event::TrackFailed {
+            track: track("x", 1),
+            error: "e".into(),
+        });
+        assert!(vm.intent(Intent::Undo).is_empty());
+    }
+
+    #[test]
+    fn undo_without_a_loaded_track_restores_only_the_queue() {
+        let mut vm = with_results(4);
+        vm.apply(Event::QueueChanged {
+            tracks: tracks(3),
+            current: None,
+        });
+        vm.intent(Intent::PlayResult(0));
+        assert_eq!(
+            vm.intent(Intent::Undo),
+            vec![Command::Enqueue {
+                tracks: tracks(3),
+                mode: EnqueueMode::Replace
+            }]
+        );
+    }
+
+    #[test]
+    fn track_failed_toast_says_whether_playback_moved_on() {
+        let mut vm = playing(225);
+        vm.apply(Event::TrackFailed {
+            track: track("a", 1),
+            error: "video unavailable".into(),
+        });
+        vm.apply(Event::QueueChanged {
+            tracks: tracks(3),
+            current: Some(1),
+        });
+        assert_eq!(
+            vm.ui().toast.as_ref().unwrap().text,
+            "Couldn't play “Title a”: video unavailable. Skipped to the next track."
+        );
+
+        let mut vm = playing(225);
+        vm.apply(Event::TrackFailed {
+            track: track("a", 1),
+            error: "video unavailable".into(),
+        });
+        vm.apply(Event::State(PlayState::Stopped));
+        assert_eq!(
+            vm.ui().toast.as_ref().unwrap().text,
+            "Couldn't play “Title a”: video unavailable. Playback stopped."
+        );
+        // Only the event right after the failure tells its outcome.
+        vm.apply(Event::QueueChanged {
+            tracks: tracks(3),
+            current: Some(1),
+        });
+        assert!(
+            vm.ui()
+                .toast
+                .as_ref()
+                .unwrap()
+                .text
+                .ends_with("Playback stopped.")
+        );
+    }
+
+    #[test]
+    fn provider_broken_keeps_its_toast_over_the_failure() {
+        let mut vm = playing(225);
+        vm.apply(Event::TrackFailed {
+            track: track("a", 1),
+            error: "e".into(),
+        });
+        vm.apply(Event::ProviderBroken {
+            provider: ProviderId("ytmusic".into()),
+            detail: "3 consecutive failures".into(),
+        });
+        vm.apply(Event::State(PlayState::Stopped));
+        let t = vm.ui().toast.clone().unwrap();
+        assert!(t.text.starts_with("YouTube Music stopped working"));
+        assert!(!t.text.contains("Playback stopped"));
+    }
+
+    #[test]
+    fn dirty_accumulates_until_taken() {
+        let mut vm = playing(225);
+        vm.apply(Event::Volume(30));
+        vm.apply(Event::Position(Duration::from_secs(5)));
+        vm.apply(Event::State(PlayState::Paused));
+        assert_eq!(
+            vm.take_dirty(),
+            Dirty::VOLUME | Dirty::ELAPSED | Dirty::SEEK | Dirty::STATE
+        );
+        assert!(vm.take_dirty().is_empty());
     }
 
     #[test]

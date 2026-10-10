@@ -21,6 +21,9 @@ use objc2_foundation::{
 use super::theme::{self, Icon, Weight};
 use super::ui::{self, AppView};
 
+/// The opacity of a disabled control.
+pub const DIMMED: CGFloat = 0.4;
+
 pub fn rect(x: CGFloat, y: CGFloat, w: CGFloat, h: CGFloat) -> NSRect {
     NSRect::new(NSPoint::new(x, y), NSSize::new(w, h))
 }
@@ -302,6 +305,16 @@ impl HoverButton {
         self.setImage(icon.image(size).as_deref());
     }
 
+    /// Dims a disabled button, which takes no clicks and shows no hover.
+    pub fn set_enabled(&self, enabled: bool) {
+        if self.isEnabled() == enabled {
+            return;
+        }
+        self.setEnabled(enabled);
+        self.setAlphaValue(if enabled { 1.0 } else { DIMMED });
+        self.paint();
+    }
+
     /// Shows or hides the button; hiding also drops its hover state.
     pub fn set_shown(&self, shown: bool) {
         if !shown {
@@ -329,7 +342,7 @@ impl HoverButton {
 
     fn paint(&self) {
         let iv = self.ivars();
-        let c = if iv.hovered.get() {
+        let c = if iv.hovered.get() && self.isEnabled() {
             Some(&*iv.hover)
         } else {
             iv.normal.as_deref()
@@ -748,8 +761,10 @@ impl Slider {
         }
     }
 
+    /// Dims a disabled slider, which takes no input and shows no knob.
     pub fn set_enabled(&self, enabled: bool) {
         if self.ivars().enabled.replace(enabled) != enabled {
+            self.setAlphaValue(if enabled { 1.0 } else { DIMMED });
             self.setNeedsDisplay(true);
         }
     }
@@ -826,8 +841,14 @@ impl EmptyState {
     const BUTTON_H: CGFloat = 36.0;
     const GROUP_H: CGFloat = 136.0;
 
-    /// The action button sends `focusSearch:` to `target`.
-    pub fn new(mtm: MainThreadMarker, frame: NSRect, icon: Icon, target: &AnyObject) -> EmptyState {
+    /// The action button sends `action` to `target`.
+    pub fn new(
+        mtm: MainThreadMarker,
+        frame: NSRect,
+        icon: Icon,
+        target: &AnyObject,
+        action: Sel,
+    ) -> EmptyState {
         let view = view(mtm, frame, FLEX_W | FLEX_H);
         let (w, h) = (frame.size.width, frame.size.height);
         let gh = Self::GROUP_H;
@@ -869,9 +890,10 @@ impl EmptyState {
             FLEX_W,
         );
         sub.setAlignment(NSTextAlignment::Center);
+        let action_sel = action;
         let action = HoverButton::primary(mtm, rect(0.0, 0.0, 0.0, Self::BUTTON_H));
         action.setAutoresizingMask(centred);
-        action.set_action(target, objc2::sel!(focusSearch:));
+        action.set_action(target, action_sel);
         group.addSubview(&iconv);
         group.addSubview(&heading);
         group.addSubview(&sub);

@@ -137,11 +137,13 @@ fn beside(exe: &Path) -> Option<PathBuf> {
 
 fn connection(daemon: PathBuf, slot: Slot) {
     let mut attempt = 0;
+    let mut out_of_date = false;
     loop {
-        match Client::connect_or_spawn(&daemon, Role::Gui, CONNECT_TIMEOUT) {
+        let link = match Client::connect_or_spawn(&daemon, Role::Gui, CONNECT_TIMEOUT) {
             Ok((client, events)) => {
                 *slot.lock().unwrap_or_else(PoisonError::into_inner) = Some(Arc::new(client));
                 attempt = 0;
+                out_of_date = false;
                 post(vec![Msg::Link(Link::Connected)]);
                 let mut reason = "connection closed".to_owned();
                 while let Ok(first) = events.recv() {
@@ -171,20 +173,34 @@ fn connection(daemon: PathBuf, slot: Slot) {
                     }
                 }
                 *slot.lock().unwrap_or_else(PoisonError::into_inner) = None;
-                post(vec![Msg::Link(Link::Lost(reason))]);
+                Link::Lost(reason)
             }
             Err(e) if e.kind() == io::ErrorKind::Unsupported => {
-                eprintln!("requiem-gui: {e}");
-                post(vec![Msg::Link(Link::OutOfDate)]);
-                return;
+                if !std::mem::replace(&mut out_of_date, true) {
+                    eprintln!("requiem-gui: {e}");
+                }
+                Link::OutOfDate
             }
             Err(e) => {
+                out_of_date = false;
                 eprintln!("requiem-gui: cannot reach the player: {e}");
-                post(vec![Msg::Link(Link::Lost(e.to_string()))]);
+                Link::Lost(e.to_string())
             }
-        }
-        thread::sleep(BACKOFF[attempt.min(BACKOFF.len() - 1)]);
+        };
+        let delay = retry_delay(&link, attempt);
+        post(vec![Msg::Link(link)]);
+        thread::sleep(delay);
         attempt += 1;
+    }
+}
+
+/// How long to wait before the next connect after `link`. An out-of-date player is polled at
+/// the slowest pace until it quits and a current one can start.
+fn retry_delay(link: &Link, attempt: usize) -> Duration {
+    let slowest = BACKOFF.len() - 1;
+    match link {
+        Link::OutOfDate => BACKOFF[slowest],
+        _ => BACKOFF[attempt.min(slowest)],
     }
 }
 
@@ -214,6 +230,14 @@ mod tests {
         assert_eq!(rx.try_iter().collect::<Vec<_>>(), vec![Command::Next]);
         drop(rx);
         enqueue(&tx, Command::Next);
+    }
+
+    #[test]
+    fn out_of_date_keeps_retrying_at_the_slowest_pace() {
+        assert_eq!(retry_delay(&Link::OutOfDate, 0), Duration::from_secs(4));
+        let lost = Link::Lost("x".into());
+        assert_eq!(retry_delay(&lost, 0), Duration::from_millis(500));
+        assert_eq!(retry_delay(&lost, 9), Duration::from_secs(4));
     }
 
     #[test]

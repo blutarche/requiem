@@ -119,6 +119,11 @@ define_class!(
             });
         }
 
+        #[unsafe(method(emptyAction:))]
+        fn empty_action(&self, _sender: Option<&AnyObject>) {
+            ui::with(|ui| ui.empty_action());
+        }
+
         #[unsafe(method(openPalette:))]
         fn open_palette(&self, _sender: Option<&AnyObject>) {
             ui::with(|ui| ui.open_palette());

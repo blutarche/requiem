@@ -13,16 +13,20 @@ use super::theme::{self, Icon, Weight};
 use super::widgets::{
     self, FLEX_W, HoverButton, PIN_BOTTOM, PIN_LEFT, PIN_RIGHT, PIN_TOP, Slider, SliderKind, rect,
 };
+use crate::vm::Controls;
 
 pub struct PlayerBar {
     pub view: Retained<NSView>,
     title: Retained<NSTextField>,
     artists: Retained<NSTextField>,
+    prev: Retained<HoverButton>,
     play: Retained<HoverButton>,
+    next: Retained<HoverButton>,
     seek: Retained<Slider>,
     elapsed: Retained<NSTextField>,
     total: Retained<NSTextField>,
     volume: Retained<Slider>,
+    volume_icon: Retained<NSView>,
     playing: Cell<bool>,
 }
 
@@ -168,6 +172,7 @@ impl PlayerBar {
             rect(vx - 26.0, (h - 16.0) / 2.0, 16.0, 16.0),
         );
         vicon.setAutoresizingMask(PIN_RIGHT);
+        let vicon: Retained<NSView> = Retained::into_super(Retained::into_super(vicon));
         let volume = Slider::new(
             mtm,
             rect(vx, h / 2.0 - 8.0, vw, 16.0),
@@ -181,11 +186,14 @@ impl PlayerBar {
             view,
             title,
             artists,
+            prev,
             play,
+            next,
             seek,
             elapsed,
             total,
             volume,
+            volume_icon: vicon,
             playing: Cell::new(false),
         }
     }
@@ -205,7 +213,16 @@ impl PlayerBar {
             }
         }
         widgets::set_text(&self.total, total);
-        self.seek.set_enabled(track.is_some());
+    }
+
+    pub fn set_controls(&self, c: Controls) {
+        for b in [&self.prev, &self.play, &self.next] {
+            b.set_enabled(c.transport);
+        }
+        self.seek.set_enabled(c.seek);
+        self.volume.set_enabled(c.player);
+        self.volume_icon
+            .setAlphaValue(if c.player { 1.0 } else { widgets::DIMMED });
     }
 
     pub fn set_elapsed(&self, text: &str) {

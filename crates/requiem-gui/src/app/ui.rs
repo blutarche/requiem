@@ -3,6 +3,7 @@
 
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
+use std::time::Instant;
 
 use dispatch2::{DispatchQueue, DispatchTime};
 use objc2::rc::Retained;
@@ -25,7 +26,10 @@ use super::widgets::{
     self, EmptyState, FLEX_H, FLEX_W, Field, HoverButton, NavItem, PIN_BOTTOM, PIN_LEFT, PIN_RIGHT,
     PIN_TOP, rect,
 };
-use crate::vm::{self, Banner, Dirty, EmptyText, Intent, PaletteAction, Toast, UiState, Vm};
+use crate::vm::{
+    self, Banner, Controls, Dirty, EmptyAction, EmptyText, Intent, PaletteAction, Toast, UiState,
+    Vm,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AppView {
@@ -91,6 +95,8 @@ pub struct Ui {
     bar: PlayerBar,
     toast: ToastView,
     pub palette: Palette,
+    /// The banner deadline a `tick` is already scheduled for.
+    tick_at: Cell<Option<Instant>>,
 }
 
 impl Ui {
@@ -206,7 +212,7 @@ impl Ui {
         status.setHidden(true);
         let list = rect(PAD, 0.0, mw - 2.0 * PAD, field_y - 16.0);
         let results = Table::new(mtm, list, Kind::Results);
-        let results_empty = EmptyState::new(mtm, list, Icon::Search, target);
+        let results_empty = EmptyState::new(mtm, list, Icon::Search, target, sel!(emptyAction:));
         search_page.addSubview(&search.ring);
         search_page.addSubview(&status);
         search_page.addSubview(&results.view);
@@ -238,7 +244,7 @@ impl Ui {
         );
         queue_count.setAlignment(NSTextAlignment::Right);
         let queue = Table::new(mtm, list, Kind::Queue);
-        let queue_empty = EmptyState::new(mtm, list, Icon::ListMusic, target);
+        let queue_empty = EmptyState::new(mtm, list, Icon::ListMusic, target, sel!(focusSearch:));
         queue_empty.set(
             Icon::ListMusic,
             "Queue is empty",
@@ -304,6 +310,7 @@ impl Ui {
             bar,
             toast,
             palette,
+            tick_at: Cell::new(None),
         });
         let query = ui.vm.borrow().ui().query.clone();
         ui.search.set_value(&query);
@@ -404,6 +411,8 @@ impl Ui {
             PaletteAction::PlayPause => self.intent(Intent::Toggle),
             PaletteAction::Next => self.intent(Intent::Next),
             PaletteAction::Previous => self.intent(Intent::Prev),
+            PaletteAction::PlaySelected => self.activate_selection(false),
+            PaletteAction::AddToQueue => self.activate_selection(true),
             PaletteAction::FocusSearch => self.focus_search(),
             PaletteAction::ShowSearch => self.show(AppView::Search),
             PaletteAction::ShowQueue => self.show(AppView::Queue),
@@ -414,14 +423,34 @@ impl Ui {
 
     pub fn intent(&self, intent: Intent) {
         let cmds = self.vm.borrow_mut().intent(intent);
-        for cmd in cmds {
-            let events = self.backend.send(cmd);
-            let mut vm = self.vm.borrow_mut();
-            for ev in events {
-                vm.apply(ev);
-            }
-        }
+        self.send(cmds);
         self.render();
+    }
+
+    /// Sends `cmds`, then whatever the view model raised in answer: the demo backend answers
+    /// at once, and its events can raise more.
+    fn send(&self, mut cmds: Vec<requiem_core::Command>) {
+        while !cmds.is_empty() {
+            for cmd in cmds {
+                let events = self.backend.send(cmd);
+                let mut vm = self.vm.borrow_mut();
+                for ev in events {
+                    vm.apply(ev);
+                }
+            }
+            cmds = self.vm.borrow_mut().take_commands();
+        }
+    }
+
+    /// The results empty state's button: "Start a search" runs the typed query, or focuses
+    /// the empty field; "Edit search" focuses the field.
+    pub fn empty_action(&self) {
+        let action = self.vm.borrow().ui().results_empty().map(|e| e.action);
+        if action == Some(EmptyAction::StartSearch) && !self.search.value().trim().is_empty() {
+            self.search_submitted();
+        } else {
+            self.focus_search();
+        }
     }
 
     pub fn search_submitted(&self) {
@@ -441,11 +470,18 @@ impl Ui {
                 }
             }
             AppView::Queue => {
-                if let Some(i) = self.queue.selected_row() {
-                    self.intent(Intent::PlayQueue(i));
+                if let Some(i) = self.queue.selected_row().filter(|_| !append) {
+                    self.play_queue(i);
                 }
             }
         }
+    }
+
+    /// Plays queue row `i` and drops the selection, so the current-row marker is what
+    /// stands out.
+    pub fn play_queue(&self, i: usize) {
+        self.intent(Intent::PlayQueue(i));
+        self.queue.deselect();
     }
 
     pub fn seek_fraction(&self, fraction: f64) {
@@ -470,7 +506,7 @@ impl Ui {
 
     pub fn receive(&self, batch: Vec<Msg>) {
         let mut raise = false;
-        {
+        let cmds = {
             let mut vm = self.vm.borrow_mut();
             for m in batch {
                 match m {
@@ -479,7 +515,9 @@ impl Ui {
                     Msg::Raise => raise = true,
                 }
             }
-        }
+            vm.take_commands()
+        };
+        self.send(cmds);
         self.render();
         if raise {
             self.raise();
@@ -501,12 +539,37 @@ impl Ui {
         let patch = {
             let mut vm = self.vm.borrow_mut();
             let dirty = vm.take_dirty();
-            if dirty.is_empty() {
-                return;
-            }
-            Patch::new(dirty, vm.ui())
+            (!dirty.is_empty()).then(|| Patch::new(dirty, vm.ui()))
         };
-        self.apply(patch);
+        if let Some(patch) = patch {
+            self.apply(patch);
+        }
+        self.schedule_tick();
+    }
+
+    /// Wakes the view model when the banner is due to change on its own.
+    fn schedule_tick(&self) {
+        let next = self.vm.borrow().next_tick();
+        if next == self.tick_at.get() {
+            return;
+        }
+        self.tick_at.set(next);
+        let Some(at) = next else { return };
+        let wait = at.saturating_duration_since(Instant::now());
+        if let Ok(when) = DispatchTime::try_from(wait) {
+            let _ = DispatchQueue::main().after(when, move || {
+                with(|ui| ui.tick(at));
+            });
+        }
+    }
+
+    fn tick(&self, at: Instant) {
+        if self.tick_at.get() != Some(at) {
+            return;
+        }
+        self.tick_at.set(None);
+        self.vm.borrow_mut().tick();
+        self.render();
     }
 
     fn apply(&self, p: Patch) {
@@ -530,7 +593,7 @@ impl Ui {
             self.results_empty.view.setHidden(has_rows);
             if let Some(e) = empty {
                 self.results_empty
-                    .set(Icon::Search, &e.heading, &e.sub, e.action);
+                    .set(Icon::Search, &e.heading, &e.sub, e.action.label());
             }
         }
         if let Some((rows, current)) = p.queue {
@@ -563,6 +626,11 @@ impl Ui {
         if let Some(v) = p.volume {
             self.bar.set_volume(v);
         }
+        if let Some(c) = p.controls {
+            self.bar.set_controls(c);
+            self.results.set_enabled(c.player);
+            self.queue.set_enabled(c.player);
+        }
         if let Some(t) = p.toast {
             self.show_toast(t);
         }
@@ -587,8 +655,11 @@ impl Ui {
     fn show_banner(&self, banner: Option<Banner>) {
         let b = self.main.bounds();
         let shown = banner.is_some();
-        if let Some(banner) = banner {
-            widgets::set_text(&self.banner_label, banner.text);
+        if let Some(banner) = &banner {
+            widgets::set_text(&self.banner_label, &banner.text);
+            // The stuck banner can outgrow a narrow window.
+            self.banner_label
+                .setToolTip(Some(&NSString::from_str(&banner.text)));
             let c = if banner.error {
                 theme::bad()
             } else {
@@ -649,6 +720,7 @@ struct Patch {
     progress: Option<f64>,
     playing: Option<bool>,
     volume: Option<u8>,
+    controls: Option<Controls>,
     toast: Option<Option<Toast>>,
     banner: Option<Option<Banner>>,
 }
@@ -673,8 +745,11 @@ impl Patch {
                 .then(|| s.progress()),
             playing: any(Dirty::STATE).then(|| s.is_playing()),
             volume: any(Dirty::VOLUME).then_some(s.volume),
+            controls: d
+                .intersects(Dirty::CONNECTION | Dirty::QUEUE | Dirty::NOW_PLAYING | Dirty::STATE)
+                .then(|| s.controls()),
             toast: any(Dirty::TOAST).then(|| s.toast.clone()),
-            banner: any(Dirty::CONNECTION).then(|| s.banner()),
+            banner: any(Dirty::CONNECTION).then(|| s.banner.clone()),
         }
     }
 }
@@ -694,6 +769,7 @@ mod tests {
         assert!(p.results.is_none() && p.search_status.is_none() && p.queue.is_none());
         assert!(p.now_playing.is_none() && p.elapsed.is_none() && p.progress.is_none());
         assert!(p.playing.is_none() && p.toast.is_none() && p.banner.is_none());
+        assert!(p.controls.is_none());
     }
 
     #[test]
@@ -717,6 +793,12 @@ mod tests {
         assert_eq!(p.playing, Some(true));
         assert_eq!(p.toast, Some(None));
         assert_eq!(p.banner, Some(None));
+        let on = Controls {
+            transport: true,
+            seek: true,
+            player: true,
+        };
+        assert_eq!(p.controls, Some(on));
     }
 
     #[test]
@@ -738,6 +820,6 @@ mod tests {
         let (vm, _) = demo::start_in(crate::args::View::Empty);
         let (rows, empty) = Patch::new(Dirty::RESULTS, vm.ui()).results.unwrap();
         assert!(rows.is_empty());
-        assert_eq!(empty.unwrap().action, "Start a search");
+        assert_eq!(empty.unwrap().action, EmptyAction::StartSearch);
     }
 }

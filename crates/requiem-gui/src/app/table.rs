@@ -94,6 +94,8 @@ pub struct ControllerIvars {
     kind: Kind,
     rows: RefCell<Vec<RowText>>,
     current: Cell<Option<usize>>,
+    /// Whether the rows' "+" buttons take clicks.
+    enabled: Cell<bool>,
     table: OnceCell<Weak<NSTableView>>,
 }
 
@@ -220,7 +222,9 @@ impl Controller {
                 .and_then(|v| v.downcast::<AddCell>().ok());
             let cell = reused.unwrap_or_else(|| AddCell::new(mtm, &id, self));
             // A reused cell may come from a hovered row.
-            cell.ivars().button.get()?.set_shown(false);
+            let button = cell.ivars().button.get()?;
+            button.set_shown(false);
+            button.set_enabled(self.ivars().enabled.get());
             return Some(Retained::into_super(cell));
         }
         let rows = self.ivars().rows.borrow();
@@ -599,6 +603,7 @@ impl Table {
             kind,
             rows: RefCell::new(Vec::new()),
             current: Cell::new(None),
+            enabled: Cell::new(true),
             table: OnceCell::new(),
         });
         // SAFETY: NSObject's `init`.
@@ -654,6 +659,23 @@ impl Table {
         self.table.reloadData();
         // Column widths settle when the table tiles.
         self.header.setNeedsDisplay(true);
+    }
+
+    /// Dims and disables the rows' "+" buttons; playing rows goes through the view model,
+    /// which drops it while disconnected.
+    pub fn set_enabled(&self, enabled: bool) {
+        if self.controller.ivars().enabled.replace(enabled) == enabled {
+            return;
+        }
+        for_visible_rows(&self.table, |_, rv| {
+            for v in rv.subviews().iter() {
+                if let Some(add) = v.downcast_ref::<AddCell>()
+                    && let Some(b) = add.ivars().button.get()
+                {
+                    b.set_enabled(enabled);
+                }
+            }
+        });
     }
 
     pub fn selected_row(&self) -> Option<usize> {
