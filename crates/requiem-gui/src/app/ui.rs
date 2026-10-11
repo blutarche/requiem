@@ -633,10 +633,11 @@ impl Ui {
         self.run(intent);
     }
 
-    /// Appends result `i`, and confirms it on the row's "+" when it was sent.
+    /// Appends result `i`, and confirms it on the row's "+" and to VoiceOver when it was sent.
     pub fn append_result(&self, i: usize) {
         if self.run(Intent::AppendResult(i)) {
             self.results.confirm_add(i);
+            widgets::announce(self.mtm, "Added to queue");
         }
     }
 

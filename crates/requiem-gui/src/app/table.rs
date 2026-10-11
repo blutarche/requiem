@@ -9,10 +9,10 @@ use objc2::rc::{Retained, Weak};
 use objc2::runtime::{AnyObject, NSObject, ProtocolObject, Sel};
 use objc2::{DefinedClass, MainThreadOnly, Message, define_class, msg_send, sel};
 use objc2_app_kit::{
-    NSAttributedStringNSStringDrawing, NSBezierPath, NSBorderType, NSControlTextEditingDelegate,
-    NSEvent, NSFocusRingType, NSMenu, NSMenuDelegate, NSMenuItem, NSResponder, NSScrollView,
-    NSTableColumn, NSTableColumnResizingOptions, NSTableRowView, NSTableView,
-    NSTableViewColumnAutoresizingStyle, NSTableViewDataSource, NSTableViewDelegate,
+    NSAttributedStringNSStringDrawing, NSBezierPath, NSBorderType, NSColor,
+    NSControlTextEditingDelegate, NSEvent, NSFocusRingType, NSMenu, NSMenuDelegate, NSMenuItem,
+    NSResponder, NSScrollView, NSTableColumn, NSTableColumnResizingOptions, NSTableRowView,
+    NSTableView, NSTableViewColumnAutoresizingStyle, NSTableViewDataSource, NSTableViewDelegate,
     NSTableViewSelectionHighlightStyle, NSTableViewStyle, NSTextAlignment, NSTextField,
     NSTrackingAreaOptions, NSUserInterfaceItemIdentification, NSView,
     NSViewFrameDidChangeNotification,
@@ -600,6 +600,8 @@ impl RowView {
         for v in self.subviews().iter() {
             if let Some(cell) = v.downcast_ref::<TextCell>() {
                 cell.set_row_selected(selected);
+            } else if let Some(cell) = v.downcast_ref::<AddCell>() {
+                cell.set_row_selected(selected);
             }
         }
     }
@@ -718,6 +720,7 @@ pub struct AddCellIvars {
     added: Cell<bool>,
     /// Bumped on every change, so a stale revert leaves a newer check alone.
     generation: Cell<u64>,
+    row_selected: Cell<bool>,
 }
 
 define_class!(
@@ -737,6 +740,7 @@ impl AddCell {
             button: OnceCell::new(),
             added: Cell::new(false),
             generation: Cell::new(0),
+            row_selected: Cell::new(false),
         });
         let w = ADD_W;
         // SAFETY: `initWithFrame:` is NSView's designated initializer.
@@ -807,13 +811,32 @@ impl AddCell {
             return;
         }
         if let Some(b) = iv.button.get() {
-            let (icon, tint) = if added {
-                (Icon::Check, theme::accent())
-            } else {
-                (Icon::Plus, theme::muted())
-            };
+            let icon = if added { Icon::Check } else { Icon::Plus };
             b.set_icon(icon, ADD_ICON);
-            b.setContentTintColor(Some(&tint));
+            b.setContentTintColor(Some(&self.tint()));
+        }
+    }
+
+    fn set_row_selected(&self, selected: bool) {
+        let iv = self.ivars();
+        if iv.row_selected.replace(selected) == selected || !iv.added.get() {
+            return;
+        }
+        if let Some(b) = iv.button.get() {
+            b.setContentTintColor(Some(&self.tint()));
+        }
+    }
+
+    fn tint(&self) -> Retained<NSColor> {
+        let iv = self.ivars();
+        if !iv.added.get() {
+            theme::muted()
+        } else if iv.row_selected.get() {
+            // The check in accent would fall under 3:1 against the selection, as the
+            // current-row marker would.
+            theme::accent_hi()
+        } else {
+            theme::accent()
         }
     }
 }
