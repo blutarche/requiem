@@ -29,8 +29,8 @@ use super::widgets::{
 };
 use super::{Delegate, MainWindow};
 use crate::vm::{
-    self, Banner, Controls, Dirty, EmptyAction, EmptyText, Intent, PaletteAction, QueueEdit, Toast,
-    UiState, Vm,
+    self, Banner, Controls, Dirty, EmptyAction, EmptyText, Intent, PaletteAction, QueueEdit,
+    Selection, Toast, UiState, Vm,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -510,11 +510,22 @@ impl Ui {
     }
 
     /// Whether the visible table has a row that Return (or with `append`, Cmd+Return) acts on.
-    pub fn has_selection(&self, append: bool) -> bool {
+    pub fn selection(&self) -> Selection {
         match self.view.get() {
-            AppView::Search => self.results.selected_row().is_some(),
-            AppView::Queue => !append && self.queue.selected_row().is_some(),
+            AppView::Search => {
+                let row = self.results.selected_row().is_some();
+                Selection { row, result: row }
+            }
+            AppView::Queue => Selection {
+                row: self.queue.selected_row().is_some(),
+                result: false,
+            },
         }
+    }
+
+    /// Whether `action` would do anything now; for the menus and the palette.
+    pub fn can_run(&self, action: PaletteAction) -> bool {
+        self.vm.borrow().ui().can_run(action, self.selection())
     }
 
     /// Whether something plays, and which controls are live; for the menus.
@@ -551,7 +562,7 @@ impl Ui {
 
     pub fn open_palette(&self) {
         if !self.palette.is_open() {
-            self.palette.open();
+            self.palette.open(|a| self.can_run(a));
         }
     }
 
@@ -559,7 +570,7 @@ impl Ui {
         if self.palette.is_open() {
             self.close_palette();
         } else {
-            self.palette.open();
+            self.palette.open(|a| self.can_run(a));
         }
     }
 
@@ -848,6 +859,9 @@ impl Ui {
         if let Some(row) = select {
             self.queue.select(row);
         }
+        if self.palette.is_open() {
+            self.palette.set_enabled(|a| self.can_run(a));
+        }
         self.schedule_tick();
     }
 
@@ -999,6 +1013,9 @@ impl Ui {
 
     /// Keeps a shown banner fitted to the window's width.
     pub fn window_resized(&self) {
+        if self.palette.is_open() {
+            self.palette.layout();
+        }
         if !self.banner_shown.get() {
             return;
         }

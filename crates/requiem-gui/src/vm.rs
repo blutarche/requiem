@@ -193,6 +193,15 @@ pub struct Controls {
     pub player: bool,
 }
 
+/// The visible table's selection, as far as actions care.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Selection {
+    /// A row is selected.
+    pub row: bool,
+    /// The selected row is a search result, so it can be added.
+    pub result: bool,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct UiState {
     pub connection: Connection,
@@ -294,6 +303,24 @@ impl UiState {
             transport: live && !self.queue.is_empty(),
             seek: live && self.now_playing.is_some(),
             player: live,
+        }
+    }
+
+    /// Whether `action` would do anything. The menus enable their items, and the palette its
+    /// rows, by this.
+    pub fn can_run(&self, action: PaletteAction, selection: Selection) -> bool {
+        let can = self.controls();
+        match action {
+            PaletteAction::PlayPause | PaletteAction::Next | PaletteAction::Previous => {
+                can.transport
+            }
+            PaletteAction::PlaySelected => can.player && selection.row,
+            PaletteAction::AddToQueue => can.player && selection.result,
+            PaletteAction::VolumeUp | PaletteAction::VolumeDown => can.player,
+            PaletteAction::ClearQueue => self.edit_command(QueueEdit::Clear).is_some(),
+            PaletteAction::FocusSearch | PaletteAction::ShowSearch | PaletteAction::ShowQueue => {
+                true
+            }
         }
     }
 
@@ -1099,6 +1126,54 @@ mod tests {
         vm.link(Link::Connected);
         vm.take_dirty();
         vm
+    }
+
+    #[test]
+    fn actions_run_only_when_they_would_act() {
+        let runnable = |vm: &Vm, selection| {
+            PaletteAction::ALL
+                .into_iter()
+                .filter(|&a| vm.ui().can_run(a, selection))
+                .collect::<Vec<_>>()
+        };
+        let views = vec![
+            PaletteAction::FocusSearch,
+            PaletteAction::ShowSearch,
+            PaletteAction::ShowQueue,
+        ];
+        assert_eq!(
+            runnable(
+                &Vm::new(),
+                Selection {
+                    row: true,
+                    result: true
+                }
+            ),
+            views
+        );
+
+        let mut vm = connected();
+        let none = Selection::default();
+        let mut idle = views.clone();
+        idle.extend([PaletteAction::VolumeUp, PaletteAction::VolumeDown]);
+        assert_eq!(runnable(&vm, none), idle);
+
+        vm.apply(Event::QueueChanged {
+            tracks: tracks(2),
+            current: Some(0),
+        });
+        assert_eq!(runnable(&vm, none).len(), PaletteAction::ALL.len() - 2);
+        let queue_row = Selection {
+            row: true,
+            result: false,
+        };
+        assert!(vm.ui().can_run(PaletteAction::PlaySelected, queue_row));
+        assert!(!vm.ui().can_run(PaletteAction::AddToQueue, queue_row));
+        let result = Selection {
+            row: true,
+            result: true,
+        };
+        assert_eq!(runnable(&vm, result).len(), PaletteAction::ALL.len());
     }
 
     /// A vm with `n` results from a completed search.

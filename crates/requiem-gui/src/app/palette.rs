@@ -78,6 +78,8 @@ define_class!(
 
 struct Row {
     action: PaletteAction,
+    /// It would do something now; a disabled row is dimmed and skipped.
+    enabled: Cell<bool>,
     view: Retained<ActionRow>,
     label: Retained<NSTextField>,
     keys: Retained<NSTextField>,
@@ -90,8 +92,8 @@ pub struct Palette {
     rows: Vec<Row>,
     none: Retained<NSTextField>,
     shown: RefCell<Vec<usize>>,
-    /// Index into `shown`.
-    selected: Cell<usize>,
+    /// Index into `shown`; always an enabled row.
+    selected: Cell<Option<usize>>,
     open: Cell<bool>,
 }
 
@@ -179,6 +181,7 @@ impl Palette {
                 panel.addSubview(&view);
                 Row {
                     action,
+                    enabled: Cell::new(true),
                     view,
                     label,
                     keys,
@@ -204,7 +207,7 @@ impl Palette {
             rows,
             none,
             shown: RefCell::new(Vec::new()),
-            selected: Cell::new(0),
+            selected: Cell::new(None),
             open: Cell::new(false),
         };
         p.filter();
@@ -215,7 +218,11 @@ impl Palette {
         self.open.get()
     }
 
-    pub fn open(&self) {
+    /// Opens with the rows `enabled` accepts enabled.
+    pub fn open(&self, enabled: impl Fn(PaletteAction) -> bool) {
+        for r in &self.rows {
+            r.enabled.set(enabled(r.action));
+        }
         self.field.set_value("");
         self.filter();
         self.open.set(true);
@@ -230,6 +237,28 @@ impl Palette {
         self.overlay.setHidden(true);
     }
 
+    /// Re-dims the rows for what `enabled` now accepts, keeping the selection where it can.
+    pub fn set_enabled(&self, enabled: impl Fn(PaletteAction) -> bool) {
+        let mut changed = false;
+        for r in &self.rows {
+            let e = enabled(r.action);
+            changed |= r.enabled.replace(e) != e;
+        }
+        if !changed {
+            return;
+        }
+        let flags = self.shown_enabled();
+        let kept = self.selected.get().filter(|&i| flags[i]);
+        self.selected.set(kept.or_else(|| step(&flags, None, 1)));
+        self.repaint();
+    }
+
+    /// Per shown row, whether it is enabled.
+    fn shown_enabled(&self) -> Vec<bool> {
+        let shown = self.shown.borrow();
+        shown.iter().map(|&i| self.rows[i].enabled.get()).collect()
+    }
+
     /// Re-filters on the field's text and lays the panel out to fit.
     pub fn filter(&self) {
         let matches = PaletteAction::filter(&self.field.value());
@@ -240,14 +269,22 @@ impl Palette {
             .filter(|(_, r)| matches.contains(&r.action))
             .map(|(i, _)| i)
             .collect();
+        *self.shown.borrow_mut() = shown;
+        self.layout();
+        self.selected.set(step(&self.shown_enabled(), None, 1));
+        self.repaint();
+    }
+
+    /// Places the panel and its shown rows for the window's current size.
+    pub fn layout(&self) {
+        let shown = self.shown.borrow();
         let n = shown.len().max(1);
         let list_h = n as CGFloat * ROW_H;
         let ph = 12.0 + Field::H + PAD + list_h + PAD;
         let b = self.overlay.bounds();
-        let top = (b.size.height * 0.2).round();
         self.panel.setFrame(rect(
             ((b.size.width - PANEL_W) / 2.0).round(),
-            b.size.height - top - ph,
+            b.size.height - panel_top(b.size.height, ph) - ph,
             PANEL_W,
             ph,
         ));
@@ -281,14 +318,11 @@ impl Palette {
             nf.size.height,
         ));
         self.none.setHidden(!shown.is_empty());
-        *self.shown.borrow_mut() = shown;
-        self.selected.set(0);
-        self.repaint();
     }
 
     pub fn repaint(&self) {
         let shown = self.shown.borrow();
-        let sel = shown.get(self.selected.get()).copied();
+        let sel = self.selected.get().and_then(|s| shown.get(s).copied());
         for (i, r) in self.rows.iter().enumerate() {
             // Muted keys on the accent-tinted row would fall to 3.64:1.
             let (bg, ink, keys) = if Some(i) == sel {
@@ -297,42 +331,48 @@ impl Palette {
                     theme::ink(),
                     theme::ink_2(),
                 )
-            } else {
+            } else if r.enabled.get() {
                 (None, theme::ink_2(), theme::muted())
+            } else {
+                (None, theme::muted_2(), theme::muted_2())
             };
             widgets::fill(&r.view, bg.as_deref());
             r.label.setTextColor(Some(&ink));
             r.keys.setTextColor(Some(&keys));
+            r.view.setAccessibilityEnabled(r.enabled.get());
         }
     }
 
+    /// Moves the selection `delta` rows, over disabled ones.
     pub fn move_selection(&self, delta: isize) {
-        let n = self.shown.borrow().len();
-        if n == 0 {
+        let next = step(&self.shown_enabled(), self.selected.get(), delta);
+        if next.is_some() && self.selected.replace(next) != next {
+            self.repaint();
+        }
+    }
+
+    /// Selects the row for `PaletteAction::ALL[row]`, if it is shown and enabled.
+    fn select_row(&self, row: usize) {
+        if !self.rows.get(row).is_some_and(|r| r.enabled.get()) {
             return;
         }
-        let i = (self.selected.get() as isize + delta).rem_euclid(n as isize);
-        self.selected.set(i as usize);
-        self.repaint();
-    }
-
-    /// Selects the row for `PaletteAction::ALL[row]`, if it is shown.
-    fn select_row(&self, row: usize) {
         let slot = self.shown.borrow().iter().position(|&i| i == row);
-        if let Some(slot) = slot
-            && self.selected.replace(slot) != slot
-        {
+        if slot.is_some() && self.selected.replace(slot) != slot {
             self.repaint();
         }
     }
 
     pub fn selected_action(&self) -> Option<PaletteAction> {
-        let i = *self.shown.borrow().get(self.selected.get())?;
+        let i = *self.shown.borrow().get(self.selected.get()?)?;
         Some(self.rows[i].action)
     }
 
+    /// The action of row `row`, unless it is disabled.
     pub fn action(&self, row: usize) -> Option<PaletteAction> {
-        self.rows.get(row).map(|r| r.action)
+        self.rows
+            .get(row)
+            .filter(|r| r.enabled.get())
+            .map(|r| r.action)
     }
 
     fn click_outside(&self, p: NSPoint) {
@@ -344,5 +384,50 @@ impl Palette {
         if !inside {
             ui::with(|ui| ui.close_palette());
         }
+    }
+}
+
+/// The panel's distance below the window's top edge: a fifth of the window height, or less
+/// when that would leave under 16 pt below a `panel_h` panel.
+fn panel_top(height: CGFloat, panel_h: CGFloat) -> CGFloat {
+    (height * 0.2).round().min(height - panel_h - 16.0)
+}
+
+/// The enabled slot `delta` (±1) steps from `from`, wrapping and passing over disabled ones;
+/// from no selection, the first enabled slot. `None` when no slot is enabled.
+fn step(enabled: &[bool], from: Option<usize>, delta: isize) -> Option<usize> {
+    let Some(from) = from else {
+        return enabled.iter().position(|&e| e);
+    };
+    let n = enabled.len() as isize;
+    (1..=n)
+        .map(|k| (from as isize + k * delta.signum()).rem_euclid(n) as usize)
+        .find(|&i| enabled[i])
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_panel_fits_a_minimum_height_window() {
+        let full = 12.0 + Field::H + PAD + PaletteAction::ALL.len() as CGFloat * ROW_H + PAD;
+        assert_eq!(panel_top(720.0, full), 144.0);
+        let top = panel_top(500.0, full);
+        assert!(top >= 0.0 && top + full <= 500.0 - 16.0, "top {top}");
+        assert_eq!(panel_top(500.0, 100.0), 100.0);
+    }
+
+    #[test]
+    fn the_selection_skips_disabled_rows() {
+        let rows = [false, true, false, true, false];
+        assert_eq!(step(&rows, None, 1), Some(1));
+        assert_eq!(step(&rows, Some(1), 1), Some(3));
+        assert_eq!(step(&rows, Some(3), 1), Some(1));
+        assert_eq!(step(&rows, Some(1), -1), Some(3));
+        assert_eq!(step(&[true], Some(0), 1), Some(0));
+        assert_eq!(step(&[false, false], None, 1), None);
+        assert_eq!(step(&[false, false], Some(0), -1), None);
+        assert_eq!(step(&[], None, 1), None);
     }
 }

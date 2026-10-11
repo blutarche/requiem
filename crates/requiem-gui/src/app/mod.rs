@@ -29,7 +29,7 @@ use objc2_foundation::{MainThreadMarker, NSNotification, NSRect, NSString};
 
 use crate::args::{Args, View};
 use crate::demo;
-use crate::vm::{Intent, QueueEdit, SEEK_STEP_SECS, VOLUME_STEP, Vm};
+use crate::vm::{Intent, PaletteAction, QueueEdit, SEEK_STEP_SECS, VOLUME_STEP, Vm};
 use backend::{Backend, Live};
 use ui::{AppView, Ui};
 
@@ -307,27 +307,48 @@ fn validate(ui: &Ui, item: &NSMenuItem) -> bool {
     };
     let in_text = is(NSText::class());
     let on_button = is(NSButton::class());
-    let (playing, can) = ui.playback();
     if action == sel!(toggle:) {
+        let (playing, _) = ui.playback();
         item.setTitle(&NSString::from_str(if playing { "Pause" } else { "Play" }));
-        can.transport
-    } else if action == sel!(next:) || action == sel!(prev:) {
-        !in_text && can.transport
-    } else if action == sel!(volumeUp:) || action == sel!(volumeDown:) {
-        !in_text && can.player
-    } else if action == sel!(playSelected:) || action == sel!(addToQueue:) {
-        let append = action == sel!(addToQueue:);
-        !in_text && !on_button && can.player && ui.has_selection(append)
+    }
+    if let Some(a) = palette_action(action) {
+        // These keys belong to a focused field, or for Return a focused button.
+        let taken = match a {
+            PaletteAction::Next
+            | PaletteAction::Previous
+            | PaletteAction::VolumeUp
+            | PaletteAction::VolumeDown => in_text,
+            PaletteAction::PlaySelected | PaletteAction::AddToQueue => in_text || on_button,
+            _ => false,
+        };
+        !taken && ui.can_run(a)
     } else if let Some(edit) = row_edit(action) {
         // For Remove, the key monitor's conditions for Delete, which its item only shows.
         !in_text && ui.selected_edit(edit).is_some_and(|e| ui.can_edit(e))
-    } else if action == sel!(clearQueue:) {
-        ui.can_edit(QueueEdit::Clear)
     } else if action == sel!(quitAndStop:) {
         ui.can_stop_player()
     } else {
         true
     }
+}
+
+/// The palette action a menu item's `action` runs, so both enable it alike.
+fn palette_action(action: Sel) -> Option<PaletteAction> {
+    [
+        (sel!(toggle:), PaletteAction::PlayPause),
+        (sel!(next:), PaletteAction::Next),
+        (sel!(prev:), PaletteAction::Previous),
+        (sel!(playSelected:), PaletteAction::PlaySelected),
+        (sel!(addToQueue:), PaletteAction::AddToQueue),
+        (sel!(focusSearch:), PaletteAction::FocusSearch),
+        (sel!(showSearch:), PaletteAction::ShowSearch),
+        (sel!(showQueue:), PaletteAction::ShowQueue),
+        (sel!(volumeUp:), PaletteAction::VolumeUp),
+        (sel!(volumeDown:), PaletteAction::VolumeDown),
+        (sel!(clearQueue:), PaletteAction::ClearQueue),
+    ]
+    .into_iter()
+    .find_map(|(s, a)| (s == action).then_some(a))
 }
 
 fn row_edit(action: Sel) -> Option<fn(usize) -> QueueEdit> {
@@ -372,6 +393,8 @@ fn field_command(ui: &Ui, control: &NSControl, text: &NSTextView, command: Sel) 
             }
         } else if command == sel!(cancelOperation:) {
             ui.close_palette();
+        } else if command == sel!(insertTab:) || command == sel!(insertBacktab:) {
+            // The palette has nothing else to focus.
         } else {
             return false;
         }
