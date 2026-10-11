@@ -164,7 +164,7 @@ pub enum Intent {
     SeekBy(i64),
     SetVolume(u8),
     VolumeBy(i16),
-    /// The shown toast's action: restores the queue a result replaced or Clear emptied.
+    /// The toast's Undo, or Cmd+Z: restores the queue a result replaced or Clear emptied.
     Undo,
     /// `selected` is the queue row selected now; the selection follows that track.
     EditQueue {
@@ -393,7 +393,8 @@ pub struct Vm {
     connect_error: Option<LinkError>,
     /// The banner already shows the reason and the hint.
     stuck: bool,
-    /// The previous queue while the "Queue replaced" toast is shown.
+    /// The queue a replace or clear left behind. It outlives its toast, until the queue
+    /// changes again or the undo is used.
     undo: Option<Undo>,
     /// Where to seek once the track an undo restarted begins.
     restore: Option<Restore>,
@@ -408,6 +409,13 @@ pub struct Vm {
 #[derive(Debug)]
 struct Undo {
     toast: u64,
+    /// The Undo menu item's title.
+    title: &'static str,
+    /// The queue the change being undone leaves; any other queue ends the offer.
+    after: Vec<TrackId>,
+    /// The session has answered with `after`. Until then, the queue as it was is news sent
+    /// before the change, not a change.
+    landed: bool,
     tracks: Vec<Track>,
     /// The playing index and position, when a track was loaded.
     playing: Option<(usize, Duration)>,
@@ -479,6 +487,11 @@ impl Vm {
         self.queue_selection.take()
     }
 
+    /// The Undo menu item's title while there is a queue change to undo.
+    pub fn undo_title(&self) -> Option<&'static str> {
+        self.undo.as_ref().map(|u| u.title)
+    }
+
     /// Commands to send that no intent returned: a search resent on reconnect, or the seek
     /// that finishes an undo.
     pub fn take_commands(&mut self) -> Vec<Command> {
@@ -536,6 +549,15 @@ impl Vm {
                 // `edit_command` sends none it would ignore.
                 if let Some(row) = self.select_after.take() {
                     self.queue_selection = tracks.len().checked_sub(1).map(|last| row.min(last));
+                }
+                if let Some(u) = &mut self.undo {
+                    // Ids, not tracks: the session may fill in details of the tracks it was sent.
+                    let ids = || tracks.iter().map(|t| &t.id);
+                    if u.after.iter().eq(ids()) {
+                        u.landed = true;
+                    } else if u.landed || !u.tracks.iter().map(|t| &t.id).eq(ids()) {
+                        self.withdraw_undo();
+                    }
                 }
                 self.ui.queue = tracks;
                 self.ui.current = current;
@@ -697,7 +719,7 @@ impl Vm {
                 };
                 self.select_after = selected.and_then(|s| follow(s, &cmd));
                 if edit == QueueEdit::Clear {
-                    self.offer_undo("Queue cleared");
+                    self.offer_undo("Queue cleared", "Undo Clear Queue", Vec::new());
                 }
                 vec![cmd]
             }
@@ -708,7 +730,6 @@ impl Vm {
     pub fn dismiss_toast(&mut self, id: u64) {
         if self.ui.toast.as_ref().is_some_and(|t| t.id == id) {
             self.ui.toast = None;
-            self.undo = None;
             self.dirty |= Dirty::TOAST;
         }
     }
@@ -743,14 +764,15 @@ impl Vm {
             Command::PlayIndex(0),
         ];
         if !self.ui.queue.is_empty() {
-            self.offer_undo("Queue replaced");
+            let after = rest.iter().map(|t| t.id.clone()).collect();
+            self.offer_undo("Queue replaced", "Undo Replace Queue", after);
         }
         cmds
     }
 
     /// Shows `text` with Undo, which restores the queue as it is now: its tracks, and the
-    /// playing track and position.
-    fn offer_undo(&mut self, text: &str) {
+    /// playing track and position. `after` is the queue the change leaves.
+    fn offer_undo(&mut self, text: &str, title: &'static str, after: Vec<TrackId>) {
         let tracks = self.ui.queue.clone();
         let playing = self
             .ui
@@ -760,22 +782,29 @@ impl Vm {
         self.toast_with(text.to_owned(), false, Some("Undo"));
         self.undo = Some(Undo {
             toast: self.last_toast,
+            title,
+            after,
+            landed: false,
             tracks,
             playing,
         });
+    }
+
+    /// Ends the offer, and its toast if that still shows.
+    fn withdraw_undo(&mut self) {
+        if let Some(u) = self.undo.take() {
+            self.dismiss_toast(u.toast);
+        }
     }
 
     /// Restores the queue: `Enqueue` and `PlayIndex` now, and the `Seek` once the restored
     /// track starts. A seek sent before then reaches the previous track's decoder, because
     /// the session loads the new one only after resolving it.
     fn undo(&mut self) -> Vec<Command> {
-        let shown = self.ui.toast.as_ref().map(|t| t.id);
-        let Some(undo) = self.undo.take().filter(|u| Some(u.toast) == shown) else {
+        let Some(undo) = self.undo.take() else {
             return Vec::new();
         };
-        if let Some(id) = shown {
-            self.dismiss_toast(id);
-        }
+        self.dismiss_toast(undo.toast);
         self.restore = undo.playing.and_then(|(index, position)| {
             let track = undo.tracks.get(index)?;
             (!position.is_zero()).then(|| Restore {
@@ -815,7 +844,6 @@ impl Vm {
 
     fn toast_with(&mut self, text: String, error: bool, action: Option<&'static str>) {
         self.last_toast += 1;
-        self.undo = None;
         self.ui.toast = Some(Toast {
             id: self.last_toast,
             text,
@@ -2179,18 +2207,108 @@ mod tests {
     }
 
     #[test]
-    fn undo_ends_with_its_toast() {
-        let (mut vm, _) = replaced();
+    fn undo_outlives_its_toast() {
+        let (mut vm, old) = replaced();
         let id = vm.ui().toast.as_ref().unwrap().id;
         vm.dismiss_toast(id);
+        assert_eq!(vm.undo_title(), Some("Undo Replace Queue"));
+        assert_eq!(
+            vm.intent(Intent::Undo),
+            [
+                Command::Enqueue {
+                    tracks: old.clone(),
+                    mode: EnqueueMode::Replace
+                },
+                Command::PlayIndex(2)
+            ]
+        );
+        assert_eq!(vm.undo_title(), None);
         assert!(vm.intent(Intent::Undo).is_empty());
 
+        // Another toast takes the place of its toast, not of the offer.
         let (mut vm, _) = replaced();
         vm.apply(Event::TrackFailed {
             track: track("x", 1),
             error: "e".into(),
         });
+        assert!(vm.ui().toast.as_ref().unwrap().error);
+        assert_eq!(vm.intent(Intent::Undo).len(), 2);
+        assert!(
+            vm.ui().toast.as_ref().unwrap().error,
+            "not the undo's toast"
+        );
+    }
+
+    #[test]
+    fn undo_offer_ends_when_the_queue_changes_again() {
+        let (mut vm, old) = replaced();
+        let new = tracks(4)[1..].to_vec();
+        // News sent before the session had the replace, its answer, and the first track
+        // starting keep it.
+        vm.apply(Event::QueueChanged {
+            tracks: old.clone(),
+            current: Some(2),
+        });
+        vm.apply(Event::QueueChanged {
+            tracks: new.clone(),
+            current: None,
+        });
+        vm.apply(Event::QueueChanged {
+            tracks: new.clone(),
+            current: Some(0),
+        });
+        // So does the next track starting on its own.
+        vm.apply(Event::QueueChanged {
+            tracks: new.clone(),
+            current: Some(1),
+        });
+        assert_eq!(vm.undo_title(), Some("Undo Replace Queue"));
+        // Once it has landed, the old queue is a change too.
+        let mut back = replaced().0;
+        back.apply(Event::QueueChanged {
+            tracks: new.clone(),
+            current: None,
+        });
+        back.apply(Event::QueueChanged {
+            tracks: old,
+            current: None,
+        });
+        assert_eq!(back.undo_title(), None);
+        // An append, a remove or another client's change ends it, and its toast with it.
+        vm.take_dirty();
+        let mut more = new.clone();
+        more.push(track("extra", 100));
+        vm.apply(Event::QueueChanged {
+            tracks: more,
+            current: Some(1),
+        });
+        assert_eq!(vm.undo_title(), None);
+        assert!(vm.ui().toast.is_none());
+        assert!(vm.take_dirty().contains(Dirty::TOAST));
         assert!(vm.intent(Intent::Undo).is_empty());
+
+        // After its toast is gone, too.
+        let (mut vm, _) = cleared();
+        let id = vm.ui().toast.as_ref().unwrap().id;
+        vm.dismiss_toast(id);
+        assert_eq!(vm.undo_title(), Some("Undo Clear Queue"));
+        vm.apply(Event::QueueChanged {
+            tracks: tracks(1),
+            current: None,
+        });
+        assert_eq!(vm.undo_title(), None);
+        assert!(vm.intent(Intent::Undo).is_empty());
+    }
+
+    #[test]
+    fn undo_title_names_the_change() {
+        assert_eq!(connected().undo_title(), None);
+        assert_eq!(replaced().0.undo_title(), Some("Undo Replace Queue"));
+        assert_eq!(cleared().0.undo_title(), Some("Undo Clear Queue"));
+        // Replacing an empty queue offers nothing.
+        let mut vm = with_results(4);
+        vm.intent(Intent::PlayResult(1));
+        assert_eq!(vm.undo_title(), None);
     }
 
     #[test]

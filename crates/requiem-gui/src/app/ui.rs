@@ -7,17 +7,17 @@ use std::time::{Duration, Instant};
 
 use dispatch2::{DispatchQueue, DispatchTime};
 use objc2::rc::Retained;
-use objc2::runtime::{AnyObject, ProtocolObject};
-use objc2::{MainThreadOnly, sel};
+use objc2::runtime::{AnyObject, NSObject, ProtocolObject};
+use objc2::{MainThreadOnly, define_class, msg_send, sel};
 use objc2_app_kit::{
-    NSAnimatablePropertyContainer, NSApplication, NSAttributedStringNSStringDrawing,
-    NSBackingStoreType, NSLineBreakMode, NSTextAlignment, NSTextField, NSTextFieldDelegate, NSView,
-    NSWindow, NSWindowOcclusionState, NSWindowStyleMask, NSWindowTitleVisibility,
+    NSAnimatablePropertyContainer, NSApplication, NSAttributedStringNSStringDrawing, NSEvent,
+    NSLineBreakMode, NSResponder, NSTextAlignment, NSTextField, NSTextFieldDelegate,
+    NSTrackingAreaOptions, NSView, NSWindow, NSWindowOcclusionState, NSWindowStyleMask,
+    NSWindowTitleVisibility,
 };
 use objc2_core_foundation::CGFloat;
-use objc2_foundation::{MainThreadMarker, NSPoint, NSSize, NSString};
+use objc2_foundation::{MainThreadMarker, NSPoint, NSRect, NSSize, NSString};
 
-use super::Delegate;
 use super::backend::{Backend, Msg};
 use super::bar::PlayerBar;
 use super::palette::Palette;
@@ -27,6 +27,7 @@ use super::widgets::{
     self, EmptyState, FLEX_H, FLEX_W, Field, HoverButton, NavItem, PIN_BOTTOM, PIN_LEFT, PIN_RIGHT,
     PIN_TOP, rect,
 };
+use super::{Delegate, MainWindow};
 use crate::vm::{
     self, Banner, Controls, Dirty, EmptyAction, EmptyText, Intent, PaletteAction, QueueEdit, Toast,
     UiState, Vm,
@@ -73,6 +74,67 @@ const TOAST_RISE: CGFloat = 8.0;
 /// How long "Quit and Stop Music" waits for the player's goodbye.
 const QUIT_GRACE: Duration = Duration::from_secs(3);
 
+define_class!(
+    /// The toast's box; the pointer resting on it holds the toast's countdown.
+    // SAFETY: NSView has no subclassing requirements; no ivars; no Drop impl.
+    #[unsafe(super(NSView, NSResponder, NSObject))]
+    #[thread_kind = MainThreadOnly]
+    struct ToastPanel;
+
+    impl ToastPanel {
+        #[unsafe(method(mouseEntered:))]
+        fn mouse_entered(&self, _event: &NSEvent) {
+            with(|ui| ui.hover_toast(true));
+        }
+
+        #[unsafe(method(mouseExited:))]
+        fn mouse_exited(&self, _event: &NSEvent) {
+            with(|ui| ui.hover_toast(false));
+        }
+
+        /// A hidden view gets no `mouseExited:`.
+        #[unsafe(method(viewDidHide))]
+        fn view_did_hide(&self) {
+            // SAFETY: forwards to the superclass implementation.
+            let _: () = unsafe { msg_send![super(self), viewDidHide] };
+            with(|ui| ui.hover_toast(false));
+        }
+    }
+);
+
+/// The shown toast's time left, which stands still while the pointer rests on the toast.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Countdown {
+    /// Ends then.
+    Running(Instant),
+    /// This much is left.
+    Held(Duration),
+}
+
+impl Countdown {
+    fn new(now: Instant, held: bool) -> Countdown {
+        if held {
+            Countdown::Held(vm::TOAST_DURATION)
+        } else {
+            Countdown::Running(now + vm::TOAST_DURATION)
+        }
+    }
+
+    fn hold(self, now: Instant) -> Countdown {
+        match self {
+            Countdown::Running(end) => Countdown::Held(end.saturating_duration_since(now)),
+            held => held,
+        }
+    }
+
+    fn resume(self, now: Instant) -> Countdown {
+        match self {
+            Countdown::Held(left) => Countdown::Running(now + left),
+            running => running,
+        }
+    }
+}
+
 struct ToastView {
     view: Retained<NSView>,
     accent: Retained<NSView>,
@@ -81,6 +143,9 @@ struct ToastView {
     id: Cell<u64>,
     /// False from the start of the exit; the view hides once the exit ends.
     shown: Cell<bool>,
+    /// The pointer is on the toast.
+    hovered: Cell<bool>,
+    clock: Cell<Countdown>,
 }
 
 pub struct Ui {
@@ -125,17 +190,7 @@ impl Ui {
             | NSWindowStyleMask::Miniaturizable
             | NSWindowStyleMask::Resizable
             | NSWindowStyleMask::FullSizeContentView;
-        // SAFETY: a standard initializer call; the window is retained by `Ui`, and released-
-        // when-closed is turned off below before anything can close it.
-        let window = unsafe {
-            NSWindow::initWithContentRect_styleMask_backing_defer(
-                NSWindow::alloc(mtm),
-                rect(0.0, 0.0, WIN_W, WIN_H),
-                style,
-                NSBackingStoreType::Buffered,
-                true,
-            )
-        };
+        let window = MainWindow::create(mtm, rect(0.0, 0.0, WIN_W, WIN_H), style);
         // SAFETY: `Ui` owns the window for the life of the process.
         unsafe { window.setReleasedWhenClosed(false) };
         window.setTitle(&NSString::from_str("requiem"));
@@ -348,12 +403,15 @@ impl Ui {
 
     fn toast_view(mtm: MainThreadMarker, target: &AnyObject) -> ToastView {
         let w = 320.0;
-        let view = widgets::panel(
-            mtm,
-            rect(WIN_W - 16.0 - w, PlayerBar::H + 16.0, w, TOAST_H),
-            PIN_RIGHT | PIN_BOTTOM,
-            &theme::bg_3(),
-        );
+        let frame = rect(WIN_W - 16.0 - w, PlayerBar::H + 16.0, w, TOAST_H);
+        // SAFETY: `initWithFrame:` is NSView's designated initializer.
+        let panel: Retained<ToastPanel> =
+            unsafe { msg_send![ToastPanel::alloc(mtm), initWithFrame: frame] };
+        // Always active, so leaving the toast while another app is in front still resumes it.
+        widgets::track_hover(&panel, NSTrackingAreaOptions::ActiveAlways);
+        let view: Retained<NSView> = Retained::into_super(panel);
+        view.setAutoresizingMask(PIN_RIGHT | PIN_BOTTOM);
+        widgets::fill(&view, Some(&theme::bg_3()));
         widgets::round(&view, theme::RADIUS);
         widgets::border(&view, &theme::line_2(), 1.0);
         let accent = widgets::panel(mtm, rect(0.0, 0.0, 3.0, TOAST_H), FLEX_H, &theme::bad());
@@ -408,6 +466,8 @@ impl Ui {
             action,
             id: Cell::new(0),
             shown: Cell::new(false),
+            hovered: Cell::new(false),
+            clock: Cell::new(Countdown::Held(Duration::ZERO)),
         }
     }
 
@@ -630,9 +690,75 @@ impl Ui {
         self.dismiss_toast(self.toast.id.get());
     }
 
-    /// The toast's action button; the view model checks the toast is still the one shown.
+    /// The toast's action button: Undo, its only action.
     pub fn toast_action(&self) {
         self.intent(Intent::Undo);
+    }
+
+    /// Cmd+Z outside a text field: the same undo as the toast's button.
+    pub fn undo(&self) {
+        self.intent(Intent::Undo);
+    }
+
+    /// The Undo menu item's title, and whether it is enabled.
+    pub fn undo_item(&self) -> (&'static str, bool) {
+        let vm = self.vm.borrow();
+        let title = vm.undo_title();
+        (
+            title.unwrap_or("Undo"),
+            title.is_some() && vm.ui().controls().player,
+        )
+    }
+
+    /// Holds the toast's countdown while the pointer is on it, and resumes it with the time
+    /// that was left.
+    pub fn hover_toast(&self, over: bool) {
+        let t = &self.toast;
+        if t.hovered.replace(over) == over || !t.shown.get() {
+            return;
+        }
+        let now = Instant::now();
+        let clock = if over {
+            t.clock.get().hold(now)
+        } else {
+            t.clock.get().resume(now)
+        };
+        t.clock.set(clock);
+        self.schedule_dismissal(t.id.get(), clock);
+    }
+
+    /// Starts toast `id`'s countdown, held if the pointer already rests on `frame`.
+    fn start_countdown(&self, id: u64, frame: NSRect) {
+        let at = self
+            .root
+            .convertPoint_fromView(self.window.mouseLocationOutsideOfEventStream(), None);
+        let (o, s) = (frame.origin, frame.size);
+        let over = at.x >= o.x && at.x < o.x + s.width && at.y >= o.y && at.y < o.y + s.height;
+        let t = &self.toast;
+        t.hovered.set(over);
+        let clock = Countdown::new(Instant::now(), over);
+        t.clock.set(clock);
+        self.schedule_dismissal(id, clock);
+    }
+
+    fn schedule_dismissal(&self, id: u64, clock: Countdown) {
+        let Countdown::Running(end) = clock else {
+            return;
+        };
+        let wait = end.saturating_duration_since(Instant::now());
+        if let Ok(when) = DispatchTime::try_from(wait) {
+            let _ = DispatchQueue::main().after(when, move || {
+                with(|ui| ui.countdown_ended(id, end));
+            });
+        }
+    }
+
+    /// Dismisses toast `id`, unless another replaced it or its countdown was held since.
+    fn countdown_ended(&self, id: u64, end: Instant) {
+        let t = &self.toast;
+        if t.id.get() == id && t.clock.get() == Countdown::Running(end) {
+            self.dismiss_toast(id);
+        }
     }
 
     fn dismiss_toast(&self, id: u64) {
@@ -932,7 +1058,8 @@ impl Ui {
         if swap {
             widgets::crossfade(&t.view, widgets::MICRO);
         }
-        t.id.set(toast.id);
+        // A toast amended in place keeps its countdown.
+        let new = t.id.replace(toast.id) != toast.id;
         widgets::set_text(&t.label, &toast.text);
         t.accent.setHidden(!toast.error);
         let text_w = t.label.fittingSize().width;
@@ -950,8 +1077,8 @@ impl Ui {
         };
         let h = base_h + (lines - 1.0) * (line_h - 2.0);
         let root = self.root.bounds();
-        t.view
-            .setFrame(rect(root.size.width - 16.0 - w, PlayerBar::H + 16.0, w, h));
+        let frame = rect(root.size.width - 16.0 - w, PlayerBar::H + 16.0, w, h);
+        t.view.setFrame(frame);
         let text_h = lines * line_h;
         t.label.setFrame(rect(
             16.0,
@@ -968,14 +1095,11 @@ impl Ui {
             ));
         }
         t.label.setToolTip(Some(&NSString::from_str(&toast.text)));
+        if new {
+            self.start_countdown(toast.id, frame);
+        }
         if !swap {
             self.enter_toast();
-        }
-        let id = toast.id;
-        if let Ok(when) = DispatchTime::try_from(vm::TOAST_DURATION) {
-            let _ = DispatchQueue::main().after(when, move || {
-                with(|ui| ui.dismiss_toast(id));
-            });
         }
     }
 
@@ -1148,6 +1272,27 @@ mod tests {
         assert_eq!(p.elapsed.as_deref(), Some(""));
         assert_eq!(p.progress, Some(0.0));
         assert!(p.results.is_none() && p.queue.is_none());
+    }
+
+    #[test]
+    fn toast_countdown_holds_and_resumes_with_the_time_left() {
+        let t0 = Instant::now();
+        let s = |n| t0 + Duration::from_secs(n);
+        let c = Countdown::new(t0, false);
+        assert_eq!(c, Countdown::Running(s(4)));
+        let held = c.hold(s(1));
+        assert_eq!(held, Countdown::Held(Duration::from_secs(3)));
+        // Holding again, or resuming a running one, changes nothing.
+        assert_eq!(held.hold(s(2)), held);
+        assert_eq!(c.resume(s(2)), c);
+        assert_eq!(held.resume(s(10)), Countdown::Running(s(13)));
+        // Under the pointer from the start, it waits for the pointer to leave.
+        assert_eq!(
+            Countdown::new(t0, true).resume(s(5)),
+            Countdown::Running(s(9))
+        );
+        // Held past its end, it resumes with nothing left.
+        assert_eq!(c.hold(s(6)).resume(s(7)), Countdown::Running(s(7)));
     }
 
     #[test]

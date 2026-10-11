@@ -21,11 +21,11 @@ use objc2::runtime::{AnyObject, NSObject, NSObjectProtocol, ProtocolObject, Sel}
 use objc2::{ClassType, MainThreadOnly, define_class, msg_send, sel};
 use objc2_app_kit::{
     NSAppearance, NSAppearanceNameDarkAqua, NSApplication, NSApplicationActivationPolicy,
-    NSApplicationDelegate, NSButton, NSControl, NSControlTextEditingDelegate, NSEvent, NSEventMask,
-    NSEventModifierFlags, NSMenu, NSMenuItem, NSResponder, NSText, NSTextFieldDelegate, NSTextView,
-    NSWindowDelegate,
+    NSApplicationDelegate, NSBackingStoreType, NSButton, NSControl, NSControlTextEditingDelegate,
+    NSEvent, NSEventMask, NSEventModifierFlags, NSMenu, NSMenuItem, NSResponder, NSText,
+    NSTextFieldDelegate, NSTextView, NSWindow, NSWindowDelegate, NSWindowStyleMask,
 };
-use objc2_foundation::{MainThreadMarker, NSNotification, NSString};
+use objc2_foundation::{MainThreadMarker, NSNotification, NSRect, NSString};
 
 use crate::args::{Args, View};
 use crate::demo;
@@ -216,6 +216,73 @@ impl Delegate {
         // SAFETY: NSObject's `init`; the class has no ivars to initialise.
         unsafe { msg_send![Self::alloc(mtm), init] }
     }
+}
+
+define_class!(
+    /// The window. NSWindow answers `undo:` itself, for the text fields' typing undo, so the
+    /// action never reaches the delegate; the queue's undo is added here.
+    // SAFETY: NSWindow has no subclassing requirements; no ivars; no Drop impl.
+    #[unsafe(super(NSWindow, NSResponder, NSObject))]
+    #[thread_kind = MainThreadOnly]
+    pub struct MainWindow;
+
+    impl MainWindow {
+        /// Typing undo in a text field; elsewhere the replaced or cleared queue's.
+        #[unsafe(method(undo:))]
+        fn undo(&self, sender: Option<&AnyObject>) {
+            if in_text(self) {
+                // SAFETY: forwards to the superclass implementation.
+                let _: () = unsafe { msg_send![super(self), undo: sender] };
+            } else {
+                ui::with(|ui| ui.undo());
+            }
+        }
+
+        #[unsafe(method(validateMenuItem:))]
+        fn validate_menu_item(&self, item: &NSMenuItem) -> bool {
+            let undo = item.action() == Some(sel!(undo:));
+            if undo && !in_text(self) {
+                let (title, enabled) = ui::with(|ui| ui.undo_item()).unwrap_or(("Undo", false));
+                item.setTitle(&NSString::from_str(title));
+                enabled
+            } else {
+                if undo {
+                    // The superclass titles it for typing, if there is any to undo.
+                    item.setTitle(&NSString::from_str("Undo"));
+                }
+                // SAFETY: forwards to the superclass implementation.
+                unsafe { msg_send![super(self), validateMenuItem: item] }
+            }
+        }
+    }
+);
+
+impl MainWindow {
+    fn create(
+        mtm: MainThreadMarker,
+        frame: NSRect,
+        style: NSWindowStyleMask,
+    ) -> Retained<NSWindow> {
+        // SAFETY: NSWindow's designated initializer. `Ui` retains the window and turns off
+        // released-when-closed before anything can close it.
+        let this: Retained<Self> = unsafe {
+            msg_send![
+                Self::alloc(mtm),
+                initWithContentRect: frame,
+                styleMask: style,
+                backing: NSBackingStoreType::Buffered,
+                defer: true
+            ]
+        };
+        Retained::into_super(this)
+    }
+}
+
+/// A text field is being edited.
+fn in_text(window: &NSWindow) -> bool {
+    window
+        .firstResponder()
+        .is_some_and(|r| r.isKindOfClass(NSText::class()))
 }
 
 fn edit_selected(edit: fn(usize) -> QueueEdit) {
