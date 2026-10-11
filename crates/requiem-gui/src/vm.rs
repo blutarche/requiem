@@ -1,6 +1,7 @@
 //! View model: folds daemon events and connection status into `UiState`, and maps user
 //! intents to `Command`s. No AppKit types, so it is unit-tested on every OS.
 
+use std::io;
 use std::ops::{BitOr, BitOrAssign};
 use std::time::{Duration, Instant};
 
@@ -21,9 +22,11 @@ pub const BANNER_GRACE: Duration = Duration::from_millis(800);
 /// After this long without a connection, the banner adds the reason and what to do.
 pub const STUCK_AFTER: Duration = Duration::from_secs(30);
 
-const OUT_OF_DATE: &str = "An older requiem player is still running. Quit it from the menu \
-                           bar; this window reconnects on its own.";
-const STUCK_HINT: &str = "If this persists, quit requiem from the menu bar and reopen it.";
+// The old player's menu item may still be named "Quit requiem", so this names none.
+const OUT_OF_DATE: &str = "An older requiem player is still running. Quit it from its \
+                           menu-bar icon; this window reconnects on its own.";
+const STUCK_HINT: &str = "If this persists, choose Quit and Stop Music from the requiem \
+                          menu-bar icon, then reopen requiem.";
 
 /// Regions of the window that need refreshing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -80,7 +83,7 @@ pub enum Connection {
     Connecting,
     Connected,
     /// Lost after a connection; the backend retries with backoff. Holds the reason.
-    Reconnecting(String),
+    Reconnecting(LinkError),
     /// The daemon speaks another protocol version; the backend retries until it is gone.
     OutOfDate,
     /// `--demo`: fixed fake data, no daemon.
@@ -91,9 +94,43 @@ pub enum Connection {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Link {
     Connected,
-    Lost(String),
+    Lost(LinkError),
     OutOfDate,
     Demo,
+}
+
+/// Why the player can't be reached, as the banner puts it. The raw error goes to stderr only.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LinkError {
+    /// Nothing listens on the socket.
+    NotRunning,
+    /// A timeout, or the connection closed.
+    NotResponding,
+    Unreachable,
+}
+
+impl LinkError {
+    pub fn from_io(kind: io::ErrorKind) -> LinkError {
+        use io::ErrorKind as K;
+        match kind {
+            K::NotFound | K::ConnectionRefused => LinkError::NotRunning,
+            K::TimedOut
+            | K::UnexpectedEof
+            | K::ConnectionReset
+            | K::ConnectionAborted
+            | K::BrokenPipe
+            | K::NotConnected => LinkError::NotResponding,
+            _ => LinkError::Unreachable,
+        }
+    }
+
+    pub fn text(self) -> &'static str {
+        match self {
+            LinkError::NotRunning => "The player isn't running.",
+            LinkError::NotResponding => "The player stopped responding.",
+            LinkError::Unreachable => "The player couldn't be reached.",
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -127,7 +164,7 @@ pub enum Intent {
     SeekBy(i64),
     SetVolume(u8),
     VolumeBy(i16),
-    /// The shown toast's action: restores the queue a result replaced or Clear emptied.
+    /// The toast's Undo, or Cmd+Z: restores the queue a result replaced or Clear emptied.
     Undo,
     /// `selected` is the queue row selected now; the selection follows that track.
     EditQueue {
@@ -154,6 +191,15 @@ pub struct Controls {
     pub seek: bool,
     /// Volume, and playing or adding rows: connected.
     pub player: bool,
+}
+
+/// The visible table's selection, as far as actions care.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Selection {
+    /// A row is selected.
+    pub row: bool,
+    /// The selected row is a search result, so it can be added.
+    pub result: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -220,6 +266,18 @@ impl UiState {
         }
     }
 
+    /// The seek bar's value as VoiceOver reads it, "1:23 of 3:45"; empty with nothing loaded.
+    pub fn seek_spoken(&self) -> String {
+        if self.now_playing.is_none() {
+            return String::new();
+        }
+        let at = fmt_time(self.position);
+        match self.total_text() {
+            total if total.is_empty() => at,
+            total => format!("{at} of {total}"),
+        }
+    }
+
     /// Playback progress in `0.0..=1.0`.
     pub fn progress(&self) -> f64 {
         match self.duration {
@@ -246,6 +304,29 @@ impl UiState {
             seek: live && self.now_playing.is_some(),
             player: live,
         }
+    }
+
+    /// Whether `action` would do anything. The menus enable their items, and the palette its
+    /// rows, by this.
+    pub fn can_run(&self, action: PaletteAction, selection: Selection) -> bool {
+        let can = self.controls();
+        match action {
+            PaletteAction::PlayPause | PaletteAction::Next | PaletteAction::Previous => {
+                can.transport
+            }
+            PaletteAction::PlaySelected => can.player && selection.row,
+            PaletteAction::AddToQueue => can.player && selection.result,
+            PaletteAction::VolumeUp | PaletteAction::VolumeDown => can.player,
+            PaletteAction::ClearQueue => self.edit_command(QueueEdit::Clear).is_some(),
+            PaletteAction::FocusSearch | PaletteAction::ShowSearch | PaletteAction::ShowQueue => {
+                true
+            }
+        }
+    }
+
+    /// Whether "Quit and Stop Music" has a player to stop.
+    pub fn can_stop_player(&self) -> bool {
+        self.connection == Connection::Connected
     }
 
     /// The command `edit` sends, or `None` when it does nothing: disconnected, a row out of
@@ -280,13 +361,13 @@ impl UiState {
             EmptyText {
                 heading: "No results".to_owned(),
                 sub: format!("Nothing matched “{}”", self.query),
-                action: EmptyAction::EditSearch,
+                action: Some("Edit search"),
             }
         } else {
             EmptyText {
                 heading: "Search YouTube Music".to_owned(),
-                sub: "Type a song, artist or album, then press Return.".to_owned(),
-                action: EmptyAction::StartSearch,
+                sub: "Type a song, artist or album, then press Return".to_owned(),
+                action: None,
             }
         })
     }
@@ -314,24 +395,8 @@ pub struct Banner {
 pub struct EmptyText {
     pub heading: String,
     pub sub: String,
-    pub action: EmptyAction,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum EmptyAction {
-    /// Runs the search when the field has text, and focuses the field otherwise.
-    StartSearch,
-    /// Focuses the search field.
-    EditSearch,
-}
-
-impl EmptyAction {
-    pub fn label(self) -> &'static str {
-        match self {
-            EmptyAction::StartSearch => "Start a search",
-            EmptyAction::EditSearch => "Edit search",
-        }
-    }
+    /// The label of the button that focuses the search field, if there is one.
+    pub action: Option<&'static str>,
 }
 
 #[derive(Debug, Default)]
@@ -348,10 +413,11 @@ pub struct Vm {
     /// When the current spell without a connection began; `None` while connected.
     offline_since: Option<Instant>,
     /// Why the last connect attempt before the first connection failed.
-    connect_error: Option<String>,
+    connect_error: Option<LinkError>,
     /// The banner already shows the reason and the hint.
     stuck: bool,
-    /// The previous queue while the "Queue replaced" toast is shown.
+    /// The queue a replace or clear left behind. It outlives its toast, until the queue
+    /// changes again or the undo is used.
     undo: Option<Undo>,
     /// Where to seek once the track an undo restarted begins.
     restore: Option<Restore>,
@@ -366,9 +432,18 @@ pub struct Vm {
 #[derive(Debug)]
 struct Undo {
     toast: u64,
+    /// The Undo menu item's title.
+    title: &'static str,
+    /// The queue the change being undone leaves; any other queue ends the offer.
+    after: Vec<TrackId>,
+    /// The session has answered with `after`. Until then, the queue as it was is news sent
+    /// before the change, not a change.
+    landed: bool,
     tracks: Vec<Track>,
     /// The playing index and position, when a track was loaded.
     playing: Option<(usize, Duration)>,
+    /// That track was paused.
+    paused: bool,
 }
 
 #[derive(Debug)]
@@ -376,6 +451,7 @@ struct Restore {
     index: usize,
     track: TrackId,
     position: Duration,
+    paused: bool,
 }
 
 /// A local value that wins over disagreeing echoes until `until`.
@@ -437,6 +513,11 @@ impl Vm {
         self.queue_selection.take()
     }
 
+    /// The Undo menu item's title while there is a queue change to undo.
+    pub fn undo_title(&self) -> Option<&'static str> {
+        self.undo.as_ref().map(|u| u.title)
+    }
+
     /// Commands to send that no intent returned: a search resent on reconnect, or the seek
     /// that finishes an undo.
     pub fn take_commands(&mut self) -> Vec<Command> {
@@ -495,6 +576,15 @@ impl Vm {
                 if let Some(row) = self.select_after.take() {
                     self.queue_selection = tracks.len().checked_sub(1).map(|last| row.min(last));
                 }
+                if let Some(u) = &mut self.undo {
+                    // Ids, not tracks: the session may fill in details of the tracks it was sent.
+                    let ids = || tracks.iter().map(|t| &t.id);
+                    if u.after.iter().eq(ids()) {
+                        u.landed = true;
+                    } else if u.landed || !u.tracks.iter().map(|t| &t.id).eq(ids()) {
+                        self.withdraw_undo();
+                    }
+                }
                 self.ui.queue = tracks;
                 self.ui.current = current;
                 self.dirty |= Dirty::QUEUE;
@@ -509,8 +599,15 @@ impl Vm {
                 self.set_position(Duration::ZERO);
                 self.dirty |= Dirty::NOW_PLAYING | Dirty::ELAPSED | Dirty::SEEK;
                 if let Some(r) = restore {
-                    let seek = self.seek_to(r.position, now);
-                    self.outbox.extend(seek);
+                    // The session starts every track playing, and pauses only one that has
+                    // started, so this `Pause` lets the first moments play.
+                    if r.paused {
+                        self.outbox.push(Command::Pause);
+                    }
+                    if !r.position.is_zero() {
+                        let seek = self.seek_to(r.position, now);
+                        self.outbox.extend(seek);
+                    }
                 }
             }
             Event::Position(at) => {
@@ -530,13 +627,14 @@ impl Vm {
                 }
             }
             Event::TrackFailed { track, error } => {
-                self.toast(format!("Couldn't play “{}”: {error}.", track.title), true);
+                self.toast(format!("Couldn't play “{}”: {error}", track.title), true);
                 self.failed_toast = Some(self.last_toast);
             }
-            Event::ProviderBroken { provider, detail } => {
+            // The detail is for stderr, which the backend writes it to.
+            Event::ProviderBroken { provider, .. } => {
                 self.toast(
                     format!(
-                        "{} stopped working ({detail}); requiem may need an update",
+                        "{} stopped working; requiem may need an update",
                         provider_name(&provider.0)
                     ),
                     true,
@@ -655,7 +753,12 @@ impl Vm {
                 };
                 self.select_after = selected.and_then(|s| follow(s, &cmd));
                 if edit == QueueEdit::Clear {
-                    self.offer_undo("Queue cleared");
+                    let text = if self.ui.is_playing() {
+                        "Queue cleared and playback stopped"
+                    } else {
+                        "Queue cleared"
+                    };
+                    self.offer_undo(text, "Undo Clear Queue", Vec::new());
                 }
                 vec![cmd]
             }
@@ -666,7 +769,6 @@ impl Vm {
     pub fn dismiss_toast(&mut self, id: u64) {
         if self.ui.toast.as_ref().is_some_and(|t| t.id == id) {
             self.ui.toast = None;
-            self.undo = None;
             self.dirty |= Dirty::TOAST;
         }
     }
@@ -701,14 +803,15 @@ impl Vm {
             Command::PlayIndex(0),
         ];
         if !self.ui.queue.is_empty() {
-            self.offer_undo("Queue replaced");
+            let after = rest.iter().map(|t| t.id.clone()).collect();
+            self.offer_undo("Queue replaced", "Undo Replace Queue", after);
         }
         cmds
     }
 
     /// Shows `text` with Undo, which restores the queue as it is now: its tracks, and the
-    /// playing track and position.
-    fn offer_undo(&mut self, text: &str) {
+    /// playing track, position and pause. `after` is the queue the change leaves.
+    fn offer_undo(&mut self, text: &str, title: &'static str, after: Vec<TrackId>) {
         let tracks = self.ui.queue.clone();
         let playing = self
             .ui
@@ -718,28 +821,38 @@ impl Vm {
         self.toast_with(text.to_owned(), false, Some("Undo"));
         self.undo = Some(Undo {
             toast: self.last_toast,
+            title,
+            after,
+            landed: false,
             tracks,
             playing,
+            paused: self.ui.state == PlayState::Paused,
         });
     }
 
-    /// Restores the queue: `Enqueue` and `PlayIndex` now, and the `Seek` once the restored
-    /// track starts. A seek sent before then reaches the previous track's decoder, because
-    /// the session loads the new one only after resolving it.
+    /// Ends the offer, and its toast if that still shows.
+    fn withdraw_undo(&mut self) {
+        if let Some(u) = self.undo.take() {
+            self.dismiss_toast(u.toast);
+        }
+    }
+
+    /// Restores the queue: `Enqueue` and `PlayIndex` now, and the `Pause` and `Seek` once the
+    /// restored track starts. A seek sent before then reaches the previous track's decoder,
+    /// because the session loads the new one only after resolving it, and loading plays.
     fn undo(&mut self) -> Vec<Command> {
-        let shown = self.ui.toast.as_ref().map(|t| t.id);
-        let Some(undo) = self.undo.take().filter(|u| Some(u.toast) == shown) else {
+        let Some(undo) = self.undo.take() else {
             return Vec::new();
         };
-        if let Some(id) = shown {
-            self.dismiss_toast(id);
-        }
+        self.dismiss_toast(undo.toast);
+        let paused = undo.paused;
         self.restore = undo.playing.and_then(|(index, position)| {
             let track = undo.tracks.get(index)?;
-            (!position.is_zero()).then(|| Restore {
+            (paused || !position.is_zero()).then(|| Restore {
                 index,
                 track: track.id.clone(),
                 position,
+                paused,
             })
         });
         let mut cmds = vec![Command::Enqueue {
@@ -773,7 +886,6 @@ impl Vm {
 
     fn toast_with(&mut self, text: String, error: bool, action: Option<&'static str>) {
         self.last_toast += 1;
-        self.undo = None;
         self.ui.toast = Some(Toast {
             id: self.last_toast,
             text,
@@ -786,7 +898,8 @@ impl Vm {
     /// Adds what happened next to a `TrackFailed` toast that is still shown.
     fn amend_failure(&mut self, failed: Option<u64>, outcome: &str) {
         if let Some(t) = self.ui.toast.as_mut().filter(|t| Some(t.id) == failed) {
-            t.text = format!("{} {outcome}", t.text);
+            // Two sentences now, so both end in a period.
+            t.text = format!("{}. {outcome}", t.text);
             self.dirty |= Dirty::TOAST;
         }
     }
@@ -794,10 +907,8 @@ impl Vm {
     fn refresh_banner(&mut self, now: Instant) {
         let waited = self.offline_since.map(|t| now.saturating_duration_since(t));
         let (text, reason) = match &self.ui.connection {
-            Connection::Connecting => ("Connecting to player…", self.connect_error.as_deref()),
-            Connection::Reconnecting(r) => {
-                ("Player disconnected — reconnecting…", Some(r.as_str()))
-            }
+            Connection::Connecting => ("Connecting to player…", self.connect_error),
+            Connection::Reconnecting(r) => ("Player disconnected — reconnecting…", Some(*r)),
             Connection::OutOfDate => (OUT_OF_DATE, None),
             Connection::Connected | Connection::Demo => ("", None),
         };
@@ -810,7 +921,7 @@ impl Vm {
             Some(w) if w < BANNER_GRACE => None,
             Some(_) if self.stuck => Some(Banner {
                 text: match reason {
-                    Some(r) => format!("{text} ({r}). {STUCK_HINT}"),
+                    Some(r) => format!("{text} {} {STUCK_HINT}", r.text()),
                     None => format!("{text} {STUCK_HINT}"),
                 },
                 error: false,
@@ -1021,6 +1132,54 @@ mod tests {
         vm
     }
 
+    #[test]
+    fn actions_run_only_when_they_would_act() {
+        let runnable = |vm: &Vm, selection| {
+            PaletteAction::ALL
+                .into_iter()
+                .filter(|&a| vm.ui().can_run(a, selection))
+                .collect::<Vec<_>>()
+        };
+        let views = vec![
+            PaletteAction::FocusSearch,
+            PaletteAction::ShowSearch,
+            PaletteAction::ShowQueue,
+        ];
+        assert_eq!(
+            runnable(
+                &Vm::new(),
+                Selection {
+                    row: true,
+                    result: true
+                }
+            ),
+            views
+        );
+
+        let mut vm = connected();
+        let none = Selection::default();
+        let mut idle = views.clone();
+        idle.extend([PaletteAction::VolumeUp, PaletteAction::VolumeDown]);
+        assert_eq!(runnable(&vm, none), idle);
+
+        vm.apply(Event::QueueChanged {
+            tracks: tracks(2),
+            current: Some(0),
+        });
+        assert_eq!(runnable(&vm, none).len(), PaletteAction::ALL.len() - 2);
+        let queue_row = Selection {
+            row: true,
+            result: false,
+        };
+        assert!(vm.ui().can_run(PaletteAction::PlaySelected, queue_row));
+        assert!(!vm.ui().can_run(PaletteAction::AddToQueue, queue_row));
+        let result = Selection {
+            row: true,
+            result: true,
+        };
+        assert_eq!(runnable(&vm, result).len(), PaletteAction::ALL.len());
+    }
+
     /// A vm with `n` results from a completed search.
     fn with_results(n: usize) -> Vm {
         let mut vm = connected();
@@ -1223,6 +1382,25 @@ mod tests {
     }
 
     #[test]
+    fn seek_bar_value_is_spoken_as_time() {
+        assert_eq!(connected().ui().seek_spoken(), "");
+        let mut vm = playing(225);
+        vm.apply(Event::Position(Duration::from_secs(83)));
+        assert_eq!(vm.ui().seek_spoken(), "1:23 of 3:45");
+        // No duration known: the time alone.
+        let mut vm = connected();
+        let t = Track {
+            duration: None,
+            ..track("x", 1)
+        };
+        vm.apply(Event::NowPlaying {
+            track: t,
+            duration: None,
+        });
+        assert_eq!(vm.ui().seek_spoken(), "0:00");
+    }
+
+    #[test]
     fn state_change_marks_state_and_elapsed() {
         let mut vm = playing(225);
         vm.apply(Event::State(PlayState::Paused));
@@ -1238,6 +1416,8 @@ mod tests {
         vm.apply(Event::Position(Duration::from_secs(10)));
         vm.apply(Event::State(PlayState::Buffering));
         assert_eq!(vm.ui().elapsed_text(), "Buffering…");
+        // VoiceOver still hears the time.
+        assert_eq!(vm.ui().seek_spoken(), "0:10 of 3:45");
         assert!(vm.ui().is_playing());
         vm.apply(Event::State(PlayState::Playing));
         assert_eq!(vm.ui().elapsed_text(), "0:10");
@@ -1278,7 +1458,7 @@ mod tests {
         });
         let t = vm.ui().toast.clone().unwrap();
         assert!(t.error);
-        assert_eq!(t.text, "Couldn't play “Title a”: unplayable: private.");
+        assert_eq!(t.text, "Couldn't play “Title a”: unplayable: private");
         assert_eq!(vm.take_dirty(), Dirty::TOAST);
     }
 
@@ -1291,8 +1471,10 @@ mod tests {
         });
         let t = vm.ui().toast.clone().unwrap();
         assert!(t.error);
-        assert!(t.text.starts_with("YouTube Music stopped working"));
-        assert!(t.text.contains("3 consecutive failures"));
+        assert_eq!(
+            t.text,
+            "YouTube Music stopped working; requiem may need an update"
+        );
     }
 
     #[test]
@@ -1562,10 +1744,10 @@ mod tests {
     #[test]
     fn losing_connection_raises_no_toast() {
         let mut vm = playing(225);
-        vm.link(Link::Lost("daemon closed the connection".into()));
+        vm.link(Link::Lost(LinkError::NotResponding));
         assert_eq!(
             vm.ui().connection,
-            Connection::Reconnecting("daemon closed the connection".into())
+            Connection::Reconnecting(LinkError::NotResponding)
         );
         assert!(vm.ui().toast.is_none());
         assert!(vm.take_dirty().contains(Dirty::CONNECTION));
@@ -1576,7 +1758,7 @@ mod tests {
         let mut vm = playing(225);
         let t0 = Instant::now();
         let ms = |n| t0 + Duration::from_millis(n);
-        vm.link_at(Link::Lost("gone".into()), t0);
+        vm.link_at(Link::Lost(LinkError::NotResponding), t0);
         assert_eq!(vm.ui().banner, None);
         assert_eq!(vm.next_tick(), Some(t0 + BANNER_GRACE));
         vm.take_dirty();
@@ -1600,10 +1782,10 @@ mod tests {
         let mut vm = playing(225);
         let t0 = Instant::now();
         let s = |n| t0 + Duration::from_secs(n);
-        vm.link_at(Link::Lost("gone".into()), t0);
+        vm.link_at(Link::Lost(LinkError::NotResponding), t0);
         // Each failed retry reports Lost again with the latest reason.
-        vm.link_at(Link::Lost("connection refused".into()), s(4));
-        vm.link_at(Link::Lost("connection refused".into()), s(29));
+        vm.link_at(Link::Lost(LinkError::NotRunning), s(4));
+        vm.link_at(Link::Lost(LinkError::NotRunning), s(29));
         assert_eq!(
             vm.ui().banner.as_ref().map(|b| b.text.as_str()),
             Some("Player disconnected — reconnecting…")
@@ -1612,8 +1794,9 @@ mod tests {
         assert_eq!(
             vm.ui().banner,
             Some(Banner {
-                text: "Player disconnected — reconnecting… (connection refused). If this \
-                       persists, quit requiem from the menu bar and reopen it."
+                text: "Player disconnected — reconnecting… The player isn't running. If \
+                       this persists, choose Quit and Stop Music from the requiem menu-bar \
+                       icon, then reopen requiem."
                     .into(),
                 error: false
             })
@@ -1636,17 +1819,59 @@ mod tests {
             })
         );
         // A failed first connect is still connecting: nothing was disconnected.
-        vm.link_at(Link::Lost("not found".into()), t0 + Duration::from_secs(3));
+        vm.link_at(
+            Link::Lost(LinkError::NotRunning),
+            t0 + Duration::from_secs(3),
+        );
         assert_eq!(vm.ui().connection, Connection::Connecting);
         vm.tick_at(t0 + STUCK_AFTER);
         assert_eq!(
             vm.ui().banner.as_ref().map(|b| b.text.as_str()),
             Some(
-                "Connecting to player… (not found). If this persists, quit requiem from the \
-                 menu bar and reopen it."
+                "Connecting to player… The player isn't running. If this persists, choose \
+                 Quit and Stop Music from the requiem menu-bar icon, then reopen requiem."
             )
         );
         assert!(vm.ui().toast.is_none());
+    }
+
+    #[test]
+    fn link_errors_are_put_in_plain_words() {
+        use io::ErrorKind as K;
+        for (kind, want) in [
+            (K::ConnectionRefused, LinkError::NotRunning),
+            (K::NotFound, LinkError::NotRunning),
+            (K::TimedOut, LinkError::NotResponding),
+            (K::UnexpectedEof, LinkError::NotResponding),
+            (K::ConnectionReset, LinkError::NotResponding),
+            (K::BrokenPipe, LinkError::NotResponding),
+            (K::PermissionDenied, LinkError::Unreachable),
+            (K::InvalidData, LinkError::Unreachable),
+            (K::Other, LinkError::Unreachable),
+        ] {
+            assert_eq!(LinkError::from_io(kind), want, "{kind:?}");
+        }
+        assert_eq!(LinkError::NotRunning.text(), "The player isn't running.");
+        assert_eq!(
+            LinkError::NotResponding.text(),
+            "The player stopped responding."
+        );
+        assert_eq!(
+            LinkError::Unreachable.text(),
+            "The player couldn't be reached."
+        );
+        // The stuck banner says it in those words.
+        let mut vm = playing(225);
+        let t0 = Instant::now();
+        vm.link_at(Link::Lost(LinkError::Unreachable), t0);
+        vm.tick_at(t0 + STUCK_AFTER);
+        let text = vm.ui().banner.clone().unwrap().text;
+        assert!(
+            text.starts_with(
+                "Player disconnected — reconnecting… The player couldn't be reached. If this"
+            ),
+            "{text}"
+        );
     }
 
     #[test]
@@ -1658,7 +1883,7 @@ mod tests {
         assert_eq!(vm.next_tick(), None);
 
         let mut vm = playing(225);
-        vm.link_at(Link::Lost("gone".into()), t0);
+        vm.link_at(Link::Lost(LinkError::NotResponding), t0);
         vm.link_at(Link::Connected, t0 + Duration::from_millis(700));
         assert_eq!(vm.ui().banner, None);
         assert!(vm.ui().toast.is_none());
@@ -1672,7 +1897,7 @@ mod tests {
             current: Some(1),
         });
         let t0 = Instant::now();
-        vm.link_at(Link::Lost("gone".into()), t0);
+        vm.link_at(Link::Lost(LinkError::NotResponding), t0);
         vm.tick_at(t0 + Duration::from_secs(2));
         vm.take_dirty();
         vm.link_at(Link::Connected, t0 + Duration::from_secs(3));
@@ -1695,7 +1920,7 @@ mod tests {
     #[test]
     fn snapshot_after_reconnect_rebuilds_state() {
         let mut vm = playing(225);
-        vm.link(Link::Lost("gone".into()));
+        vm.link(Link::Lost(LinkError::NotResponding));
         vm.link(Link::Connected);
         let q = tracks(4);
         vm.apply(Event::QueueChanged {
@@ -1721,7 +1946,7 @@ mod tests {
     fn pending_search_survives_disconnect_and_is_resent() {
         let mut vm = connected();
         let req = search_req(&mut vm, "a");
-        vm.link(Link::Lost("gone".into()));
+        vm.link(Link::Lost(LinkError::NotResponding));
         assert_eq!(vm.ui().search, SearchStatus::Pending);
         assert!(vm.take_commands().is_empty());
         vm.link(Link::Connected);
@@ -1774,8 +1999,8 @@ mod tests {
         assert_eq!(
             vm.ui().banner,
             Some(Banner {
-                text: "An older requiem player is still running. Quit it from the menu bar; \
-                       this window reconnects on its own."
+                text: "An older requiem player is still running. Quit it from its menu-bar \
+                       icon; this window reconnects on its own."
                     .into(),
                 error: true
             })
@@ -1827,8 +2052,8 @@ mod tests {
             vm.ui().results_empty(),
             Some(EmptyText {
                 heading: "Search YouTube Music".into(),
-                sub: "Type a song, artist or album, then press Return.".into(),
-                action: EmptyAction::StartSearch,
+                sub: "Type a song, artist or album, then press Return".into(),
+                action: None,
             })
         );
         let req = search_req(&mut vm, "zzz");
@@ -1841,7 +2066,7 @@ mod tests {
             Some(EmptyText {
                 heading: "No results".into(),
                 sub: "Nothing matched “zzz”".into(),
-                action: EmptyAction::EditSearch,
+                action: Some("Edit search"),
             })
         );
         assert_eq!(with_results(1).ui().results_empty(), None);
@@ -1957,12 +2182,26 @@ mod tests {
             player: true,
         };
         assert_eq!(vm.ui().controls(), on);
-        vm.link(Link::Lost("gone".into()));
+        vm.link(Link::Lost(LinkError::NotResponding));
         assert_eq!(vm.ui().controls(), off);
         vm.link(Link::OutOfDate);
         assert_eq!(vm.ui().controls(), off);
         let (demo, _) = crate::demo::start();
         assert_eq!(demo.ui().controls(), on);
+    }
+
+    #[test]
+    fn only_a_connected_player_can_be_stopped() {
+        let mut vm = Vm::new();
+        assert!(!vm.ui().can_stop_player());
+        vm.link(Link::Connected);
+        assert!(vm.ui().can_stop_player());
+        vm.link(Link::Lost(LinkError::NotResponding));
+        assert!(!vm.ui().can_stop_player());
+        vm.link(Link::OutOfDate);
+        assert!(!vm.ui().can_stop_player());
+        let (demo, _) = crate::demo::start();
+        assert!(!demo.ui().can_stop_player());
     }
 
     #[test]
@@ -1972,7 +2211,7 @@ mod tests {
         assert!(vm.intent(Intent::Toggle).is_empty());
         assert!(vm.intent(Intent::Next).is_empty());
         assert!(vm.intent(Intent::Prev).is_empty());
-        vm.link(Link::Lost("gone".into()));
+        vm.link(Link::Lost(LinkError::NotResponding));
         for i in [
             Intent::PlayResult(0),
             Intent::AppendResult(0),
@@ -2067,6 +2306,46 @@ mod tests {
     }
 
     #[test]
+    fn undo_keeps_a_paused_queue_paused() {
+        let restored = |at: u64| {
+            let mut vm = with_results(4);
+            let old = tracks(3);
+            vm.apply(Event::QueueChanged {
+                tracks: old.clone(),
+                current: Some(2),
+            });
+            vm.apply(Event::NowPlaying {
+                track: old[2].clone(),
+                duration: old[2].duration,
+            });
+            vm.apply(Event::State(PlayState::Paused));
+            vm.apply(Event::Position(Duration::from_secs(at)));
+            vm.intent(Intent::PlayResult(1));
+            vm.apply(Event::State(PlayState::Playing));
+            vm.intent(Intent::Undo);
+            vm.apply(Event::QueueChanged {
+                tracks: old.clone(),
+                current: Some(2),
+            });
+            assert!(vm.take_commands().is_empty());
+            vm.apply(Event::NowPlaying {
+                track: old[2].clone(),
+                duration: old[2].duration,
+            });
+            vm.take_commands()
+        };
+        assert_eq!(
+            restored(61),
+            [
+                Command::Pause,
+                Command::Seek(SeekTarget::Absolute(Duration::from_secs(61)))
+            ]
+        );
+        // Paused at the very start: nothing to seek.
+        assert_eq!(restored(0), [Command::Pause]);
+    }
+
+    #[test]
     fn undo_seek_is_dropped_if_another_track_starts() {
         let (mut vm, old) = replaced();
         vm.intent(Intent::Undo);
@@ -2082,18 +2361,108 @@ mod tests {
     }
 
     #[test]
-    fn undo_ends_with_its_toast() {
-        let (mut vm, _) = replaced();
+    fn undo_outlives_its_toast() {
+        let (mut vm, old) = replaced();
         let id = vm.ui().toast.as_ref().unwrap().id;
         vm.dismiss_toast(id);
+        assert_eq!(vm.undo_title(), Some("Undo Replace Queue"));
+        assert_eq!(
+            vm.intent(Intent::Undo),
+            [
+                Command::Enqueue {
+                    tracks: old.clone(),
+                    mode: EnqueueMode::Replace
+                },
+                Command::PlayIndex(2)
+            ]
+        );
+        assert_eq!(vm.undo_title(), None);
         assert!(vm.intent(Intent::Undo).is_empty());
 
+        // Another toast takes the place of its toast, not of the offer.
         let (mut vm, _) = replaced();
         vm.apply(Event::TrackFailed {
             track: track("x", 1),
             error: "e".into(),
         });
+        assert!(vm.ui().toast.as_ref().unwrap().error);
+        assert_eq!(vm.intent(Intent::Undo).len(), 2);
+        assert!(
+            vm.ui().toast.as_ref().unwrap().error,
+            "not the undo's toast"
+        );
+    }
+
+    #[test]
+    fn undo_offer_ends_when_the_queue_changes_again() {
+        let (mut vm, old) = replaced();
+        let new = tracks(4)[1..].to_vec();
+        // News sent before the session had the replace, its answer, and the first track
+        // starting keep it.
+        vm.apply(Event::QueueChanged {
+            tracks: old.clone(),
+            current: Some(2),
+        });
+        vm.apply(Event::QueueChanged {
+            tracks: new.clone(),
+            current: None,
+        });
+        vm.apply(Event::QueueChanged {
+            tracks: new.clone(),
+            current: Some(0),
+        });
+        // So does the next track starting on its own.
+        vm.apply(Event::QueueChanged {
+            tracks: new.clone(),
+            current: Some(1),
+        });
+        assert_eq!(vm.undo_title(), Some("Undo Replace Queue"));
+        // Once it has landed, the old queue is a change too.
+        let mut back = replaced().0;
+        back.apply(Event::QueueChanged {
+            tracks: new.clone(),
+            current: None,
+        });
+        back.apply(Event::QueueChanged {
+            tracks: old,
+            current: None,
+        });
+        assert_eq!(back.undo_title(), None);
+        // An append, a remove or another client's change ends it, and its toast with it.
+        vm.take_dirty();
+        let mut more = new.clone();
+        more.push(track("extra", 100));
+        vm.apply(Event::QueueChanged {
+            tracks: more,
+            current: Some(1),
+        });
+        assert_eq!(vm.undo_title(), None);
+        assert!(vm.ui().toast.is_none());
+        assert!(vm.take_dirty().contains(Dirty::TOAST));
         assert!(vm.intent(Intent::Undo).is_empty());
+
+        // After its toast is gone, too.
+        let (mut vm, _) = cleared();
+        let id = vm.ui().toast.as_ref().unwrap().id;
+        vm.dismiss_toast(id);
+        assert_eq!(vm.undo_title(), Some("Undo Clear Queue"));
+        vm.apply(Event::QueueChanged {
+            tracks: tracks(1),
+            current: None,
+        });
+        assert_eq!(vm.undo_title(), None);
+        assert!(vm.intent(Intent::Undo).is_empty());
+    }
+
+    #[test]
+    fn undo_title_names_the_change() {
+        assert_eq!(connected().undo_title(), None);
+        assert_eq!(replaced().0.undo_title(), Some("Undo Replace Queue"));
+        assert_eq!(cleared().0.undo_title(), Some("Undo Clear Queue"));
+        // Replacing an empty queue offers nothing.
+        let mut vm = with_results(4);
+        vm.intent(Intent::PlayResult(1));
+        assert_eq!(vm.undo_title(), None);
     }
 
     #[test]
@@ -2220,7 +2589,7 @@ mod tests {
         assert_eq!(queued(0).ui().edit_command(QueueEdit::Clear), None);
 
         let mut vm = queued(5);
-        vm.link(Link::Lost("gone".into()));
+        vm.link(Link::Lost(LinkError::NotResponding));
         for e in [
             QueueEdit::Remove(0),
             QueueEdit::MoveDown(0),
@@ -2313,6 +2682,24 @@ mod tests {
         });
         vm.apply(Event::State(PlayState::Stopped));
         (vm, old)
+    }
+
+    #[test]
+    fn clear_toast_says_whether_playback_stopped() {
+        let text = |state: Option<PlayState>| {
+            let mut vm = queued(3);
+            if let Some(s) = state {
+                vm.apply(Event::State(s));
+            }
+            edit(&mut vm, QueueEdit::Clear, None);
+            vm.ui().toast.clone().unwrap().text
+        };
+        let stopped = "Queue cleared and playback stopped";
+        assert_eq!(text(Some(PlayState::Playing)), stopped);
+        assert_eq!(text(Some(PlayState::Buffering)), stopped);
+        // Nothing was heard, so nothing stopped.
+        assert_eq!(text(Some(PlayState::Paused)), "Queue cleared");
+        assert_eq!(text(None), "Queue cleared");
     }
 
     #[test]

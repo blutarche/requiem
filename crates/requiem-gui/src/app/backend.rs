@@ -17,7 +17,7 @@ use requiem_ipc::{Client, Incoming, Role};
 
 use super::ui;
 use crate::demo;
-use crate::vm::Link;
+use crate::vm::{Link, LinkError};
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(3);
 /// Commands waiting for the writer thread. Beyond this the daemon is not keeping up, and
@@ -169,7 +169,13 @@ fn connection(daemon: PathBuf, slot: Slot) {
                     let mut goodbye = false;
                     for inc in std::iter::once(first).chain(events.try_iter()) {
                         match inc {
-                            Incoming::Event(ev) => batch.push(Msg::Event(ev)),
+                            Incoming::Event(ev) => {
+                                // The toast stays plain; the cause goes here.
+                                if let Event::ProviderBroken { provider, detail } = &ev {
+                                    eprintln!("requiem-gui: {} broke: {detail}", provider.0);
+                                }
+                                batch.push(Msg::Event(ev));
+                            }
                             Incoming::Raise => batch.push(Msg::Raise),
                             Incoming::Disconnected(r) => {
                                 reason = r;
@@ -190,7 +196,8 @@ fn connection(daemon: PathBuf, slot: Slot) {
                     }
                 }
                 *slot.lock().unwrap_or_else(PoisonError::into_inner) = None;
-                Link::Lost(reason)
+                eprintln!("requiem-gui: lost the player: {reason}");
+                Link::Lost(LinkError::NotResponding)
             }
             Err(e) if e.kind() == io::ErrorKind::Unsupported => {
                 if !std::mem::replace(&mut out_of_date, true) {
@@ -201,7 +208,7 @@ fn connection(daemon: PathBuf, slot: Slot) {
             Err(e) => {
                 out_of_date = false;
                 eprintln!("requiem-gui: cannot reach the player: {e}");
-                Link::Lost(e.to_string())
+                Link::Lost(LinkError::from_io(e.kind()))
             }
         };
         if STOPPING.load(Ordering::Relaxed) {
@@ -257,7 +264,7 @@ mod tests {
     #[test]
     fn out_of_date_keeps_retrying_at_the_slowest_pace() {
         assert_eq!(retry_delay(&Link::OutOfDate, 0), Duration::from_secs(4));
-        let lost = Link::Lost("x".into());
+        let lost = Link::Lost(LinkError::NotResponding);
         assert_eq!(retry_delay(&lost, 0), Duration::from_millis(500));
         assert_eq!(retry_delay(&lost, 9), Duration::from_secs(4));
     }

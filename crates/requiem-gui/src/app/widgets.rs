@@ -1,21 +1,24 @@
 //! Small views. Backgrounds, borders and radii are layer properties rather than `drawRect:`
 //! so they cost no backing store; only the seek bar draws.
 
-use std::cell::{Cell, OnceCell};
+use std::cell::{Cell, OnceCell, RefCell};
 use std::ptr::NonNull;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use block2::{RcBlock, StackBlock};
 use objc2::rc::{Retained, Weak};
 use objc2::runtime::{AnyObject, Sel};
 use objc2::{AnyThread, DefinedClass, MainThreadOnly, Message, define_class, msg_send};
 use objc2_app_kit::{
-    NSAccessibility, NSAccessibilityButtonRole, NSAccessibilitySliderRole, NSAnimationContext,
+    NSAccessibility, NSAccessibilityAnnouncementKey,
+    NSAccessibilityAnnouncementRequestedNotification, NSAccessibilityButtonRole,
+    NSAccessibilityPostNotificationWithUserInfo, NSAccessibilityPriorityKey,
+    NSAccessibilityPriorityLevel, NSAccessibilitySliderRole, NSAnimationContext, NSApplication,
     NSAttributedStringNSStringDrawing, NSAutoresizingMaskOptions, NSBezierPath, NSButton,
     NSCellImagePosition, NSColor, NSControl, NSEvent, NSEventMask, NSEventTrackingRunLoopMode,
     NSEventType, NSFocusRingType, NSFont, NSImageScaling, NSImageView, NSLineBreakMode,
     NSResponder, NSTextAlignment, NSTextField, NSTrackingArea, NSTrackingAreaOptions, NSView,
-    NSWorkspace,
+    NSWindow, NSWindowOcclusionState, NSWorkspace,
 };
 use objc2_core_foundation::CGFloat;
 use objc2_foundation::{
@@ -36,7 +39,6 @@ const RING_W: CGFloat = 2.0;
 /// Cubic Bézier control points of a timing curve.
 pub type Curve = [f32; 4];
 pub const EASE_OUT: Curve = [0.23, 1.0, 0.32, 1.0];
-pub const EASE_IN_OUT: Curve = [0.77, 0.0, 0.175, 1.0];
 /// Small swaps: a toast's text, an icon.
 pub const MICRO: Duration = Duration::from_millis(120);
 /// Things entering, leaving or moving.
@@ -47,9 +49,81 @@ pub fn reduce_motion() -> bool {
     NSWorkspace::sharedWorkspace().accessibilityDisplayShouldReduceMotion()
 }
 
+/// How long after a key asked for something its changes still apply at once, so results
+/// that arrive later, such as the next title after Cmd+Right, count too.
+const KEY_QUIET: Duration = Duration::from_secs(1);
+
+thread_local! {
+    static LAST_KEY: Cell<Option<Instant>> = const { Cell::new(None) };
+    static STILL: Cell<bool> = const { Cell::new(false) };
+}
+
+/// Runs `f` with every change it makes applied at once: catching up on what happened while
+/// the window could not be seen shows where things are, not how they got there.
+pub fn still(f: impl FnOnce()) {
+    let was = STILL.with(|s| s.replace(true));
+    f();
+    STILL.with(|s| s.set(was));
+}
+
+/// Marks the change about to be made as asked for from the keyboard.
+pub fn note_key_intent() {
+    LAST_KEY.with(|k| k.set(Some(Instant::now())));
+}
+
+/// Marks it so if the event being handled is a key press: a key the window's monitor
+/// handles, a menu key equivalent, or a field's Return.
+pub fn note_key_event(mtm: MainThreadMarker) {
+    let event = NSApplication::sharedApplication(mtm).currentEvent();
+    if event.is_some_and(|e| e.r#type() == NSEventType::KeyDown) {
+        note_key_intent();
+    }
+}
+
+/// `duration`, or none for a change the keyboard asked for: who drives by keys wants the
+/// result, not the motion.
+pub fn motion(duration: Duration) -> Duration {
+    if keyboard_quiet(LAST_KEY.with(Cell::get), Instant::now()) {
+        Duration::ZERO
+    } else {
+        duration
+    }
+}
+
+fn keyboard_quiet(last_key: Option<Instant>, now: Instant) -> bool {
+    last_key.is_some_and(|k| now.saturating_duration_since(k) < KEY_QUIET)
+}
+
+/// Has VoiceOver read `text` out now, ahead of other speech.
+pub fn announce(mtm: MainThreadMarker, text: &str) {
+    let app = NSApplication::sharedApplication(mtm);
+    let text = NSString::from_str(text);
+    let priority = NSNumber::new_isize(NSAccessibilityPriorityLevel::High.0);
+    // SAFETY: the key statics are immutable framework constants.
+    let keys = unsafe { [NSAccessibilityAnnouncementKey, NSAccessibilityPriorityKey] };
+    let info = NSDictionary::<NSString, AnyObject>::from_slices(&keys, &[&text, &priority]);
+    // SAFETY: the element is the app; the info dictionary holds the announcement as a string
+    // and the priority as a number, as the notification requires.
+    unsafe {
+        NSAccessibilityPostNotificationWithUserInfo(
+            &app,
+            NSAccessibilityAnnouncementRequestedNotification,
+            Some(&info),
+        );
+    }
+}
+
 /// Whether changes to `view` would be seen animating. A snapshot's window is never shown.
 fn on_screen(view: &NSView) -> bool {
-    view.window().is_some_and(|w| w.isVisible())
+    !STILL.with(Cell::get) && view.window().is_some_and(|w| window_on_screen(&w))
+}
+
+/// Not hidden, minimized, fully covered, or in a hidden app.
+pub fn window_on_screen(w: &NSWindow) -> bool {
+    w.isVisible()
+        && !w.isMiniaturized()
+        && !NSApplication::sharedApplication(w.mtm()).isHidden()
+        && w.occlusionState().contains(NSWindowOcclusionState::Visible)
 }
 
 fn timing(curve: Curve) -> Retained<CAMediaTimingFunction> {
@@ -90,7 +164,8 @@ pub fn animate(
 
 /// Cross-fades `view` from how it looks now to how the changes made next leave it.
 pub fn crossfade(view: &NSView, duration: Duration) {
-    if !on_screen(view) {
+    // A zero duration would be Core Animation's default 0.25 s.
+    if duration.is_zero() || !on_screen(view) {
         return;
     }
     let Some(layer) = view.layer() else { return };
@@ -398,7 +473,7 @@ impl HoverButton {
             mtm,
             frame,
             Some(&theme::accent()),
-            &theme::accent_hi(),
+            &theme::accent_hover(),
             theme::RADIUS,
         );
         this.setImagePosition(NSCellImagePosition::NoImage);
@@ -878,9 +953,34 @@ impl SliderKind {
     }
 }
 
+/// A slider's value, and the value its fill was last drawn at.
+#[derive(Debug, Clone, Copy, Default)]
+struct Fill {
+    value: f64,
+    drawn: f64,
+}
+
+impl Fill {
+    /// Takes `v`; true when the fill on screen, `w` points long at 1, is now off by half a
+    /// point or more, or should appear or vanish. Measured from the drawn value, not the
+    /// last one set: on a long track no single tick moves half a point.
+    fn set(&mut self, v: f64, w: CGFloat) -> bool {
+        self.value = v;
+        ((self.drawn - v) * w).abs() >= 0.5 || (v == 0.0) != (self.drawn == 0.0)
+    }
+
+    /// The value to draw, which is then the one on screen.
+    fn draw(&mut self) -> f64 {
+        self.drawn = self.value;
+        self.value
+    }
+}
+
 pub struct SliderIvars {
     kind: SliderKind,
-    value: Cell<f64>,
+    fill: Cell<Fill>,
+    /// The value VoiceOver reads, when not a percent.
+    spoken: RefCell<String>,
     dragging: Cell<bool>,
     hovered: Cell<bool>,
     enabled: Cell<bool>,
@@ -898,7 +998,9 @@ define_class!(
         #[unsafe(method(drawRect:))]
         fn draw_rect(&self, _dirty: NSRect) {
             let (x0, w, mid) = self.track();
-            let v = self.ivars().value.get();
+            let mut fill = self.ivars().fill.get();
+            let v = fill.draw();
+            self.ivars().fill.set(fill);
             theme::line_2().setFill();
             NSBezierPath::bezierPathWithRoundedRect_xRadius_yRadius(rect(x0, mid - 2.0, w, 4.0), 2.0, 2.0)
                 .fill();
@@ -944,13 +1046,18 @@ define_class!(
             true
         }
 
-        /// Percent, as VoiceOver reads it.
+        /// The spoken value if there is one, as the seek bar's time, else a percent.
         #[unsafe(method_id(accessibilityValue))]
         fn accessibility_value(&self) -> Option<Retained<AnyObject>> {
-            let pct = (self.ivars().value.get() * 100.0).round();
-            Some(Retained::into_super(Retained::into_super(Retained::into_super(
-                NSNumber::new_f64(pct),
-            ))))
+            let spoken = self.ivars().spoken.borrow();
+            if spoken.is_empty() {
+                let pct = (self.ivars().fill.get().value * 100.0).round();
+                Some(Retained::into_super(Retained::into_super(Retained::into_super(
+                    NSNumber::new_f64(pct),
+                ))))
+            } else {
+                Some(Retained::into_super(Retained::into_super(NSString::from_str(&spoken))))
+            }
         }
 
         #[unsafe(method(isAccessibilityEnabled))]
@@ -981,7 +1088,8 @@ impl Slider {
     ) -> Retained<Self> {
         let this = Self::alloc(mtm).set_ivars(SliderIvars {
             kind,
-            value: Cell::new(0.0),
+            fill: Cell::new(Fill::default()),
+            spoken: RefCell::new(String::new()),
             dragging: Cell::new(false),
             hovered: Cell::new(false),
             enabled: Cell::new(true),
@@ -1010,17 +1118,26 @@ impl Slider {
         true
     }
 
-    /// Ignored mid-drag. Redraws only when the fill moves by at least half a point.
+    /// Ignored mid-drag. Redraws only when the fill would move by at least half a point.
     pub fn set_value(&self, v: f64) {
         let iv = self.ivars();
         if iv.dragging.get() {
             return;
         }
-        let v = v.clamp(0.0, 1.0);
         let (_, w, _) = self.track();
-        let old = iv.value.replace(v);
-        if ((old - v) * w).abs() >= 0.5 || (v == 0.0) != (old == 0.0) {
+        let mut fill = iv.fill.get();
+        let redraw = fill.set(v.clamp(0.0, 1.0), w);
+        iv.fill.set(fill);
+        if redraw {
             self.setNeedsDisplay(true);
+        }
+    }
+
+    /// What VoiceOver reads as the value instead of a percent; empty for the percent.
+    pub fn set_spoken(&self, text: &str) {
+        let mut spoken = self.ivars().spoken.borrow_mut();
+        if *spoken != text {
+            text.clone_into(&mut spoken);
         }
     }
 
@@ -1082,7 +1199,9 @@ impl Slider {
         let p = self.convertPoint_fromView(event.locationInWindow(), None);
         let (x0, w, _) = self.track();
         let v = ((p.x - x0) / w).clamp(0.0, 1.0);
-        self.ivars().value.set(v);
+        let mut fill = self.ivars().fill.get();
+        fill.value = v;
+        self.ivars().fill.set(fill);
         self.setNeedsDisplay(true);
         let kind = self.ivars().kind;
         match kind {
@@ -1182,12 +1301,86 @@ impl EmptyState {
         }
     }
 
-    pub fn set(&self, icon: Icon, heading: &str, sub: &str, action: &str) {
+    /// With no `action`, the button hides.
+    pub fn set(&self, icon: Icon, heading: &str, sub: &str, action: Option<&str>) {
         self.icon.setImage(icon.image(32.0).as_deref());
         set_text(&self.heading, heading);
         set_text(&self.sub, sub);
-        let w = self.action.set_label(action);
-        let x = ((self.group.bounds().size.width - w) / 2.0).round();
-        self.action.setFrame(rect(x, 0.0, w, Self::BUTTON_H));
+        self.action.setHidden(action.is_none());
+        // Lowers the rows by half the space a missing button leaves, so the block stays
+        // centred.
+        let drop = if action.is_none() {
+            (self.sub.frame().origin.y / 2.0).round()
+        } else {
+            0.0
+        };
+        self.group.setBoundsOrigin(NSPoint::new(0.0, drop));
+        if let Some(action) = action {
+            let w = self.action.set_label(action);
+            let x = ((self.group.bounds().size.width - w) / 2.0).round();
+            self.action.setFrame(rect(x, 0.0, w, Self::BUTTON_H));
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn keyboard_changes_apply_at_once_for_a_second() {
+        let t0 = Instant::now();
+        let ms = |n| t0 + Duration::from_millis(n);
+        assert!(!keyboard_quiet(None, t0));
+        assert!(keyboard_quiet(Some(t0), t0));
+        assert!(keyboard_quiet(Some(t0), ms(999)));
+        assert!(!keyboard_quiet(Some(t0), ms(1000)));
+        // A key noted after `now` was read still counts.
+        assert!(keyboard_quiet(Some(ms(5)), t0));
+    }
+
+    #[test]
+    fn catching_up_holds_still_until_it_ends() {
+        let still_now = || STILL.with(Cell::get);
+        assert!(!still_now());
+        still(|| {
+            assert!(still_now());
+            still(|| assert!(still_now()));
+            assert!(still_now());
+        });
+        assert!(!still_now());
+    }
+
+    /// Draws as AppKit would after `set` asks for it; returns how many draws `ticks` took.
+    fn draws(fill: &mut Fill, ticks: impl IntoIterator<Item = f64>, w: CGFloat) -> usize {
+        let mut n = 0;
+        for v in ticks {
+            if fill.set(v, w) {
+                fill.draw();
+                n += 1;
+            }
+        }
+        n
+    }
+
+    #[test]
+    fn a_long_track_still_moves_the_fill() {
+        // A track of about 10 minutes on a 300 pt bar moves 0.12 pt per 250 ms tick, so the
+        // fill moves every fifth tick.
+        let mut fill = Fill::default();
+        fill.set(0.1, 300.0);
+        fill.draw();
+        let ticks = (1..=40).map(|i| 0.1 + f64::from(i) * 0.0004);
+        assert_eq!(draws(&mut fill, ticks, 300.0), 8);
+        // Under half a point from what is drawn: no draw.
+        assert!(!fill.set(fill.drawn + 0.001, 300.0));
+    }
+
+    #[test]
+    fn the_fill_appears_and_vanishes_at_once() {
+        let mut fill = Fill::default();
+        assert!(fill.set(0.0001, 300.0));
+        fill.draw();
+        assert!(fill.set(0.0, 300.0));
     }
 }

@@ -81,7 +81,7 @@ impl StatusMenu {
         let next = action_item(ns_string!("Next"), UiAction::Next);
         let prev = action_item(ns_string!("Previous"), UiAction::Prev);
         let open = action_item(ns_string!("Open requiem"), UiAction::OpenGui);
-        let quit = action_item(ns_string!("Quit requiem"), UiAction::Quit);
+        let quit = action_item(ns_string!("Quit and Stop Music"), UiAction::Quit);
 
         let menu = NSMenu::new(mtm);
         // Enabled state is set explicitly; autoenabling would consult the responder chain.

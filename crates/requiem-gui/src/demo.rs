@@ -8,7 +8,7 @@ use requiem_core::{
 };
 
 use crate::args::View;
-use crate::vm::{BANNER_GRACE, Intent, Link, Vm};
+use crate::vm::{BANNER_GRACE, Intent, Link, LinkError, Vm};
 
 pub const QUERY: &str = "night drive";
 
@@ -266,11 +266,10 @@ impl Daemon {
                 _ => self.seek(Duration::ZERO),
             },
             Command::Pause => self.set_state(PlayState::Paused),
-            Command::Resume => self.set_state(PlayState::Playing),
+            Command::Resume => self.resume(),
             Command::TogglePause => match self.state {
                 PlayState::Playing | PlayState::Buffering => self.set_state(PlayState::Paused),
-                PlayState::Paused => self.set_state(PlayState::Playing),
-                PlayState::Stopped => Vec::new(),
+                PlayState::Paused | PlayState::Stopped => self.resume(),
             },
             Command::Seek(SeekTarget::Absolute(to)) => self.seek(to),
             Command::Seek(SeekTarget::Relative(s)) => {
@@ -381,6 +380,19 @@ impl Daemon {
         ]
     }
 
+    /// As the session: a stopped queue starts after the last track played, or from the top
+    /// once it is past the end.
+    fn resume(&mut self) -> Vec<Event> {
+        match self.state {
+            PlayState::Paused => self.set_state(PlayState::Playing),
+            PlayState::Stopped if !self.queue.is_empty() => {
+                let next = self.current.map_or(0, |c| c + 1);
+                self.start(if next < self.queue.len() { next } else { 0 })
+            }
+            _ => Vec::new(),
+        }
+    }
+
     fn stop(&mut self) -> Vec<Event> {
         self.state = PlayState::Stopped;
         vec![Event::State(PlayState::Stopped)]
@@ -429,7 +441,7 @@ pub fn start_in(view: View) -> (Vm, Daemon) {
     match view {
         View::Disconnected => {
             // Past the grace, as a real outage would be by the time its banner shows.
-            vm.link_at(Link::Lost("demo".into()), t0);
+            vm.link_at(Link::Lost(LinkError::NotResponding), t0);
             vm.tick_at(t0 + BANNER_GRACE);
         }
         View::OutOfDate => vm.link(Link::OutOfDate),
@@ -448,7 +460,7 @@ pub fn start_in(view: View) -> (Vm, Daemon) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::vm::{Connection, EmptyAction, QueueEdit, SearchStatus};
+    use crate::vm::{Connection, QueueEdit, SearchStatus};
 
     fn run(vm: &mut Vm, daemon: &mut Daemon, intent: Intent) {
         for cmd in vm.intent(intent) {
@@ -484,7 +496,7 @@ mod tests {
         assert_eq!(ui.search, SearchStatus::Idle);
         let empty = ui.results_empty().unwrap();
         assert_eq!(empty.heading, "Search YouTube Music");
-        assert_eq!(empty.action, EmptyAction::StartSearch);
+        assert_eq!(empty.action, None);
         assert_eq!(ui.state, PlayState::Playing);
     }
 
@@ -567,6 +579,66 @@ mod tests {
     }
 
     #[test]
+    fn play_while_stopped_starts_from_the_top_once_past_the_end() {
+        let (mut vm, mut d) = start();
+        run(&mut vm, &mut d, Intent::PlayQueue(7));
+        run(&mut vm, &mut d, Intent::Next);
+        assert_eq!(vm.ui().state, PlayState::Stopped);
+        run(&mut vm, &mut d, Intent::Toggle);
+        assert_eq!(vm.ui().state, PlayState::Playing);
+        assert_eq!(vm.ui().current, Some(0));
+        assert_eq!(vm.ui().now_playing.as_ref(), Some(&vm.ui().queue[0]));
+
+        let (mut vm, mut d) = start();
+        run(&mut vm, &mut d, Intent::PlayQueue(7));
+        run(&mut vm, &mut d, Intent::Next);
+        for ev in d.apply(Command::Resume) {
+            vm.apply(ev);
+        }
+        assert_eq!(
+            (vm.ui().state, vm.ui().current),
+            (PlayState::Playing, Some(0))
+        );
+    }
+
+    #[test]
+    fn play_while_stopped_starts_after_the_last_track_played() {
+        let (mut vm, mut d) = start();
+        let after = vm.ui().queue[3].clone();
+        run(&mut vm, &mut d, Intent::Toggle);
+        // Removing the paused current track stops, with the cursor just before its place.
+        edit(&mut vm, &mut d, QueueEdit::Remove(2), None);
+        assert_eq!(vm.ui().state, PlayState::Stopped);
+        assert_eq!(vm.ui().current, Some(1));
+        run(&mut vm, &mut d, Intent::Toggle);
+        assert_eq!(
+            (vm.ui().state, vm.ui().current),
+            (PlayState::Playing, Some(2))
+        );
+        assert_eq!(vm.ui().now_playing.as_ref(), Some(&after));
+
+        // Resume does the same; paused, it only resumes.
+        let (mut vm, mut d) = start();
+        run(&mut vm, &mut d, Intent::Toggle);
+        for ev in d.apply(Command::Resume) {
+            vm.apply(ev);
+        }
+        assert_eq!(
+            (vm.ui().state, vm.ui().current),
+            (PlayState::Playing, Some(2))
+        );
+        assert_eq!(vm.ui().elapsed_text(), "1:23");
+    }
+
+    #[test]
+    fn play_with_an_empty_queue_does_nothing() {
+        let mut d = Daemon::default();
+        d.apply(Command::Clear);
+        assert!(d.apply(Command::Resume).is_empty());
+        assert!(d.apply(Command::TogglePause).is_empty());
+    }
+
+    #[test]
     fn seek_and_volume() {
         let (mut vm, mut d) = start();
         run(&mut vm, &mut d, Intent::SeekBy(5));
@@ -620,5 +692,45 @@ mod tests {
         assert_eq!(vm.ui().queue, queue);
         assert_eq!(vm.ui().current, Some(2));
         assert_eq!(vm.ui().elapsed_text(), "1:23");
+    }
+
+    /// Runs `intent`, then what the view model raises in answer, as the app does.
+    fn settle(vm: &mut Vm, d: &mut Daemon, intent: Intent) {
+        run(vm, d, intent);
+        loop {
+            let cmds = vm.take_commands();
+            if cmds.is_empty() {
+                break;
+            }
+            for cmd in cmds {
+                for ev in d.apply(cmd) {
+                    vm.apply(ev);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn undo_leaves_a_paused_queue_paused() {
+        for change in [
+            Intent::PlayResult(25),
+            Intent::EditQueue {
+                edit: QueueEdit::Clear,
+                selected: None,
+            },
+        ] {
+            let (mut vm, mut d) = start();
+            let queue = vm.ui().queue.clone();
+            settle(&mut vm, &mut d, Intent::Toggle);
+            assert_eq!(vm.ui().state, PlayState::Paused);
+            settle(&mut vm, &mut d, change);
+            settle(&mut vm, &mut d, Intent::Undo);
+            let ui = vm.ui();
+            assert_eq!(ui.queue, queue);
+            assert_eq!(ui.current, Some(2));
+            assert_eq!(ui.now_playing.as_ref(), Some(&queue[2]));
+            assert_eq!(ui.state, PlayState::Paused);
+            assert_eq!(ui.elapsed_text(), "1:23");
+        }
     }
 }

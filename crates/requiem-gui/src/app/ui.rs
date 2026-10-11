@@ -7,17 +7,16 @@ use std::time::{Duration, Instant};
 
 use dispatch2::{DispatchQueue, DispatchTime};
 use objc2::rc::Retained;
-use objc2::runtime::{AnyObject, ProtocolObject};
-use objc2::{MainThreadOnly, sel};
+use objc2::runtime::{AnyObject, NSObject, ProtocolObject};
+use objc2::{MainThreadOnly, define_class, msg_send, sel};
 use objc2_app_kit::{
-    NSAnimatablePropertyContainer, NSApplication, NSBackingStoreType, NSLineBreakMode,
-    NSTextAlignment, NSTextField, NSTextFieldDelegate, NSView, NSWindow, NSWindowOcclusionState,
-    NSWindowStyleMask, NSWindowTitleVisibility,
+    NSAnimatablePropertyContainer, NSApplication, NSAttributedStringNSStringDrawing, NSEvent,
+    NSLineBreakMode, NSResponder, NSTextAlignment, NSTextField, NSTextFieldDelegate,
+    NSTrackingAreaOptions, NSView, NSWindow, NSWindowStyleMask, NSWindowTitleVisibility,
 };
 use objc2_core_foundation::CGFloat;
-use objc2_foundation::{MainThreadMarker, NSPoint, NSSize, NSString};
+use objc2_foundation::{MainThreadMarker, NSPoint, NSRect, NSSize, NSString};
 
-use super::Delegate;
 use super::backend::{Backend, Msg};
 use super::bar::PlayerBar;
 use super::palette::Palette;
@@ -27,8 +26,9 @@ use super::widgets::{
     self, EmptyState, FLEX_H, FLEX_W, Field, HoverButton, NavItem, PIN_BOTTOM, PIN_LEFT, PIN_RIGHT,
     PIN_TOP, rect,
 };
+use super::{Delegate, MainWindow};
 use crate::vm::{
-    self, Banner, Controls, Dirty, EmptyAction, EmptyText, Intent, PaletteAction, QueueEdit, Toast,
+    self, Banner, Controls, Dirty, EmptyText, Intent, PaletteAction, QueueEdit, Selection, Toast,
     UiState, Vm,
 };
 
@@ -57,6 +57,7 @@ const WIN_H: CGFloat = 720.0;
 const MIN_W: CGFloat = 800.0;
 const MIN_H: CGFloat = 500.0;
 const SIDEBAR_W: CGFloat = 240.0;
+/// One line; a second adds a line's height.
 const BANNER_H: CGFloat = 32.0;
 const PAD: CGFloat = 24.0;
 /// The window has a transparent title bar over the content; the page headers start below
@@ -69,17 +70,93 @@ const TOAST_ACTION_H: CGFloat = 48.0;
 const TOAST_BUTTON_H: CGFloat = 32.0;
 /// How far below its place a toast starts as it fades in.
 const TOAST_RISE: CGFloat = 8.0;
+/// The toast's distance from the window's right edge, and from the player bar.
+const TOAST_RIGHT: CGFloat = 24.0;
+const TOAST_BOTTOM: CGFloat = 16.0;
+/// Leaving is quicker than entering.
+const TOAST_EXIT: Duration = Duration::from_millis(150);
 /// How long "Quit and Stop Music" waits for the player's goodbye.
 const QUIT_GRACE: Duration = Duration::from_secs(3);
+
+define_class!(
+    /// The toast's box; the pointer resting on it holds the toast's countdown.
+    // SAFETY: NSView has no subclassing requirements; no ivars; no Drop impl.
+    #[unsafe(super(NSView, NSResponder, NSObject))]
+    #[thread_kind = MainThreadOnly]
+    struct ToastPanel;
+
+    impl ToastPanel {
+        #[unsafe(method(mouseEntered:))]
+        fn mouse_entered(&self, _event: &NSEvent) {
+            with(|ui| ui.hover_toast(true));
+        }
+
+        #[unsafe(method(mouseExited:))]
+        fn mouse_exited(&self, _event: &NSEvent) {
+            with(|ui| ui.hover_toast(false));
+        }
+
+        /// A hidden view gets no `mouseExited:`.
+        #[unsafe(method(viewDidHide))]
+        fn view_did_hide(&self) {
+            // SAFETY: forwards to the superclass implementation.
+            let _: () = unsafe { msg_send![super(self), viewDidHide] };
+            with(|ui| ui.hover_toast(false));
+        }
+    }
+);
+
+/// The shown toast's time left, which stands still while the pointer rests on the toast.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Countdown {
+    /// Ends then.
+    Running(Instant),
+    /// This much is left.
+    Held(Duration),
+}
+
+impl Countdown {
+    fn new(now: Instant, held: bool) -> Countdown {
+        if held {
+            Countdown::Held(vm::TOAST_DURATION)
+        } else {
+            Countdown::Running(now + vm::TOAST_DURATION)
+        }
+    }
+
+    fn hold(self, now: Instant) -> Countdown {
+        match self {
+            Countdown::Running(end) => Countdown::Held(end.saturating_duration_since(now)),
+            held => held,
+        }
+    }
+
+    fn resume(self, now: Instant) -> Countdown {
+        match self {
+            Countdown::Held(left) => Countdown::Running(now + left),
+            running => running,
+        }
+    }
+}
 
 struct ToastView {
     view: Retained<NSView>,
     accent: Retained<NSView>,
     label: Retained<NSTextField>,
     action: Retained<HoverButton>,
+    /// The toast shown, or about to be once a swap's fade-out ends.
     id: Cell<u64>,
+    /// The toast whose countdown runs: the view model's, seen or not.
+    counting: Cell<u64>,
+    /// The toast and text last read out.
+    said: RefCell<(u64, String)>,
+    /// The toast to lay out once the shown one has faded out.
+    pending: RefCell<Option<Toast>>,
     /// False from the start of the exit; the view hides once the exit ends.
     shown: Cell<bool>,
+    /// The pointer is on the toast.
+    hovered: Cell<bool>,
+    clock: Cell<Countdown>,
 }
 
 pub struct Ui {
@@ -96,6 +173,8 @@ pub struct Ui {
     banner_label: Retained<NSTextField>,
     /// False from the start of the fade-out; the view hides once it ends.
     banner_shown: Cell<bool>,
+    /// How far the banner pushes the pages down.
+    banner_inset: Cell<CGFloat>,
     search_page: Retained<NSView>,
     pub search: Field,
     status: Retained<NSTextField>,
@@ -122,17 +201,7 @@ impl Ui {
             | NSWindowStyleMask::Miniaturizable
             | NSWindowStyleMask::Resizable
             | NSWindowStyleMask::FullSizeContentView;
-        // SAFETY: a standard initializer call; the window is retained by `Ui`, and released-
-        // when-closed is turned off below before anything can close it.
-        let window = unsafe {
-            NSWindow::initWithContentRect_styleMask_backing_defer(
-                NSWindow::alloc(mtm),
-                rect(0.0, 0.0, WIN_W, WIN_H),
-                style,
-                NSBackingStoreType::Buffered,
-                true,
-            )
-        };
+        let window = MainWindow::create(mtm, rect(0.0, 0.0, WIN_W, WIN_H), style);
         // SAFETY: `Ui` owns the window for the life of the process.
         unsafe { window.setReleasedWhenClosed(false) };
         window.setTitle(&NSString::from_str("requiem"));
@@ -259,13 +328,20 @@ impl Ui {
             PIN_TOP | PIN_RIGHT,
         );
         queue_count.setAlignment(NSTextAlignment::Right);
+        // On the heading's baseline rather than its centre line. Labels draw their text from
+        // the top of their frame, so the baseline is the top less the first-baseline offset.
+        let baseline = heading.frame().origin.y + heading.frame().size.height
+            - heading.firstBaselineOffsetFromTop();
+        let mut f = queue_count.frame();
+        f.origin.y = baseline + queue_count.firstBaselineOffsetFromTop() - f.size.height;
+        queue_count.setFrame(f);
         let queue = Table::new(mtm, list, Kind::Queue);
         let queue_empty = EmptyState::new(mtm, list, Icon::ListMusic, target, sel!(focusSearch:));
         queue_empty.set(
             Icon::ListMusic,
             "Queue is empty",
             "Play or add a search result",
-            "Go to search",
+            Some("Go to search"),
         );
         queue_page.addSubview(&heading);
         queue_page.addSubview(&queue_count);
@@ -291,6 +367,13 @@ impl Ui {
             FLEX_W,
         );
         banner_label.setAlignment(NSTextAlignment::Center);
+        // The stuck banner can outgrow a narrow window; it wraps rather than losing its end.
+        banner_label.setUsesSingleLineMode(false);
+        banner_label.setMaximumNumberOfLines(2);
+        banner_label.setLineBreakMode(NSLineBreakMode::ByWordWrapping);
+        if let Some(cell) = banner_label.cell() {
+            cell.setTruncatesLastVisibleLine(true);
+        }
         banner.addSubview(&banner_rule);
         banner.addSubview(&banner_label);
         banner.setHidden(true);
@@ -315,6 +398,7 @@ impl Ui {
             banner,
             banner_label,
             banner_shown: Cell::new(false),
+            banner_inset: Cell::new(0.0),
             search_page,
             search,
             status,
@@ -337,12 +421,20 @@ impl Ui {
 
     fn toast_view(mtm: MainThreadMarker, target: &AnyObject) -> ToastView {
         let w = 320.0;
-        let view = widgets::panel(
-            mtm,
-            rect(WIN_W - 16.0 - w, PlayerBar::H + 16.0, w, TOAST_H),
-            PIN_RIGHT | PIN_BOTTOM,
-            &theme::bg_3(),
+        let frame = rect(
+            WIN_W - TOAST_RIGHT - w,
+            PlayerBar::H + TOAST_BOTTOM,
+            w,
+            TOAST_H,
         );
+        // SAFETY: `initWithFrame:` is NSView's designated initializer.
+        let panel: Retained<ToastPanel> =
+            unsafe { msg_send![ToastPanel::alloc(mtm), initWithFrame: frame] };
+        // Always active, so leaving the toast while another app is in front still resumes it.
+        widgets::track_hover(&panel, NSTrackingAreaOptions::ActiveAlways);
+        let view: Retained<NSView> = Retained::into_super(panel);
+        view.setAutoresizingMask(PIN_RIGHT | PIN_BOTTOM);
+        widgets::fill(&view, Some(&theme::bg_3()));
         widgets::round(&view, theme::RADIUS);
         widgets::border(&view, &theme::line_2(), 1.0);
         let accent = widgets::panel(mtm, rect(0.0, 0.0, 3.0, TOAST_H), FLEX_H, &theme::bad());
@@ -396,7 +488,12 @@ impl Ui {
             label,
             action,
             id: Cell::new(0),
+            counting: Cell::new(0),
+            said: RefCell::new((0, String::new())),
+            pending: RefCell::new(None),
             shown: Cell::new(false),
+            hovered: Cell::new(false),
+            clock: Cell::new(Countdown::Held(Duration::ZERO)),
         }
     }
 
@@ -432,11 +529,22 @@ impl Ui {
     }
 
     /// Whether the visible table has a row that Return (or with `append`, Cmd+Return) acts on.
-    pub fn has_selection(&self, append: bool) -> bool {
+    pub fn selection(&self) -> Selection {
         match self.view.get() {
-            AppView::Search => self.results.selected_row().is_some(),
-            AppView::Queue => !append && self.queue.selected_row().is_some(),
+            AppView::Search => {
+                let row = self.results.selected_row().is_some();
+                Selection { row, result: row }
+            }
+            AppView::Queue => Selection {
+                row: self.queue.selected_row().is_some(),
+                result: false,
+            },
         }
+    }
+
+    /// Whether `action` would do anything now; for the menus and the palette.
+    pub fn can_run(&self, action: PaletteAction) -> bool {
+        self.vm.borrow().ui().can_run(action, self.selection())
     }
 
     /// Whether something plays, and which controls are live; for the menus.
@@ -445,13 +553,15 @@ impl Ui {
         (vm.ui().is_playing(), vm.ui().controls())
     }
 
-    /// Stops the player, then the window closes on its goodbye. Without a connected player
-    /// the window just closes.
+    /// Whether "Quit and Stop Music" is available.
+    pub fn can_stop_player(&self) -> bool {
+        self.vm.borrow().ui().can_stop_player()
+    }
+
+    /// Stops the player, then the window closes on its goodbye. Does nothing without a
+    /// connected player; the menu item is disabled then.
     pub fn quit_and_stop(&self) {
-        let app = NSApplication::sharedApplication(self.mtm);
-        let connected = self.vm.borrow().ui().connection == vm::Connection::Connected;
-        if !connected || !self.backend.stop_player() {
-            app.terminate(None);
+        if !self.can_stop_player() || !self.backend.stop_player() {
             return;
         }
         // A player that never says goodbye still lets the window go.
@@ -471,7 +581,7 @@ impl Ui {
 
     pub fn open_palette(&self) {
         if !self.palette.is_open() {
-            self.palette.open();
+            self.palette.open(|a| self.can_run(a));
         }
     }
 
@@ -479,7 +589,7 @@ impl Ui {
         if self.palette.is_open() {
             self.close_palette();
         } else {
-            self.palette.open();
+            self.palette.open(|a| self.can_run(a));
         }
     }
 
@@ -497,6 +607,8 @@ impl Ui {
     }
 
     pub fn run_action(&self, action: PaletteAction) {
+        // Clicked or not, the palette is a keyboard tool.
+        widgets::note_key_intent();
         self.close_palette();
         match action {
             PaletteAction::PlayPause => self.intent(Intent::Toggle),
@@ -514,9 +626,24 @@ impl Ui {
     }
 
     pub fn intent(&self, intent: Intent) {
+        self.run(intent);
+    }
+
+    /// Appends result `i`, and confirms it on the row's "+" when it was sent.
+    pub fn append_result(&self, i: usize) {
+        if self.run(Intent::AppendResult(i)) {
+            self.results.confirm_add(i);
+        }
+    }
+
+    /// `intent`; true when it sent anything.
+    fn run(&self, intent: Intent) -> bool {
+        widgets::note_key_event(self.mtm);
         let cmds = self.vm.borrow_mut().intent(intent);
+        let sent = !cmds.is_empty();
         self.send(cmds);
         self.render();
+        sent
     }
 
     /// Sends `cmds`, then whatever the view model raised in answer: the demo backend answers
@@ -534,15 +661,9 @@ impl Ui {
         }
     }
 
-    /// The results empty state's button: "Start a search" runs the typed query, or focuses
-    /// the empty field; "Edit search" focuses the field.
+    /// The results empty state's button, "Edit search".
     pub fn empty_action(&self) {
-        let action = self.vm.borrow().ui().results_empty().map(|e| e.action);
-        if action == Some(EmptyAction::StartSearch) && !self.search.value().trim().is_empty() {
-            self.search_submitted();
-        } else {
-            self.focus_search();
-        }
+        self.focus_search();
     }
 
     pub fn search_submitted(&self) {
@@ -552,15 +673,11 @@ impl Ui {
     /// Plays (or with `append`, appends) the keyboard-selected row of the visible table.
     pub fn activate_selection(&self, append: bool) {
         match self.view.get() {
-            AppView::Search => {
-                if let Some(i) = self.results.selected_row() {
-                    self.intent(if append {
-                        Intent::AppendResult(i)
-                    } else {
-                        Intent::PlayResult(i)
-                    });
-                }
-            }
+            AppView::Search => match self.results.selected_row() {
+                Some(i) if append => self.append_result(i),
+                Some(i) => self.intent(Intent::PlayResult(i)),
+                None => {}
+            },
             AppView::Queue => {
                 if let Some(i) = self.queue.selected_row().filter(|_| !append) {
                     self.play_queue(i);
@@ -614,12 +731,83 @@ impl Ui {
     }
 
     pub fn close_toast(&self) {
+        widgets::note_key_event(self.mtm);
         self.dismiss_toast(self.toast.id.get());
     }
 
-    /// The toast's action button; the view model checks the toast is still the one shown.
+    /// The toast's action button: Undo, its only action.
     pub fn toast_action(&self) {
         self.intent(Intent::Undo);
+    }
+
+    /// Cmd+Z outside a text field: the same undo as the toast's button.
+    pub fn undo(&self) {
+        self.intent(Intent::Undo);
+    }
+
+    /// The Undo menu item's title, and whether it is enabled.
+    pub fn undo_item(&self) -> (&'static str, bool) {
+        let vm = self.vm.borrow();
+        let title = vm.undo_title();
+        (
+            title.unwrap_or("Undo"),
+            title.is_some() && vm.ui().controls().player,
+        )
+    }
+
+    /// Holds the toast's countdown while the pointer is on it, and resumes it with the time
+    /// that was left.
+    pub fn hover_toast(&self, over: bool) {
+        let t = &self.toast;
+        if t.hovered.replace(over) == over || !t.shown.get() {
+            return;
+        }
+        let now = Instant::now();
+        let clock = if over {
+            t.clock.get().hold(now)
+        } else {
+            t.clock.get().resume(now)
+        };
+        t.clock.set(clock);
+        self.schedule_dismissal(t.counting.get(), clock);
+    }
+
+    /// Starts toast `id`'s countdown, held if the pointer already rests on `frame`.
+    fn start_countdown(&self, id: u64, frame: NSRect) {
+        let at = self
+            .root
+            .convertPoint_fromView(self.window.mouseLocationOutsideOfEventStream(), None);
+        let (o, s) = (frame.origin, frame.size);
+        let over = at.x >= o.x && at.x < o.x + s.width && at.y >= o.y && at.y < o.y + s.height;
+        self.start_clock(id, over);
+    }
+
+    fn start_clock(&self, id: u64, held: bool) {
+        let t = &self.toast;
+        t.hovered.set(held);
+        let clock = Countdown::new(Instant::now(), held);
+        t.clock.set(clock);
+        self.schedule_dismissal(id, clock);
+    }
+
+    fn schedule_dismissal(&self, id: u64, clock: Countdown) {
+        let Countdown::Running(end) = clock else {
+            return;
+        };
+        let wait = end.saturating_duration_since(Instant::now());
+        if let Ok(when) = DispatchTime::try_from(wait) {
+            let _ = DispatchQueue::main().after(when, move || {
+                with(|ui| ui.countdown_ended(id, end));
+            });
+        }
+    }
+
+    /// Dismisses toast `id`, unless another replaced it or its countdown was held since.
+    fn countdown_ended(&self, id: u64, end: Instant) {
+        let t = &self.toast;
+        if t.counting.get() == id && t.clock.get() == Countdown::Running(end) {
+            self.dismiss_toast(id);
+        }
     }
 
     fn dismiss_toast(&self, id: u64) {
@@ -663,14 +851,26 @@ impl Ui {
         if self.on_screen() {
             self.render_now();
         } else {
+            self.count_toast();
             self.schedule_tick();
         }
     }
 
-    /// Renders what changed while the window couldn't be seen, once it can.
+    /// Renders what changed while the window couldn't be seen, once it can, without motion.
     pub fn catch_up(&self) {
         if self.on_screen() {
-            self.render_now();
+            widgets::still(|| self.render_now());
+        }
+    }
+
+    /// Starts the countdown of a toast raised while the window can't be seen, so one that
+    /// runs out meanwhile is dropped rather than shown late.
+    fn count_toast(&self) {
+        let id = self.vm.borrow().ui().toast.as_ref().map(|t| t.id);
+        if let Some(id) = id
+            && self.toast.counting.replace(id) != id
+        {
+            self.start_clock(id, false);
         }
     }
 
@@ -688,16 +888,14 @@ impl Ui {
         if let Some(row) = select {
             self.queue.select(row);
         }
+        if self.palette.is_open() {
+            self.palette.set_enabled(|a| self.can_run(a));
+        }
         self.schedule_tick();
     }
 
-    /// Not hidden, minimized or fully covered.
     fn on_screen(&self) -> bool {
-        let w = &self.window;
-        w.isVisible()
-            && !w.isMiniaturized()
-            && !NSApplication::sharedApplication(self.mtm).isHidden()
-            && w.occlusionState().contains(NSWindowOcclusionState::Visible)
+        widgets::window_on_screen(&self.window)
     }
 
     /// Wakes the view model when the banner is due to change on its own.
@@ -746,7 +944,7 @@ impl Ui {
             self.results_empty.view.setHidden(has_rows);
             if let Some(e) = empty {
                 self.results_empty
-                    .set(Icon::Search, &e.heading, &e.sub, e.action.label());
+                    .set(Icon::Search, &e.heading, &e.sub, e.action);
             }
         }
         if let Some(badge) = p.queue_badge {
@@ -772,6 +970,9 @@ impl Ui {
         }
         if let Some(e) = p.elapsed {
             self.bar.set_elapsed(&e);
+        }
+        if let Some(s) = p.seek_spoken {
+            self.bar.set_seek_spoken(&s);
         }
         if let Some(f) = p.progress {
             self.bar.set_progress(f);
@@ -808,12 +1009,60 @@ impl Ui {
         self.results_empty.view.setFrame(list);
     }
 
+    /// Fits the banner to its text at the current width: one line, or two when one is too
+    /// narrow. Returns its height.
+    fn layout_banner(&self) -> CGFloat {
+        let b = self.main.bounds();
+        let l = &self.banner_label;
+        let room = b.size.width - 2.0 * PAD;
+        let font = l
+            .font()
+            .unwrap_or_else(|| theme::font(12.0, Weight::Medium));
+        let text = l.stringValue().to_string();
+        // The label's cell pads its text by 2 pt a side.
+        let text_w = widgets::attributed(&text, &font, &theme::ink_2())
+            .size()
+            .width
+            .ceil()
+            + 4.0;
+        let lines: CGFloat = if text_w > room { 2.0 } else { 1.0 };
+        let line_h = widgets::line_height(&font);
+        let h = BANNER_H + (lines - 1.0) * (line_h - 2.0);
+        self.banner
+            .setFrame(rect(0.0, b.size.height - h, b.size.width, h));
+        let text_h = lines * line_h;
+        l.setFrame(rect(PAD, ((h - text_h) / 2.0).round(), room, text_h));
+        h
+    }
+
+    /// Keeps a shown banner fitted to the window's width.
+    pub fn window_resized(&self) {
+        if self.palette.is_open() {
+            self.palette.layout();
+        }
+        if !self.banner_shown.get() {
+            return;
+        }
+        let h = self.layout_banner();
+        if self.banner_inset.replace(h) != h {
+            let b = self.main.bounds();
+            let page = rect(0.0, 0.0, b.size.width, b.size.height - h);
+            self.search_page.setFrame(page);
+            self.queue_page.setFrame(page);
+        }
+    }
+
     fn show_banner(&self, banner: Option<Banner>) {
         let b = self.main.bounds();
         let shown = banner.is_some();
         if let Some(banner) = &banner {
+            if !self.banner_shown.get()
+                || self.banner_label.stringValue().to_string() != banner.text
+            {
+                widgets::announce(self.mtm, &banner.text);
+            }
             widgets::set_text(&self.banner_label, &banner.text);
-            // The stuck banner can outgrow a narrow window.
+            // Two lines can still be too few at the minimum width.
             self.banner_label
                 .setToolTip(Some(&NSString::from_str(&banner.text)));
             let c = if banner.error {
@@ -823,19 +1072,22 @@ impl Ui {
             };
             self.banner_label.setTextColor(Some(&c));
         }
-        let h = b.size.height - if shown { BANNER_H } else { 0.0 };
-        let page = rect(0.0, 0.0, b.size.width, h);
+        let inset = if shown { self.layout_banner() } else { 0.0 };
+        let page = rect(0.0, 0.0, b.size.width, b.size.height - inset);
         let place_pages = || {
             self.search_page.animator().setFrame(page);
             self.queue_page.animator().setFrame(page);
         };
         let changed = self.banner_shown.replace(shown) != shown;
-        let shift = if changed && !widgets::reduce_motion() {
+        // Also when a shown banner grows to a second line.
+        let moved = self.banner_inset.replace(inset) != inset;
+        let shift = if moved && !widgets::reduce_motion() {
             widgets::STANDARD
         } else {
             Duration::ZERO
         };
-        widgets::animate(&self.main, shift, widgets::EASE_IN_OUT, place_pages, || {});
+        // The banner's own curve, so the pages and the fade move as one.
+        widgets::animate(&self.main, shift, widgets::EASE_OUT, place_pages, || {});
         if !changed {
             return;
         }
@@ -868,16 +1120,81 @@ impl Ui {
     fn show_toast(&self, toast: Option<Toast>) {
         let t = &self.toast;
         let Some(toast) = toast else {
+            t.pending.take();
             if t.shown.replace(false) {
                 self.leave_toast();
             }
             return;
         };
         let swap = t.shown.replace(true);
-        if swap {
-            widgets::crossfade(&t.view, widgets::MICRO);
-        }
         t.id.set(toast.id);
+        // A new toast, or an amended text, is read out; a re-render is not.
+        let said = (toast.id, toast.text.clone());
+        if *t.said.borrow() != said {
+            widgets::announce(self.mtm, &toast.text);
+            *t.said.borrow_mut() = said;
+        }
+        // A toast amended in place keeps its countdown, as does one counted while hidden.
+        let new = t.counting.replace(toast.id) != toast.id;
+        if swap {
+            if new {
+                self.start_clock(toast.id, t.hovered.get());
+            }
+            if t.pending.replace(Some(toast)).is_none() {
+                self.fade_toast_out();
+            }
+            return;
+        }
+        let frame = self.lay_out_toast(&toast);
+        if new {
+            self.start_countdown(toast.id, frame);
+        }
+        self.enter_toast();
+    }
+
+    /// Fades the shown toast's content out at its own size, then lays out the newest pending
+    /// toast and fades that in. Resizing the box mid-fade would clip the old text.
+    fn fade_toast_out(&self) {
+        let t = &self.toast;
+        widgets::animate(
+            &t.view,
+            widgets::motion(widgets::MICRO),
+            widgets::EASE_OUT,
+            || {
+                for v in t.view.subviews().iter() {
+                    v.animator().setAlphaValue(0.0);
+                }
+            },
+            || {
+                with(|ui| ui.fade_toast_in());
+            },
+        );
+    }
+
+    fn fade_toast_in(&self) {
+        let t = &self.toast;
+        // Dismissed meanwhile: the exit is under way.
+        let Some(toast) = t.pending.take() else {
+            return;
+        };
+        self.lay_out_toast(&toast);
+        widgets::animate(
+            &t.view,
+            widgets::motion(widgets::MICRO),
+            widgets::EASE_OUT,
+            || {
+                for v in t.view.subviews().iter() {
+                    v.animator().setAlphaValue(1.0);
+                }
+            },
+            || {},
+        );
+    }
+
+    /// Sizes the toast for `toast` and fills it in; returns its frame. The tables scroll
+    /// clear of it.
+    fn lay_out_toast(&self, toast: &Toast) -> NSRect {
+        let t = &self.toast;
         widgets::set_text(&t.label, &toast.text);
         t.accent.setHidden(!toast.error);
         let text_w = t.label.fittingSize().width;
@@ -895,8 +1212,13 @@ impl Ui {
         };
         let h = base_h + (lines - 1.0) * (line_h - 2.0);
         let root = self.root.bounds();
-        t.view
-            .setFrame(rect(root.size.width - 16.0 - w, PlayerBar::H + 16.0, w, h));
+        let frame = rect(
+            root.size.width - TOAST_RIGHT - w,
+            PlayerBar::H + TOAST_BOTTOM,
+            w,
+            h,
+        );
+        t.view.setFrame(frame);
         let text_h = lines * line_h;
         t.label.setFrame(rect(
             16.0,
@@ -913,15 +1235,13 @@ impl Ui {
             ));
         }
         t.label.setToolTip(Some(&NSString::from_str(&toast.text)));
-        if !swap {
-            self.enter_toast();
-        }
-        let id = toast.id;
-        if let Ok(when) = DispatchTime::try_from(vm::TOAST_DURATION) {
-            let _ = DispatchQueue::main().after(when, move || {
-                with(|ui| ui.dismiss_toast(id));
-            });
-        }
+        self.set_toast_inset(TOAST_BOTTOM + h);
+        frame
+    }
+
+    fn set_toast_inset(&self, inset: CGFloat) {
+        self.results.set_bottom_inset(inset);
+        self.queue.set_bottom_inset(inset);
     }
 
     /// Fades the toast in as it rises into the frame it was given.
@@ -935,10 +1255,14 @@ impl Ui {
         };
         v.setAlphaValue(0.0);
         v.setFrameOrigin(NSPoint::new(at.x, at.y - rise));
+        // A swap's fade-out cut short by a dismissal leaves the content clear.
+        for c in v.subviews().iter() {
+            c.setAlphaValue(1.0);
+        }
         v.setHidden(false);
         widgets::animate(
             v,
-            widgets::STANDARD,
+            widgets::motion(widgets::STANDARD),
             widgets::EASE_OUT,
             || {
                 v.animator().setAlphaValue(1.0);
@@ -961,7 +1285,7 @@ impl Ui {
         let id = t.id.get();
         widgets::animate(
             v,
-            widgets::STANDARD,
+            widgets::motion(TOAST_EXIT),
             widgets::EASE_OUT,
             || {
                 v.animator().setAlphaValue(0.0);
@@ -972,6 +1296,7 @@ impl Ui {
                     let t = &ui.toast;
                     if t.id.get() == id && !t.shown.get() {
                         t.view.setHidden(true);
+                        ui.set_toast_inset(0.0);
                     }
                 });
             },
@@ -994,6 +1319,7 @@ struct Patch {
     queue_badge: Option<Option<String>>,
     now_playing: Option<NowPlaying>,
     elapsed: Option<String>,
+    seek_spoken: Option<String>,
     progress: Option<f64>,
     playing: Option<bool>,
     volume: Option<u8>,
@@ -1019,6 +1345,7 @@ impl Patch {
             }),
             elapsed: (any(Dirty::ELAPSED) || any(Dirty::STATE) || any(Dirty::NOW_PLAYING))
                 .then(|| s.elapsed_text()),
+            seek_spoken: (any(Dirty::ELAPSED) || any(Dirty::NOW_PLAYING)).then(|| s.seek_spoken()),
             progress: (any(Dirty::SEEK) || any(Dirty::NOW_PLAYING) || any(Dirty::STATE))
                 .then(|| s.progress()),
             playing: any(Dirty::STATE).then(|| s.is_playing()),
@@ -1096,10 +1423,31 @@ mod tests {
     }
 
     #[test]
+    fn toast_countdown_holds_and_resumes_with_the_time_left() {
+        let t0 = Instant::now();
+        let s = |n| t0 + Duration::from_secs(n);
+        let c = Countdown::new(t0, false);
+        assert_eq!(c, Countdown::Running(s(4)));
+        let held = c.hold(s(1));
+        assert_eq!(held, Countdown::Held(Duration::from_secs(3)));
+        // Holding again, or resuming a running one, changes nothing.
+        assert_eq!(held.hold(s(2)), held);
+        assert_eq!(c.resume(s(2)), c);
+        assert_eq!(held.resume(s(10)), Countdown::Running(s(13)));
+        // Under the pointer from the start, it waits for the pointer to leave.
+        assert_eq!(
+            Countdown::new(t0, true).resume(s(5)),
+            Countdown::Running(s(9))
+        );
+        // Held past its end, it resumes with nothing left.
+        assert_eq!(c.hold(s(6)).resume(s(7)), Countdown::Running(s(7)));
+    }
+
+    #[test]
     fn empty_results_carry_their_empty_state() {
         let (vm, _) = demo::start_in(crate::args::View::Empty);
         let (rows, empty) = Patch::new(Dirty::RESULTS, vm.ui()).results.unwrap();
         assert!(rows.is_empty());
-        assert_eq!(empty.unwrap().action, EmptyAction::StartSearch);
+        assert_eq!(empty.unwrap().heading, "Search YouTube Music");
     }
 }

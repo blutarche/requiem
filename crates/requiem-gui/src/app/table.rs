@@ -10,15 +10,16 @@ use objc2::runtime::{AnyObject, NSObject, ProtocolObject, Sel};
 use objc2::{DefinedClass, MainThreadOnly, Message, define_class, msg_send, sel};
 use objc2_app_kit::{
     NSAttributedStringNSStringDrawing, NSBezierPath, NSBorderType, NSControlTextEditingDelegate,
-    NSEvent, NSFocusRingType, NSMenu, NSMenuItem, NSResponder, NSScrollView, NSTableColumn,
-    NSTableColumnResizingOptions, NSTableRowView, NSTableView, NSTableViewColumnAutoresizingStyle,
-    NSTableViewDataSource, NSTableViewDelegate, NSTableViewSelectionHighlightStyle,
-    NSTableViewStyle, NSTextAlignment, NSTextField, NSTrackingAreaOptions,
-    NSUserInterfaceItemIdentification, NSView, NSViewFrameDidChangeNotification,
+    NSEvent, NSFocusRingType, NSMenu, NSMenuDelegate, NSMenuItem, NSResponder, NSScrollView,
+    NSTableColumn, NSTableColumnResizingOptions, NSTableRowView, NSTableView,
+    NSTableViewColumnAutoresizingStyle, NSTableViewDataSource, NSTableViewDelegate,
+    NSTableViewSelectionHighlightStyle, NSTableViewStyle, NSTextAlignment, NSTextField,
+    NSTrackingAreaOptions, NSUserInterfaceItemIdentification, NSView,
+    NSViewFrameDidChangeNotification,
 };
 use objc2_core_foundation::CGFloat;
 use objc2_foundation::{
-    MainThreadMarker, NSAttributedString, NSIndexSet, NSInteger, NSNotification,
+    MainThreadMarker, NSAttributedString, NSEdgeInsets, NSIndexSet, NSInteger, NSNotification,
     NSNotificationCenter, NSObjectProtocol, NSPoint, NSRect, NSSize, NSString,
 };
 use requiem_core::Track;
@@ -29,6 +30,7 @@ use super::widgets::{self, FLEX_H, FLEX_W, HoverButton, PIN_BOTTOM, PIN_LEFT, PI
 use crate::vm::{self, Intent, QueueEdit};
 
 pub const ROW_H: CGFloat = 36.0;
+const FOCUS_RING: CGFloat = 2.0;
 const HEADER_H: CGFloat = 32.0;
 const PAD: CGFloat = 12.0;
 
@@ -99,6 +101,8 @@ pub struct ControllerIvars {
     /// Whether the rows' "+" buttons take clicks.
     enabled: Cell<bool>,
     table: OnceCell<Weak<NSTableView>>,
+    /// The row outlined while its context menu is open.
+    menu_row: Cell<Option<NSInteger>>,
 }
 
 define_class!(
@@ -122,6 +126,22 @@ define_class!(
 
     // SAFETY: no required methods.
     unsafe impl NSControlTextEditingDelegate for Controller {}
+
+    // SAFETY: the implemented methods have the protocol's signatures.
+    unsafe impl NSMenuDelegate for Controller {
+        /// Outlines the clicked row, as AppKit's own tables do; the rows draw their own
+        /// backgrounds, so its outline is theirs too.
+        #[unsafe(method(menuWillOpen:))]
+        fn menu_will_open(&self, _menu: &NSMenu) {
+            let row = self.table().map(|t| t.clickedRow()).filter(|&r| r >= 0);
+            self.outline(row);
+        }
+
+        #[unsafe(method(menuDidClose:))]
+        fn menu_did_close(&self, _menu: &NSMenu) {
+            self.outline(None);
+        }
+    }
 
     // SAFETY: the implemented methods have the protocol's signatures.
     unsafe impl NSTableViewDelegate for Controller {
@@ -165,6 +185,9 @@ define_class!(
                     rv.ivars().selected.set(row == selected);
                     rv.paint();
                 });
+                if let Some(t) = table.downcast_ref::<KeyTable>() {
+                    t.show_focus();
+                }
             }
         }
     }
@@ -187,7 +210,7 @@ define_class!(
         #[unsafe(method(contextAdd:))]
         fn context_add(&self, _sender: Option<&AnyObject>) {
             if let Some(row) = self.clicked_row() {
-                ui::with(|ui| ui.intent(Intent::AppendResult(row)));
+                ui::with(|ui| ui.append_result(row));
             }
         }
 
@@ -219,16 +242,8 @@ define_class!(
         #[unsafe(method(addClicked:))]
         fn add_clicked(&self, sender: Option<&NSView>) {
             let (Some(table), Some(sender)) = (self.table(), sender) else { return };
-            let row = table.rowForView(sender);
-            let Ok(index) = usize::try_from(row) else { return };
-            ui::with(|ui| ui.intent(Intent::AppendResult(index)));
-            let col = table.columnWithIdentifier(&NSString::from_str(Col::Add.id()));
-            if let Some(cell) = table
-                .viewAtColumn_row_makeIfNecessary(col, row, false)
-                .and_then(|v| v.downcast::<AddCell>().ok())
-            {
-                cell.confirm();
-            }
+            let Ok(index) = usize::try_from(table.rowForView(sender)) else { return };
+            ui::with(|ui| ui.append_result(index));
         }
     }
 );
@@ -246,6 +261,20 @@ impl Controller {
 
     fn table(&self) -> Option<Retained<NSTableView>> {
         self.ivars().table.get()?.load()
+    }
+
+    fn outline(&self, row: Option<NSInteger>) {
+        let Some(table) = self.table() else { return };
+        let old = self.ivars().menu_row.replace(row);
+        for (r, on) in [(old, false), (row, true)] {
+            if let Some(rv) = r
+                .and_then(|r| table.rowViewAtRow_makeIfNecessary(r, false))
+                .and_then(|rv| rv.downcast::<RowView>().ok())
+            {
+                rv.ivars().outlined.set(on);
+                rv.paint();
+            }
+        }
     }
 
     /// The row a double-click or the context menu is for: the clicked row, not the selection.
@@ -337,11 +366,27 @@ impl Controller {
 
 pub struct KeyTableIvars {
     focused: Cell<bool>,
+    ring: OnceCell<Retained<FocusRing>>,
 }
 
 define_class!(
-    /// A table that tells its rows when it holds keyboard focus. It draws no focus ring;
-    /// the selected row turns from neutral to accent instead.
+    /// An outline over the rows that lets clicks through to them.
+    // SAFETY: NSView has no subclassing requirements; no ivars; no Drop impl.
+    #[unsafe(super(NSView, NSResponder, NSObject))]
+    #[thread_kind = MainThreadOnly]
+    pub struct FocusRing;
+
+    impl FocusRing {
+        #[unsafe(method_id(hitTest:))]
+        fn hit_test(&self, _point: NSPoint) -> Option<Retained<NSView>> {
+            None
+        }
+    }
+);
+
+define_class!(
+    /// A table that tells its rows when it holds keyboard focus. The selected row turns from
+    /// neutral to accent; with no row selected, a ring over the rows shows focus.
     // SAFETY: NSTableView has no subclassing requirements; no Drop impl.
     #[unsafe(super(NSTableView, objc2_app_kit::NSControl, NSView, NSResponder, NSObject))]
     #[thread_kind = MainThreadOnly]
@@ -375,6 +420,7 @@ impl KeyTable {
     fn new_table(mtm: MainThreadMarker, frame: NSRect) -> Retained<NSTableView> {
         let this = Self::alloc(mtm).set_ivars(KeyTableIvars {
             focused: Cell::new(false),
+            ring: OnceCell::new(),
         });
         // SAFETY: `initWithFrame:` is NSView's designated initializer.
         let this: Retained<Self> = unsafe { msg_send![super(this), initWithFrame: frame] };
@@ -393,6 +439,14 @@ impl KeyTable {
             rv.ivars().focused.set(focused);
             rv.paint();
         });
+        self.show_focus();
+    }
+
+    /// The ring, while the table has focus and no selected row to show it.
+    fn show_focus(&self) {
+        if let Some(ring) = self.ivars().ring.get() {
+            ring.setHidden(!(self.focused() && self.selectedRow() < 0));
+        }
     }
 }
 
@@ -415,6 +469,8 @@ pub struct RowIvars {
     current: Cell<bool>,
     /// The table holds keyboard focus.
     focused: Cell<bool>,
+    /// The row's context menu is open.
+    outlined: Cell<bool>,
 }
 
 define_class!(
@@ -454,6 +510,9 @@ define_class!(
             // SAFETY: forwards to the superclass implementation.
             let _: () = unsafe { msg_send![super(self), prepareForReuse] };
             // The pointer may have left while the row was off screen, with no `mouseExited:`.
+            if self.ivars().outlined.replace(false) {
+                self.paint();
+            }
             self.set_hovered(false);
         }
     }
@@ -467,6 +526,7 @@ impl RowView {
             selected: Cell::new(false),
             current: Cell::new(false),
             focused: Cell::new(false),
+            outlined: Cell::new(false),
         });
         // SAFETY: `initWithFrame:` is the designated initializer.
         let this: Retained<Self> = unsafe { msg_send![super(this), initWithFrame: NSRect::ZERO] };
@@ -482,7 +542,7 @@ impl RowView {
             if let Some(add) = v.downcast_ref::<AddCell>()
                 && let Some(b) = add.ivars().button.get()
             {
-                b.set_shown(hovered);
+                b.set_shown(hovered || add.ivars().added.get());
             }
         }
     }
@@ -508,6 +568,8 @@ impl RowView {
             (false, false) => 0.0,
         };
         widgets::fill(self, Some(&theme::mix(base, theme::ACCENT, accent)));
+        let outline = if iv.outlined.get() { FOCUS_RING } else { 0.0 };
+        widgets::border(self, &theme::accent(), outline);
         for v in self.subviews().iter() {
             if let Some(cell) = v.downcast_ref::<TextCell>() {
                 cell.set_row_selected(selected);
@@ -566,6 +628,8 @@ impl TextCell {
         if col == Col::Duration {
             label.setAlignment(NSTextAlignment::Right);
         }
+        // A truncated cell shows its full text on hover.
+        label.setAllowsExpansionToolTips(true);
         this.addSubview(&label);
         add_rule(mtm, &this, w);
         if col == Col::Title {
@@ -618,8 +682,8 @@ pub struct AddCellIvars {
 }
 
 define_class!(
-    /// The cell before Time: in results, a "+" ghost button shown while the row is hovered;
-    /// in the queue, empty, so both tables keep the same columns.
+    /// The results' cell before Time: a "+" ghost button shown while the row is hovered, or
+    /// while it confirms an add with a check.
     // SAFETY: NSView has no subclassing requirements; no Drop impl.
     #[unsafe(super(NSView, NSResponder, NSObject))]
     #[thread_kind = MainThreadOnly]
@@ -662,9 +726,13 @@ impl AddCell {
         this
     }
 
-    /// Swaps "+" for a check for `ADDED_FOR`, fading both ways.
+    /// Swaps "+" for a check for `ADDED_FOR`, fading both ways. The check shows without
+    /// the pointer on the row, after a keyboard or menu add.
     fn confirm(&self) {
         self.fade_added(true);
+        if let Some(b) = self.ivars().button.get() {
+            b.set_shown(true);
+        }
         let generation = self.ivars().generation.get();
         let Ok(when) = DispatchTime::try_from(ADDED_FOR) else {
             return;
@@ -680,10 +748,17 @@ impl AddCell {
     }
 
     fn fade_added(&self, added: bool) {
-        if let Some(b) = self.ivars().button.get() {
-            widgets::crossfade(b, widgets::MICRO);
-        }
+        // The cell, not the button, so the button hiding fades too.
+        widgets::crossfade(self, widgets::motion(widgets::MICRO));
         self.set_added(added);
+        if !added && let Some(b) = self.ivars().button.get() {
+            // SAFETY: a superview holds its subviews, so it is alive while `self` is in it.
+            let row = unsafe { self.superview() };
+            let hovered = row
+                .and_then(|v| v.downcast::<RowView>().ok())
+                .is_some_and(|rv| rv.ivars().hovered.get());
+            b.set_shown(hovered);
+        }
     }
 
     fn set_added(&self, added: bool) {
@@ -708,6 +783,8 @@ pub struct HeaderIvars {
     table: OnceCell<Weak<NSTableView>>,
     /// Per column: title and whether it is right-aligned.
     titles: Vec<(&'static str, bool)>,
+    /// The table has the "+" column.
+    add: bool,
 }
 
 define_class!(
@@ -739,7 +816,8 @@ define_class!(
             let size = 11.0;
             let attrs = widgets::attrs(
                 &theme::font(size, Weight::Medium),
-                &theme::muted_2(),
+                // muted, not the spec's muted-2: 2.74:1 on bg-2 is too faint to read.
+                &theme::muted(),
                 Some(0.12 * size),
             );
             let columns = table.tableColumns();
@@ -779,7 +857,7 @@ impl ColumnHeader {
         let Some(scroll) = table.enclosingScrollView() else {
             return;
         };
-        let widths = column_widths(scroll.contentSize().width);
+        let widths = column_widths(scroll.contentSize().width, self.ivars().add);
         for c in table.tableColumns().iter() {
             match Col::from_id(&c.identifier().to_string()) {
                 Some(Col::Title) => c.setWidth(widths.title),
@@ -812,10 +890,12 @@ struct Widths {
     album: Option<CGFloat>,
 }
 
-/// Text-column widths for a table `width` wide. They fill what the fixed columns leave,
-/// rounding into the last, so the columns end flush with the table.
-fn column_widths(width: CGFloat) -> Widths {
-    let flex = (width - ADD_W - DURATION_W).max(0.0);
+/// Text-column widths for a table `width` wide, with or without the "+" column. They fill
+/// what the fixed columns leave, rounding into the last, so the columns end flush with the
+/// table.
+fn column_widths(width: CGFloat, add: bool) -> Widths {
+    let add_w = if add { ADD_W } else { 0.0 };
+    let flex = (width - add_w - DURATION_W).max(0.0);
     if width < ALBUM_MIN_W {
         let title = (flex * 46.0 / 76.0).floor();
         Widths {
@@ -860,7 +940,8 @@ impl Table {
         table.setAllowsEmptySelection(true);
         table.setFocusRingType(NSFocusRingType::None);
 
-        // Time stays the last column, flush with the table's right edge in both tables.
+        // Time stays the last column, flush with the table's right edge in both tables. Only
+        // results have the "+" column.
         let cols: &[(Col, &str, CGFloat)] = &[
             (Col::Title, "Title", 0.0),
             (Col::Artists, "Artists", 0.0),
@@ -868,8 +949,9 @@ impl Table {
             (Col::Add, "", ADD_W),
             (Col::Duration, "Time", DURATION_W),
         ];
+        let add = kind == Kind::Results;
         let mut titles = Vec::with_capacity(cols.len());
-        for &(col, title, width) in cols {
+        for &(col, title, width) in cols.iter().filter(|c| add || c.0 != Col::Add) {
             let c = NSTableColumn::initWithIdentifier(
                 NSTableColumn::alloc(mtm),
                 &NSString::from_str(col.id()),
@@ -895,12 +977,13 @@ impl Table {
             current: Cell::new(None),
             enabled: Cell::new(true),
             table: OnceCell::new(),
+            menu_row: Cell::new(None),
         });
         // SAFETY: NSObject's `init`.
         let controller: Retained<Controller> = unsafe { msg_send![super(controller), init] };
         let _ = controller.ivars().table.set(Weak::from_retained(&table));
-        // SAFETY: the table's data source, delegate and target, and its menu items' targets, are
-        // weak. The controller lives in the returned `Table` next to the table view, and the
+        // SAFETY: the table's data source, delegate and target, its menu's delegate and its menu
+        // items' targets, are weak. The controller lives in the returned `Table` next to the table view, and the
         // installed `Ui` holds both tables until exit, so the references stay valid. It
         // implements the actions set here.
         unsafe {
@@ -908,13 +991,16 @@ impl Table {
             table.setDelegate(Some(ProtocolObject::from_ref(&*controller)));
             table.setTarget(Some(&controller));
             table.setDoubleAction(Some(sel!(rowDoubleClicked:)));
-            table.setMenu(Some(&context_menu(mtm, kind, &controller)));
+            let menu = context_menu(mtm, kind, &controller);
+            menu.setDelegate(Some(ProtocolObject::from_ref(&*controller)));
+            table.setMenu(Some(&menu));
         }
 
         let view = widgets::view(mtm, frame, FLEX_W | FLEX_H);
         let header = ColumnHeader::alloc(mtm).set_ivars(HeaderIvars {
             table: OnceCell::new(),
             titles,
+            add,
         });
         let hframe = rect(0.0, h - HEADER_H, w, HEADER_H);
         // SAFETY: `initWithFrame:` is NSView's designated initializer.
@@ -935,6 +1021,16 @@ impl Table {
         scroll.contentView().setDrawsBackground(false);
         scroll.setFocusRingType(NSFocusRingType::None);
         view.addSubview(&scroll);
+        // SAFETY: `initWithFrame:` is NSView's designated initializer.
+        let ring: Retained<FocusRing> =
+            unsafe { msg_send![FocusRing::alloc(mtm), initWithFrame: scroll.frame()] };
+        ring.setAutoresizingMask(FLEX_W | FLEX_H);
+        widgets::border(&ring, &theme::accent(), FOCUS_RING);
+        ring.setHidden(true);
+        view.addSubview(&ring);
+        if let Some(t) = table.downcast_ref::<KeyTable>() {
+            let _ = t.ivars().ring.set(ring);
+        }
         let clip = scroll.contentView();
         // SAFETY: the header implements the selector, and it lives as long as the table, in
         // the installed `Ui`, until exit; the observation goes with it.
@@ -958,6 +1054,10 @@ impl Table {
     pub fn set_rows(&self, rows: Vec<RowText>, current: Option<usize>) {
         self.controller.set_rows(rows, current);
         self.table.reloadData();
+        // Reloading can drop the selection.
+        if let Some(t) = self.table.downcast_ref::<KeyTable>() {
+            t.show_focus();
+        }
         // Column widths settle when the table tiles.
         self.header.setNeedsDisplay(true);
     }
@@ -981,6 +1081,40 @@ impl Table {
 
     pub fn selected_row(&self) -> Option<usize> {
         usize::try_from(self.table.selectedRow()).ok()
+    }
+
+    /// Leaves `inset` below the last row, so it can scroll clear of an overlay.
+    pub fn set_bottom_inset(&self, inset: CGFloat) {
+        let Some(scroll) = self.table.enclosingScrollView() else {
+            return;
+        };
+        scroll.setAutomaticallyAdjustsContentInsets(false);
+        scroll.setContentInsets(NSEdgeInsets {
+            top: 0.0,
+            left: 0.0,
+            bottom: inset,
+            right: 0.0,
+        });
+    }
+
+    /// Swaps row `row`'s "+" for a check, if the row is on screen.
+    pub fn confirm_add(&self, row: usize) {
+        let Ok(row) = NSInteger::try_from(row) else {
+            return;
+        };
+        let col = self
+            .table
+            .columnWithIdentifier(&NSString::from_str(Col::Add.id()));
+        if col < 0 {
+            return;
+        }
+        if let Some(cell) = self
+            .table
+            .viewAtColumn_row_makeIfNecessary(col, row, false)
+            .and_then(|v| v.downcast::<AddCell>().ok())
+        {
+            cell.confirm();
+        }
     }
 
     /// Selects the first row unless a row is already selected.
@@ -1081,7 +1215,7 @@ mod tests {
 
     #[test]
     fn columns_split_46_30_24_and_fill_the_table() {
-        let w = column_widths(800.0);
+        let w = column_widths(800.0, true);
         assert_eq!(w.title, 310.0);
         assert_eq!(w.artists, 202.0);
         assert_eq!(w.album, Some(164.0));
@@ -1092,12 +1226,21 @@ mod tests {
     }
 
     #[test]
+    fn the_queue_gives_the_plus_column_to_the_text() {
+        let w = column_widths(800.0, false);
+        assert_eq!(w.title, 331.0);
+        assert_eq!(w.artists, 216.0);
+        assert_eq!(w.album, Some(173.0));
+        assert_eq!(w.title + w.artists + w.album.unwrap() + DURATION_W, 800.0);
+    }
+
+    #[test]
     fn narrow_tables_drop_the_album_column() {
-        let w = column_widths(ALBUM_MIN_W - 1.0);
+        let w = column_widths(ALBUM_MIN_W - 1.0, true);
         assert_eq!(w.album, None);
         assert_eq!(w.title + w.artists + ADD_W + DURATION_W, ALBUM_MIN_W - 1.0);
         assert!(w.title > w.artists);
-        assert!(column_widths(ALBUM_MIN_W).album.is_some());
+        assert!(column_widths(ALBUM_MIN_W, true).album.is_some());
     }
 
     #[test]
