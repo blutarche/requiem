@@ -23,6 +23,7 @@ use objc2_foundation::{
     NSNotificationCenter, NSObjectProtocol, NSPoint, NSRect, NSSize, NSString,
 };
 use requiem_core::Track;
+use requiem_macos::artwork::Cover;
 
 use super::theme::{self, Icon, Weight};
 use super::ui;
@@ -30,6 +31,9 @@ use super::widgets::{self, FLEX_H, FLEX_W, HoverButton, PIN_BOTTOM, PIN_LEFT, PI
 use crate::vm::{self, Intent, QueueEdit};
 
 pub const ROW_H: CGFloat = 36.0;
+/// The title's artwork, before the title.
+const THUMB: CGFloat = 32.0;
+const THUMB_GAP: CGFloat = 10.0;
 const FOCUS_RING: CGFloat = 2.0;
 /// How far the table's focus ring sits outside its rows.
 const RING_OUTSET: CGFloat = 4.0;
@@ -75,13 +79,14 @@ impl Col {
     }
 }
 
-/// One row's text, formatted once per list change.
+/// One row's text, formatted once per list change, and its artwork.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RowText {
     title: String,
     artists: String,
     album: String,
     duration: String,
+    artwork: Option<String>,
 }
 
 pub fn rows(tracks: &[Track]) -> Vec<RowText> {
@@ -92,6 +97,7 @@ pub fn rows(tracks: &[Track]) -> Vec<RowText> {
             artists: vm::artists(t),
             album: t.album.clone().unwrap_or_default(),
             duration: t.duration.map(vm::fmt_time).unwrap_or_default(),
+            artwork: t.artwork_url.clone(),
         })
         .collect()
 }
@@ -377,6 +383,9 @@ impl Controller {
         if let Some(bar) = iv.bar.get() {
             bar.setHidden(!current);
         }
+        if let Some(cover) = iv.cover.get() {
+            cover.set_url(r.artwork.as_deref());
+        }
         Some(Retained::into_super(cell))
     }
 }
@@ -610,6 +619,8 @@ impl RowView {
 pub struct TextCellIvars {
     label: OnceCell<Retained<NSTextField>>,
     bar: OnceCell<Retained<NSView>>,
+    /// The title's artwork.
+    cover: OnceCell<Retained<Cover>>,
     /// Muted text, raised to ink-2 on a selected row.
     secondary: bool,
     row_selected: Cell<bool>,
@@ -617,7 +628,7 @@ pub struct TextCellIvars {
 
 define_class!(
     /// A cell: one truncating label, the row's 1 px bottom rule, and for the title column the
-    /// queue's 2 px current-row marker.
+    /// artwork and the queue's 2 px current-row marker.
     // SAFETY: NSView has no subclassing requirements; no Drop impl.
     #[unsafe(super(NSView, NSResponder, NSObject))]
     #[thread_kind = MainThreadOnly]
@@ -630,6 +641,7 @@ impl TextCell {
         let this = Self::alloc(mtm).set_ivars(TextCellIvars {
             label: OnceCell::new(),
             bar: OnceCell::new(),
+            cover: OnceCell::new(),
             secondary: col != Col::Title,
             row_selected: Cell::new(false),
         });
@@ -644,14 +656,19 @@ impl TextCell {
             Col::Duration => (theme::tabular(14.0, Weight::Regular), theme::muted()),
             _ => (theme::font(14.0, Weight::Regular), theme::muted()),
         };
+        let x = if col == Col::Title {
+            PAD + THUMB + THUMB_GAP
+        } else {
+            PAD
+        };
         let label = widgets::placed_label(
             mtm,
             "",
             &font,
             &color,
-            PAD,
+            x,
             ROW_H / 2.0,
-            w - 2.0 * PAD,
+            w - x - PAD,
             FLEX_W | PIN_TOP | PIN_BOTTOM,
         );
         if col == Col::Duration {
@@ -662,6 +679,15 @@ impl TextCell {
         this.addSubview(&label);
         add_rule(mtm, &this, w);
         if col == Col::Title {
+            let cover = widgets::cover(
+                mtm,
+                rect(PAD, ((ROW_H - THUMB) / 2.0).round(), THUMB, THUMB),
+                4.0,
+                14.0,
+            );
+            cover.setAutoresizingMask(PIN_LEFT);
+            this.addSubview(&cover);
+            let _ = this.ivars().cover.set(cover);
             let bar = widgets::panel(
                 mtm,
                 rect(0.0, 0.0, 2.0, ROW_H),
@@ -1311,6 +1337,7 @@ mod tests {
             artists: artists.into(),
             album: album.into(),
             duration: duration.into(),
+            artwork: None,
         }
     }
 
@@ -1399,5 +1426,17 @@ mod tests {
                 row("Long", "C", "", "1:02:05"),
             ]
         );
+    }
+
+    #[test]
+    fn rows_carry_the_artwork_url() {
+        let mut t = track("One", &["A"], None, None);
+        t.artwork_url = Some("https://lh3.googleusercontent.com/x=w120-h120".into());
+        let rows = rows(&[t, track("Two", &[], None, None)]);
+        assert_eq!(
+            rows[0].artwork.as_deref(),
+            Some("https://lh3.googleusercontent.com/x=w120-h120")
+        );
+        assert_eq!(rows[1].artwork, None);
     }
 }

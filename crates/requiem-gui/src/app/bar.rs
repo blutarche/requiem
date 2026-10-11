@@ -8,6 +8,7 @@ use objc2::sel;
 use objc2_app_kit::{NSTextAlignment, NSTextField, NSView};
 use objc2_core_foundation::CGFloat;
 use objc2_foundation::{MainThreadMarker, NSPoint};
+use requiem_macos::artwork::Cover;
 
 use super::theme::{self, Icon, Weight};
 use super::widgets::{
@@ -18,6 +19,7 @@ use crate::vm::Controls;
 
 pub struct PlayerBar {
     pub view: Retained<NSView>,
+    cover: Retained<Cover>,
     title: FadeLabel,
     artists: FadeLabel,
     prev: Retained<HoverButton>,
@@ -43,6 +45,10 @@ impl PlayerBar {
     const TITLE_Y: CGFloat = 45.0;
     const TITLE_ALONE_Y: CGFloat = Self::H / 2.0;
     const ARTISTS_Y: CGFloat = 26.0;
+    const COVER: CGFloat = 48.0;
+    /// The cover's left edge, and the text's distance from it.
+    const COVER_X: CGFloat = 20.0;
+    const COVER_GAP: CGFloat = 12.0;
 
     pub fn new(mtm: MainThreadMarker, width: CGFloat, target: &AnyObject) -> PlayerBar {
         let h = Self::H;
@@ -60,15 +66,30 @@ impl PlayerBar {
         );
         view.addSubview(&rule);
 
+        let cover = widgets::cover(
+            mtm,
+            rect(
+                Self::COVER_X,
+                (h - Self::COVER) / 2.0,
+                Self::COVER,
+                Self::COVER,
+            ),
+            theme::RADIUS,
+            20.0,
+        );
+        cover.setAutoresizingMask(PIN_LEFT);
+        view.addSubview(&cover);
+
         // Width and the free space on each side shrink in proportion, so the left block and
         // the centred transport never overlap down to the window's minimum width.
-        let left_w = (width - Self::CENTER_W) / 2.0 - 40.0;
+        let text_x = Self::COVER_X + Self::COVER + Self::COVER_GAP;
+        let left_w = (width - Self::CENTER_W) / 2.0 - 20.0 - text_x;
         let title = widgets::placed_label(
             mtm,
             "",
             &theme::font(14.0, Weight::SemiBold),
             &theme::ink(),
-            20.0,
+            text_x,
             Self::TITLE_Y,
             left_w,
             FLEX_W | PIN_LEFT,
@@ -78,7 +99,7 @@ impl PlayerBar {
             "",
             &theme::font(12.0, Weight::Regular),
             &theme::muted(),
-            20.0,
+            text_x,
             Self::ARTISTS_Y,
             left_w,
             FLEX_W | PIN_LEFT,
@@ -204,6 +225,7 @@ impl PlayerBar {
 
         PlayerBar {
             view,
+            cover,
             title: FadeLabel::new(title),
             artists: FadeLabel::new(artists),
             prev,
@@ -219,7 +241,8 @@ impl PlayerBar {
     }
 
     /// `None` when nothing is loaded.
-    pub fn set_track(&self, track: Option<(&str, &str)>, total: &str) {
+    pub fn set_track(&self, track: Option<(&str, &str)>, total: &str, artwork: Option<&str>) {
+        self.cover.set_url(artwork);
         let (title, artists, color) = match track {
             Some((title, artists)) => (title, artists, theme::ink()),
             None => ("Nothing playing", "", theme::muted()),

@@ -27,6 +27,8 @@ use objc2_app_kit::{
 };
 use objc2_foundation::{MainThreadMarker, NSNotification, NSRect, NSString};
 
+use requiem_macos::artwork;
+
 use crate::args::{Args, View};
 use crate::demo;
 use crate::vm::{Intent, PaletteAction, QueueEdit, SEEK_STEP_SECS, VOLUME_STEP, Vm};
@@ -626,6 +628,15 @@ fn menu_bar(mtm: MainThreadMarker, target: &Delegate) -> (Retained<NSMenu>, Reta
     (bar, window)
 }
 
+/// Caches the demo tracks' made-up artwork, so it shows without any fetch.
+fn seed_demo_artwork(mtm: MainThreadMarker) {
+    for (i, track) in demo::results().iter().enumerate() {
+        if let Some(url) = &track.artwork_url {
+            artwork::insert(mtm, url, &artwork::demo_cover(i, 64.0));
+        }
+    }
+}
+
 pub fn run(args: Args) {
     let mtm = MainThreadMarker::new().expect("requiem-gui must start on the main thread");
     let app = NSApplication::sharedApplication(mtm);
@@ -639,6 +650,7 @@ pub fn run(args: Args) {
     // Live messages are dispatched to the main queue, which drains only once `app.run()`
     // starts, after the UI is installed.
     let (vm, backend) = if args.uses_demo_data() {
+        seed_demo_artwork(mtm);
         let (vm, daemon) = demo::start_in(args.view);
         (vm, Backend::Demo(RefCell::new(daemon)))
     } else {

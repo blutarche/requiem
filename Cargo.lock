@@ -817,6 +817,7 @@ dependencies = [
  "objc2-quartz-core",
  "requiem-core",
  "requiem-ipc",
+ "requiem-macos",
 ]
 
 [[package]]
