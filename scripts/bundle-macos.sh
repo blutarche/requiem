@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Assembles target/requiem.app from the release requiemd and requiem-gui binaries.
+# Assembles target/requiem.app from the release requiemd, requiem-gui and requiem (CLI) binaries.
 # Usage: scripts/bundle-macos.sh [--no-build]
 set -euo pipefail
 
@@ -21,10 +21,10 @@ case "${1:-}" in
 esac
 
 if [ "$build" -eq 1 ]; then
-  MACOSX_DEPLOYMENT_TARGET="$BASE_MIN_OS" "$CARGO_BIN" build --release -p requiem-daemon -p requiem-gui
+  MACOSX_DEPLOYMENT_TARGET="$BASE_MIN_OS" "$CARGO_BIN" build --release -p requiem-daemon -p requiem-gui -p requiem-cli
 fi
 
-for bin in requiemd requiem-gui; do
+for bin in requiemd requiem-gui requiem; do
   if [ ! -x "target/release/$bin" ]; then
     echo "bundle-macos.sh: target/release/$bin is missing; build it or drop --no-build" >&2
     exit 1
@@ -50,7 +50,7 @@ rm -rf "$app"
 helper="$app/Contents/Helpers/requiemd.app"
 mkdir -p "$app/Contents/MacOS" "$app/Contents/Frameworks" "$app/Contents/Resources/licenses" \
   "$helper/Contents/MacOS"
-cp target/release/requiem-gui "$app/Contents/MacOS/"
+cp target/release/requiem-gui target/release/requiem "$app/Contents/MacOS/"
 cp target/release/requiemd "$helper/Contents/MacOS/"
 frameworks="$app/Contents/Frameworks"
 licenses="$app/Contents/Resources/licenses"
@@ -91,6 +91,7 @@ embed() {
 
 embed "$helper/Contents/MacOS/requiemd" "@executable_path/../../../../Frameworks"
 embed "$app/Contents/MacOS/requiem-gui" "@executable_path/../Frameworks"
+embed "$app/Contents/MacOS/requiem" "@executable_path/../Frameworks"
 
 # Every remaining dependency must be a system library or inside the bundle.
 for f in "$app"/Contents/MacOS/* "$helper"/Contents/MacOS/* "$frameworks"/*; do
@@ -171,6 +172,7 @@ for d in "$frameworks"/*.dylib; do
   codesign --force --sign - --timestamp=none "$d"
 done
 codesign --force --sign - --timestamp=none "$helper"
+codesign --force --sign - --timestamp=none "$app/Contents/MacOS/requiem"
 codesign --force --sign - --timestamp=none "$app"
 codesign --verify --deep --strict "$app"
 

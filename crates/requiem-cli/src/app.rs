@@ -3,7 +3,10 @@ use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use crossbeam_channel::Receiver;
-use requiem_core::{Command, EnqueueMode, Event, PlayState, SeekTarget, Session, Track};
+use requiem_core::{
+    Command, EnqueueMode, Event, PlayState, ProviderId, SeekTarget, Session, Track, TrackId,
+};
+use serde_json::{Value, json};
 
 const DEFAULT_AWAIT_SECS: f64 = 30.0;
 
@@ -16,7 +19,10 @@ commands:
   search <query>        search; prints numbered results
   play <n>              replace the queue with result n and play it
   add <n>               append result n to the queue
+  play-track <json>     like play, with the track object a --json result line prints
+  add-track <json>      like add, with that track object
   queue                 show the queue (> marks the current track)
+  jump <n>              play queue position n
   remove <n>            remove queue position n
   move <from> <to>      move queue position from so it ends up at to
   clear                 empty the queue and stop
@@ -31,6 +37,15 @@ commands:
   mark <name>           print MARK <name> <unix_millis>
   shutdown-daemon       with --connect: stop the daemon and exit
   help | quit           quit leaves a --connect daemon running";
+
+/// How the REPL writes what it prints.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Format {
+    #[default]
+    Text,
+    /// One JSON object per line, each with a `"type"` field.
+    Json,
+}
 
 /// What the REPL drives: an in-process `Session` or a daemon over IPC.
 pub trait Player {
@@ -90,6 +105,7 @@ struct Hub {
     ui: Mutex<Ui>,
     changed: Condvar,
     out: Mutex<Box<dyn Write + Send>>,
+    format: Format,
 }
 
 impl Hub {
@@ -97,10 +113,32 @@ impl Hub {
         self.ui.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
-    fn say(&self, line: &str) {
+    fn write_line(&self, line: &str) {
         let mut out = self.out.lock().unwrap_or_else(PoisonError::into_inner);
         let _ = writeln!(out, "{line}");
         let _ = out.flush();
+    }
+
+    /// Prints `text` in text mode and `json` in JSON mode.
+    fn emit(&self, text: &str, json: Value) {
+        match self.format {
+            Format::Text => self.write_line(text),
+            Format::Json => self.write_line(&json.to_string()),
+        }
+    }
+
+    fn error(&self, message: &str) {
+        self.emit(
+            &format!("error: {message}"),
+            json!({ "type": "error", "message": message }),
+        );
+    }
+
+    /// JSON mode only: confirms that a command was accepted. Text mode prints nothing.
+    fn ack(&self, command: &str) {
+        if self.format == Format::Json {
+            self.write_line(&json!({ "type": "ack", "command": command }).to_string());
+        }
     }
 
     /// Lines are written before the lock is released so that an `await` woken by this
@@ -113,23 +151,43 @@ impl Hub {
                     return;
                 }
                 if tracks.is_empty() {
-                    self.say("no results");
+                    self.emit("no results", json!({ "type": "no_results" }));
                 }
                 for (i, t) in tracks.iter().enumerate() {
-                    self.say(&format!("  {}. {}", i + 1, track_line(t)));
+                    self.emit(
+                        &format!("  {}. {}", i + 1, track_line(t)),
+                        track_json("result", t, [("index", json!(i + 1))]),
+                    );
                 }
                 ui.results = Some(tracks);
                 ui.seen.results = true;
             }
-            Event::SearchFailed { error, .. } => self.say(&format!("search failed: {error}")),
+            Event::SearchFailed { error, .. } => self.emit(
+                &format!("search failed: {error}"),
+                json!({ "type": "search_failed", "error": error }),
+            ),
             Event::QueueChanged { tracks, current } => {
                 let cur = current.map_or("none".to_owned(), |i| (i + 1).to_string());
-                self.say(&format!("queue: {} tracks, current {cur}", tracks.len()));
+                self.emit(
+                    &format!("queue: {} tracks, current {cur}", tracks.len()),
+                    json!({
+                        "type": "queue_changed",
+                        "count": tracks.len(),
+                        "current": current.map(|i| i + 1),
+                    }),
+                );
                 ui.queue = tracks;
                 ui.current = current;
             }
             Event::NowPlaying { track, duration } => {
-                self.say(&format!("now playing: {}", track_label(&track)));
+                self.emit(
+                    &format!("now playing: {}", track_label(&track)),
+                    track_json(
+                        "now_playing",
+                        &track,
+                        [("duration_ms", json!(duration.map(|d| d.as_millis() as u64)))],
+                    ),
+                );
                 ui.now = Some(track);
                 ui.duration = duration;
                 ui.position = Duration::ZERO;
@@ -137,7 +195,10 @@ impl Hub {
             }
             Event::Position(at) => ui.position = at,
             Event::State(s) => {
-                self.say(&format!("state: {}", state_name(s)));
+                self.emit(
+                    &format!("state: {}", state_name(s)),
+                    json!({ "type": "state", "state": state_name(s) }),
+                );
                 ui.state = s;
                 match s {
                     PlayState::Playing => ui.seen.playing = true,
@@ -146,15 +207,24 @@ impl Hub {
                 }
             }
             Event::Volume(v) => {
-                self.say(&format!("volume: {v}"));
+                self.emit(
+                    &format!("volume: {v}"),
+                    json!({ "type": "volume", "volume": v }),
+                );
                 ui.volume = v;
                 ui.synced = true;
             }
             Event::TrackFailed { track, error } => {
-                self.say(&format!("track failed: {}: {error}", track.title));
+                self.emit(
+                    &format!("track failed: {}: {error}", track.title),
+                    json!({ "type": "track_failed", "title": track.title, "error": error }),
+                );
             }
             Event::ProviderBroken { detail, .. } => {
-                self.say(&format!("provider broken: {detail}"));
+                self.emit(
+                    &format!("provider broken: {detail}"),
+                    json!({ "type": "provider_broken", "detail": detail }),
+                );
             }
         }
         drop(ui);
@@ -174,6 +244,62 @@ fn state_name(s: PlayState) -> &'static str {
         PlayState::Buffering => "buffering",
         PlayState::Stopped => "stopped",
     }
+}
+
+/// `kind` is the object's `"type"`; `extra` adds or overrides fields. `duration_ms` defaults to
+/// the track's own length.
+fn track_json<const N: usize>(kind: &str, t: &Track, extra: [(&str, Value); N]) -> Value {
+    let mut o = json!({
+        "type": kind,
+        "id": { "provider": t.id.provider.0, "id": t.id.id },
+        "title": t.title,
+        "artists": t.artists,
+        "album": t.album,
+        "duration_ms": t.duration.map(|d| d.as_millis() as u64),
+        "artwork_url": t.artwork_url,
+    });
+    for (k, v) in extra {
+        o[k] = v;
+    }
+    o
+}
+
+/// The inverse of `track_json`: a track from a `--json` result line. `type` and `index` are ignored.
+fn parse_track(text: &str) -> Result<Track, String> {
+    let v: Value = serde_json::from_str(text).map_err(|e| format!("bad JSON: {e}"))?;
+    let str_at = |v: &Value, key: &str| {
+        v.get(key)
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+            .ok_or_else(|| format!("missing string field {key}"))
+    };
+    let opt_str = |key: &str| v.get(key).and_then(Value::as_str).map(str::to_owned);
+    let id = v.get("id").ok_or("missing field id")?;
+    let artists = v
+        .get("artists")
+        .and_then(Value::as_array)
+        .ok_or("missing array field artists")?
+        .iter()
+        .map(|a| {
+            a.as_str()
+                .map(str::to_owned)
+                .ok_or("artists must be strings")
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(Track {
+        id: TrackId {
+            provider: ProviderId(str_at(id, "provider")?),
+            id: str_at(id, "id")?,
+        },
+        title: str_at(&v, "title")?,
+        artists,
+        album: opt_str("album"),
+        duration: v
+            .get("duration_ms")
+            .and_then(Value::as_u64)
+            .map(Duration::from_millis),
+        artwork_url: opt_str("artwork_url"),
+    })
 }
 
 fn track_label(t: &Track) -> String {
@@ -226,6 +352,15 @@ pub struct App<'a> {
 impl<'a> App<'a> {
     /// Subscribes and starts the printer thread, which ends when the session shuts down.
     pub fn new(player: &'a dyn Player, out: impl Write + Send + 'static, script: bool) -> Self {
+        Self::with_format(player, out, script, Format::Text)
+    }
+
+    pub fn with_format(
+        player: &'a dyn Player,
+        out: impl Write + Send + 'static,
+        script: bool,
+        format: Format,
+    ) -> Self {
         let hub = Arc::new(Hub {
             ui: Mutex::new(Ui {
                 latest_req: 0,
@@ -243,6 +378,7 @@ impl<'a> App<'a> {
             }),
             changed: Condvar::new(),
             out: Mutex::new(Box::new(out)),
+            format,
         });
         let rx = player.subscribe();
         let h = hub.clone();
@@ -287,8 +423,7 @@ impl<'a> App<'a> {
             return None;
         }
         let reason = self.player.disconnected()?;
-        self.hub
-            .say(&format!("error: player disconnected: {reason}"));
+        self.hub.error(&format!("player disconnected: {reason}"));
         Some(Flow::Exit(if self.script { 2 } else { 1 }))
     }
 
@@ -305,11 +440,10 @@ impl<'a> App<'a> {
             Some((c, a)) => (c, a.trim()),
             None => (line, ""),
         };
-        let say = |s: &str| self.hub.say(s);
         match cmd {
             "search" => {
                 if arg.is_empty() {
-                    say("error: usage: search <query>");
+                    self.hub.error("usage: search <query>");
                     return Flow::Continue;
                 }
                 let req = {
@@ -323,12 +457,24 @@ impl<'a> App<'a> {
                     req,
                     query: arg.to_owned(),
                 });
+                self.hub.ack(cmd);
             }
-            "play" | "add" => {
-                let Some(track) = self.pick(arg) else {
-                    return Flow::Continue;
+            "play" | "add" | "play-track" | "add-track" => {
+                let track = if cmd.ends_with("-track") {
+                    match parse_track(arg) {
+                        Ok(t) => t,
+                        Err(e) => {
+                            self.hub.error(&format!("{cmd}: {e}"));
+                            return Flow::Continue;
+                        }
+                    }
+                } else {
+                    let Some(t) = self.pick(arg) else {
+                        return Flow::Continue;
+                    };
+                    t
                 };
-                if cmd == "play" {
+                if cmd.starts_with("play") {
                     self.clear_playback_seen();
                     self.player.send(Command::Enqueue {
                         tracks: vec![track],
@@ -341,29 +487,53 @@ impl<'a> App<'a> {
                         mode: EnqueueMode::Append,
                     });
                 }
+                self.hub.ack(cmd);
             }
             "queue" => {
                 let ui = self.hub.lock_ui();
                 if ui.queue.is_empty() {
-                    say("queue empty");
+                    self.hub
+                        .emit("queue empty", json!({ "type": "queue_empty" }));
                 }
                 for (i, t) in ui.queue.iter().enumerate() {
-                    let mark = if ui.current == Some(i) { '>' } else { ' ' };
-                    say(&format!("{mark} {}. {}", i + 1, track_line(t)));
+                    let current = ui.current == Some(i);
+                    let mark = if current { '>' } else { ' ' };
+                    self.hub.emit(
+                        &format!("{mark} {}. {}", i + 1, track_line(t)),
+                        track_json(
+                            "queue_item",
+                            t,
+                            [("index", json!(i + 1)), ("current", json!(current))],
+                        ),
+                    );
                 }
             }
+            "jump" => match self.queue_pos(arg) {
+                Some(i) => {
+                    self.clear_playback_seen();
+                    self.player.send(Command::PlayIndex(i));
+                    self.hub.ack(cmd);
+                }
+                None => self.say_no_position(arg),
+            },
             "remove" => match self.queue_pos(arg) {
-                Some(i) => self.player.send(Command::Remove(i)),
+                Some(i) => {
+                    self.player.send(Command::Remove(i));
+                    self.hub.ack(cmd);
+                }
                 None => self.say_no_position(arg),
             },
             "move" => {
                 let mut it = arg.split_whitespace();
                 let (Some(from), Some(to), None) = (it.next(), it.next(), it.next()) else {
-                    say("error: usage: move <from> <to>");
+                    self.hub.error("usage: move <from> <to>");
                     return Flow::Continue;
                 };
                 match (self.queue_pos(from), self.queue_pos(to)) {
-                    (Some(from), Some(to)) => self.player.send(Command::Move { from, to }),
+                    (Some(from), Some(to)) => {
+                        self.player.send(Command::Move { from, to });
+                        self.hub.ack(cmd);
+                    }
                     (None, _) => self.say_no_position(from),
                     (_, None) => self.say_no_position(to),
                 }
@@ -371,6 +541,7 @@ impl<'a> App<'a> {
             "clear" => {
                 self.clear_playback_seen();
                 self.player.send(Command::Clear);
+                self.hub.ack(cmd);
             }
             "next" | "prev" | "pause" | "resume" | "toggle" => {
                 self.clear_playback_seen();
@@ -381,43 +552,54 @@ impl<'a> App<'a> {
                     "resume" => Command::Resume,
                     _ => Command::TogglePause,
                 });
+                self.hub.ack(cmd);
             }
             "seek" => match parse_seek(arg) {
-                Some(t) => self.player.send(Command::Seek(t)),
-                None => say("error: usage: seek <secs|+secs|-secs>"),
+                Some(t) => {
+                    self.player.send(Command::Seek(t));
+                    self.hub.ack(cmd);
+                }
+                None => self.hub.error("usage: seek <secs|+secs|-secs>"),
             },
             "vol" => match arg.parse::<u8>() {
-                Ok(v) if v <= 100 => self.player.send(Command::SetVolume(v)),
-                _ => say("error: usage: vol <0-100>"),
+                Ok(v) if v <= 100 => {
+                    self.player.send(Command::SetVolume(v));
+                    self.hub.ack(cmd);
+                }
+                _ => self.hub.error("usage: vol <0-100>"),
             },
-            "status" => say(&self.status()),
+            "status" => self.status(),
             "sleep" => match parse_secs(arg) {
                 Some(d) => std::thread::sleep(d),
-                None => say("error: usage: sleep <secs>"),
+                None => self.hub.error("usage: sleep <secs>"),
             },
             "await" => return self.await_event(arg),
             "mark" => {
                 if arg.is_empty() {
-                    say("error: usage: mark <name>");
+                    self.hub.error("usage: mark <name>");
                 } else {
                     let ms = SystemTime::now()
                         .duration_since(UNIX_EPOCH)
                         .map_or(0, |d| d.as_millis());
-                    say(&format!("MARK {arg} {ms}"));
+                    self.hub.emit(
+                        &format!("MARK {arg} {ms}"),
+                        json!({ "type": "mark", "name": arg, "unix_millis": ms as u64 }),
+                    );
                 }
             }
-            "help" => say(HELP),
+            "help" => self.hub.emit(HELP, json!({ "type": "help", "text": HELP })),
             "shutdown-daemon" => {
                 if !self.player.remote() {
-                    say("error: not connected to a daemon");
+                    self.hub.error("not connected to a daemon");
                 } else {
                     self.player.send(Command::Shutdown);
+                    self.hub.ack(cmd);
                     return Flow::Quit;
                 }
             }
             "quit" | "exit" => return Flow::Quit,
             other => {
-                say(&format!("error: unknown command {other}"));
+                self.hub.error(&format!("unknown command {other}"));
                 if self.script {
                     return Flow::Exit(2);
                 }
@@ -430,7 +612,7 @@ impl<'a> App<'a> {
     fn pick(&self, arg: &str) -> Option<Track> {
         let ui = self.hub.lock_ui();
         let Some(results) = &ui.results else {
-            self.hub.say("error: no search results yet");
+            self.hub.error("no search results yet");
             return None;
         };
         let track = arg
@@ -439,7 +621,7 @@ impl<'a> App<'a> {
             .and_then(|n| n.checked_sub(1))
             .and_then(|i| results.get(i));
         if track.is_none() {
-            self.hub.say(&format!("error: no result {arg}"));
+            self.hub.error(&format!("no result {arg}"));
         }
         track.cloned()
     }
@@ -454,7 +636,7 @@ impl<'a> App<'a> {
     }
 
     fn say_no_position(&self, arg: &str) {
-        self.hub.say(&format!("error: no queue position {arg}"));
+        self.hub.error(&format!("no queue position {arg}"));
     }
 
     fn clear_playback_seen(&self) {
@@ -464,16 +646,26 @@ impl<'a> App<'a> {
         ui.seen.nowplaying = false;
     }
 
-    fn status(&self) -> String {
+    fn status(&self) {
         let ui = self.hub.lock_ui();
         let track = ui.now.as_ref().map_or("-".to_owned(), track_label);
         let dur = ui.duration.map_or("?:??".to_owned(), mss);
-        format!(
-            "status: {} | {track} | {} / {dur} | volume {}",
-            state_name(ui.state),
-            mss(ui.position),
-            ui.volume
-        )
+        self.hub.emit(
+            &format!(
+                "status: {} | {track} | {} / {dur} | volume {}",
+                state_name(ui.state),
+                mss(ui.position),
+                ui.volume
+            ),
+            json!({
+                "type": "status",
+                "state": state_name(ui.state),
+                "track": ui.now.as_ref().map(|t| track_json("track", t, [])),
+                "position_ms": ui.position.as_millis() as u64,
+                "duration_ms": ui.duration.map(|d| d.as_millis() as u64),
+                "volume": ui.volume,
+            }),
+        );
     }
 
     fn await_event(&self, arg: &str) -> Flow {
@@ -486,7 +678,7 @@ impl<'a> App<'a> {
             "nowplaying" => |s| s.nowplaying,
             _ => {
                 self.hub
-                    .say("error: usage: await <results|playing|stopped|nowplaying> [timeout_secs]");
+                    .error("usage: await <results|playing|stopped|nowplaying> [timeout_secs]");
                 return Flow::Continue;
             }
         };
@@ -495,7 +687,7 @@ impl<'a> App<'a> {
             Some(t) => match parse_secs(t) {
                 Some(d) => d,
                 None => {
-                    self.hub.say("error: bad timeout");
+                    self.hub.error("bad timeout");
                     return Flow::Continue;
                 }
             },
@@ -509,8 +701,7 @@ impl<'a> App<'a> {
             }
             let Some(left) = deadline.checked_duration_since(Instant::now()) else {
                 drop(ui);
-                self.hub
-                    .say(&format!("error: timed out waiting for {what}"));
+                self.hub.error(&format!("timed out waiting for {what}"));
                 return if self.script {
                     Flow::Exit(2)
                 } else {
@@ -536,7 +727,18 @@ pub fn run(
     out: impl Write + Send + 'static,
     script: bool,
 ) -> io::Result<u8> {
-    let app = App::new(player, out, script);
+    run_with_format(player, input, out, script, Format::Text)
+}
+
+/// `run` with a choice of output format.
+pub fn run_with_format(
+    player: &dyn Player,
+    input: impl BufRead,
+    out: impl Write + Send + 'static,
+    script: bool,
+    format: Format,
+) -> io::Result<u8> {
+    let app = App::with_format(player, out, script, format);
     if player.remote() {
         app.sync();
     }
