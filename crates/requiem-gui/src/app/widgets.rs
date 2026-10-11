@@ -1398,6 +1398,7 @@ impl EmptyState {
             rect(((w - 32.0) / 2.0).round(), heading_y + 18.0, 32.0, 32.0),
         );
         iconv.setAutoresizingMask(centred);
+        hide_from_accessibility(&iconv);
         let heading = placed_label(
             mtm,
             "",
