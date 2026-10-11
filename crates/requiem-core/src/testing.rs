@@ -308,8 +308,13 @@ impl Provider for FakeProvider {
                 on_state(state);
                 Ok(())
             }
+            // Like a real provider, a failure ends a pending sign-in and leaves any other
+            // state as it was.
             Err(e) => {
-                self.set_account(AccountState::SignedOut);
+                let mut st = self.state.lock().unwrap();
+                if matches!(st.account, AccountState::Pending { .. }) {
+                    st.account = AccountState::SignedOut;
+                }
                 Err(e)
             }
         }

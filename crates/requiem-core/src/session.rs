@@ -334,14 +334,16 @@ impl Actor {
                     state,
                 } => {
                     self.signing_in.remove(&provider);
+                    let failed = result.is_err();
                     if let Err(e) = result {
                         self.emit(Event::SignInFailed {
                             provider: provider.clone(),
                             error: sign_in_error(&e),
                         });
                     }
-                    // Always announced, so a client waiting on its `SignIn` hears the outcome.
-                    self.set_account(provider, state, true);
+                    // A failure is announced even when it leaves the state as it was, so a
+                    // client waiting on its `SignIn` hears the outcome; a success already was.
+                    self.set_account(provider, state, failed);
                 }
             }
         }

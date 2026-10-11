@@ -1249,6 +1249,10 @@ fn sign_in_reports_pending_then_signed_in() {
     gate.release();
     r.wait_event(is_account(signed_in()));
     assert_eq!(r.provider.sign_in_calls(), 1);
+    // Announced once: the next event is the volume sent after it.
+    r.send(Command::SetVolume(55));
+    let next = r.wait_event(|e| matches!(e, Event::Account { .. } | Event::Volume(_)));
+    assert_eq!(next, Event::Volume(55));
 }
 
 #[test]
