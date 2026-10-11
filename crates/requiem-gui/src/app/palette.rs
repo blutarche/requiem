@@ -262,11 +262,9 @@ impl Palette {
             return;
         }
         // Sign In and Sign Out are listed only while they apply.
-        if self.open.get() {
-            if self.listed() != *self.shown.borrow() {
-                self.filter();
-                return;
-            }
+        if self.open.get() && self.listed() != *self.shown.borrow() {
+            self.filter();
+            return;
         }
         let was = self.highlight_text();
         let flags = self.shown_enabled();
