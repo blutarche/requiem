@@ -18,3 +18,6 @@ requiem-ipc.workspace = true
 requiem-macos.workspace = true
 crossbeam-channel.workspace = true
 libc.workspace = true
+
+[target.'cfg(target_os = "linux")'.dependencies]
+requiem-linux.workspace = true
