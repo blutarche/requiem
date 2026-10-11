@@ -9,7 +9,8 @@ use requiem_ipc::Server;
 use requiem_macos::{UiAction, ViewTracker};
 
 /// Runs the platform UI on the main thread until `stop` fires. On macOS that is the status
-/// item and media keys; elsewhere it only waits. `stop_tx` is how the UI asks to quit.
+/// item and media keys; on Linux the tray icon and MPRIS, which run on their own threads
+/// while this only waits. `stop_tx` is how the UI asks to quit.
 pub fn run_platform(stop_tx: &Sender<()>, stop: Receiver<()>, server: &Server) {
     thread::scope(|scope| {
         let (views_tx, views) = unbounded();
@@ -17,6 +18,11 @@ pub fn run_platform(stop_tx: &Sender<()>, stop: Receiver<()>, server: &Server) {
         // Closing `done` ends the view thread, which would otherwise wait on the server.
         let (done_tx, done) = bounded::<()>(0);
         let events = server.subscribe();
+        #[cfg(target_os = "linux")]
+        let (desktop, desktop_actions) = {
+            let (tx, rx) = unbounded();
+            (requiem_linux::start(tx), rx)
+        };
         let _ = thread::Builder::new()
             .name("requiem-daemon-view".into())
             .spawn_scoped(scope, move || {
@@ -25,6 +31,10 @@ pub fn run_platform(stop_tx: &Sender<()>, stop: Receiver<()>, server: &Server) {
                     select! {
                         recv(events) -> ev => match ev {
                             Ok(ev) => {
+                                #[cfg(target_os = "linux")]
+                                if let Some(desktop) = &desktop {
+                                    desktop.apply(&ev);
+                                }
                                 if let Some(view) = tracker.apply(&ev) {
                                     if views_tx.send(view).is_err() {
                                         return;
@@ -54,6 +64,18 @@ pub fn run_platform(stop_tx: &Sender<()>, stop: Receiver<()>, server: &Server) {
                             }
                         }
                         UiAction::Quit => crate::request_stop(stop_tx),
+                    }
+                }
+            });
+        #[cfg(target_os = "linux")]
+        let _ = thread::Builder::new()
+            .name("requiem-daemon-desktop".into())
+            .spawn_scoped(scope, move || {
+                // Ends once the view thread drops `desktop`, the last holder of a sender.
+                for action in desktop_actions {
+                    match action.command() {
+                        Some(cmd) => server.send(cmd),
+                        None => crate::request_stop(stop_tx),
                     }
                 }
             });
