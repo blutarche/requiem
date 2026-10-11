@@ -1,5 +1,6 @@
 //! AppKit and MediaPlayer side. Everything here runs on the main thread.
 
+pub mod art;
 mod now_playing;
 mod status;
 

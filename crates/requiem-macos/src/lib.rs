@@ -1,4 +1,5 @@
-//! macOS menu-bar status item, Now Playing and media keys for the player daemon.
+//! macOS menu-bar status item, Now Playing and media keys for the player daemon, and the
+//! artwork loader it shares with the GUI.
 //!
 //! On other OSes the types still exist and `run` only waits for `stop`.
 
@@ -7,10 +8,15 @@ use std::time::Duration;
 use crossbeam_channel::{Receiver, Sender};
 use requiem_core::PlayState;
 
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+mod art;
 #[cfg(target_os = "macos")]
 mod macos;
 mod view;
 
+/// Artwork loading and the cover view.
+#[cfg(target_os = "macos")]
+pub use macos::art as artwork;
 pub use view::ViewTracker;
 
 /// What the status item and Now Playing show. `artists` is joined for display.

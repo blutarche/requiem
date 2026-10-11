@@ -13,11 +13,26 @@ crossbeam-channel.workspace = true
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2.workspace = true
 block2.workspace = true
+ureq.workspace = true
 dispatch2 = { version = "0.3.1", default-features = false, features = ["std", "objc2"] }
+objc2-core-foundation = { version = "0.3.2", default-features = false, features = ["std", "CFCGTypes"] }
+objc2-core-graphics = { version = "0.3.2", default-features = false, features = ["std", "CGColor"] }
+objc2-quartz-core = { version = "0.3.2", default-features = false, features = [
+    "std",
+    "objc2-core-foundation",
+    "objc2-core-graphics",
+    "CAAnimation",
+    "CALayer",
+    "CAMediaTiming",
+    "CAMediaTimingFunction",
+] }
 objc2-foundation = { workspace = true, features = [
     "std",
+    "NSArray",
+    "NSData",
     "NSDate",
     "NSDictionary",
+    "NSEnumerator",
     "NSGeometry",
     "NSObjCRuntime",
     "NSObject",
@@ -26,21 +41,47 @@ objc2-foundation = { workspace = true, features = [
 ] }
 objc2-app-kit = { workspace = true, features = [
     "std",
+    "block2",
     "objc2-core-foundation",
+    "objc2-core-graphics",
+    "objc2-quartz-core",
+    "NSAccessibility",
+    "NSAccessibilityConstants",
+    "NSAccessibilityProtocols",
+    "NSAppearance",
     "NSApplication",
+    "NSBezierPath",
+    "NSBitmapImageRep",
     "NSButton",
+    "NSButtonCell",
+    "NSCell",
+    "NSColor",
     "NSControl",
     "NSEvent",
+    "NSFont",
+    "NSGraphics",
     "NSGraphicsContext",
     "NSImage",
+    "NSImageRep",
+    "NSImageView",
     "NSMenu",
     "NSMenuItem",
+    "NSParagraphStyle",
+    "NSPopover",
     "NSResponder",
     "NSRunningApplication",
+    "NSScreen",
+    "NSSlider",
     "NSStatusBar",
     "NSStatusBarButton",
     "NSStatusItem",
+    "NSText",
+    "NSTextField",
     "NSView",
+    "NSViewController",
+    "NSVisualEffectView",
+    "NSWindow",
+    "NSWorkspace",
 ] }
 objc2-media-player = { workspace = true, features = [
     "std",
