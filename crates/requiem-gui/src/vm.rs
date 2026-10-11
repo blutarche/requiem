@@ -297,10 +297,14 @@ impl Browse {
     }
 }
 
-/// The host of `url`, as the sign-in panel's "Open www.google.com" names it.
-pub fn url_host(url: &str) -> &str {
-    let rest = url.split_once("://").map_or(url, |(_, rest)| rest);
-    rest.split(['/', '?', '#']).next().unwrap_or(rest)
+/// What the sign-in panel tells the user to open: the whole address, which is where the code
+/// is entered, without its scheme.
+pub fn sign_in_hint(url: &str) -> String {
+    let shown = url.split_once("://").map_or(url, |(_, rest)| rest);
+    format!(
+        "On any device, go to {} and enter this code.",
+        shown.trim_end_matches('/')
+    )
 }
 
 /// "Code expires in 3 min": whole minutes, rounded up, so it never reads 0 while valid.
@@ -3900,10 +3904,14 @@ mod tests {
     }
 
     #[test]
-    fn the_sign_in_button_names_the_host() {
-        assert_eq!(url_host("https://www.google.com/device"), "www.google.com");
-        assert_eq!(url_host("https://example.com"), "example.com");
-        assert_eq!(url_host("example.com/x?y"), "example.com");
+    fn the_sign_in_text_names_the_whole_address() {
+        let hint = sign_in_hint("https://www.google.com/device");
+        assert_eq!(
+            hint,
+            "On any device, go to www.google.com/device and enter this code."
+        );
+        assert!(hint.contains("/device"));
+        assert!(sign_in_hint("example.com/x/").contains("example.com/x and"));
     }
 
     #[test]

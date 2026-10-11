@@ -109,7 +109,7 @@ const STATUS_H: CGFloat = 26.0;
 const COLLECTION_COVER: CGFloat = 120.0;
 const BACK_H: CGFloat = 28.0;
 const BUTTON_H: CGFloat = 36.0;
-const SIGN_IN_W: CGFloat = 440.0;
+const SIGN_IN_W: CGFloat = 560.0;
 const SIGN_IN_H: CGFloat = 250.0;
 /// How often the sign-in panel's countdown is redrawn.
 const EXPIRY_TICK: Duration = Duration::from_secs(30);
@@ -675,6 +675,18 @@ impl Ui {
         open.set_action(target, sel!(openHost:));
         let cancel = HoverButton::secondary(mtm, rect(0.0, 0.0, 0.0, BUTTON_H));
         cancel.set_action(target, sel!(cancelSignIn:));
+        // A long address wraps rather than losing its end.
+        sub.setUsesSingleLineMode(false);
+        sub.setMaximumNumberOfLines(2);
+        sub.setLineBreakMode(NSLineBreakMode::ByWordWrapping);
+        let two_lines = 2.0 * widgets::line_height(&theme::font(14.0, Weight::Regular));
+        let mut f = sub.frame();
+        f.origin.y -= two_lines - f.size.height;
+        f.size.height = two_lines;
+        sub.setFrame(f);
+        for l in [&sub, &code] {
+            l.setSelectable(true);
+        }
         for v in [&heading, &sub, &code, &expiry] {
             view.addSubview(v);
         }
@@ -1625,16 +1637,12 @@ impl Ui {
 
     fn show_sign_in(&self, url: &str, code: &str, expires_at_unix: u64) {
         let p = &self.sign_in;
-        let host = vm::url_host(url);
-        widgets::set_text(
-            &p.sub,
-            &format!("On any device, open {host} and enter this code."),
-        );
+        widgets::set_text(&p.sub, &vm::sign_in_hint(url));
         widgets::set_text(&p.code, code);
         widgets::set_text(&p.expiry, &vm::expires_text(expires_at_unix, unix_now()));
         let buttons = [
             (&p.copy, "Copy Code".to_owned()),
-            (&p.open, format!("Open {host}")),
+            (&p.open, "Open in Browser".to_owned()),
             (&p.cancel, "Cancel".to_owned()),
         ];
         let widths: Vec<CGFloat> = buttons.iter().map(|(b, t)| b.set_label(t)).collect();
