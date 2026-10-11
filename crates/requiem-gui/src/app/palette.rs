@@ -177,6 +177,11 @@ impl Palette {
                 view.setAccessibilityLabel(Some(&objc2_foundation::NSString::from_str(
                     action.label(),
                 )));
+                if !action.shortcut().is_empty() {
+                    view.setAccessibilityHelp(Some(&objc2_foundation::NSString::from_str(
+                        &format!("{} ({})", action.label(), action.shortcut()),
+                    )));
+                }
                 widgets::hide_from_accessibility(&label);
                 widgets::hide_from_accessibility(&keys);
                 widgets::track_hover(&view, NSTrackingAreaOptions::empty());
