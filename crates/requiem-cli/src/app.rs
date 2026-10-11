@@ -147,7 +147,7 @@ impl Hub {
     /// Prints `text` in text mode and `json` in JSON mode.
     fn emit(&self, text: &str, json: Value) {
         match self.format {
-            Format::Text => self.write_line(text),
+            Format::Text => self.write_line(&printable(text)),
             Format::Json => self.write_line(&json.to_string()),
         }
     }
@@ -461,6 +461,14 @@ fn item_json(item: &Item, index: usize) -> Value {
             "artwork_url": c.artwork_url,
         }),
     }
+}
+
+/// Replaces control characters, which a terminal would act on, with U+FFFD. Titles, channel
+/// names and API errors come from remote services. JSON mode escapes them already.
+fn printable(text: &str) -> String {
+    text.chars()
+        .map(|c| if c.is_control() { '\u{fffd}' } else { c })
+        .collect()
 }
 
 fn account_text(state: &AccountState) -> String {

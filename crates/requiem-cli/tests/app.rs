@@ -622,6 +622,28 @@ fn script_home(r: &Rig) {
 }
 
 #[test]
+fn text_mode_never_prints_terminal_escapes_from_remote_titles() {
+    let r = rig();
+    let mut t = track("t1");
+    t.title = "a\x1b]0;pwned\x07b\x1b[2Jc\u{9b}31m\x7f\r".into();
+    r.provider.script_browse(
+        Page::Home,
+        vec![Step::ok(vec![Shelf {
+            title: "Sh\x1b[2Jelf".into(),
+            items: vec![Item::Track(t)],
+        }])],
+    );
+    let app = r.app(true);
+    exec_all(&app, "home\nawait results 1");
+    let text = r.out.text();
+    assert!(
+        !text.chars().any(|c| c.is_control() && c != '\n'),
+        "{text:?}"
+    );
+    assert!(text.contains("a\u{fffd}]0;pwned\u{fffd}b"), "{text:?}");
+}
+
+#[test]
 fn home_numbers_items_across_shelves_and_open_lists_a_playlist() {
     let r = rig();
     script_home(&r);
