@@ -25,10 +25,11 @@ pub fn run_platform(stop_tx: &Sender<()>, stop: Receiver<()>, server: &Server) {
                     select! {
                         recv(events) -> ev => match ev {
                             Ok(ev) => {
-                                if let Some(view) = tracker.apply(&ev)
-                                    && views_tx.send(view).is_err()
-                                {
-                                    return;
+                                if let Some(view) = tracker.apply(&ev) {
+                                    if views_tx.send(view).is_err() {
+                                        return;
+                                    }
+                                    requiem_macos::wake();
                                 }
                             }
                             Err(_) => return,
@@ -52,9 +53,7 @@ pub fn run_platform(stop_tx: &Sender<()>, stop: Receiver<()>, server: &Server) {
                                 launch_gui();
                             }
                         }
-                        UiAction::Quit => {
-                            let _ = stop_tx.try_send(());
-                        }
+                        UiAction::Quit => crate::request_stop(stop_tx),
                     }
                 }
             });

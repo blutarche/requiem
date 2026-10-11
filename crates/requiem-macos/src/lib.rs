@@ -35,9 +35,10 @@ pub enum UiAction {
 }
 
 /// Runs the AppKit loop on the calling (main) thread until `stop` fires.
-/// `views` delivers updates (coalesce: apply only the latest per run-loop turn).
+/// `views` delivers updates; of those pending at a [`wake`], only the latest is applied.
 ///
-/// A disconnected `stop` counts as fired. On macOS this panics off the main thread.
+/// On macOS the loop reads `views` and `stop` only when woken: call [`wake`] after every send
+/// on either. A disconnected `stop` counts as fired. On macOS this panics off the main thread.
 pub fn run(views: Receiver<Option<PlayerView>>, actions: Sender<UiAction>, stop: Receiver<()>) {
     #[cfg(target_os = "macos")]
     macos::run(views, actions, stop);
@@ -46,6 +47,12 @@ pub fn run(views: Receiver<Option<PlayerView>>, actions: Sender<UiAction>, stop:
         let _ = (views, actions);
         let _ = stop.recv();
     }
+}
+
+/// Has `run` read `views` and `stop` soon. Callable from any thread, before or during `run`.
+pub fn wake() {
+    #[cfg(target_os = "macos")]
+    macos::wake();
 }
 
 #[cfg(all(test, not(target_os = "macos")))]

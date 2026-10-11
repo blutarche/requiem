@@ -7,13 +7,14 @@ use std::cell::RefCell;
 use std::time::{Duration, Instant};
 
 use crossbeam_channel::{Receiver, Sender, TryRecvError};
+use dispatch2::DispatchQueue;
 use objc2::rc::Retained;
 use objc2::{DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send, sel};
 use objc2_app_kit::{
     NSApplication, NSApplicationActivationPolicy, NSEvent, NSEventModifierFlags, NSEventType,
     NSMenuItem,
 };
-use objc2_foundation::{NSObject, NSPoint, NSRunLoop, NSRunLoopCommonModes, NSTimer};
+use objc2_foundation::{NSObject, NSPoint};
 use requiem_core::PlayState;
 
 use self::now_playing::NowPlaying;
@@ -21,10 +22,14 @@ use self::status::{StatusMenu, menu_action};
 use crate::view::changed;
 use crate::{PlayerView, UiAction};
 
-/// Seconds between drains of `views` and checks of `stop`.
-const TICK: f64 = 0.25;
-/// Below the tracker's 2 s, so one tick of delay cannot swallow a seek it reported.
+/// Below the tracker's 2 s, so a seek it reported still applies after up to 1 s of main-queue
+/// delay.
 const APPLY_TOLERANCE: Duration = Duration::from_secs(1);
+
+thread_local! {
+    /// Set on the main thread while `run` is in `app.run()`.
+    static CONTROLLER: RefCell<Option<Retained<Controller>>> = const { RefCell::new(None) };
+}
 
 /// Playing or about to be: the toggle pauses, and the icon shows playback.
 fn is_active(state: PlayState) -> bool {
@@ -49,19 +54,6 @@ define_class!(
     struct Controller;
 
     impl Controller {
-        #[unsafe(method(tick:))]
-        fn tick(&self, timer: &NSTimer) {
-            let ivars = self.ivars();
-            if !matches!(ivars.stop.try_recv(), Err(TryRecvError::Empty)) {
-                timer.invalidate();
-                self.stop_app();
-                return;
-            }
-            if let Some(view) = ivars.views.try_iter().last() {
-                self.show(view);
-            }
-        }
-
         #[unsafe(method(menuAction:))]
         fn on_menu_action(&self, sender: &NSMenuItem) {
             if let Some(action) = menu_action(sender.tag()) {
@@ -76,6 +68,18 @@ impl Controller {
         let this = Self::alloc(mtm).set_ivars(ivars);
         // SAFETY: NSObject's `init` takes no arguments and returns the initialized object.
         unsafe { msg_send![super(this), init] }
+    }
+
+    /// Checks `stop`, then applies only the latest pending view.
+    fn drain(&self) {
+        let ivars = self.ivars();
+        if !matches!(ivars.stop.try_recv(), Err(TryRecvError::Empty)) {
+            self.stop_app();
+            return;
+        }
+        if let Some(view) = ivars.views.try_iter().last() {
+            self.show(view);
+        }
     }
 
     fn show(&self, view: Option<PlayerView>) {
@@ -94,7 +98,7 @@ impl Controller {
         self.ivars().status.cancel_tracking();
         let app = NSApplication::sharedApplication(self.mtm());
         app.stop(None);
-        // `stop:` takes effect after the next event, and a timer firing is not one.
+        // `stop:` takes effect after the next event, and a main-queue block is not one.
         let wake = NSEvent::otherEventWithType_location_modifierFlags_timestamp_windowNumber_context_subtype_data1_data2(
             NSEventType::ApplicationDefined,
             NSPoint::ZERO,
@@ -110,6 +114,18 @@ impl Controller {
             app.postEvent_atStart(&wake, true);
         }
     }
+}
+
+/// Main-queue blocks run in the run loop's common modes, which include menu tracking, so the
+/// status menu still updates while it is open.
+pub(crate) fn wake() {
+    DispatchQueue::main().exec_async(|| {
+        CONTROLLER.with_borrow(|controller| {
+            if let Some(controller) = controller {
+                controller.drain();
+            }
+        });
+    });
 }
 
 pub(crate) fn run(
@@ -136,25 +152,14 @@ pub(crate) fn run(
         },
     );
     controller.ivars().status.set_target(&controller);
-
-    // SAFETY: `Controller` implements `tick:` taking the timer, and the timer retains it.
-    let timer = unsafe {
-        NSTimer::timerWithTimeInterval_target_selector_userInfo_repeats(
-            TICK,
-            &controller,
-            sel!(tick:),
-            None,
-            true,
-        )
-    };
-    timer.setTolerance(0.05);
-    // Common modes keep the timer firing while the status menu is open.
-    // SAFETY: `NSRunLoopCommonModes` is an immutable string constant from Foundation.
-    unsafe { NSRunLoop::mainRunLoop().addTimer_forMode(&timer, NSRunLoopCommonModes) };
+    CONTROLLER.set(Some(controller.clone()));
+    // Picks up anything sent before `CONTROLLER` was set. Queued rather than called, because
+    // `stop:` before `run` would not end it.
+    wake();
 
     app.run();
 
-    timer.invalidate();
+    CONTROLLER.set(None);
     controller.ivars().now_playing.close();
     controller.ivars().status.remove();
 }
@@ -167,8 +172,6 @@ mod tests {
 
     #[test]
     fn controller_implements_its_selectors() {
-        let class = Controller::class();
-        assert!(class.responds_to(sel!(tick:)));
-        assert!(class.responds_to(sel!(menuAction:)));
+        assert!(Controller::class().responds_to(sel!(menuAction:)));
     }
 }

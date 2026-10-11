@@ -13,6 +13,7 @@ crossbeam-channel.workspace = true
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2.workspace = true
 block2.workspace = true
+dispatch2 = { version = "0.3.1", default-features = false, features = ["std", "objc2"] }
 objc2-foundation = { workspace = true, features = [
     "std",
     "NSDate",
@@ -20,9 +21,7 @@ objc2-foundation = { workspace = true, features = [
     "NSGeometry",
     "NSObjCRuntime",
     "NSObject",
-    "NSRunLoop",
     "NSString",
-    "NSTimer",
     "NSValue",
 ] }
 objc2-app-kit = { workspace = true, features = [

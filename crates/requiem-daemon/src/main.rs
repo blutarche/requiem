@@ -91,9 +91,7 @@ fn main() -> ExitCode {
     let (stop_tx, stop_rx) = bounded::<()>(1);
     let hook_tx = stop_tx.clone();
     let hooks = ServerHooks {
-        on_shutdown: Box::new(move || {
-            let _ = hook_tx.try_send(());
-        }),
+        on_shutdown: Box::new(move || request_stop(&hook_tx)),
     };
     let server = match Server::start(session, hooks) {
         Ok(s) => s,
@@ -119,6 +117,12 @@ fn main() -> ExitCode {
     debug!("shutting down");
     server.shutdown();
     ExitCode::SUCCESS
+}
+
+/// Asks the platform UI to return. The macOS loop sees `stop` only when woken.
+fn request_stop(stop: &Sender<()>) {
+    let _ = stop.try_send(());
+    requiem_macos::wake();
 }
 
 /// Mirrors the playback state; the daemon starts `Stopped`.
@@ -153,7 +157,7 @@ fn idle_exit(
         let idle = counts.gui + counts.cli == 0 && stopped.load(Ordering::Acquire);
         if timer.expired(Instant::now(), idle) {
             debug!("idle for {limit:?}, exiting");
-            let _ = stop.try_send(());
+            request_stop(stop);
             return;
         }
     }
