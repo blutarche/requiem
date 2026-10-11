@@ -580,7 +580,7 @@ impl RowView {
             // Selection without keyboard focus is neutral, as in AppKit.
             theme::LINE_2
         } else if iv.hovered.get() {
-            theme::BG_3
+            theme::ROW_HOVER
         } else if iv.odd.get() || iv.current.get() {
             // The current row's tint over the darker zebra stripe would barely show.
             theme::BG_2

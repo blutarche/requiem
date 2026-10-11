@@ -38,6 +38,8 @@ pub const BG: u32 = 0x0A0A0C;
 pub const BG_2: u32 = 0x121216;
 pub const BG_3: u32 = 0x1A1A20;
 pub const LINE_2: u32 = 0x34343F;
+/// A hovered table row: BG_3 30% toward LINE_2. BG_3 itself is 1.08:1 against a BG_2 stripe.
+pub const ROW_HOVER: u32 = 0x22222A;
 pub const ACCENT: u32 = 0x7C70F5;
 const ACCENT_DEEP: u32 = 0x5A4FC0;
 /// Alphas of `accent_soft` and `selection`.
