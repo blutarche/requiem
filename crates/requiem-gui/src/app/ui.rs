@@ -10,16 +10,21 @@ use objc2::rc::Retained;
 use objc2::runtime::{AnyObject, NSObject, ProtocolObject};
 use objc2::{MainThreadOnly, define_class, msg_send, sel};
 use objc2_app_kit::{
-    NSAnimatablePropertyContainer, NSApplication, NSAttributedStringNSStringDrawing, NSEvent,
-    NSLineBreakMode, NSResponder, NSTextAlignment, NSTextField, NSTextFieldDelegate,
+    NSAlert, NSAlertFirstButtonReturn, NSAnimatablePropertyContainer, NSApplication,
+    NSAttributedStringNSStringDrawing, NSColor, NSEvent, NSFont, NSLineBreakMode, NSPasteboard,
+    NSPasteboardTypeString, NSResponder, NSTextAlignment, NSTextField, NSTextFieldDelegate,
     NSTrackingAreaOptions, NSView, NSWindow, NSWindowStyleMask, NSWindowTitleVisibility,
+    NSWorkspace,
 };
 use objc2_core_foundation::CGFloat;
-use objc2_foundation::{MainThreadMarker, NSPoint, NSRect, NSSize, NSString};
+use objc2_foundation::{MainThreadMarker, NSPoint, NSRect, NSSize, NSString, NSURL};
+use requiem_core::{Collection, Item, Shelf};
+use requiem_macos::artwork::Cover;
 
 use super::backend::{Backend, Msg};
 use super::bar::PlayerBar;
 use super::palette::Palette;
+use super::shelves::Shelves;
 use super::table::{self, Kind, Table};
 use super::theme::{self, Icon, Weight};
 use super::widgets::{
@@ -28,14 +33,51 @@ use super::widgets::{
 };
 use super::{Delegate, MainWindow};
 use crate::vm::{
-    self, Banner, Controls, Dirty, EmptyText, Intent, PaletteAction, QueueEdit, Selection, Toast,
-    UiState, Vm,
+    self, Banner, Controls, Dirty, EmptyText, Intent, LibraryView, List, PageView, PaletteAction,
+    Place, QueueEdit, Selection, Toast, UiState, Vm,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AppView {
+    Home,
     Search,
+    Library,
     Queue,
+    /// A playlist or album opened from Home or the Library; not in the sidebar.
+    Collection,
+}
+
+impl AppView {
+    fn place(self) -> Place {
+        match self {
+            AppView::Home => Place::Home,
+            AppView::Search => Place::Search,
+            AppView::Library => Place::Library,
+            AppView::Queue => Place::Queue,
+            AppView::Collection => Place::Collection,
+        }
+    }
+
+    fn of(place: Place) -> AppView {
+        match place {
+            Place::Home => AppView::Home,
+            Place::Search => AppView::Search,
+            Place::Library => AppView::Library,
+            Place::Queue => AppView::Queue,
+            Place::Collection => AppView::Collection,
+        }
+    }
+}
+
+/// Whether a snapshot of a connected window has what it waits for.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SnapshotState {
+    Waiting,
+    /// The page is in; its covers may still be arriving.
+    Loaded {
+        covers: bool,
+    },
+    Failed(String),
 }
 
 thread_local! {
@@ -64,6 +106,13 @@ const PAD: CGFloat = 24.0;
 /// it.
 const TOP: CGFloat = 20.0;
 const STATUS_H: CGFloat = 26.0;
+const COLLECTION_COVER: CGFloat = 120.0;
+const BACK_H: CGFloat = 28.0;
+const BUTTON_H: CGFloat = 36.0;
+const SIGN_IN_W: CGFloat = 440.0;
+const SIGN_IN_H: CGFloat = 250.0;
+/// How often the sign-in panel's countdown is redrawn.
+const EXPIRY_TICK: Duration = Duration::from_secs(30);
 const TOAST_H: CGFloat = 40.0;
 /// Tall enough for a compact button.
 const TOAST_ACTION_H: CGFloat = 48.0;
@@ -159,6 +208,28 @@ struct ToastView {
     clock: Cell<Countdown>,
 }
 
+/// The Library's device-code panel.
+struct SignInPanel {
+    view: Retained<NSView>,
+    sub: Retained<NSTextField>,
+    code: Retained<NSTextField>,
+    expiry: Retained<NSTextField>,
+    copy: Retained<HoverButton>,
+    open: Retained<HoverButton>,
+    cancel: Retained<HoverButton>,
+}
+
+/// An open collection's cover, name and buttons.
+struct CollectionHead {
+    view: Retained<NSView>,
+    back: Retained<HoverButton>,
+    cover: Retained<Cover>,
+    title: Retained<NSTextField>,
+    sub: Retained<NSTextField>,
+    play: Retained<HoverButton>,
+    add: Retained<HoverButton>,
+}
+
 pub struct Ui {
     mtm: MainThreadMarker,
     pub window: Retained<NSWindow>,
@@ -166,7 +237,9 @@ pub struct Ui {
     vm: RefCell<Vm>,
     backend: Backend,
     view: Cell<AppView>,
+    nav_home: Retained<NavItem>,
     nav_search: Retained<NavItem>,
+    nav_library: Retained<NavItem>,
     nav_queue: Retained<NavItem>,
     main: Retained<NSView>,
     banner: Retained<NSView>,
@@ -175,6 +248,20 @@ pub struct Ui {
     banner_shown: Cell<bool>,
     /// How far the banner pushes the pages down.
     banner_inset: Cell<CGFloat>,
+    home_page: Retained<NSView>,
+    pub shelves: Shelves,
+    home_state: EmptyState,
+    library_page: Retained<NSView>,
+    library_head: Retained<NSView>,
+    library_who: Retained<NSTextField>,
+    library_table: Table,
+    library_state: EmptyState,
+    sign_in: SignInPanel,
+    expiry_scheduled: Cell<bool>,
+    collection_page: Retained<NSView>,
+    collection_head: CollectionHead,
+    collection_table: Table,
+    collection_state: EmptyState,
     search_page: Retained<NSView>,
     pub search: Field,
     status: Retained<NSTextField>,
@@ -260,9 +347,13 @@ impl Ui {
                 text,
             )
         };
-        let nav_search = nav(nav_y - 36.0, AppView::Search, Icon::Search, "Search");
-        let nav_queue = nav(nav_y - 76.0, AppView::Queue, Icon::ListMusic, "Queue");
+        let nav_home = nav(nav_y - 36.0, AppView::Home, Icon::Home, "Home");
+        let nav_search = nav(nav_y - 76.0, AppView::Search, Icon::Search, "Search");
+        let nav_library = nav(nav_y - 116.0, AppView::Library, Icon::Library, "Library");
+        let nav_queue = nav(nav_y - 156.0, AppView::Queue, Icon::ListMusic, "Queue");
+        sidebar.addSubview(&nav_home);
         sidebar.addSubview(&nav_search);
+        sidebar.addSubview(&nav_library);
         sidebar.addSubview(&nav_queue);
         root.addSubview(&sidebar);
 
@@ -353,6 +444,100 @@ impl Ui {
         queue_page.addSubview(&queue_empty.view);
         main.addSubview(&queue_page);
 
+        // Home page.
+        let home_page = widgets::view(mtm, rect(0.0, 0.0, mw, mh), FLEX_W | FLEX_H);
+        let shelves = Shelves::new(mtm, rect(0.0, 0.0, mw, mh - TOP));
+        let home_state = EmptyState::new(
+            mtm,
+            rect(0.0, 0.0, mw, mh),
+            Icon::Home,
+            target,
+            sel!(refresh:),
+        );
+        home_page.addSubview(&shelves.view);
+        home_page.addSubview(&home_state.view);
+        main.addSubview(&home_page);
+
+        // Library page.
+        let library_page = widgets::view(mtm, rect(0.0, 0.0, mw, mh), FLEX_W | FLEX_H);
+        let library_head = widgets::view(
+            mtm,
+            rect(0.0, mh - TOP - Field::H - 8.0, mw, Field::H + 8.0),
+            FLEX_W | PIN_TOP,
+        );
+        let hy = (Field::H + 8.0) / 2.0;
+        let library_title = widgets::placed_label(
+            mtm,
+            "Library",
+            &heading_font,
+            &theme::ink(),
+            PAD,
+            hy,
+            200.0,
+            PIN_TOP | PIN_LEFT,
+        );
+        let library_who = widgets::placed_label(
+            mtm,
+            "",
+            &count_font,
+            &theme::muted(),
+            mw - PAD - 90.0 - 12.0 - 260.0,
+            hy,
+            260.0,
+            PIN_TOP | PIN_RIGHT,
+        );
+        library_who.setAlignment(NSTextAlignment::Right);
+        let sign_out = HoverButton::secondary(mtm, rect(mw - PAD - 90.0, hy - 16.0, 90.0, 32.0));
+        let w = sign_out.set_label("Sign Out");
+        sign_out.setFrame(rect(mw - PAD - w, hy - 16.0, w, 32.0));
+        sign_out.setAutoresizingMask(PIN_TOP | PIN_RIGHT);
+        sign_out.set_action(target, sel!(signOut:));
+        library_who.setFrame(rect(
+            mw - PAD - w - 12.0 - 260.0,
+            library_who.frame().origin.y,
+            260.0,
+            library_who.frame().size.height,
+        ));
+        library_head.addSubview(&library_title);
+        library_head.addSubview(&library_who);
+        library_head.addSubview(&sign_out);
+        let library_table = Table::new(mtm, list, Kind::Library);
+        let library_state = EmptyState::new(
+            mtm,
+            rect(0.0, 0.0, mw, mh),
+            Icon::Library,
+            target,
+            sel!(libraryAction:),
+        );
+        let sign_in = Self::sign_in_panel(mtm, mw, mh, target);
+        library_page.addSubview(&library_head);
+        library_page.addSubview(&library_table.view);
+        library_page.addSubview(&library_state.view);
+        library_page.addSubview(&sign_in.view);
+        main.addSubview(&library_page);
+
+        // Collection page.
+        let collection_page = widgets::view(mtm, rect(0.0, 0.0, mw, mh), FLEX_W | FLEX_H);
+        let collection_head = Self::collection_head(mtm, mw, mh, target);
+        let collection_list = rect(
+            PAD,
+            0.0,
+            mw - 2.0 * PAD,
+            collection_head.view.frame().origin.y - 16.0,
+        );
+        let collection_table = Table::new(mtm, collection_list, Kind::Collection);
+        let collection_state = EmptyState::new(
+            mtm,
+            collection_list,
+            Icon::ListMusic,
+            target,
+            sel!(refresh:),
+        );
+        collection_page.addSubview(&collection_head.view);
+        collection_page.addSubview(&collection_table.view);
+        collection_page.addSubview(&collection_state.view);
+        main.addSubview(&collection_page);
+
         let banner = widgets::panel(
             mtm,
             rect(0.0, mh - BANNER_H, mw, BANNER_H),
@@ -395,14 +580,30 @@ impl Ui {
             root,
             vm: RefCell::new(vm),
             backend,
-            view: Cell::new(AppView::Search),
+            view: Cell::new(AppView::Home),
+            nav_home,
             nav_search,
+            nav_library,
             nav_queue,
             main,
             banner,
             banner_label,
             banner_shown: Cell::new(false),
             banner_inset: Cell::new(0.0),
+            home_page,
+            shelves,
+            home_state,
+            library_page,
+            library_head,
+            library_who,
+            library_table,
+            library_state,
+            sign_in,
+            expiry_scheduled: Cell::new(false),
+            collection_page,
+            collection_head,
+            collection_table,
+            collection_state,
             search_page,
             search,
             status,
@@ -419,8 +620,137 @@ impl Ui {
         });
         let query = ui.vm.borrow().ui().query.clone();
         ui.search.set_value(&query);
-        ui.show(AppView::Search);
+        ui.show(AppView::Home);
         ui
+    }
+
+    fn sign_in_panel(
+        mtm: MainThreadMarker,
+        mw: CGFloat,
+        mh: CGFloat,
+        target: &AnyObject,
+    ) -> SignInPanel {
+        let view = widgets::view(
+            mtm,
+            rect(
+                ((mw - SIGN_IN_W) / 2.0).round(),
+                ((mh - SIGN_IN_H) / 2.0 + 8.0).round(),
+                SIGN_IN_W,
+                SIGN_IN_H,
+            ),
+            PIN_LEFT | PIN_RIGHT | PIN_TOP | PIN_BOTTOM,
+        );
+        let centred = |text: &str, font: &NSFont, color: &NSColor, mid_y: CGFloat| {
+            let l = widgets::placed_label(mtm, text, font, color, 0.0, mid_y, SIGN_IN_W, FLEX_W);
+            l.setAlignment(NSTextAlignment::Center);
+            l
+        };
+        let heading = centred(
+            "Sign in to Google",
+            &theme::font(16.0, Weight::SemiBold),
+            &theme::ink(),
+            SIGN_IN_H - 20.0,
+        );
+        let sub = centred(
+            "",
+            &theme::font(14.0, Weight::Regular),
+            &theme::muted(),
+            SIGN_IN_H - 48.0,
+        );
+        let code = centred(
+            "",
+            &theme::font(32.0, Weight::SemiBold),
+            &theme::ink(),
+            SIGN_IN_H - 100.0,
+        );
+        let expiry = centred(
+            "",
+            &theme::font(12.0, Weight::Regular),
+            &theme::muted(),
+            SIGN_IN_H - 144.0,
+        );
+        let copy = HoverButton::primary(mtm, rect(0.0, 0.0, 0.0, BUTTON_H));
+        copy.set_action(target, sel!(copyCode:));
+        let open = HoverButton::secondary(mtm, rect(0.0, 0.0, 0.0, BUTTON_H));
+        open.set_action(target, sel!(openHost:));
+        let cancel = HoverButton::secondary(mtm, rect(0.0, 0.0, 0.0, BUTTON_H));
+        cancel.set_action(target, sel!(cancelSignIn:));
+        for v in [&heading, &sub, &code, &expiry] {
+            view.addSubview(v);
+        }
+        for b in [&copy, &open, &cancel] {
+            view.addSubview(b);
+        }
+        view.setHidden(true);
+        SignInPanel {
+            view,
+            sub,
+            code,
+            expiry,
+            copy,
+            open,
+            cancel,
+        }
+    }
+
+    fn collection_head(
+        mtm: MainThreadMarker,
+        mw: CGFloat,
+        mh: CGFloat,
+        target: &AnyObject,
+    ) -> CollectionHead {
+        let h = BACK_H + 12.0 + COLLECTION_COVER;
+        let view = widgets::view(mtm, rect(0.0, mh - TOP - h, mw, h), FLEX_W | PIN_TOP);
+        let back = HoverButton::secondary(mtm, rect(PAD, COLLECTION_COVER + 12.0, 0.0, BACK_H));
+        back.set_action(target, sel!(goBack:));
+        back.setAutoresizingMask(PIN_TOP | PIN_LEFT);
+        let cover = widgets::cover(
+            mtm,
+            rect(PAD, 0.0, COLLECTION_COVER, COLLECTION_COVER),
+            8.0,
+            40.0,
+        );
+        let x = PAD + COLLECTION_COVER + 20.0;
+        let title = widgets::placed_label(
+            mtm,
+            "",
+            &theme::font(20.0, Weight::SemiBold),
+            &theme::ink(),
+            x,
+            COLLECTION_COVER - 14.0,
+            mw - x - PAD,
+            FLEX_W | PIN_TOP,
+        );
+        let sub = widgets::placed_label(
+            mtm,
+            "",
+            &theme::font(14.0, Weight::Regular),
+            &theme::muted(),
+            x,
+            COLLECTION_COVER - 42.0,
+            mw - x - PAD,
+            FLEX_W | PIN_TOP,
+        );
+        let play = HoverButton::primary(mtm, rect(x, 8.0, 0.0, BUTTON_H));
+        play.set_action(target, sel!(playCollection:));
+        let w = play.set_label("Play");
+        play.setFrame(rect(x, 8.0, w, BUTTON_H));
+        let add = HoverButton::secondary(mtm, rect(x + w + 8.0, 8.0, 0.0, BUTTON_H));
+        add.set_action(target, sel!(addCollection:));
+        let aw = add.set_label("Add to Queue");
+        add.setFrame(rect(x + w + 8.0, 8.0, aw, BUTTON_H));
+        for v in [&back as &NSView, &cover, &title, &sub, &play, &add] {
+            view.addSubview(v);
+        }
+        CollectionHead {
+            view,
+            back,
+            cover,
+            title,
+            sub,
+            play,
+            add,
+        }
     }
 
     fn toast_view(mtm: MainThreadMarker, target: &AnyObject) -> ToastView {
@@ -507,6 +837,7 @@ impl Ui {
 
     pub fn show(&self, view: AppView) {
         self.switch_to(view);
+        self.visit(view.place());
         if view == AppView::Search && self.vm.borrow().ui().results.is_empty() {
             self.window.makeFirstResponder(Some(&self.search.text));
             return;
@@ -514,6 +845,13 @@ impl Ui {
         let table = match view {
             AppView::Search => &self.results,
             AppView::Queue => &self.queue,
+            AppView::Library => &self.library_table,
+            AppView::Collection => &self.collection_table,
+            AppView::Home => {
+                // Keeps Space and the arrow keys from landing in a hidden text field.
+                self.window.makeFirstResponder(None);
+                return;
+            }
         };
         // Keeps Space and the arrow keys from landing in a hidden text field.
         self.window.makeFirstResponder(Some(&table.table));
@@ -521,13 +859,36 @@ impl Ui {
         table.select_current();
     }
 
+    /// Tells the view model where the window is, which fetches a page not yet loaded.
+    fn visit(&self, place: Place) {
+        let cmds = self.vm.borrow_mut().intent(Intent::Visit(place));
+        self.send(cmds);
+        self.render();
+    }
+
     /// Shows `view`'s page and marks its nav item, leaving focus where it is.
     fn switch_to(&self, view: AppView) {
         self.view.set(view);
+        self.home_page.setHidden(view != AppView::Home);
         self.search_page.setHidden(view != AppView::Search);
+        self.library_page.setHidden(view != AppView::Library);
         self.queue_page.setHidden(view != AppView::Queue);
-        self.nav_search.set_active(view == AppView::Search);
-        self.nav_queue.set_active(view == AppView::Queue);
+        self.collection_page.setHidden(view != AppView::Collection);
+        // An open collection keeps the nav item of the page it was opened from lit.
+        let lit = match view {
+            AppView::Collection => self
+                .vm
+                .borrow()
+                .ui()
+                .collection
+                .as_ref()
+                .map_or(AppView::Home, |c| AppView::of(c.from)),
+            v => v,
+        };
+        self.nav_home.set_active(lit == AppView::Home);
+        self.nav_search.set_active(lit == AppView::Search);
+        self.nav_library.set_active(lit == AppView::Library);
+        self.nav_queue.set_active(lit == AppView::Queue);
     }
 
     /// The results table has focus with its first row selected.
@@ -546,10 +907,19 @@ impl Ui {
                 let row = self.results.selected_row().is_some();
                 Selection { row, result: row }
             }
+            AppView::Collection => {
+                let row = self.collection_table.selected_row().is_some();
+                Selection { row, result: row }
+            }
+            AppView::Library => Selection {
+                row: self.library_table.selected_row().is_some(),
+                result: false,
+            },
             AppView::Queue => Selection {
                 row: self.queue.selected_row().is_some(),
                 result: false,
             },
+            AppView::Home => Selection::default(),
         }
     }
 
@@ -630,8 +1000,13 @@ impl Ui {
             PaletteAction::PlaySelected => self.activate_selection(false),
             PaletteAction::AddToQueue => self.activate_selection(true),
             PaletteAction::FocusSearch => self.focus_search(),
+            PaletteAction::ShowHome => self.show(AppView::Home),
             PaletteAction::ShowSearch => self.show(AppView::Search),
+            PaletteAction::ShowLibrary => self.show(AppView::Library),
             PaletteAction::ShowQueue => self.show(AppView::Queue),
+            PaletteAction::Refresh => self.intent(Intent::Refresh),
+            PaletteAction::SignIn => self.intent(Intent::SignIn),
+            PaletteAction::SignOut => self.confirm_sign_out(),
             PaletteAction::VolumeUp => self.intent(Intent::VolumeBy(vm::VOLUME_STEP)),
             PaletteAction::VolumeDown => self.intent(Intent::VolumeBy(-vm::VOLUME_STEP)),
             PaletteAction::ClearQueue => self.edit_queue(QueueEdit::Clear),
@@ -642,11 +1017,136 @@ impl Ui {
         self.run(intent);
     }
 
-    /// Appends result `i`, and confirms it on the row's "+" and to VoiceOver when it was sent.
-    pub fn append_result(&self, i: usize) {
-        if self.run(Intent::AppendResult(i)) {
-            self.results.confirm_add(i);
+    /// Appends item `i` of `list`, and confirms it on the row's "+" and to VoiceOver when it
+    /// was sent.
+    pub fn append_row(&self, list: List, i: usize) {
+        if self.run(Intent::Append { list, index: i }) {
+            match list {
+                List::Results => self.results.confirm_add(i),
+                List::Collection => self.collection_table.confirm_add(i),
+                List::Shelf(_) => {}
+            }
             widgets::announce(self.mtm, "Added to queue");
+        }
+    }
+
+    /// A click on a Home card: a track plays its shelf from there; a playlist or album opens.
+    pub fn card_clicked(&self, shelf: usize, index: usize) {
+        match self.shelves.item(shelf, index) {
+            Some(Item::Track(_)) => self.intent(Intent::PlayFrom {
+                list: List::Shelf(shelf),
+                from: index,
+            }),
+            Some(Item::Collection(c)) => self.open_collection(c, Place::Home),
+            None => {}
+        }
+    }
+
+    pub fn card_add(&self, shelf: usize, index: usize) {
+        self.append_row(List::Shelf(shelf), index);
+    }
+
+    pub fn open_library_row(&self, row: usize) {
+        let c = self
+            .vm
+            .borrow()
+            .ui()
+            .library_collections()
+            .get(row)
+            .map(|c| (*c).clone());
+        if let Some(c) = c {
+            self.open_collection(c, Place::Library);
+        }
+    }
+
+    fn open_collection(&self, collection: Collection, from: Place) {
+        self.run(Intent::OpenCollection { collection, from });
+        self.show(AppView::Collection);
+    }
+
+    /// Back from an open collection to the page it was opened from; that page kept its scroll.
+    pub fn go_back(&self) {
+        if self.view.get() != AppView::Collection {
+            return;
+        }
+        let from = self
+            .vm
+            .borrow()
+            .ui()
+            .collection
+            .as_ref()
+            .map_or(Place::Home, |c| c.from);
+        self.show(AppView::of(from));
+    }
+
+    pub fn can_go_back(&self) -> bool {
+        self.view.get() == AppView::Collection
+    }
+
+    pub fn refresh(&self) {
+        self.intent(Intent::Refresh);
+    }
+
+    /// The Library empty state's button: Sign in, or Try again.
+    pub fn library_action(&self) {
+        let signed_out = self.vm.borrow().ui().library_view() == LibraryView::SignedOut;
+        self.intent(if signed_out {
+            Intent::SignIn
+        } else {
+            Intent::Refresh
+        });
+    }
+
+    pub fn play_collection(&self) {
+        self.intent(Intent::PlayFrom {
+            list: List::Collection,
+            from: 0,
+        });
+    }
+
+    pub fn add_collection(&self) {
+        if self.run(Intent::AppendAll(List::Collection)) {
+            widgets::announce(self.mtm, "Added to queue");
+        }
+    }
+
+    pub fn cancel_sign_in(&self) {
+        self.intent(Intent::SignOut);
+    }
+
+    /// Asks before signing out; the Library goes with the account.
+    pub fn confirm_sign_out(&self) {
+        let alert = NSAlert::new(self.mtm);
+        alert.setMessageText(&NSString::from_str("Sign out of Google?"));
+        alert.setInformativeText(&NSString::from_str(
+            "Your Library will be unavailable until you sign in again.",
+        ));
+        alert.addButtonWithTitle(&NSString::from_str("Sign Out"));
+        alert.addButtonWithTitle(&NSString::from_str("Cancel"));
+        if alert.runModal() == NSAlertFirstButtonReturn {
+            self.intent(Intent::SignOut);
+        }
+    }
+
+    pub fn copy_code(&self) {
+        if let LibraryView::Pending { user_code, .. } = self.vm.borrow().ui().library_view() {
+            let pb = NSPasteboard::generalPasteboard();
+            pb.clearContents();
+            // SAFETY: the type static is an immutable framework constant.
+            pb.setString_forType(&NSString::from_str(&user_code), unsafe {
+                NSPasteboardTypeString
+            });
+            widgets::announce(self.mtm, "Code copied");
+        }
+    }
+
+    pub fn open_host(&self) {
+        if let LibraryView::Pending {
+            verification_url, ..
+        } = self.vm.borrow().ui().library_view()
+            && let Some(url) = NSURL::URLWithString(&NSString::from_str(&verification_url))
+        {
+            NSWorkspace::sharedWorkspace().openURL(&url);
         }
     }
 
@@ -688,10 +1188,27 @@ impl Ui {
     pub fn activate_selection(&self, append: bool) {
         match self.view.get() {
             AppView::Search => match self.results.selected_row() {
-                Some(i) if append => self.append_result(i),
-                Some(i) => self.intent(Intent::PlayResult(i)),
+                Some(i) if append => self.append_row(List::Results, i),
+                Some(i) => self.intent(Intent::PlayFrom {
+                    list: List::Results,
+                    from: i,
+                }),
                 None => {}
             },
+            AppView::Collection => match self.collection_table.selected_row() {
+                Some(i) if append => self.append_row(List::Collection, i),
+                Some(i) => self.intent(Intent::PlayFrom {
+                    list: List::Collection,
+                    from: i,
+                }),
+                None => {}
+            },
+            AppView::Library => {
+                if let Some(i) = self.library_table.selected_row().filter(|_| !append) {
+                    self.open_library_row(i);
+                }
+            }
+            AppView::Home => {}
             AppView::Queue => {
                 if let Some(i) = self.queue.selected_row().filter(|_| !append) {
                     self.play_queue(i);
@@ -960,6 +1477,15 @@ impl Ui {
                     .set(Icon::Search, &e.heading, &e.sub, e.action);
             }
         }
+        if let Some((view, shelves)) = p.home {
+            self.show_home(&view, &shelves);
+        }
+        if let Some((view, rows)) = p.library {
+            self.show_library(&view, rows);
+        }
+        if let Some(c) = p.collection {
+            self.show_collection(c);
+        }
         if let Some(badge) = p.queue_badge {
             self.nav_queue.set_count(badge.as_deref());
         }
@@ -1001,12 +1527,210 @@ impl Ui {
             self.bar.set_controls(c);
             self.results.set_enabled(c.player);
             self.queue.set_enabled(c.player);
+            self.library_table.set_enabled(c.player);
+            self.collection_table.set_enabled(c.player);
+            self.collection_head.play.set_enabled(c.player);
+            self.collection_head.add.set_enabled(c.player);
         }
         if let Some(t) = p.toast {
             self.show_toast(t);
         }
         if let Some(b) = p.banner {
             self.show_banner(b);
+        }
+    }
+
+    fn pages(&self) -> [&Retained<NSView>; 5] {
+        [
+            &self.home_page,
+            &self.search_page,
+            &self.library_page,
+            &self.queue_page,
+            &self.collection_page,
+        ]
+    }
+
+    fn show_home(&self, view: &PageView, shelves: &[Shelf]) {
+        let ready = *view == PageView::Ready && shelves.iter().any(|s| !s.items.is_empty());
+        self.shelves.set_shelves(if ready { shelves } else { &[] });
+        self.shelves.view.setHidden(!ready);
+        self.home_state.view.setHidden(ready);
+        if !ready {
+            Self::page_state(&self.home_state, Icon::Home, view, "Home");
+        }
+    }
+
+    /// A page that is loading, failed or empty, in its empty state.
+    fn page_state(state: &EmptyState, icon: Icon, view: &PageView, name: &str) {
+        match view {
+            PageView::Loading => state.set(icon, &format!("Loading {name}"), "", None),
+            PageView::Failed(e) => {
+                state.set(icon, &format!("Couldn't load {name}"), e, Some("Try again"));
+            }
+            PageView::Ready => state.set(icon, &format!("{name} is empty"), "", None),
+        }
+    }
+
+    fn show_library(&self, view: &LibraryView, rows: Vec<table::RowText>) {
+        let panel = matches!(view, LibraryView::Pending { .. });
+        let list = matches!(
+            view,
+            LibraryView::SignedIn {
+                page: PageView::Ready,
+                ..
+            }
+        ) && !rows.is_empty();
+        let head = matches!(view, LibraryView::SignedIn { .. });
+        self.sign_in.view.setHidden(!panel);
+        self.library_head.setHidden(!head);
+        self.library_table.view.setHidden(!list);
+        self.library_state.view.setHidden(panel || list);
+        let state = &self.library_state;
+        match view {
+            LibraryView::Loading => state.set(Icon::Library, "Loading Library", "", None),
+            LibraryView::Unavailable(text) => {
+                state.set(Icon::Library, "Google sign-in isn't set up", text, None);
+            }
+            LibraryView::SignedOut => state.set(
+                Icon::Library,
+                "Sign in to see your Library",
+                "Your playlists and albums from YouTube Music appear here.",
+                Some("Sign in"),
+            ),
+            LibraryView::Pending {
+                verification_url,
+                user_code,
+                expires_at_unix,
+            } => self.show_sign_in(verification_url, user_code, *expires_at_unix),
+            LibraryView::SignedIn { name, page } => {
+                widgets::set_text(
+                    &self.library_who,
+                    &name
+                        .as_deref()
+                        .map_or_else(|| "Signed in".to_owned(), |n| format!("Signed in as {n}")),
+                );
+                if *page == PageView::Ready && rows.is_empty() {
+                    state.set(Icon::Library, "Your Library is empty", "", None);
+                } else if *page != PageView::Ready {
+                    Self::page_state(state, Icon::Library, page, "Library");
+                }
+            }
+        }
+        self.library_table
+            .set_rows(if list { rows } else { Vec::new() }, None);
+        if list {
+            self.library_table.deselect();
+        }
+    }
+
+    fn show_sign_in(&self, url: &str, code: &str, expires_at_unix: u64) {
+        let p = &self.sign_in;
+        let host = vm::url_host(url);
+        widgets::set_text(
+            &p.sub,
+            &format!("On any device, open {host} and enter this code."),
+        );
+        widgets::set_text(&p.code, code);
+        widgets::set_text(&p.expiry, &vm::expires_text(expires_at_unix, unix_now()));
+        let buttons = [
+            (&p.copy, "Copy Code".to_owned()),
+            (&p.open, format!("Open {host}")),
+            (&p.cancel, "Cancel".to_owned()),
+        ];
+        let widths: Vec<CGFloat> = buttons.iter().map(|(b, t)| b.set_label(t)).collect();
+        let total = widths.iter().sum::<CGFloat>() + 8.0 * (widths.len() as CGFloat - 1.0);
+        let mut x = ((SIGN_IN_W - total) / 2.0).round();
+        for ((b, _), w) in buttons.iter().zip(widths) {
+            b.setFrame(rect(x, 20.0, w, BUTTON_H));
+            x += w + 8.0;
+        }
+        self.schedule_expiry();
+    }
+
+    /// Redraws the countdown while the panel shows; "Code expires in N min" moves each minute.
+    fn schedule_expiry(&self) {
+        if self.expiry_scheduled.replace(true) {
+            return;
+        }
+        if let Ok(when) = DispatchTime::try_from(EXPIRY_TICK) {
+            let _ = DispatchQueue::main().after(when, || {
+                with(|ui| ui.expiry_tick());
+            });
+        }
+    }
+
+    fn expiry_tick(&self) {
+        self.expiry_scheduled.set(false);
+        if let LibraryView::Pending {
+            expires_at_unix, ..
+        } = self.vm.borrow().ui().library_view()
+        {
+            widgets::set_text(
+                &self.sign_in.expiry,
+                &vm::expires_text(expires_at_unix, unix_now()),
+            );
+            self.schedule_expiry();
+        }
+    }
+
+    fn show_collection(&self, c: Option<CollectionPatch>) {
+        let Some(c) = c else {
+            self.collection_table.set_rows(Vec::new(), None);
+            return;
+        };
+        let h = &self.collection_head;
+        widgets::set_text(&h.title, &c.collection.title);
+        widgets::set_text(&h.sub, c.collection.subtitle.as_deref().unwrap_or(""));
+        h.cover.set_url(c.collection.artwork_url.as_deref());
+        let back = match c.from {
+            Place::Library => "\u{2039} Library",
+            _ => "\u{2039} Home",
+        };
+        let w = h.back.set_label(back);
+        h.back
+            .setFrame(rect(PAD, h.back.frame().origin.y, w, BACK_H));
+        widgets::accessibility_label(&h.back, &format!("Back to {}", &back[4..]));
+        let ready = c.view == PageView::Ready && !c.rows.is_empty();
+        self.collection_table.view.setHidden(!ready);
+        self.collection_state.view.setHidden(ready);
+        if !ready {
+            Self::page_state(&self.collection_state, Icon::ListMusic, &c.view, "playlist");
+        }
+        self.collection_table
+            .set_rows(if ready { c.rows } else { Vec::new() }, None);
+        h.play.set_shown(true);
+        h.add.set_shown(true);
+        h.play
+            .set_enabled(ready && self.vm.borrow().ui().controls().player);
+        h.add
+            .set_enabled(ready && self.vm.borrow().ui().controls().player);
+    }
+
+    /// What a snapshot of the connected window waits for.
+    pub fn snapshot_state(&self) -> SnapshotState {
+        let vm = self.vm.borrow();
+        let ui = vm.ui();
+        let page = match self.view.get() {
+            AppView::Home => ui.home.view(),
+            AppView::Library => match ui.library_view() {
+                LibraryView::Loading => PageView::Loading,
+                LibraryView::SignedIn { page, .. } => page,
+                _ => PageView::Ready,
+            },
+            AppView::Collection => ui
+                .collection
+                .as_ref()
+                .map_or(PageView::Loading, |c| c.browse.view()),
+            _ => PageView::Ready,
+        };
+        match page {
+            PageView::Loading => SnapshotState::Waiting,
+            PageView::Failed(e) => SnapshotState::Failed(e),
+            PageView::Ready => SnapshotState::Loaded {
+                covers: self.shelves.covers_loading()
+                    || self.library_table.covers_loading()
+                    || self.collection_head.cover.is_loading(),
+            },
         }
     }
 
@@ -1061,8 +1785,9 @@ impl Ui {
         if self.banner_inset.replace(h) != h {
             let b = self.main.bounds();
             let page = rect(0.0, 0.0, b.size.width, b.size.height - h);
-            self.search_page.setFrame(page);
-            self.queue_page.setFrame(page);
+            for p in self.pages() {
+                p.setFrame(page);
+            }
         }
     }
 
@@ -1089,8 +1814,9 @@ impl Ui {
         let inset = if shown { self.layout_banner() } else { 0.0 };
         let page = rect(0.0, 0.0, b.size.width, b.size.height - inset);
         let place_pages = || {
-            self.search_page.animator().setFrame(page);
-            self.queue_page.animator().setFrame(page);
+            for p in self.pages() {
+                p.animator().setFrame(page);
+            }
         };
         let changed = self.banner_shown.replace(shown) != shown;
         // Also when a shown banner grows to a second line.
@@ -1269,6 +1995,9 @@ impl Ui {
     fn set_toast_inset(&self, inset: CGFloat) {
         self.results.set_bottom_inset(inset);
         self.queue.set_bottom_inset(inset);
+        self.library_table.set_bottom_inset(inset);
+        self.collection_table.set_bottom_inset(inset);
+        self.shelves.set_bottom_inset(inset);
     }
 
     /// Fades the toast in as it rises into the frame it was given.
@@ -1340,6 +2069,19 @@ fn spoken(toast: &Toast) -> String {
     }
 }
 
+struct CollectionPatch {
+    collection: Collection,
+    from: Place,
+    view: PageView,
+    rows: Vec<table::RowText>,
+}
+
+fn unix_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs())
+}
+
 struct NowPlaying {
     track: Option<(String, String)>,
     total: String,
@@ -1354,6 +2096,9 @@ struct Patch {
     search_status: Option<Option<(String, bool)>>,
     queue: Option<(Vec<table::RowText>, Option<usize>)>,
     queue_badge: Option<Option<String>>,
+    home: Option<(PageView, Vec<Shelf>)>,
+    library: Option<(LibraryView, Vec<table::RowText>)>,
+    collection: Option<Option<CollectionPatch>>,
     now_playing: Option<NowPlaying>,
     elapsed: Option<String>,
     seek_spoken: Option<String>,
@@ -1373,6 +2118,21 @@ impl Patch {
             search_status: any(Dirty::SEARCH_STATUS).then(|| s.search_status_text()),
             queue: any(Dirty::QUEUE).then(|| (table::rows(&s.queue), s.current)),
             queue_badge: any(Dirty::QUEUE).then(|| s.queue_badge()),
+            home: any(Dirty::HOME).then(|| (s.home.view(), s.home.shelves.clone())),
+            library: (any(Dirty::LIBRARY) || any(Dirty::ACCOUNT)).then(|| {
+                (
+                    s.library_view(),
+                    table::collection_rows(&s.library_collections()),
+                )
+            }),
+            collection: any(Dirty::COLLECTION).then(|| {
+                s.collection.as_ref().map(|c| CollectionPatch {
+                    collection: c.collection.clone(),
+                    from: c.from,
+                    view: c.browse.view(),
+                    rows: table::rows(&c.tracks),
+                })
+            }),
             now_playing: (any(Dirty::NOW_PLAYING) || any(Dirty::STATE)).then(|| NowPlaying {
                 track: s
                     .now_playing
@@ -1411,6 +2171,7 @@ mod tests {
         assert_eq!(p.volume, Some(70));
         assert!(p.results.is_none() && p.search_status.is_none() && p.queue.is_none());
         assert!(p.queue_badge.is_none());
+        assert!(p.home.is_none() && p.library.is_none() && p.collection.is_none());
         assert!(p.now_playing.is_none() && p.elapsed.is_none() && p.progress.is_none());
         assert!(p.playing.is_none() && p.toast.is_none() && p.banner.is_none());
         assert!(p.controls.is_none());

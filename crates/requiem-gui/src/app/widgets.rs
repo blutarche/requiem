@@ -464,7 +464,7 @@ pub fn hide_from_accessibility(v: &NSView) {
 }
 
 /// Makes `v` one accessibility button named `label`; its subviews stay out of the tree.
-fn as_button(v: &NSView, label: &str) {
+pub fn as_button(v: &NSView, label: &str) {
     v.setAccessibilityElement(true);
     // SAFETY: the role static is an immutable framework constant.
     v.setAccessibilityRole(Some(unsafe { NSAccessibilityButtonRole }));

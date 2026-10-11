@@ -21,6 +21,9 @@ const PANEL_W: CGFloat = 520.0;
 const PAD: CGFloat = 8.0;
 const ROW_H: CGFloat = 36.0;
 const NO_MATCH: &str = "No matching actions";
+/// The most rows shown at once, so the panel fits the minimum window height; the rest scroll
+/// into view with the selection.
+const MAX_ROWS: usize = 11;
 
 define_class!(
     /// The backdrop; a click outside the panel closes the palette.
@@ -93,6 +96,8 @@ pub struct Palette {
     rows: Vec<Row>,
     none: Retained<NSTextField>,
     shown: RefCell<Vec<usize>>,
+    /// The first of `shown` that is in view.
+    first: Cell<usize>,
     /// Index into `shown`; always an enabled row.
     selected: Cell<Option<usize>>,
     open: Cell<bool>,
@@ -214,6 +219,7 @@ impl Palette {
             rows,
             none,
             shown: RefCell::new(Vec::new()),
+            first: Cell::new(0),
             selected: Cell::new(None),
             open: Cell::new(false),
         };
@@ -255,6 +261,14 @@ impl Palette {
         if !changed {
             return;
         }
+        // Sign In and Sign Out are listed only while they apply.
+        if self.open.get() {
+            let listed = self.shown.borrow().len();
+            if self.listed().len() != listed {
+                self.filter();
+                return;
+            }
+        }
         let was = self.highlight_text();
         let flags = self.shown_enabled();
         let kept = self.selected.get().filter(|&i| flags[i]);
@@ -265,6 +279,29 @@ impl Palette {
         }
     }
 
+    /// The rows the query matches, less the account actions that do not apply now.
+    fn listed(&self) -> Vec<usize> {
+        let matches = PaletteAction::filter(&self.field.value());
+        self.rows
+            .iter()
+            .enumerate()
+            .filter(|(_, r)| {
+                matches.contains(&r.action) && (!r.action.is_account() || r.enabled.get())
+            })
+            .map(|(i, _)| i)
+            .collect()
+    }
+
+    /// Scrolls the rows so the selection is in view; true when they moved.
+    fn reveal(&self) -> bool {
+        let Some(sel) = self.selected.get() else {
+            return false;
+        };
+        let first = self.first.get();
+        let to = window_start(first, sel, MAX_ROWS);
+        self.first.replace(to) != to
+    }
+
     /// Per shown row, whether it is enabled.
     fn shown_enabled(&self) -> Vec<bool> {
         let shown = self.shown.borrow();
@@ -273,18 +310,12 @@ impl Palette {
 
     /// Re-filters on the field's text and lays the panel out to fit.
     pub fn filter(&self) {
-        let matches = PaletteAction::filter(&self.field.value());
-        let shown: Vec<usize> = self
-            .rows
-            .iter()
-            .enumerate()
-            .filter(|(_, r)| matches.contains(&r.action))
-            .map(|(i, _)| i)
-            .collect();
         let was = self.highlight_text();
-        *self.shown.borrow_mut() = shown;
-        self.layout();
+        *self.shown.borrow_mut() = self.listed();
+        self.first.set(0);
         self.selected.set(step(&self.shown_enabled(), None, 1));
+        self.reveal();
+        self.layout();
         self.repaint();
         // Closed, it is being built or opened, and `open` speaks once focus is in the field.
         if self.open.get() && self.highlight_text() != was {
@@ -312,7 +343,9 @@ impl Palette {
     /// Places the panel and its shown rows for the window's current size.
     pub fn layout(&self) {
         let shown = self.shown.borrow();
-        let n = shown.len().max(1);
+        let first = self.first.get().min(shown.len());
+        let in_view = &shown[first..shown.len().min(first + MAX_ROWS)];
+        let n = in_view.len().max(1);
         let list_h = n as CGFloat * ROW_H;
         let ph = 12.0 + Field::H + PAD + list_h + PAD;
         let b = self.overlay.bounds();
@@ -333,7 +366,7 @@ impl Palette {
         for r in &self.rows {
             r.view.setHidden(true);
         }
-        for (slot, &i) in shown.iter().enumerate() {
+        for (slot, &i) in in_view.iter().enumerate() {
             let v = &self.rows[i].view;
             let f = v.frame();
             v.setFrame(rect(
@@ -382,6 +415,9 @@ impl Palette {
     pub fn move_selection(&self, delta: isize) {
         let next = step(&self.shown_enabled(), self.selected.get(), delta);
         if next.is_some() && self.selected.replace(next) != next {
+            if self.reveal() {
+                self.layout();
+            }
             self.repaint();
             self.announce_selected(widgets::announce);
         }
@@ -423,6 +459,18 @@ impl Palette {
     }
 }
 
+/// The first row in view after the selection moves to `selected`, showing `rows` rows from
+/// `first`.
+fn window_start(first: usize, selected: usize, rows: usize) -> usize {
+    if selected < first {
+        selected
+    } else if selected >= first + rows {
+        selected + 1 - rows
+    } else {
+        first
+    }
+}
+
 /// The panel's distance below the window's top edge: a fifth of the window height, or less
 /// when that would leave under 16 pt below a `panel_h` panel.
 fn panel_top(height: CGFloat, panel_h: CGFloat) -> CGFloat {
@@ -457,11 +505,20 @@ mod tests {
 
     #[test]
     fn the_panel_fits_a_minimum_height_window() {
-        let full = 12.0 + Field::H + PAD + PaletteAction::ALL.len() as CGFloat * ROW_H + PAD;
+        let full = 12.0 + Field::H + PAD + MAX_ROWS as CGFloat * ROW_H + PAD;
         assert_eq!(panel_top(720.0, full), 144.0);
         let top = panel_top(500.0, full);
         assert!(top >= 0.0 && top + full <= 500.0 - 16.0, "top {top}");
         assert_eq!(panel_top(500.0, 100.0), 100.0);
+    }
+
+    #[test]
+    fn the_rows_scroll_to_keep_the_selection_in_view() {
+        assert_eq!(window_start(0, 3, 11), 0);
+        assert_eq!(window_start(0, 11, 11), 1);
+        assert_eq!(window_start(1, 15, 11), 5);
+        assert_eq!(window_start(5, 2, 11), 2);
+        assert_eq!(window_start(5, 15, 11), 5);
     }
 
     #[test]

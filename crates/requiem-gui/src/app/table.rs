@@ -22,17 +22,20 @@ use objc2_foundation::{
     MainThreadMarker, NSAttributedString, NSEdgeInsets, NSIndexSet, NSInteger, NSNotification,
     NSNotificationCenter, NSObjectProtocol, NSPoint, NSRect, NSSize, NSString,
 };
-use requiem_core::Track;
+use requiem_core::{Collection, Track};
 use requiem_macos::artwork::Cover;
 
 use super::theme::{self, Icon, Weight};
 use super::ui;
 use super::widgets::{self, FLEX_H, FLEX_W, HoverButton, PIN_BOTTOM, PIN_LEFT, PIN_TOP, rect};
-use crate::vm::{self, Intent, QueueEdit};
+use crate::vm::{self, Intent, List, QueueEdit};
 
 pub const ROW_H: CGFloat = 36.0;
+/// The Library's rows are taller, for a larger cover.
+const LIBRARY_ROW_H: CGFloat = 52.0;
 /// The title's artwork, before the title.
 const THUMB: CGFloat = 32.0;
+const LIBRARY_THUMB: CGFloat = 40.0;
 const THUMB_GAP: CGFloat = 10.0;
 const FOCUS_RING: CGFloat = 2.0;
 /// How far the table's focus ring sits outside its rows.
@@ -44,6 +47,33 @@ const PAD: CGFloat = 12.0;
 pub enum Kind {
     Results,
     Queue,
+    /// The Library's playlists and albums: a cover, a title and a subtitle.
+    Library,
+    /// The tracks of an open playlist or album, listed like results.
+    Collection,
+}
+
+impl Kind {
+    fn row_h(self) -> CGFloat {
+        if self == Kind::Library {
+            LIBRARY_ROW_H
+        } else {
+            ROW_H
+        }
+    }
+
+    fn thumb(self) -> CGFloat {
+        if self == Kind::Library {
+            LIBRARY_THUMB
+        } else {
+            THUMB
+        }
+    }
+
+    /// Whether rows have the "+" column.
+    fn adds(self) -> bool {
+        matches!(self, Kind::Results | Kind::Collection)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -98,6 +128,20 @@ pub fn rows(tracks: &[Track]) -> Vec<RowText> {
             album: t.album.clone().unwrap_or_default(),
             duration: t.duration.map(vm::fmt_time).unwrap_or_default(),
             artwork: t.artwork_url.clone(),
+        })
+        .collect()
+}
+
+/// The Library's rows: the title, and the subtitle in the artists column.
+pub fn collection_rows(collections: &[&Collection]) -> Vec<RowText> {
+    collections
+        .iter()
+        .map(|c| RowText {
+            title: c.title.clone(),
+            artists: c.subtitle.clone().unwrap_or_default(),
+            album: String::new(),
+            duration: String::new(),
+            artwork: c.artwork_url.clone(),
         })
         .collect()
 }
@@ -228,8 +272,8 @@ define_class!(
 
         #[unsafe(method(contextAdd:))]
         fn context_add(&self, _sender: Option<&AnyObject>) {
-            if let Some(row) = self.clicked_row() {
-                ui::with(|ui| ui.append_result(row));
+            if let (Some(row), Some(list)) = (self.clicked_row(), self.list()) {
+                ui::with(|ui| ui.append_row(list, row));
             }
         }
 
@@ -262,7 +306,9 @@ define_class!(
         fn add_clicked(&self, sender: Option<&NSView>) {
             let (Some(table), Some(sender)) = (self.table(), sender) else { return };
             let Ok(index) = usize::try_from(table.rowForView(sender)) else { return };
-            ui::with(|ui| ui.append_result(index));
+            if let Some(list) = self.list() {
+                ui::with(|ui| ui.append_row(list, index));
+            }
         }
     }
 );
@@ -280,6 +326,15 @@ impl Controller {
 
     fn table(&self) -> Option<Retained<NSTableView>> {
         self.ivars().table.get()?.load()
+    }
+
+    /// The track list the rows show, when they are tracks to append.
+    fn list(&self) -> Option<List> {
+        match self.ivars().kind {
+            Kind::Results => Some(List::Results),
+            Kind::Collection => Some(List::Collection),
+            Kind::Queue | Kind::Library => None,
+        }
     }
 
     fn outline(&self, row: Option<NSInteger>) {
@@ -304,8 +359,20 @@ impl Controller {
 
     fn play(&self, row: usize) {
         match self.ivars().kind {
-            Kind::Results => ui::with(|ui| ui.intent(Intent::PlayResult(row))),
+            Kind::Results => ui::with(|ui| {
+                ui.intent(Intent::PlayFrom {
+                    list: List::Results,
+                    from: row,
+                })
+            }),
+            Kind::Collection => ui::with(|ui| {
+                ui.intent(Intent::PlayFrom {
+                    list: List::Collection,
+                    from: row,
+                })
+            }),
             Kind::Queue => ui::with(|ui| ui.play_queue(row)),
+            Kind::Library => ui::with(|ui| ui.open_library_row(row)),
         };
     }
 
@@ -349,7 +416,7 @@ impl Controller {
             // SAFETY: views under the "add" identifier are only ever `AddCell`s.
             let reused = unsafe { table.makeViewWithIdentifier_owner(&id, Some(self)) }
                 .and_then(|v| v.downcast::<AddCell>().ok());
-            let target = (self.ivars().kind == Kind::Results).then_some(self);
+            let target = self.ivars().kind.adds().then_some(self);
             let cell = reused.unwrap_or_else(|| AddCell::new(mtm, &id, target));
             // A reused cell may come from a hovered or just-added row.
             cell.set_added(false);
@@ -364,7 +431,7 @@ impl Controller {
         // SAFETY: views under these identifiers are only ever `TextCell`s.
         let reused = unsafe { table.makeViewWithIdentifier_owner(&id, Some(self)) }
             .and_then(|v| v.downcast::<TextCell>().ok());
-        let cell = reused.unwrap_or_else(|| TextCell::new(mtm, &id, col));
+        let cell = reused.unwrap_or_else(|| TextCell::new(mtm, &id, col, self.ivars().kind));
         let text = match col {
             Col::Title => &r.title,
             Col::Artists => &r.artists,
@@ -637,7 +704,8 @@ define_class!(
 );
 
 impl TextCell {
-    fn new(mtm: MainThreadMarker, id: &NSString, col: Col) -> Retained<Self> {
+    fn new(mtm: MainThreadMarker, id: &NSString, col: Col, kind: Kind) -> Retained<Self> {
+        let (row_h, thumb) = (kind.row_h(), kind.thumb());
         let this = Self::alloc(mtm).set_ivars(TextCellIvars {
             label: OnceCell::new(),
             bar: OnceCell::new(),
@@ -648,7 +716,7 @@ impl TextCell {
         let w = 200.0;
         // SAFETY: `initWithFrame:` is NSView's designated initializer.
         let this: Retained<Self> =
-            unsafe { msg_send![super(this), initWithFrame: rect(0.0, 0.0, w, ROW_H)] };
+            unsafe { msg_send![super(this), initWithFrame: rect(0.0, 0.0, w, row_h)] };
         this.setIdentifier(Some(id));
         this.setWantsLayer(true);
         let (font, color) = match col {
@@ -657,7 +725,7 @@ impl TextCell {
             _ => (theme::font(14.0, Weight::Regular), theme::muted()),
         };
         let x = if col == Col::Title {
-            PAD + THUMB + THUMB_GAP
+            PAD + thumb + THUMB_GAP
         } else {
             PAD
         };
@@ -667,7 +735,7 @@ impl TextCell {
             &font,
             &color,
             x,
-            ROW_H / 2.0,
+            row_h / 2.0,
             w - x - PAD,
             FLEX_W | PIN_TOP | PIN_BOTTOM,
         );
@@ -681,7 +749,7 @@ impl TextCell {
         if col == Col::Title {
             let cover = widgets::cover(
                 mtm,
-                rect(PAD, ((ROW_H - THUMB) / 2.0).round(), THUMB, THUMB),
+                rect(PAD, ((row_h - thumb) / 2.0).round(), thumb, thumb),
                 4.0,
                 14.0,
             );
@@ -690,7 +758,7 @@ impl TextCell {
             let _ = this.ivars().cover.set(cover);
             let bar = widgets::panel(
                 mtm,
-                rect(0.0, 0.0, 2.0, ROW_H),
+                rect(0.0, 0.0, 2.0, row_h),
                 FLEX_H | PIN_LEFT,
                 &theme::accent(),
             );
@@ -877,8 +945,7 @@ pub struct HeaderIvars {
     table: OnceCell<Weak<NSTableView>>,
     /// Per column: title and whether it is right-aligned.
     titles: Vec<(&'static str, bool)>,
-    /// The table has the "+" column.
-    add: bool,
+    kind: Kind,
 }
 
 define_class!(
@@ -951,7 +1018,21 @@ impl ColumnHeader {
         let Some(scroll) = table.enclosingScrollView() else {
             return;
         };
-        let widths = column_widths(scroll.contentSize().width, self.ivars().add);
+        let width = scroll.contentSize().width;
+        let kind = self.ivars().kind;
+        if kind == Kind::Library {
+            let (title, details) = library_widths(width);
+            for c in table.tableColumns().iter() {
+                match Col::from_id(&c.identifier().to_string()) {
+                    Some(Col::Title) => c.setWidth(title),
+                    Some(Col::Artists) => c.setWidth(details),
+                    _ => {}
+                }
+            }
+            self.setNeedsDisplay(true);
+            return;
+        }
+        let widths = column_widths(width, kind.adds());
         for c in table.tableColumns().iter() {
             match Col::from_id(&c.identifier().to_string()) {
                 Some(Col::Title) => c.setWidth(widths.title),
@@ -982,6 +1063,12 @@ struct Widths {
     title: CGFloat,
     artists: CGFloat,
     album: Option<CGFloat>,
+}
+
+/// The Library's title and details columns for a table `width` wide: 60/40, filling it.
+fn library_widths(width: CGFloat) -> (CGFloat, CGFloat) {
+    let title = (width * 0.6).floor();
+    (title, (width - title).max(0.0))
 }
 
 /// Text-column widths for a table `width` wide, with or without the "+" column. They fill
@@ -1023,7 +1110,7 @@ impl Table {
         table.setStyle(NSTableViewStyle::Plain);
         table.setSelectionHighlightStyle(NSTableViewSelectionHighlightStyle::None);
         table.setIntercellSpacing(NSSize::new(0.0, 0.0));
-        table.setRowHeight(ROW_H);
+        table.setRowHeight(kind.row_h());
         table.setBackgroundColor(&objc2_app_kit::NSColor::clearColor());
         table.setUsesAlternatingRowBackgroundColors(false);
         // `ColumnHeader::fit_columns` sizes the columns.
@@ -1036,14 +1123,18 @@ impl Table {
 
         // Time stays the last column, flush with the table's right edge in both tables. Only
         // results have the "+" column.
-        let cols: &[(Col, &str, CGFloat)] = &[
-            (Col::Title, "Title", 0.0),
-            (Col::Artists, "Artists", 0.0),
-            (Col::Album, "Album", 0.0),
-            (Col::Add, "", ADD_W),
-            (Col::Duration, "Time", DURATION_W),
-        ];
-        let add = kind == Kind::Results;
+        let cols: &[(Col, &str, CGFloat)] = if kind == Kind::Library {
+            &[(Col::Title, "Name", 0.0), (Col::Artists, "Details", 0.0)]
+        } else {
+            &[
+                (Col::Title, "Title", 0.0),
+                (Col::Artists, "Artists", 0.0),
+                (Col::Album, "Album", 0.0),
+                (Col::Add, "", ADD_W),
+                (Col::Duration, "Time", DURATION_W),
+            ]
+        };
+        let add = kind.adds();
         let mut titles = Vec::with_capacity(cols.len());
         for &(col, title, width) in cols.iter().filter(|c| add || c.0 != Col::Add) {
             let c = NSTableColumn::initWithIdentifier(
@@ -1094,7 +1185,7 @@ impl Table {
         let header = ColumnHeader::alloc(mtm).set_ivars(HeaderIvars {
             table: OnceCell::new(),
             titles,
-            add,
+            kind,
         });
         let hframe = rect(0.0, h - HEADER_H, w, HEADER_H);
         // SAFETY: `initWithFrame:` is NSView's designated initializer.
@@ -1199,6 +1290,24 @@ impl Table {
         });
     }
 
+    /// A visible row's cover has not arrived.
+    pub fn covers_loading(&self) -> bool {
+        let col = self
+            .table
+            .columnWithIdentifier(&NSString::from_str(Col::Title.id()));
+        if col < 0 {
+            return false;
+        }
+        let range = self.table.rowsInRect(self.table.visibleRect());
+        (range.location..range.location + range.length).any(|row| {
+            self.table
+                .viewAtColumn_row_makeIfNecessary(col, row as isize, false)
+                .and_then(|v| v.downcast::<TextCell>().ok())
+                .and_then(|c| c.ivars().cover.get().map(|cv| cv.is_loading()))
+                .unwrap_or(false)
+        })
+    }
+
     pub fn selected_row(&self) -> Option<usize> {
         usize::try_from(self.table.selectedRow()).ok()
     }
@@ -1275,10 +1384,11 @@ fn context_menu(mtm: MainThreadMarker, kind: Kind, target: &Controller) -> Retai
     let menu = NSMenu::initWithTitle(NSMenu::alloc(mtm), &NSString::new());
     // `None` is a separator.
     let items: &[Option<(&str, Sel)>] = match kind {
-        Kind::Results => &[
+        Kind::Results | Kind::Collection => &[
             Some(("Play", sel!(contextPlay:))),
             Some(("Add to Queue", sel!(contextAdd:))),
         ],
+        Kind::Library => &[Some(("Open", sel!(contextPlay:)))],
         Kind::Queue => &[
             Some(("Play", sel!(contextPlay:))),
             Some(("Remove from Queue", sel!(contextRemove:))),

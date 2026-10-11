@@ -385,6 +385,16 @@ impl Cover {
         self.show(image.as_deref(), false);
     }
 
+    /// A URL is set whose image has not arrived: still loading, or failed.
+    pub fn is_loading(&self) -> bool {
+        let iv = self.ivars();
+        iv.url.borrow().is_some()
+            && iv
+                .art
+                .get()
+                .is_some_and(|art| art.ivars().image.borrow().is_none())
+    }
+
     fn show(&self, image: Option<&NSImage>, arrived: bool) {
         let Some(art) = self.ivars().art.get() else {
             return;

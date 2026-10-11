@@ -5,7 +5,10 @@ use std::io;
 use std::ops::{BitOr, BitOrAssign};
 use std::time::{Duration, Instant};
 
-use requiem_core::{Command, EnqueueMode, Event, PlayState, SeekTarget, Track, TrackId};
+use requiem_core::{
+    AccountState, Collection, Command, EnqueueMode, Event, Item, Page, PlayState, ProviderId,
+    SeekTarget, Shelf, Track, TrackId,
+};
 
 pub const SEEK_STEP_SECS: i64 = 5;
 pub const VOLUME_STEP: i16 = 10;
@@ -49,7 +52,12 @@ impl Dirty {
     pub const TOAST: Dirty = Dirty(1 << 8);
     /// The connection or its banner.
     pub const CONNECTION: Dirty = Dirty(1 << 9);
-    pub const ALL: Dirty = Dirty((1 << 10) - 1);
+    pub const HOME: Dirty = Dirty(1 << 10);
+    pub const LIBRARY: Dirty = Dirty(1 << 11);
+    pub const COLLECTION: Dirty = Dirty(1 << 12);
+    /// The account state, which the Library page and the palette show.
+    pub const ACCOUNT: Dirty = Dirty(1 << 13);
+    pub const ALL: Dirty = Dirty((1 << 14) - 1);
 
     pub fn contains(self, other: Dirty) -> bool {
         self.0 & other.0 == other.0
@@ -153,9 +161,17 @@ pub struct Toast {
 #[derive(Debug, Clone, PartialEq)]
 pub enum Intent {
     Search(String),
-    /// Replace the queue with results `i..` and play the first.
-    PlayResult(usize),
-    AppendResult(usize),
+    /// Replace the queue with the tracks of `list` from item `from` on, and play the first.
+    PlayFrom {
+        list: List,
+        from: usize,
+    },
+    /// Append item `index` of `list`.
+    Append {
+        list: List,
+        index: usize,
+    },
+    AppendAll(List),
     PlayQueue(usize),
     Toggle,
     Next,
@@ -171,6 +187,128 @@ pub enum Intent {
         edit: QueueEdit,
         selected: Option<usize>,
     },
+    /// Shows `Place`, fetching its page if it has not loaded.
+    Visit(Place),
+    OpenCollection {
+        collection: Collection,
+        from: Place,
+    },
+    /// Fetches the current page again, if it is a browse page.
+    Refresh,
+    SignIn,
+    SignOut,
+}
+
+/// Where the window is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Place {
+    Home,
+    Search,
+    Library,
+    Queue,
+    /// A playlist or album opened from Home or Library.
+    Collection,
+}
+
+/// A list of items an intent plays or appends from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum List {
+    Results,
+    /// The tracks of the open collection.
+    Collection,
+    /// A Home shelf, by index. Its items may include collections, which the tracks skip.
+    Shelf(usize),
+}
+
+/// A browse page that is fetched on its own and answered by its own req.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Slot {
+    Home,
+    Library,
+    Collection,
+}
+
+impl Slot {
+    const ALL: [Slot; 3] = [Slot::Home, Slot::Library, Slot::Collection];
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub enum Load {
+    /// Not requested yet, or dropped for a reconnect.
+    #[default]
+    Idle,
+    Loading,
+    Done,
+    Failed {
+        error: String,
+        sign_in_required: bool,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct Browse {
+    pub load: Load,
+    pub shelves: Vec<Shelf>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct CollectionPage {
+    pub collection: Collection,
+    /// The page it was opened from, which Back returns to.
+    pub from: Place,
+    pub browse: Browse,
+    /// Every track of the shelves, which the page lists.
+    pub tracks: Vec<Track>,
+}
+
+/// What a browse page shows.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PageView {
+    Loading,
+    Failed(String),
+    Ready,
+}
+
+/// What the Library page shows.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LibraryView {
+    /// No account state yet.
+    Loading,
+    Unavailable(String),
+    SignedOut,
+    Pending {
+        verification_url: String,
+        user_code: String,
+        expires_at_unix: u64,
+    },
+    SignedIn {
+        name: Option<String>,
+        page: PageView,
+    },
+}
+
+impl Browse {
+    pub fn view(&self) -> PageView {
+        match &self.load {
+            Load::Idle | Load::Loading => PageView::Loading,
+            Load::Failed { error, .. } => PageView::Failed(error.clone()),
+            Load::Done => PageView::Ready,
+        }
+    }
+}
+
+/// The host of `url`, as the sign-in panel's "Open www.google.com" names it.
+pub fn url_host(url: &str) -> &str {
+    let rest = url.split_once("://").map_or(url, |(_, rest)| rest);
+    rest.split(['/', '?', '#']).next().unwrap_or(rest)
+}
+
+/// "Code expires in 3 min": whole minutes, rounded up, so it never reads 0 while valid.
+pub fn expires_text(expires_at_unix: u64, now_unix: u64) -> String {
+    match expires_at_unix.saturating_sub(now_unix) {
+        0 => "Code expired".to_owned(),
+        left => format!("Code expires in {} min", left.div_ceil(60)),
+    }
 }
 
 /// A change to the queue: to one row, by index, or to all of it.
@@ -220,6 +358,12 @@ pub struct UiState {
     pub volume: u8,
     /// At most one at a time; a new toast replaces the shown one.
     pub toast: Option<Toast>,
+    pub place: Place,
+    pub home: Browse,
+    pub library: Browse,
+    pub collection: Option<CollectionPage>,
+    /// The daemon's account states, by provider; the first provider's is the one shown.
+    pub accounts: Vec<(ProviderId, AccountState)>,
 }
 
 impl Default for UiState {
@@ -238,6 +382,11 @@ impl Default for UiState {
             state: PlayState::Stopped,
             volume: 100,
             toast: None,
+            place: Place::Search,
+            home: Browse::default(),
+            library: Browse::default(),
+            collection: None,
+            accounts: Vec::new(),
         }
     }
 }
@@ -318,9 +467,109 @@ impl UiState {
             PaletteAction::AddToQueue => can.player && selection.result,
             PaletteAction::VolumeUp | PaletteAction::VolumeDown => can.player,
             PaletteAction::ClearQueue => self.edit_command(QueueEdit::Clear).is_some(),
-            PaletteAction::FocusSearch | PaletteAction::ShowSearch | PaletteAction::ShowQueue => {
-                true
+            PaletteAction::FocusSearch
+            | PaletteAction::ShowHome
+            | PaletteAction::ShowSearch
+            | PaletteAction::ShowLibrary
+            | PaletteAction::ShowQueue => true,
+            PaletteAction::Refresh => can.player && self.refreshable(),
+            PaletteAction::SignIn => can.player && self.library_view() == LibraryView::SignedOut,
+            PaletteAction::SignOut => {
+                can.player && matches!(self.account_state(), Some(AccountState::SignedIn { .. }))
             }
+        }
+    }
+
+    /// The first provider's account state, which the Library page and Sign In act on.
+    pub fn account_state(&self) -> Option<&AccountState> {
+        self.accounts.first().map(|(_, s)| s)
+    }
+
+    /// The current place is a browse page that a fetch would fill.
+    fn refreshable(&self) -> bool {
+        match self.place {
+            Place::Home => true,
+            Place::Library => matches!(self.account_state(), Some(AccountState::SignedIn { .. })),
+            Place::Collection => self.collection.is_some(),
+            Place::Search | Place::Queue => false,
+        }
+    }
+
+    pub fn library_view(&self) -> LibraryView {
+        let Some(state) = self.account_state() else {
+            return LibraryView::Loading;
+        };
+        match state {
+            AccountState::Unavailable(text) => LibraryView::Unavailable(text.clone()),
+            AccountState::Pending {
+                verification_url,
+                user_code,
+                expires_at_unix,
+            } => LibraryView::Pending {
+                verification_url: verification_url.clone(),
+                user_code: user_code.clone(),
+                expires_at_unix: *expires_at_unix,
+            },
+            AccountState::SignedOut => LibraryView::SignedOut,
+            AccountState::SignedIn { name } => match self.library.load {
+                Load::Failed {
+                    sign_in_required: true,
+                    ..
+                } => LibraryView::SignedOut,
+                _ => LibraryView::SignedIn {
+                    name: name.clone(),
+                    page: self.library.view(),
+                },
+            },
+        }
+    }
+
+    /// The playlists and albums of the Library, in shelf order: the rows of its list.
+    pub fn library_collections(&self) -> Vec<&Collection> {
+        self.library
+            .shelves
+            .iter()
+            .flat_map(|s| &s.items)
+            .filter_map(|i| match i {
+                Item::Collection(c) => Some(c),
+                Item::Track(_) => None,
+            })
+            .collect()
+    }
+
+    /// The tracks of `list` from item `from` on.
+    fn list_tracks(&self, list: List, from: usize) -> Vec<Track> {
+        match list {
+            List::Results => self.results.get(from..).unwrap_or_default().to_vec(),
+            List::Collection => self
+                .collection
+                .as_ref()
+                .and_then(|c| c.tracks.get(from..))
+                .unwrap_or_default()
+                .to_vec(),
+            List::Shelf(i) => self
+                .home
+                .shelves
+                .get(i)
+                .and_then(|s| s.items.get(from..))
+                .unwrap_or_default()
+                .iter()
+                .filter_map(|item| match item {
+                    Item::Track(t) => Some(t.clone()),
+                    Item::Collection(_) => None,
+                })
+                .collect(),
+        }
+    }
+
+    /// Item `index` of `list`, if it is a track.
+    fn list_track(&self, list: List, index: usize) -> Option<Track> {
+        match list {
+            List::Shelf(i) => match self.home.shelves.get(i)?.items.get(index)? {
+                Item::Track(t) => Some(t.clone()),
+                Item::Collection(_) => None,
+            },
+            _ => self.list_tracks(list, index).into_iter().next(),
         }
     }
 
@@ -402,8 +651,12 @@ pub struct EmptyText {
 #[derive(Debug, Default)]
 pub struct Vm {
     ui: UiState,
+    /// The newest req of search and browse alike, so no two share one.
     last_req: u64,
     pending_req: Option<u64>,
+    /// The req each browse page waits on, by `Slot`. A page drops answers to any other req, but
+    /// only its own newer fetch supersedes it: a slow Home answer is not lost to a Library load.
+    pending_browse: [Option<u64>; 3],
     last_toast: u64,
     dirty: Dirty,
     seek_hold: Option<Hold<Duration>>,
@@ -622,10 +875,31 @@ impl Vm {
                 self.toast(format!("Couldn’t play “{}”: {error}", track.title), true);
                 self.failed_toast = Some(self.last_toast);
             }
-            Event::BrowseResults { .. }
-            | Event::BrowseFailed { .. }
-            | Event::Account { .. }
-            | Event::AccountError { .. } => {}
+            Event::BrowseResults { req, shelves, .. } => {
+                if let Some(slot) = self.take_browse(req) {
+                    self.land(slot, shelves);
+                }
+            }
+            Event::BrowseFailed {
+                req,
+                error,
+                sign_in_required,
+            } => {
+                if let Some(slot) = self.take_browse(req) {
+                    self.set_browse(
+                        slot,
+                        Browse {
+                            load: Load::Failed {
+                                error,
+                                sign_in_required,
+                            },
+                            shelves: Vec::new(),
+                        },
+                    );
+                }
+            }
+            Event::Account { provider, state } => self.set_account(provider, state),
+            Event::AccountError { error, .. } => self.toast(error, true),
             // The detail is for stderr, which the backend writes it to.
             Event::ProviderBroken { provider, .. } => {
                 self.toast(
@@ -646,6 +920,7 @@ impl Vm {
     /// `link` with the clock passed in.
     pub fn link_at(&mut self, link: Link, now: Instant) {
         let was = std::mem::replace(&mut self.ui.connection, Connection::Connecting);
+        let connected = matches!(link, Link::Connected);
         self.ui.connection = match link {
             Link::Connected => {
                 let outage = matches!(was, Connection::Reconnecting(_)) && self.ui.banner.is_some();
@@ -686,6 +961,11 @@ impl Vm {
         if self.ui.connection != was {
             self.dirty |= Dirty::CONNECTION;
         }
+        if connected {
+            self.reset_browse();
+            let fetch = self.fetch_place();
+            self.outbox.extend(fetch);
+        }
         self.refresh_banner(now);
     }
 
@@ -706,14 +986,12 @@ impl Vm {
                 self.ui.query = query.to_owned();
                 self.search_command()
             }
-            Intent::PlayResult(i) if can.player => self.play_result(i),
-            Intent::AppendResult(i) if can.player => match self.ui.results.get(i) {
-                Some(t) => vec![Command::Enqueue {
-                    tracks: vec![t.clone()],
-                    mode: EnqueueMode::Append,
-                }],
+            Intent::PlayFrom { list, from } if can.player => self.play_from(list, from),
+            Intent::Append { list, index } if can.player => match self.ui.list_track(list, index) {
+                Some(t) => enqueue_append(vec![t]),
                 None => Vec::new(),
             },
+            Intent::AppendAll(list) if can.player => enqueue_append(self.ui.list_tracks(list, 0)),
             Intent::PlayQueue(i) if can.player && i < self.ui.queue.len() => {
                 vec![Command::PlayIndex(i)]
             }
@@ -770,6 +1048,41 @@ impl Vm {
                 }
                 vec![cmd]
             }
+            Intent::Visit(place) => {
+                self.ui.place = place;
+                self.fetch_place()
+            }
+            Intent::OpenCollection { collection, from } => {
+                self.ui.collection = Some(CollectionPage {
+                    collection,
+                    from,
+                    browse: Browse::default(),
+                    tracks: Vec::new(),
+                });
+                self.pending_browse[Slot::Collection as usize] = None;
+                self.dirty |= Dirty::COLLECTION;
+                self.ui.place = Place::Collection;
+                self.fetch_place()
+            }
+            Intent::Refresh => {
+                let slot = match self.ui.place {
+                    Place::Home => Slot::Home,
+                    Place::Library => Slot::Library,
+                    Place::Collection => Slot::Collection,
+                    Place::Search | Place::Queue => return Vec::new(),
+                };
+                self.fetch(slot).into_iter().collect()
+            }
+            Intent::SignIn if can.player => self
+                .account_provider()
+                .map(|provider| Command::SignIn { provider })
+                .into_iter()
+                .collect(),
+            Intent::SignOut if can.player => self
+                .account_provider()
+                .map(|provider| Command::SignOut { provider })
+                .into_iter()
+                .collect(),
             _ => Vec::new(),
         }
     }
@@ -799,22 +1112,155 @@ impl Vm {
         self.outbox.extend(cmds);
     }
 
-    fn play_result(&mut self, i: usize) -> Vec<Command> {
-        let Some(rest) = self.ui.results.get(i..).filter(|r| !r.is_empty()) else {
+    fn play_from(&mut self, list: List, from: usize) -> Vec<Command> {
+        let rest = self.ui.list_tracks(list, from);
+        if rest.is_empty() {
             return Vec::new();
-        };
-        let cmds = vec![
-            Command::Enqueue {
-                tracks: rest.to_vec(),
-                mode: EnqueueMode::Replace,
-            },
-            Command::PlayIndex(0),
-        ];
+        }
         if !self.ui.queue.is_empty() {
             let after = rest.iter().map(|t| t.id.clone()).collect();
             self.offer_undo("Queue replaced", "Undo Replace Queue", after);
         }
-        cmds
+        vec![
+            Command::Enqueue {
+                tracks: rest,
+                mode: EnqueueMode::Replace,
+            },
+            Command::PlayIndex(0),
+        ]
+    }
+
+    fn account_provider(&self) -> Option<ProviderId> {
+        self.ui.accounts.first().map(|(p, _)| p.clone())
+    }
+
+    /// The slot that waits on `req`, which then waits on none.
+    fn take_browse(&mut self, req: u64) -> Option<Slot> {
+        Slot::ALL.into_iter().find(|&slot| {
+            let waiting = &mut self.pending_browse[slot as usize];
+            (*waiting == Some(req)).then(|| *waiting = None).is_some()
+        })
+    }
+
+    fn land(&mut self, slot: Slot, shelves: Vec<Shelf>) {
+        self.set_browse(
+            slot,
+            Browse {
+                load: Load::Done,
+                shelves,
+            },
+        );
+    }
+
+    fn set_browse(&mut self, slot: Slot, browse: Browse) {
+        match slot {
+            Slot::Home => {
+                self.ui.home = browse;
+                self.dirty |= Dirty::HOME;
+            }
+            Slot::Library => {
+                self.ui.library = browse;
+                self.dirty |= Dirty::LIBRARY;
+            }
+            Slot::Collection => {
+                if let Some(page) = &mut self.ui.collection {
+                    page.tracks = browse
+                        .shelves
+                        .iter()
+                        .flat_map(|s| &s.items)
+                        .filter_map(|i| match i {
+                            Item::Track(t) => Some(t.clone()),
+                            Item::Collection(_) => None,
+                        })
+                        .collect();
+                    page.browse = browse;
+                    self.dirty |= Dirty::COLLECTION;
+                }
+            }
+        }
+    }
+
+    /// Requests `slot`'s page, replacing what it shows with a loading state. Nothing goes out
+    /// while disconnected; the reconnect asks again. Library needs a signed-in account.
+    fn fetch(&mut self, slot: Slot) -> Option<Command> {
+        if !self.ui.controls().player {
+            return None;
+        }
+        let page = match slot {
+            Slot::Home => Page::Home,
+            Slot::Library => {
+                if !matches!(self.ui.account_state(), Some(AccountState::SignedIn { .. })) {
+                    return None;
+                }
+                Page::Library
+            }
+            Slot::Collection => {
+                Page::Collection(self.ui.collection.as_ref()?.collection.id.clone())
+            }
+        };
+        self.last_req += 1;
+        self.pending_browse[slot as usize] = Some(self.last_req);
+        self.set_browse(
+            slot,
+            Browse {
+                load: Load::Loading,
+                shelves: Vec::new(),
+            },
+        );
+        Some(Command::Browse {
+            req: self.last_req,
+            page,
+        })
+    }
+
+    /// Fetches the page of the current place unless it has been requested already.
+    fn fetch_place(&mut self) -> Vec<Command> {
+        let (slot, load) = match self.ui.place {
+            Place::Home => (Slot::Home, &self.ui.home.load),
+            Place::Library => (Slot::Library, &self.ui.library.load),
+            Place::Collection => match &self.ui.collection {
+                Some(page) => (Slot::Collection, &page.browse.load),
+                None => return Vec::new(),
+            },
+            Place::Search | Place::Queue => return Vec::new(),
+        };
+        if *load != Load::Idle {
+            return Vec::new();
+        }
+        self.fetch(slot).into_iter().collect()
+    }
+
+    /// A connection starts over: nothing asked before it is answered, and the snapshot that
+    /// follows tells the accounts again.
+    fn reset_browse(&mut self) {
+        self.pending_browse = [None; 3];
+        self.ui.home = Browse::default();
+        self.ui.library = Browse::default();
+        self.ui.accounts.clear();
+        if let Some(page) = &mut self.ui.collection {
+            page.browse = Browse::default();
+            page.tracks.clear();
+        }
+        self.dirty |= Dirty::HOME | Dirty::LIBRARY | Dirty::COLLECTION | Dirty::ACCOUNT;
+    }
+
+    fn set_account(&mut self, provider: ProviderId, state: AccountState) {
+        let signed_in =
+            |ui: &UiState| matches!(ui.account_state(), Some(AccountState::SignedIn { .. }));
+        let was = signed_in(&self.ui);
+        match self.ui.accounts.iter_mut().find(|(p, _)| *p == provider) {
+            Some(entry) => entry.1 = state,
+            None => self.ui.accounts.push((provider, state)),
+        }
+        self.dirty |= Dirty::ACCOUNT;
+        let now = signed_in(&self.ui);
+        if was && !now {
+            self.pending_browse[Slot::Library as usize] = None;
+            self.set_browse(Slot::Library, Browse::default());
+        } else if now && !was {
+            let fetch = self.fetch(Slot::Library);
+            self.outbox.extend(fetch);
+        }
     }
 
     /// Shows `text` with Undo, which restores the queue as it is now: its tracks, and the
@@ -1009,6 +1455,16 @@ impl Vm {
     }
 }
 
+fn enqueue_append(tracks: Vec<Track>) -> Vec<Command> {
+    if tracks.is_empty() {
+        return Vec::new();
+    }
+    vec![Command::Enqueue {
+        tracks,
+        mode: EnqueueMode::Append,
+    }]
+}
+
 /// Where row `selected` ends up after `cmd`, by the session's arithmetic; a removed row's
 /// place goes to the row after it. `None` once the queue is cleared.
 fn follow(selected: usize, cmd: &Command) -> Option<usize> {
@@ -1058,23 +1514,33 @@ pub enum PaletteAction {
     PlaySelected,
     AddToQueue,
     FocusSearch,
+    ShowHome,
     ShowSearch,
+    ShowLibrary,
     ShowQueue,
+    Refresh,
+    SignIn,
+    SignOut,
     VolumeUp,
     VolumeDown,
     ClearQueue,
 }
 
 impl PaletteAction {
-    pub const ALL: [PaletteAction; 11] = [
+    pub const ALL: [PaletteAction; 16] = [
         PaletteAction::PlayPause,
         PaletteAction::Next,
         PaletteAction::Previous,
         PaletteAction::PlaySelected,
         PaletteAction::AddToQueue,
         PaletteAction::FocusSearch,
+        PaletteAction::ShowHome,
         PaletteAction::ShowSearch,
+        PaletteAction::ShowLibrary,
         PaletteAction::ShowQueue,
+        PaletteAction::Refresh,
+        PaletteAction::SignIn,
+        PaletteAction::SignOut,
         PaletteAction::VolumeUp,
         PaletteAction::VolumeDown,
         PaletteAction::ClearQueue,
@@ -1088,8 +1554,13 @@ impl PaletteAction {
             PaletteAction::PlaySelected => "Play selected",
             PaletteAction::AddToQueue => "Add to queue",
             PaletteAction::FocusSearch => "Focus search",
+            PaletteAction::ShowHome => "Show home",
             PaletteAction::ShowSearch => "Show search",
+            PaletteAction::ShowLibrary => "Show library",
             PaletteAction::ShowQueue => "Show queue",
+            PaletteAction::Refresh => "Refresh",
+            PaletteAction::SignIn => "Sign in to Google",
+            PaletteAction::SignOut => "Sign out of Google",
             PaletteAction::VolumeUp => "Volume up",
             PaletteAction::VolumeDown => "Volume down",
             PaletteAction::ClearQueue => "Clear queue",
@@ -1105,12 +1576,21 @@ impl PaletteAction {
             PaletteAction::PlaySelected => "↩",
             PaletteAction::AddToQueue => "⌘↩",
             PaletteAction::FocusSearch => "⌘F",
-            PaletteAction::ShowSearch => "⌘1",
-            PaletteAction::ShowQueue => "⌘2",
+            PaletteAction::ShowHome => "⌘1",
+            PaletteAction::ShowSearch => "⌘2",
+            PaletteAction::ShowLibrary => "⌘3",
+            PaletteAction::ShowQueue => "⌘4",
+            PaletteAction::Refresh => "⌘R",
+            PaletteAction::SignIn | PaletteAction::SignOut => "",
             PaletteAction::VolumeUp => "⌘↑",
             PaletteAction::VolumeDown => "⌘↓",
             PaletteAction::ClearQueue => "",
         }
+    }
+
+    /// Sign In and Sign Out are listed only while they apply.
+    pub fn is_account(self) -> bool {
+        matches!(self, PaletteAction::SignIn | PaletteAction::SignOut)
     }
 
     /// Case-insensitive substring match on the label, in `ALL` order.
@@ -1163,7 +1643,9 @@ mod tests {
         };
         let views = vec![
             PaletteAction::FocusSearch,
+            PaletteAction::ShowHome,
             PaletteAction::ShowSearch,
+            PaletteAction::ShowLibrary,
             PaletteAction::ShowQueue,
         ];
         assert_eq!(
@@ -1182,12 +1664,18 @@ mod tests {
         let mut idle = views.clone();
         idle.extend([PaletteAction::VolumeUp, PaletteAction::VolumeDown]);
         assert_eq!(runnable(&vm, none), idle);
+        // Refresh fetches a browse page again, so it waits for one to be shown.
+        vm.intent(Intent::Visit(Place::Home));
+        assert!(runnable(&vm, none).contains(&PaletteAction::Refresh));
+        vm.intent(Intent::Visit(Place::Search));
 
         vm.apply(Event::QueueChanged {
             tracks: tracks(2),
             current: Some(0),
         });
-        assert_eq!(runnable(&vm, none).len(), PaletteAction::ALL.len() - 2);
+        // Without a selection, Play selected and Add to queue wait; with no account, so do the
+        // sign-in actions, and Refresh waits for a browse page.
+        assert_eq!(runnable(&vm, none).len(), PaletteAction::ALL.len() - 5);
         let queue_row = Selection {
             row: true,
             result: false,
@@ -1198,7 +1686,7 @@ mod tests {
             row: true,
             result: true,
         };
-        assert_eq!(runnable(&vm, result).len(), PaletteAction::ALL.len());
+        assert_eq!(runnable(&vm, result).len(), PaletteAction::ALL.len() - 3);
     }
 
     /// A vm with `n` results from a completed search.
@@ -1526,7 +2014,10 @@ mod tests {
     #[test]
     fn play_result_replaces_queue_from_row_and_plays_first() {
         let mut vm = with_results(5);
-        let cmds = vm.intent(Intent::PlayResult(2));
+        let cmds = vm.intent(Intent::PlayFrom {
+            list: List::Results,
+            from: 2,
+        });
         assert_eq!(
             cmds,
             vec![
@@ -1537,21 +2028,42 @@ mod tests {
                 Command::PlayIndex(0)
             ]
         );
-        assert!(vm.intent(Intent::PlayResult(5)).is_empty());
-        assert!(vm.intent(Intent::PlayResult(99)).is_empty());
+        assert!(
+            vm.intent(Intent::PlayFrom {
+                list: List::Results,
+                from: 5
+            })
+            .is_empty()
+        );
+        assert!(
+            vm.intent(Intent::PlayFrom {
+                list: List::Results,
+                from: 99
+            })
+            .is_empty()
+        );
     }
 
     #[test]
     fn append_result_enqueues_one_track() {
         let mut vm = with_results(5);
         assert_eq!(
-            vm.intent(Intent::AppendResult(3)),
+            vm.intent(Intent::Append {
+                list: List::Results,
+                index: 3
+            }),
             vec![Command::Enqueue {
                 tracks: vec![vm.ui().results[3].clone()],
                 mode: EnqueueMode::Append
             }]
         );
-        assert!(vm.intent(Intent::AppendResult(5)).is_empty());
+        assert!(
+            vm.intent(Intent::Append {
+                list: List::Results,
+                index: 5
+            })
+            .is_empty()
+        );
     }
 
     #[test]
@@ -2126,7 +2638,12 @@ mod tests {
         );
         assert_eq!(
             PaletteAction::filter("show"),
-            vec![PaletteAction::ShowSearch, PaletteAction::ShowQueue]
+            vec![
+                PaletteAction::ShowHome,
+                PaletteAction::ShowSearch,
+                PaletteAction::ShowLibrary,
+                PaletteAction::ShowQueue
+            ]
         );
         assert_eq!(
             PaletteAction::filter("search"),
@@ -2145,7 +2662,8 @@ mod tests {
         assert_eq!(
             keys,
             [
-                "Space", "⌘→", "⌘←", "↩", "⌘↩", "⌘F", "⌘1", "⌘2", "⌘↑", "⌘↓", ""
+                "Space", "⌘→", "⌘←", "↩", "⌘↩", "⌘F", "⌘1", "⌘2", "⌘3", "⌘4", "⌘R", "", "", "⌘↑",
+                "⌘↓", ""
             ]
         );
     }
@@ -2234,8 +2752,14 @@ mod tests {
         assert!(vm.intent(Intent::Prev).is_empty());
         vm.link(Link::Lost(LinkError::NotResponding));
         for i in [
-            Intent::PlayResult(0),
-            Intent::AppendResult(0),
+            Intent::PlayFrom {
+                list: List::Results,
+                from: 0,
+            },
+            Intent::Append {
+                list: List::Results,
+                index: 0,
+            },
             Intent::PlayQueue(0),
             Intent::SetVolume(10),
             Intent::VolumeBy(-10),
@@ -2272,7 +2796,10 @@ mod tests {
             duration: old[2].duration,
         });
         vm.apply(Event::Position(Duration::from_secs(61)));
-        vm.intent(Intent::PlayResult(1));
+        vm.intent(Intent::PlayFrom {
+            list: List::Results,
+            from: 1,
+        });
         (vm, old)
     }
 
@@ -2286,7 +2813,10 @@ mod tests {
         );
         // Nothing to undo when the queue was empty.
         let mut vm = with_results(4);
-        vm.intent(Intent::PlayResult(1));
+        vm.intent(Intent::PlayFrom {
+            list: List::Results,
+            from: 1,
+        });
         assert!(vm.ui().toast.is_none());
     }
 
@@ -2341,7 +2871,10 @@ mod tests {
             });
             vm.apply(Event::State(PlayState::Paused));
             vm.apply(Event::Position(Duration::from_secs(at)));
-            vm.intent(Intent::PlayResult(1));
+            vm.intent(Intent::PlayFrom {
+                list: List::Results,
+                from: 1,
+            });
             vm.apply(Event::State(PlayState::Playing));
             let now = vm.intent(Intent::Undo);
             assert_eq!(
@@ -2490,7 +3023,10 @@ mod tests {
         assert_eq!(cleared().0.undo_title(), Some("Undo Clear Queue"));
         // Replacing an empty queue offers nothing.
         let mut vm = with_results(4);
-        vm.intent(Intent::PlayResult(1));
+        vm.intent(Intent::PlayFrom {
+            list: List::Results,
+            from: 1,
+        });
         assert_eq!(vm.undo_title(), None);
     }
 
@@ -2501,7 +3037,10 @@ mod tests {
             tracks: tracks(3),
             current: None,
         });
-        vm.intent(Intent::PlayResult(0));
+        vm.intent(Intent::PlayFrom {
+            list: List::Results,
+            from: 0,
+        });
         assert_eq!(
             vm.intent(Intent::Undo),
             vec![Command::Enqueue {
@@ -2931,5 +3470,460 @@ mod tests {
         assert!(!d.contains(Dirty::QUEUE | Dirty::RESULTS));
         assert!(Dirty::NONE.is_empty());
         assert!(Dirty::ALL.contains(d));
+    }
+
+    fn provider() -> ProviderId {
+        ProviderId("ytmusic".into())
+    }
+
+    fn collection(id: &str) -> Collection {
+        Collection {
+            id: requiem_core::CollectionId {
+                provider: provider(),
+                id: id.into(),
+            },
+            kind: requiem_core::CollectionKind::Playlist,
+            title: format!("Playlist {id}"),
+            subtitle: Some("Playlist".into()),
+            artwork_url: None,
+        }
+    }
+
+    fn shelf(title: &str, items: Vec<Item>) -> Shelf {
+        Shelf {
+            title: title.into(),
+            items,
+        }
+    }
+
+    fn track_items(n: usize) -> Vec<Item> {
+        tracks(n).into_iter().map(Item::Track).collect()
+    }
+
+    fn account(state: AccountState) -> Event {
+        Event::Account {
+            provider: provider(),
+            state,
+        }
+    }
+
+    fn signed_in() -> Event {
+        account(AccountState::SignedIn {
+            name: Some("Ada".into()),
+        })
+    }
+
+    /// The reqs of the `Browse` commands in `cmds`, with their pages.
+    fn browses(cmds: &[Command]) -> Vec<(u64, Page)> {
+        cmds.iter()
+            .filter_map(|c| match c {
+                Command::Browse { req, page } => Some((*req, page.clone())),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// A connected vm showing Home, with its fetch sent.
+    fn home() -> (Vm, u64) {
+        let mut vm = connected();
+        let cmds = vm.intent(Intent::Visit(Place::Home));
+        let fetches = browses(&cmds);
+        let [(req, Page::Home)] = fetches.as_slice() else {
+            panic!("expected one Home fetch, got {cmds:?}");
+        };
+        let req = *req;
+        (vm, req)
+    }
+
+    fn results(req: u64, page: Page, shelves: Vec<Shelf>) -> Event {
+        Event::BrowseResults { req, page, shelves }
+    }
+
+    #[test]
+    fn browse_answers_land_per_page_and_older_fetches_of_a_page_are_dropped() {
+        let (mut vm, home_req) = home();
+        vm.apply(signed_in());
+        // The sign-in fetched the Library while Home was still loading.
+        let lib = browses(&vm.take_commands());
+        let [(lib_req, Page::Library)] = lib.as_slice() else {
+            panic!("expected the Library fetch, got {lib:?}");
+        };
+        assert!(lib_req > &home_req);
+
+        // A late Home answer, after the Library request, still lands.
+        vm.apply(results(
+            home_req,
+            Page::Home,
+            vec![shelf("Quick picks", track_items(2))],
+        ));
+        assert_eq!(vm.ui().home.load, Load::Done);
+        assert_eq!(vm.ui().library.load, Load::Loading);
+        assert!(vm.take_dirty().contains(Dirty::HOME));
+
+        // A refresh supersedes the Home fetch in flight; the older answer is dropped.
+        let first = browses(&vm.intent(Intent::Refresh))[0].0;
+        let second = browses(&vm.intent(Intent::Refresh))[0].0;
+        vm.apply(results(first, Page::Home, vec![shelf("Old", Vec::new())]));
+        assert_eq!(vm.ui().home.load, Load::Loading);
+        assert!(vm.ui().home.shelves.is_empty());
+        vm.apply(results(second, Page::Home, vec![shelf("New", Vec::new())]));
+        assert_eq!(vm.ui().home.shelves[0].title, "New");
+        // Search shares the counter, so no req means two things.
+        assert!(search_req(&mut vm, "q") > second);
+    }
+
+    #[test]
+    fn a_failed_browse_shows_its_error_for_its_own_req_only() {
+        let (mut vm, req) = home();
+        vm.apply(Event::BrowseFailed {
+            req: req + 50,
+            error: "x".into(),
+            sign_in_required: false,
+        });
+        assert_eq!(vm.ui().home.load, Load::Loading);
+        vm.apply(Event::BrowseFailed {
+            req,
+            error: "network error".into(),
+            sign_in_required: false,
+        });
+        assert_eq!(
+            vm.ui().home.view(),
+            PageView::Failed("network error".into())
+        );
+        // Try Again is a refresh.
+        assert_eq!(browses(&vm.intent(Intent::Refresh)).len(), 1);
+        assert_eq!(vm.ui().home.view(), PageView::Loading);
+    }
+
+    #[test]
+    fn home_is_fetched_on_first_show_and_again_after_a_reconnect() {
+        let mut vm = Vm::new();
+        // Disconnected, the visit fetches nothing; the connection does.
+        assert!(vm.intent(Intent::Visit(Place::Home)).is_empty());
+        vm.link(Link::Connected);
+        let first = browses(&vm.take_commands());
+        assert!(matches!(first.as_slice(), [(_, Page::Home)]));
+        // Visiting again while loaded or loading asks nothing.
+        assert!(vm.intent(Intent::Visit(Place::Home)).is_empty());
+        vm.apply(results(
+            first[0].0,
+            Page::Home,
+            vec![shelf("A", Vec::new())],
+        ));
+        assert!(vm.intent(Intent::Visit(Place::Search)).is_empty());
+        assert!(vm.intent(Intent::Visit(Place::Home)).is_empty());
+
+        vm.link(Link::Lost(LinkError::NotResponding));
+        vm.link(Link::Connected);
+        let again = browses(&vm.take_commands());
+        assert!(matches!(again.as_slice(), [(r, Page::Home)] if *r > first[0].0));
+        assert!(vm.ui().home.shelves.is_empty());
+        // An answer to the lost connection's fetch is dropped.
+        vm.apply(results(
+            first[0].0,
+            Page::Home,
+            vec![shelf("Stale", Vec::new())],
+        ));
+        assert!(vm.ui().home.shelves.is_empty());
+    }
+
+    #[test]
+    fn the_account_comes_from_the_snapshot_and_from_events() {
+        let mut vm = connected();
+        assert_eq!(vm.ui().library_view(), LibraryView::Loading);
+        vm.apply(account(AccountState::Unavailable("set up a client".into())));
+        assert_eq!(
+            vm.ui().library_view(),
+            LibraryView::Unavailable("set up a client".into())
+        );
+        assert!(vm.take_dirty().contains(Dirty::ACCOUNT));
+        vm.apply(account(AccountState::SignedOut));
+        assert_eq!(vm.ui().library_view(), LibraryView::SignedOut);
+        let pending = AccountState::Pending {
+            verification_url: "https://www.google.com/device".into(),
+            user_code: "WXYZ-ABCD".into(),
+            expires_at_unix: 1_000,
+        };
+        vm.apply(account(pending));
+        assert_eq!(
+            vm.ui().library_view(),
+            LibraryView::Pending {
+                verification_url: "https://www.google.com/device".into(),
+                user_code: "WXYZ-ABCD".into(),
+                expires_at_unix: 1_000,
+            }
+        );
+        // A new connection forgets it until its snapshot tells it again.
+        vm.link(Link::Lost(LinkError::NotResponding));
+        vm.link(Link::Connected);
+        assert_eq!(vm.ui().library_view(), LibraryView::Loading);
+        vm.apply(signed_in());
+        assert!(matches!(
+            vm.ui().library_view(),
+            LibraryView::SignedIn { name: Some(n), page: PageView::Loading } if n == "Ada"
+        ));
+    }
+
+    #[test]
+    fn sign_in_commands_name_the_accounts_provider() {
+        let mut vm = connected();
+        assert!(vm.intent(Intent::SignIn).is_empty());
+        vm.apply(account(AccountState::SignedOut));
+        assert_eq!(
+            vm.intent(Intent::SignIn),
+            vec![Command::SignIn {
+                provider: provider()
+            }]
+        );
+        assert_eq!(
+            vm.intent(Intent::SignOut),
+            vec![Command::SignOut {
+                provider: provider()
+            }]
+        );
+    }
+
+    #[test]
+    fn signing_in_fetches_the_library_and_signing_out_forgets_it() {
+        let mut vm = connected();
+        vm.apply(account(AccountState::SignedOut));
+        vm.apply(account(AccountState::Pending {
+            verification_url: "https://www.google.com/device".into(),
+            user_code: "WXYZ-ABCD".into(),
+            expires_at_unix: 1_000,
+        }));
+        assert!(vm.take_commands().is_empty());
+        vm.apply(signed_in());
+        let cmds = browses(&vm.take_commands());
+        let [(req, Page::Library)] = cmds.as_slice() else {
+            panic!("expected the Library fetch, got {cmds:?}");
+        };
+        vm.apply(results(
+            *req,
+            Page::Library,
+            vec![shelf("Playlists", vec![Item::Collection(collection("a"))])],
+        ));
+        assert_eq!(vm.ui().library_collections().len(), 1);
+        // The same state announced again is not an entry.
+        vm.apply(signed_in());
+        assert!(vm.take_commands().is_empty());
+        vm.apply(account(AccountState::SignedOut));
+        assert!(vm.ui().library_collections().is_empty());
+        assert_eq!(vm.ui().library.load, Load::Idle);
+    }
+
+    #[test]
+    fn a_sign_in_required_failure_shows_the_signed_out_library() {
+        let mut vm = connected();
+        vm.apply(signed_in());
+        let req = browses(&vm.take_commands())[0].0;
+        vm.apply(Event::BrowseFailed {
+            req,
+            error: "sign in first".into(),
+            sign_in_required: true,
+        });
+        assert_eq!(vm.ui().library_view(), LibraryView::SignedOut);
+        assert!(vm.ui().can_run(PaletteAction::SignIn, Selection::default()));
+        // Any other failure keeps the page, with its error.
+        let retry = browses(&vm.intent(Intent::Visit(Place::Library)));
+        assert!(retry.is_empty(), "a failed page waits for Try Again");
+        let req = browses(&vm.intent(Intent::Refresh))[0].0;
+        vm.apply(Event::BrowseFailed {
+            req,
+            error: "timeout".into(),
+            sign_in_required: false,
+        });
+        assert!(matches!(
+            vm.ui().library_view(),
+            LibraryView::SignedIn { page: PageView::Failed(e), .. } if e == "timeout"
+        ));
+    }
+
+    fn with_home_shelf(items: Vec<Item>) -> Vm {
+        let (mut vm, req) = home();
+        vm.apply(results(req, Page::Home, vec![shelf("Quick picks", items)]));
+        vm.take_dirty();
+        vm
+    }
+
+    #[test]
+    fn clicking_a_shelf_track_plays_the_shelf_from_it_like_a_result() {
+        let mut items = track_items(5);
+        items.insert(2, Item::Collection(collection("c")));
+        let mut vm = with_home_shelf(items);
+        let want: Vec<Track> = tracks(5)[2..].to_vec();
+        // Item 4 is the third track (items: t0 t1 c t2 t3 t4).
+        let cmds = vm.intent(Intent::PlayFrom {
+            list: List::Shelf(0),
+            from: 4,
+        });
+        assert_eq!(
+            cmds,
+            vec![
+                Command::Enqueue {
+                    tracks: want[1..].to_vec(),
+                    mode: EnqueueMode::Replace
+                },
+                Command::PlayIndex(0)
+            ]
+        );
+        // Replacing a queue offers Undo, as for a result.
+        vm.apply(Event::QueueChanged {
+            tracks: tracks(1),
+            current: Some(0),
+        });
+        vm.intent(Intent::PlayFrom {
+            list: List::Shelf(0),
+            from: 0,
+        });
+        assert_eq!(vm.ui().toast.as_ref().unwrap().action, Some("Undo"));
+        // A collection item is no track.
+        assert!(
+            vm.intent(Intent::Append {
+                list: List::Shelf(0),
+                index: 2
+            })
+            .is_empty()
+        );
+        assert_eq!(
+            vm.intent(Intent::Append {
+                list: List::Shelf(0),
+                index: 3
+            }),
+            vec![Command::Enqueue {
+                tracks: vec![tracks(5)[2].clone()],
+                mode: EnqueueMode::Append
+            }]
+        );
+        assert!(
+            vm.intent(Intent::PlayFrom {
+                list: List::Shelf(7),
+                from: 0
+            })
+            .is_empty()
+        );
+    }
+
+    #[test]
+    fn a_collection_plays_whole_or_appends_every_track() {
+        let mut vm = connected();
+        let cmds = vm.intent(Intent::OpenCollection {
+            collection: collection("a"),
+            from: Place::Library,
+        });
+        let fetches = browses(&cmds);
+        let [(req, Page::Collection(id))] = fetches.as_slice() else {
+            panic!("expected the collection fetch, got {cmds:?}");
+        };
+        assert_eq!(id.id, "a");
+        assert_eq!(vm.ui().place, Place::Collection);
+        let req = *req;
+        // Nothing to play before the tracks arrive.
+        assert!(vm.intent(Intent::AppendAll(List::Collection)).is_empty());
+        vm.apply(results(
+            req,
+            Page::Collection(id.clone()),
+            vec![shelf("", track_items(3))],
+        ));
+        assert_eq!(vm.ui().collection.as_ref().unwrap().tracks.len(), 3);
+        assert_eq!(
+            vm.intent(Intent::PlayFrom {
+                list: List::Collection,
+                from: 0
+            }),
+            vec![
+                Command::Enqueue {
+                    tracks: tracks(3),
+                    mode: EnqueueMode::Replace
+                },
+                Command::PlayIndex(0)
+            ]
+        );
+        assert_eq!(
+            vm.intent(Intent::AppendAll(List::Collection)),
+            vec![Command::Enqueue {
+                tracks: tracks(3),
+                mode: EnqueueMode::Append
+            }]
+        );
+        assert_eq!(
+            vm.intent(Intent::PlayFrom {
+                list: List::Collection,
+                from: 2
+            }),
+            vec![
+                Command::Enqueue {
+                    tracks: tracks(3)[2..].to_vec(),
+                    mode: EnqueueMode::Replace
+                },
+                Command::PlayIndex(0)
+            ]
+        );
+    }
+
+    #[test]
+    fn refresh_fetches_only_the_current_page() {
+        let (mut vm, home_req) = home();
+        vm.apply(signed_in());
+        let lib_req = browses(&vm.take_commands())[0].0;
+        vm.apply(results(home_req, Page::Home, vec![shelf("A", Vec::new())]));
+        vm.apply(results(
+            lib_req,
+            Page::Library,
+            vec![shelf("B", Vec::new())],
+        ));
+
+        let cmds = vm.intent(Intent::Refresh);
+        assert!(matches!(browses(&cmds).as_slice(), [(_, Page::Home)]));
+        assert_eq!(vm.ui().library.load, Load::Done);
+
+        vm.intent(Intent::Visit(Place::Library));
+        let cmds = vm.intent(Intent::Refresh);
+        assert!(matches!(browses(&cmds).as_slice(), [(_, Page::Library)]));
+
+        // Search and Queue have nothing to refetch.
+        vm.intent(Intent::Visit(Place::Queue));
+        assert!(vm.intent(Intent::Refresh).is_empty());
+        vm.intent(Intent::Visit(Place::Search));
+        assert!(vm.intent(Intent::Refresh).is_empty());
+    }
+
+    #[test]
+    fn an_account_error_is_a_toast() {
+        let mut vm = connected();
+        vm.apply(Event::AccountError {
+            provider: provider(),
+            error: "the code expired".into(),
+        });
+        let t = vm.ui().toast.clone().unwrap();
+        assert_eq!((t.text.as_str(), t.error), ("the code expired", true));
+    }
+
+    #[test]
+    fn the_sign_in_button_names_the_host() {
+        assert_eq!(url_host("https://www.google.com/device"), "www.google.com");
+        assert_eq!(url_host("https://example.com"), "example.com");
+        assert_eq!(url_host("example.com/x?y"), "example.com");
+    }
+
+    #[test]
+    fn the_code_expiry_counts_whole_minutes_up() {
+        assert_eq!(expires_text(1_000 + 600, 1_000), "Code expires in 10 min");
+        assert_eq!(expires_text(1_000 + 61, 1_000), "Code expires in 2 min");
+        assert_eq!(expires_text(1_000 + 1, 1_000), "Code expires in 1 min");
+        assert_eq!(expires_text(1_000, 1_000), "Code expired");
+        assert_eq!(expires_text(900, 1_000), "Code expired");
+    }
+
+    #[test]
+    fn sign_in_and_out_apply_to_their_account_state() {
+        let mut vm = connected();
+        let can = |vm: &Vm, a| vm.ui().can_run(a, Selection::default());
+        assert!(!can(&vm, PaletteAction::SignIn) && !can(&vm, PaletteAction::SignOut));
+        vm.apply(account(AccountState::SignedOut));
+        assert!(can(&vm, PaletteAction::SignIn) && !can(&vm, PaletteAction::SignOut));
+        vm.apply(signed_in());
+        assert!(!can(&vm, PaletteAction::SignIn) && can(&vm, PaletteAction::SignOut));
+        assert!(PaletteAction::SignIn.is_account() && !PaletteAction::Refresh.is_account());
     }
 }
