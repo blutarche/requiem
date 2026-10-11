@@ -71,6 +71,8 @@ echo quit >>"$script"
 if [ "$daemon" -eq 1 ]; then
   mkdir -m 0700 "$work/sock"
   export REQUIEM_SOCKET_DIR="$work/sock"
+  # Keeps the run's queue out of the user's saved session.
+  export REQUIEM_STATE_FILE="$work/state.json"
   # The sampled pid is the daemon's; the CLI only supplies the MARK lines.
   REQUIEM_LOG="${PERF_DEBUG:+debug}" target/release/requiemd 2>"$work/stderr.log" &
   pid=$!
