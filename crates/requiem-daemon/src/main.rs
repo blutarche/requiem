@@ -1,18 +1,17 @@
 use std::process::ExitCode;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 use std::thread;
 use std::time::{Duration, Instant};
 
 use crossbeam_channel::{Receiver, RecvTimeoutError, Sender, bounded};
 use requiem_audio::{AudioEngine, AudioOptions};
 use requiem_core::{
-    Command, EngineEventSink, EnqueueMode, Event, PersistSink, PlayState, Session, SessionConfig,
+    Command, EngineEventSink, EnqueueMode, Event, PersistSink, Session, SessionConfig,
 };
 use requiem_ipc::{ServeError, Server, ServerHooks};
 use requiem_provider_ytmusic::{YtMusicOptions, YtMusicProvider};
 
-use idle::IdleTimer;
+use idle::{Activity, IdleTimer};
 
 const USAGE: &str = "usage: requiemd [--prefer-aac] [--help]";
 const DEFAULT_IDLE_EXIT_SECS: u64 = 300;
@@ -138,11 +137,11 @@ fn main() -> ExitCode {
         }
     }
 
-    let stopped = Arc::new(AtomicBool::new(true));
-    watch_state(server.subscribe(), stopped.clone());
+    let activity = Arc::new(Mutex::new(Activity::new()));
+    watch_state(server.subscribe(), activity.clone());
     let (done_tx, done_rx) = bounded::<()>(0);
     thread::scope(|scope| {
-        scope.spawn(|| idle_exit(&server, &stopped, idle_limit(), &stop_tx, &done_rx));
+        scope.spawn(|| idle_exit(&server, &activity, idle_limit(), &stop_tx, &done_rx));
         ui::run_platform(&stop_tx, stop_rx, &server);
         drop(done_tx);
     });
@@ -161,24 +160,24 @@ fn request_stop(stop: &Sender<()>) {
     requiem_macos::wake();
 }
 
-/// Mirrors the playback state; the daemon starts `Stopped`.
-fn watch_state(events: Receiver<Event>, stopped: Arc<AtomicBool>) {
+fn watch_state(events: Receiver<Event>, activity: Arc<Mutex<Activity>>) {
     let _ = thread::Builder::new()
         .name("requiemd-state".into())
         .spawn(move || {
             for ev in events {
-                if let Event::State(s) = ev {
-                    stopped.store(s == PlayState::Stopped, Ordering::Release);
-                }
+                activity
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .observe(&ev);
             }
         });
 }
 
-/// Requests a stop once there have been no clients and no playback for `limit`.
-/// Returns when `done` closes.
+/// Requests a stop once there have been no clients, no playback and no pending sign-in
+/// for `limit`. Returns when `done` closes.
 fn idle_exit(
     server: &Server,
-    stopped: &AtomicBool,
+    activity: &Mutex<Activity>,
     limit: Duration,
     stop: &Sender<()>,
     done: &Receiver<()>,
@@ -190,7 +189,11 @@ fn idle_exit(
             _ => return,
         }
         let counts = server.clients();
-        let idle = counts.gui + counts.cli == 0 && stopped.load(Ordering::Acquire);
+        let quiet = activity
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .idle();
+        let idle = counts.gui + counts.cli == 0 && quiet;
         if timer.expired(Instant::now(), idle) {
             debug!("idle for {limit:?}, exiting");
             request_stop(stop);
