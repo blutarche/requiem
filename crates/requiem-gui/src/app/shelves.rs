@@ -439,9 +439,8 @@ impl Shelves {
     pub fn new(mtm: MainThreadMarker, frame: NSRect) -> Shelves {
         let view = NSScrollView::initWithFrame(NSScrollView::alloc(mtm), frame);
         view.setAutoresizingMask(widgets::FLEX_W | widgets::FLEX_H);
-        view.setWantsLayer(true);
         // No vertical scroller: with one, AppKit draws nothing at all into an off-screen
-        // snapshot of the window. The wheel and trackpad still scroll the page.
+        // snapshot of the window (cause not isolated). The wheel and trackpad still scroll the page.
         view.setHasVerticalScroller(false);
         view.setDrawsBackground(false);
         view.setBorderType(NSBorderType::NoBorder);
@@ -508,7 +507,6 @@ impl Shelves {
                 rect(0.0, y, width, row_h),
             );
             scroll.setAutoresizingMask(FLEX_W);
-            scroll.setWantsLayer(true);
             scroll.setHasHorizontalScroller(true);
             scroll.setHasVerticalScroller(false);
             scroll.setAutohidesScrollers(true);

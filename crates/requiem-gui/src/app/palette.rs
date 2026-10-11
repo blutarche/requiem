@@ -263,8 +263,7 @@ impl Palette {
         }
         // Sign In and Sign Out are listed only while they apply.
         if self.open.get() {
-            let listed = self.shown.borrow().len();
-            if self.listed().len() != listed {
+            if self.listed() != *self.shown.borrow() {
                 self.filter();
                 return;
             }
