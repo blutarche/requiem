@@ -31,6 +31,8 @@ use crate::vm::{self, Intent, QueueEdit};
 
 pub const ROW_H: CGFloat = 36.0;
 const FOCUS_RING: CGFloat = 2.0;
+/// How far the table's focus ring sits outside its rows.
+const RING_OUTSET: CGFloat = 4.0;
 const HEADER_H: CGFloat = 32.0;
 const PAD: CGFloat = 12.0;
 
@@ -555,7 +557,8 @@ impl RowView {
             theme::LINE_2
         } else if iv.hovered.get() {
             theme::BG_3
-        } else if iv.odd.get() {
+        } else if iv.odd.get() || iv.current.get() {
+            // The current row's tint over the darker zebra stripe would barely show.
             theme::BG_2
         } else {
             theme::BG
@@ -649,7 +652,19 @@ impl TextCell {
 
     fn set_row_selected(&self, selected: bool) {
         let iv = self.ivars();
-        if !iv.secondary || iv.row_selected.replace(selected) == selected {
+        if iv.row_selected.replace(selected) == selected {
+            return;
+        }
+        // The marker in accent would fall under 3:1 against the selection.
+        if let Some(bar) = iv.bar.get() {
+            let c = if selected {
+                theme::accent_hi()
+            } else {
+                theme::accent()
+            };
+            widgets::fill(bar, Some(&c));
+        }
+        if !iv.secondary {
             return;
         }
         if let Some(l) = iv.label.get() {
@@ -1021,10 +1036,20 @@ impl Table {
         scroll.contentView().setDrawsBackground(false);
         scroll.setFocusRingType(NSFocusRingType::None);
         view.addSubview(&scroll);
+        // Outset sideways, into the page gutter, so it never covers the current-row marker
+        // on the rows' left edge, and lifted off the bottom, where the player bar's border is.
+        let sf = scroll.frame();
+        let ring_frame = rect(
+            sf.origin.x - RING_OUTSET,
+            sf.origin.y + RING_OUTSET,
+            sf.size.width + 2.0 * RING_OUTSET,
+            sf.size.height - RING_OUTSET,
+        );
         // SAFETY: `initWithFrame:` is NSView's designated initializer.
         let ring: Retained<FocusRing> =
-            unsafe { msg_send![FocusRing::alloc(mtm), initWithFrame: scroll.frame()] };
+            unsafe { msg_send![FocusRing::alloc(mtm), initWithFrame: ring_frame] };
         ring.setAutoresizingMask(FLEX_W | FLEX_H);
+        view.setClipsToBounds(false);
         widgets::border(&ring, &theme::accent(), FOCUS_RING);
         ring.setHidden(true);
         view.addSubview(&ring);
