@@ -20,6 +20,7 @@ use crate::vm::PaletteAction;
 const PANEL_W: CGFloat = 520.0;
 const PAD: CGFloat = 8.0;
 const ROW_H: CGFloat = 36.0;
+const NO_MATCH: &str = "No matching actions";
 
 define_class!(
     /// The backdrop; a click outside the panel closes the palette.
@@ -191,7 +192,7 @@ impl Palette {
             .collect();
         let none = widgets::placed_label(
             mtm,
-            "No matching actions",
+            NO_MATCH,
             &font,
             &theme::muted(),
             PAD + 12.0,
@@ -231,6 +232,7 @@ impl Palette {
         if let Some(w) = self.overlay.window() {
             w.makeFirstResponder(Some(&self.field.text));
         }
+        self.announce_selected();
     }
 
     pub fn close(&self) {
@@ -248,10 +250,14 @@ impl Palette {
         if !changed {
             return;
         }
+        let was = self.selected_row();
         let flags = self.shown_enabled();
         let kept = self.selected.get().filter(|&i| flags[i]);
         self.selected.set(kept.or_else(|| step(&flags, None, 1)));
         self.repaint();
+        if self.open.get() && self.selected_row() != was {
+            self.announce_selected();
+        }
     }
 
     /// Per shown row, whether it is enabled.
@@ -275,7 +281,7 @@ impl Palette {
         self.layout();
         self.selected.set(step(&self.shown_enabled(), None, 1));
         self.repaint();
-        // Closed, it is being built or opened, and focus landing in the field speaks for it.
+        // Closed, it is being built or opened, and `open` speaks once focus is in the field.
         if self.open.get() && self.selected_row() != was {
             self.announce_selected();
         }
@@ -289,9 +295,12 @@ impl Palette {
 
     /// Focus stays in the field, so VoiceOver hears the highlighted row only from this.
     fn announce_selected(&self) {
-        if let Some(i) = self.selected_row() {
-            widgets::announce(self.panel.mtm(), self.rows[i].action.label());
-        }
+        let text = match self.selected_row() {
+            Some(i) => self.rows[i].action.label(),
+            None if self.shown.borrow().is_empty() => NO_MATCH,
+            None => return,
+        };
+        widgets::announce(self.panel.mtm(), text);
     }
 
     /// Places the panel and its shown rows for the window's current size.
