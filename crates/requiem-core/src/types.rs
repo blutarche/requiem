@@ -155,8 +155,11 @@ pub trait Provider: Send + Sync {
         ))
     }
 
-    /// Ends a pending sign-in too. Blocking; called on a worker thread.
-    fn sign_out(&self) {}
+    /// Ends a pending sign-in too. Blocking; called on a worker thread. An `Err` still means
+    /// signed out locally; it says what the provider could not confirm remotely.
+    fn sign_out(&self) -> Result<(), ProviderError> {
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -316,8 +319,9 @@ pub enum Event {
         provider: ProviderId,
         state: AccountState,
     },
-    /// Why a sign-in ended without `SignedIn`. The `Account` that follows has the new state.
-    SignInFailed {
+    /// Why a sign-in ended without `SignedIn`, or what a sign-out could not finish. The
+    /// `Account` that follows has the new state.
+    AccountError {
         provider: ProviderId,
         error: String,
     },

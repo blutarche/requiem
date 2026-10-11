@@ -81,7 +81,7 @@ fn best_thumbnail(snippet: &Value) -> Option<String> {
         .filter_map(|t| {
             let url = t.get("url")?.as_str()?;
             let side = |k: &str| t.get(k).and_then(Value::as_u64).unwrap_or(0);
-            Some((side("width") * side("height"), url))
+            Some((side("width").saturating_mul(side("height")), url))
         })
         .max_by_key(|(area, _)| *area)
         .map(|(_, url)| url.to_owned())
@@ -204,7 +204,9 @@ fn paginate<T>(
     let per_page = PER_PAGE.to_string();
     let mut out = Vec::new();
     let mut token: Option<String> = None;
-    loop {
+    // Pages can come back empty, so the item cap alone does not end a looping server.
+    let max_pages = cap / PER_PAGE * 2 + 2;
+    for _ in 0..max_pages {
         let mut q = query.to_vec();
         q.push(("maxResults", &per_page));
         if let Some(t) = &token {
@@ -213,7 +215,7 @@ fn paginate<T>(
         let (page, next) = parse(&api.get(url, &q)?)?;
         out.extend(page);
         match next {
-            Some(n) if out.len() < cap => token = Some(n),
+            Some(n) if out.len() < cap && token.as_deref() != Some(n.as_str()) => token = Some(n),
             _ => break,
         }
     }
@@ -433,6 +435,53 @@ mod tests {
         let shelves = library(&f).unwrap();
         assert_eq!(shelves[0].items.len(), 1 + 200);
         assert_eq!(f.api.calls().len(), 4);
+    }
+
+    /// Answers every request with an empty page; `fresh` gives each a new `nextPageToken`.
+    struct Endless {
+        fresh: bool,
+        requests: std::cell::Cell<usize>,
+    }
+
+    impl DataApi for Endless {
+        fn get(&self, _: &str, _: &[(&str, &str)]) -> Result<Vec<u8>, ProviderError> {
+            let n = self.requests.get() + 1;
+            self.requests.set(n);
+            let token = if self.fresh {
+                format!("t{n}")
+            } else {
+                "same".into()
+            };
+            Ok(json!({"items": [], "nextPageToken": token})
+                .to_string()
+                .into_bytes())
+        }
+
+        fn likes(&self) -> Result<String, ProviderError> {
+            unreachable!()
+        }
+    }
+
+    #[test]
+    fn a_server_that_never_ends_the_listing_is_cut_off() {
+        for (fresh, most) in [(false, 2), (true, 200 / PER_PAGE * 2 + 2)] {
+            let api = Endless {
+                fresh,
+                requests: 0.into(),
+            };
+            let got = paginate(&api, PLAYLISTS_URL, &[], 200, parse_playlists).unwrap();
+            assert!(got.is_empty());
+            assert_eq!(api.requests.get(), most, "fresh tokens: {fresh}");
+        }
+    }
+
+    #[test]
+    fn thumbnail_area_saturates() {
+        let snippet = json!({"thumbnails": {
+            "a": {"url": "https://x/a", "width": u64::MAX, "height": u64::MAX},
+            "b": {"url": "https://x/b", "width": 10, "height": 10},
+        }});
+        assert_eq!(best_thumbnail(&snippet).as_deref(), Some("https://x/a"));
     }
 
     #[test]

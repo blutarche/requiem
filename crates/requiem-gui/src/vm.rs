@@ -625,7 +625,7 @@ impl Vm {
             Event::BrowseResults { .. }
             | Event::BrowseFailed { .. }
             | Event::Account { .. }
-            | Event::SignInFailed { .. } => {}
+            | Event::AccountError { .. } => {}
             // The detail is for stderr, which the backend writes it to.
             Event::ProviderBroken { provider, .. } => {
                 self.toast(

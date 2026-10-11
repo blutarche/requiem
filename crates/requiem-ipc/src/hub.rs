@@ -127,7 +127,7 @@ impl Mirror {
             | Event::SearchFailed { .. }
             | Event::BrowseResults { .. }
             | Event::BrowseFailed { .. }
-            | Event::SignInFailed { .. }
+            | Event::AccountError { .. }
             | Event::TrackFailed { .. }
             | Event::ProviderBroken { .. } => {}
         }

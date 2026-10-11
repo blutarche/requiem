@@ -6,7 +6,7 @@
 use std::fmt;
 use std::fs::{self, OpenOptions};
 use std::io::{self, Read, Write};
-use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
+use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -22,6 +22,7 @@ pub(crate) const SCOPE: &str = "https://www.googleapis.com/auth/youtube.readonly
 const DEVICE_CODE_URL: &str = "https://oauth2.googleapis.com/device/code";
 const TOKEN_URL: &str = "https://oauth2.googleapis.com/token";
 const REVOKE_URL: &str = "https://oauth2.googleapis.com/revoke";
+const PERMISSIONS_URL: &str = "https://myaccount.google.com/permissions";
 pub(crate) const CHANNELS_URL: &str = "https://www.googleapis.com/youtube/v3/channels";
 const DEVICE_GRANT: &str = "urn:ietf:params:oauth:grant-type:device_code";
 /// RFC 8628 3.5: each `slow_down` adds 5 seconds to the polling interval.
@@ -200,6 +201,13 @@ impl fmt::Debug for TokenFile {
 }
 
 fn load_token(path: &Path) -> Option<TokenFile> {
+    // A file left readable by others (an older build, a copy, a restore) is tightened first.
+    if let Ok(meta) = fs::metadata(path)
+        && meta.permissions().mode() & 0o077 != 0
+        && let Err(e) = fs::set_permissions(path, fs::Permissions::from_mode(0o600))
+    {
+        debug!("cannot tighten the token file's mode: {e}");
+    }
     let bytes = match read_capped(path) {
         Ok(b) => b,
         Err(e) if e.kind() == io::ErrorKind::NotFound => return None,
@@ -225,12 +233,12 @@ fn save_token(path: &Path, token: &TokenFile) -> io::Result<()> {
     let dir = path
         .parent()
         .ok_or_else(|| io::Error::other("token path has no parent"))?;
-    if !dir.exists() {
-        fs::DirBuilder::new()
-            .recursive(true)
-            .mode(0o700)
-            .create(dir)?;
-    }
+    fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(dir)?;
+    // `create` leaves an existing directory as it was.
+    fs::set_permissions(dir, fs::Permissions::from_mode(0o700))?;
     let json = serde_json::to_vec(token).map_err(io::Error::other)?;
     let mut tmp = path.as_os_str().to_owned();
     tmp.push(".tmp");
@@ -515,6 +523,9 @@ struct State {
     access: Option<(Secret, Instant)>,
     pending: Option<(String, String, u64)>,
     likes: Option<String>,
+    /// Bumped by every sign-out and completed sign-in, so a token refresh that started
+    /// before one cannot store its result after it.
+    auth_gen: u64,
 }
 
 /// The signed-in Google account, if any.
@@ -630,6 +641,9 @@ impl Google {
         let mut st = locked(&self.state);
         // A sign-out while the token request was in flight wins.
         if !self.flow.is_current(r#gen) {
+            drop(st);
+            // Google already issued the grant; nothing else holds it.
+            self.revoke(tokens.refresh.expose());
             return Err(ProviderError::SignInRequired(
                 "sign-in was cancelled".into(),
             ));
@@ -640,6 +654,7 @@ impl Google {
                 path.display()
             ))
         })?;
+        st.auth_gen += 1;
         st.pending = None;
         st.refresh = Some(tokens.refresh);
         st.name = info.name;
@@ -651,30 +666,55 @@ impl Google {
         Ok(())
     }
 
-    /// Best effort: revokes the grant, then forgets it.
-    pub(crate) fn sign_out(&self) {
+    /// Whether Google confirmed the revoke. Logs the cause, never the token.
+    fn revoke(&self, token: &str) -> bool {
+        match self.http.post_form(REVOKE_URL, &[("token", token)]) {
+            Ok(resp) if resp.status == 200 => true,
+            Ok(resp) => {
+                debug!("revoke: http {}", resp.status);
+                false
+            }
+            Err(e) => {
+                debug!("revoke failed: {e}");
+                false
+            }
+        }
+    }
+
+    /// Always signs out locally. An `Err` means Google did not confirm the revoke.
+    pub(crate) fn sign_out(&self) -> Result<(), ProviderError> {
         self.flow.cancel();
         let refresh = {
             let mut st = locked(&self.state);
             let refresh = st.refresh.take();
-            *st = State::default();
+            *st = State {
+                auth_gen: st.auth_gen + 1,
+                ..State::default()
+            };
             refresh
         };
-        if let Some(r) = refresh {
-            match self.http.post_form(REVOKE_URL, &[("token", r.expose())]) {
-                Ok(resp) if resp.status == 200 => {}
-                Ok(resp) => debug!("revoke: http {}", resp.status),
-                Err(e) => debug!("revoke failed: {e}"),
-            }
-        }
+        let revoked = refresh.is_none_or(|r| self.revoke(r.expose()));
         if let Some(path) = &self.files.token {
             remove_token(path);
+        }
+        if revoked {
+            Ok(())
+        } else {
+            Err(ProviderError::ClientBroken(format!(
+                "signed out on this computer, but Google did not confirm; remove requiem's access at {PERMISSIONS_URL}"
+            )))
         }
     }
 
     /// Forgets a grant Google no longer honours.
     fn forget(&self) -> ProviderError {
-        *locked(&self.state) = State::default();
+        {
+            let mut st = locked(&self.state);
+            *st = State {
+                auth_gen: st.auth_gen + 1,
+                ..State::default()
+            };
+        }
         if let Some(path) = &self.files.token {
             remove_token(path);
         }
@@ -683,14 +723,14 @@ impl Google {
 
     fn access_token(&self) -> Result<Secret, ProviderError> {
         let _one = locked(&self.refreshing);
-        let refresh = {
+        let (refresh, auth_gen) = {
             let st = locked(&self.state);
             if let Some((token, until)) = &st.access
                 && self.clock.now() < *until
             {
                 return Ok(token.clone());
             }
-            st.refresh.clone()
+            (st.refresh.clone(), st.auth_gen)
         };
         let Some(refresh) = refresh else {
             return Err(ProviderError::SignInRequired(
@@ -708,11 +748,22 @@ impl Google {
             ],
         )?;
         let body = token_response(&resp.body);
+        let stale =
+            || ProviderError::SignInRequired("sign in to Google to see your library".into());
+        // A sign-out or sign-in while the request was in flight makes its answer stale.
+        if locked(&self.state).auth_gen != auth_gen {
+            return Err(stale());
+        }
         match (resp.status, body.access_token, body.error.as_deref()) {
             (200, Some(access), _) => {
                 let token = Secret(access);
                 let life = Duration::from_secs(body.expires_in.unwrap_or(0));
-                locked(&self.state).access = Some((
+                let mut st = locked(&self.state);
+                // Rechecked under the lock that stores it: a sign-out can land after the check above.
+                if st.auth_gen != auth_gen {
+                    return Err(stale());
+                }
+                st.access = Some((
                     token.clone(),
                     self.clock.now() + life.saturating_sub(EXPIRY_MARGIN),
                 ));
@@ -771,7 +822,6 @@ impl Google {
 
 #[cfg(test)]
 mod tests {
-    use std::os::unix::fs::PermissionsExt;
     use std::sync::Mutex as StdMutex;
 
     use super::*;
@@ -1052,6 +1102,26 @@ mod tests {
     }
 
     #[test]
+    fn save_tightens_an_existing_directory_and_load_an_existing_file() {
+        let rig = Rig::new();
+        let path = rig.token_path();
+        let dir = path.parent().unwrap();
+        fs::create_dir_all(dir).unwrap();
+        let mode = |p: &Path| fs::metadata(p).unwrap().permissions().mode() & 0o777;
+        fs::set_permissions(dir, fs::Permissions::from_mode(0o755)).unwrap();
+        let token = TokenFile {
+            refresh_token: "RT1".into(),
+            name: None,
+        };
+        save_token(&path, &token).unwrap();
+        assert_eq!(mode(dir), 0o700);
+
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
+        assert_eq!(load_token(&path).unwrap().refresh_token, "RT1");
+        assert_eq!(mode(&path), 0o600);
+    }
+
+    #[test]
     fn debug_never_shows_secrets() {
         let t = TokenFile {
             refresh_token: "RT-SECRET".into(),
@@ -1149,7 +1219,107 @@ mod tests {
         let rig = Rig::new();
         let g = rig.signed_in();
         rig.api.script(REVOKE_URL, 200, "{}");
-        g.sign_out();
+        g.sign_out().unwrap();
+        assert_eq!(
+            rig.api.forms(REVOKE_URL),
+            [vec![("token".into(), "RT1".into())]]
+        );
+        assert!(!rig.token_path().exists());
+        assert_eq!(g.account(), AccountState::SignedOut);
+    }
+
+    #[test]
+    fn a_failed_revoke_still_signs_out_and_says_so() {
+        let rig = Rig::new();
+        let g = rig.signed_in();
+        rig.api.script(REVOKE_URL, 500, "{}");
+        let err = g.sign_out().unwrap_err();
+        assert!(
+            matches!(&err, ProviderError::ClientBroken(m)
+                if m.starts_with("signed out on this computer, but Google did not confirm")
+                    && m.ends_with("https://myaccount.google.com/permissions")),
+            "{err:?}"
+        );
+        assert_eq!(g.account(), AccountState::SignedOut);
+        assert!(!rig.token_path().exists());
+    }
+
+    /// Wraps the fake and holds the token endpoint's reply until released.
+    struct Gated {
+        inner: Arc<FakeApi>,
+        entered: std::sync::mpsc::Sender<()>,
+        release: StdMutex<std::sync::mpsc::Receiver<()>>,
+    }
+
+    impl ApiHttp for Gated {
+        fn get(
+            &self,
+            url: &str,
+            query: &[(&str, &str)],
+            headers: &[(&str, &str)],
+        ) -> Result<crate::transport::HttpResponse, ProviderError> {
+            self.inner.get(url, query, headers)
+        }
+
+        fn post_form(
+            &self,
+            url: &str,
+            form: &[(&str, &str)],
+        ) -> Result<crate::transport::HttpResponse, ProviderError> {
+            let r = self.inner.post_form(url, form);
+            if url == TOKEN_URL {
+                self.entered.send(()).unwrap();
+                self.release.lock().unwrap().recv().unwrap();
+            }
+            r
+        }
+    }
+
+    #[test]
+    fn a_refresh_in_flight_during_sign_out_is_not_kept() {
+        let rig = Rig::new();
+        rig.signed_in();
+        let (entered_tx, entered) = std::sync::mpsc::channel();
+        let (release_tx, release) = std::sync::mpsc::channel();
+        let http = Arc::new(Gated {
+            inner: rig.api.clone(),
+            entered: entered_tx,
+            release: StdMutex::new(release),
+        });
+        let g = Arc::new(Google::new(http, rig.clock.clone(), rig.files()));
+        rig.api.script(TOKEN_URL, 200, REFRESHED);
+        rig.api.script(REVOKE_URL, 200, "{}");
+        let refresh = {
+            let g = g.clone();
+            std::thread::spawn(move || g.access_token())
+        };
+        entered.recv().unwrap();
+        g.sign_out().unwrap();
+        release_tx.send(()).unwrap();
+        let err = refresh.join().unwrap().unwrap_err();
+        assert!(matches!(err, ProviderError::SignInRequired(_)), "{err:?}");
+        assert!(locked(&g.state).access.is_none());
+        assert_eq!(g.account(), AccountState::SignedOut);
+    }
+
+    #[test]
+    fn a_cancelled_sign_in_revokes_the_grant_it_was_issued() {
+        let rig = Rig::new();
+        let g = rig.google();
+        rig.api.script(CHANNELS_URL, 200, CHANNEL);
+        rig.api.script(REVOKE_URL, 200, "{}");
+        let tokens = Tokens {
+            access: Secret::new("AT1"),
+            refresh: Secret::new("RT1"),
+            expires_in: Duration::from_secs(3600),
+        };
+        let r#gen = g.flow.start();
+        g.flow.cancel();
+        let err = g.finish_sign_in(tokens, r#gen).unwrap_err();
+        assert_eq!(
+            err,
+            ProviderError::SignInRequired("sign-in was cancelled".into())
+        );
         assert_eq!(
             rig.api.forms(REVOKE_URL),
             [vec![("token".into(), "RT1".into())]]
@@ -1167,7 +1337,7 @@ mod tests {
         let err = g
             .sign_in(&|s| {
                 if matches!(s, AccountState::Pending { .. }) {
-                    g.sign_out();
+                    g.sign_out().unwrap();
                 }
             })
             .unwrap_err();

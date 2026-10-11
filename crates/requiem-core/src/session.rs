@@ -97,6 +97,11 @@ enum Msg {
         provider: ProviderId,
         state: AccountState,
     },
+    SignOutDone {
+        provider: ProviderId,
+        result: Result<(), ProviderError>,
+        state: AccountState,
+    },
     SignInDone {
         provider: ProviderId,
         result: Result<(), ProviderError>,
@@ -328,6 +333,19 @@ impl Actor {
                     }
                 }
                 Msg::Account { provider, state } => self.set_account(provider, state, false),
+                Msg::SignOutDone {
+                    provider,
+                    result,
+                    state,
+                } => {
+                    if let Err(e) = result {
+                        self.emit(Event::AccountError {
+                            provider: provider.clone(),
+                            error: sign_in_error(&e),
+                        });
+                    }
+                    self.set_account(provider, state, false);
+                }
                 Msg::SignInDone {
                     provider,
                     result,
@@ -336,7 +354,7 @@ impl Actor {
                     self.signing_in.remove(&provider);
                     let failed = result.is_err();
                     if let Err(e) = result {
-                        self.emit(Event::SignInFailed {
+                        self.emit(Event::AccountError {
                             provider: provider.clone(),
                             error: sign_in_error(&e),
                         });
@@ -670,10 +688,11 @@ impl Actor {
         };
         let tx = self.tx.clone();
         thread::spawn(move || {
-            provider.sign_out();
+            let result = provider.sign_out();
             let state = provider.account();
-            let _ = tx.send(Msg::Account {
+            let _ = tx.send(Msg::SignOutDone {
                 provider: id,
+                result,
                 state,
             });
         });
