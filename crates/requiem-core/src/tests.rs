@@ -884,3 +884,224 @@ fn playing_a_track_ends_a_pause() {
     assert!(!paused);
     r.start(r#gen, None);
 }
+
+type PersistLog = Arc<std::sync::Mutex<Vec<PersistState>>>;
+
+fn persist_rig() -> (Rig, PersistLog) {
+    let log = PersistLog::default();
+    let sink_log = log.clone();
+    let r = rig(SessionConfig {
+        persist: Some(Arc::new(move |s| sink_log.lock().unwrap().push(s))),
+        ..config()
+    });
+    (r, log)
+}
+
+fn last_persist(log: &PersistLog) -> Option<PersistState> {
+    log.lock().unwrap().last().cloned()
+}
+
+fn wait_persist(log: &PersistLog, pred: impl Fn(&PersistState) -> bool) -> PersistState {
+    let deadline = Instant::now() + SECS(5);
+    loop {
+        if let Some(s) = last_persist(log).filter(&pred) {
+            return s;
+        }
+        assert!(Instant::now() < deadline, "timed out waiting for persist");
+        std::thread::sleep(Duration::from_millis(5));
+    }
+}
+
+impl Rig {
+    fn cue(&self, i: usize) {
+        self.send(Command::Cue(i));
+        self.wait_event(|e| matches!(e, Event::QueueChanged { current: Some(c), .. } if *c == i));
+    }
+
+    fn resume_loads(&self, n: usize) -> String {
+        self.send(Command::Resume);
+        self.engine.wait_load(n).1
+    }
+}
+
+#[test]
+fn cue_then_resume_plays_the_cued_index() {
+    let r = rig(config());
+    r.enqueue(&["a", "b", "c"]);
+    r.cue(1);
+    assert_eq!(r.resume_loads(1), "b");
+}
+
+#[test]
+fn cue_is_ignored_while_playing() {
+    let r = rig(config());
+    r.play_started(&["a", "b", "c"]);
+    while r.rx.try_recv().is_ok() {}
+    r.send(Command::Cue(2));
+    r.barrier();
+    assert!(
+        !r.rx
+            .try_iter()
+            .any(|e| matches!(e, Event::QueueChanged { .. }))
+    );
+    r.send(Command::Next);
+    assert_eq!(r.engine.wait_load(2).1, "b");
+}
+
+#[test]
+fn cue_out_of_range_is_ignored() {
+    let r = rig(config());
+    r.enqueue(&["a", "b"]);
+    r.wait_event(|e| matches!(e, Event::QueueChanged { .. }));
+    r.send(Command::Cue(2));
+    r.barrier();
+    assert!(
+        !r.rx
+            .try_iter()
+            .any(|e| matches!(e, Event::QueueChanged { .. }))
+    );
+    assert_eq!(r.resume_loads(1), "a");
+}
+
+#[test]
+fn replace_and_clear_drop_the_cue() {
+    let (r, log) = persist_rig();
+    r.enqueue(&["a", "b", "c"]);
+    r.cue(2);
+    r.enqueue(&["x", "y"]);
+    wait_persist(&log, |s| s.tracks.len() == 2 && s.resume == Some(0));
+    r.cue(1);
+    r.send(Command::Clear);
+    wait_persist(&log, |s| s.tracks.is_empty() && s.resume.is_none());
+    r.enqueue(&["p", "q"]);
+    assert_eq!(r.resume_loads(1), "p");
+}
+
+#[test]
+fn play_index_and_stop_drop_the_cue() {
+    let (r, log) = persist_rig();
+    r.enqueue(&["a", "b", "c"]);
+    r.cue(2);
+    r.send(Command::PlayIndex(0));
+    r.engine.wait_load(1);
+    r.send(Command::Next);
+    r.send(Command::Next);
+    r.send(Command::Next);
+    r.wait_event(|e| matches!(e, Event::State(PlayState::Stopped)));
+    r.barrier();
+    // Stopped past the end with the cursor on the last track: Play wraps to the top.
+    assert_eq!(last_persist(&log).unwrap().resume, Some(0));
+}
+
+#[test]
+fn move_keeps_the_cue_on_the_same_track() {
+    let r = rig(config());
+    r.enqueue(&["a", "b", "c"]);
+    r.cue(0);
+    r.send(Command::Move { from: 0, to: 2 });
+    r.wait_event(|e| {
+        matches!(
+            e,
+            Event::QueueChanged {
+                current: Some(2),
+                ..
+            }
+        )
+    });
+    assert_eq!(r.resume_loads(1), "a");
+}
+
+#[test]
+fn remove_before_the_cued_track_keeps_the_cue() {
+    let r = rig(config());
+    r.enqueue(&["a", "b", "c"]);
+    r.cue(2);
+    r.send(Command::Remove(0));
+    r.wait_event(|e| {
+        matches!(
+            e,
+            Event::QueueChanged {
+                current: Some(1),
+                ..
+            }
+        )
+    });
+    assert_eq!(r.resume_loads(1), "c");
+}
+
+#[test]
+fn remove_of_the_cued_track_cues_its_successor() {
+    let r = rig(config());
+    r.enqueue(&["a", "b", "c"]);
+    r.cue(1);
+    r.send(Command::Remove(1));
+    r.wait_event(|e| {
+        matches!(
+            e,
+            Event::QueueChanged {
+                current: Some(1),
+                ..
+            }
+        )
+    });
+    assert_eq!(r.resume_loads(1), "c");
+}
+
+#[test]
+fn remove_of_the_cued_last_track_clears_the_cue() {
+    let r = rig(config());
+    r.enqueue(&["a", "b", "c"]);
+    r.cue(2);
+    r.send(Command::Remove(2));
+    r.wait_event(|e| matches!(e, Event::QueueChanged { current: None, .. }));
+    assert_eq!(r.resume_loads(1), "a");
+}
+
+#[test]
+fn persist_resume_while_playing_and_paused() {
+    let (r, log) = persist_rig();
+    r.enqueue(&["a", "b", "c"]);
+    r.send(Command::PlayIndex(1));
+    let (r#gen, _) = r.engine.wait_load(1);
+    wait_persist(&log, |s| s.resume == Some(1));
+    r.start(r#gen, None);
+    r.send(Command::SetVolume(40));
+    let s = wait_persist(&log, |s| s.volume == 40);
+    assert_eq!((s.resume, s.tracks.len()), (Some(1), 3));
+    // A stopped session would resume at 2.
+    r.send(Command::Pause);
+    r.wait_event(|e| matches!(e, Event::State(PlayState::Paused)));
+    r.barrier();
+    assert_eq!(last_persist(&log).unwrap().resume, Some(1));
+}
+
+#[test]
+fn persist_resume_when_stopped_after_the_queue_ended() {
+    let (r, log) = persist_rig();
+    let g1 = r.play_started(&["a", "b"]);
+    r.engine.emit(EngineEvent::Ended { r#gen: g1 });
+    let (g2, _) = r.engine.wait_load(2);
+    r.engine.emit(EngineEvent::Ended { r#gen: g2 });
+    r.wait_event(|e| matches!(e, Event::State(PlayState::Stopped)));
+    r.barrier();
+    assert_eq!(last_persist(&log).unwrap().resume, Some(0));
+}
+
+#[test]
+fn persist_resume_when_stopped_after_a_cue() {
+    let (r, log) = persist_rig();
+    r.enqueue(&["a", "b", "c"]);
+    wait_persist(&log, |s| s.resume == Some(0));
+    r.cue(2);
+    wait_persist(&log, |s| s.resume == Some(2));
+}
+
+#[test]
+fn persist_resume_for_an_empty_queue() {
+    let (r, log) = persist_rig();
+    r.enqueue(&["a"]);
+    wait_persist(&log, |s| s.resume == Some(0));
+    r.send(Command::Clear);
+    let s = wait_persist(&log, |s| s.tracks.is_empty());
+    assert_eq!((s.resume, s.volume), (None, 100));
+}

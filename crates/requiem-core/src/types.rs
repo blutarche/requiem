@@ -163,6 +163,9 @@ pub enum Command {
         to: usize,
     },
     Clear,
+    /// Only while stopped: marks `usize` as the track Play starts. The daemon sends it on
+    /// restore and clients never do, so `PROTOCOL` is unchanged.
+    Cue(usize),
     Next,
     Prev,
     Pause,

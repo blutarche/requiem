@@ -294,7 +294,7 @@ impl Daemon {
                 evs.push(self.queue_changed());
                 evs
             }
-            Command::Shutdown => Vec::new(),
+            Command::Shutdown | Command::Cue(_) => Vec::new(),
         }
     }
 

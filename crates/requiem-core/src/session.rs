@@ -1,15 +1,29 @@
+use std::fmt;
 use std::sync::Arc;
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
 use crossbeam_channel::{Receiver, Sender, unbounded};
 
+use serde::{Deserialize, Serialize};
+
 use crate::{
     AudioSource, Command, Engine, EngineEvent, EngineEventSink, EnqueueMode, Event, FailureKind,
     PlayState, Provider, ProviderError, SeekTarget, Track, TrackId,
 };
 
-#[derive(Debug, Clone)]
+/// What a restart restores. `resume` is the queue index Play would start.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PersistState {
+    pub tracks: Vec<Track>,
+    pub resume: Option<usize>,
+    pub volume: u8,
+}
+
+/// Called on the session thread; must not block.
+pub type PersistSink = Arc<dyn Fn(PersistState) + Send + Sync>;
+
+#[derive(Clone)]
 pub struct SessionConfig {
     pub resolve_retry_delay: Duration,
     pub search_limit: usize,
@@ -17,6 +31,24 @@ pub struct SessionConfig {
     pub prev_restart_threshold: Duration,
     /// A subscriber with more queued events than this stops receiving `Position`.
     pub subscriber_position_backlog: usize,
+    /// Called with a fresh state after every queue, volume or play-state event.
+    pub persist: Option<PersistSink>,
+}
+
+impl fmt::Debug for SessionConfig {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("SessionConfig")
+            .field("resolve_retry_delay", &self.resolve_retry_delay)
+            .field("search_limit", &self.search_limit)
+            .field("max_consecutive_failures", &self.max_consecutive_failures)
+            .field("prev_restart_threshold", &self.prev_restart_threshold)
+            .field(
+                "subscriber_position_backlog",
+                &self.subscriber_position_backlog,
+            )
+            .field("persist", &self.persist.is_some())
+            .finish()
+    }
 }
 
 impl Default for SessionConfig {
@@ -27,6 +59,7 @@ impl Default for SessionConfig {
             max_consecutive_failures: 3,
             prev_restart_threshold: Duration::from_secs(3),
             subscriber_position_backlog: 64,
+            persist: None,
         }
     }
 }
@@ -141,6 +174,8 @@ struct Actor {
 
     queue: Vec<Track>,
     current: Option<usize>,
+    /// `current` was set by `Cue` and nothing is loaded: Play starts it rather than its successor.
+    cued: bool,
     /// Track handed to the engine; outlives a queue `Replace`.
     playing: Option<Track>,
     queue_version: u64,
@@ -188,6 +223,7 @@ impl Actor {
             subs: Vec::new(),
             queue: Vec::new(),
             current: None,
+            cued: false,
             playing: None,
             queue_version: 0,
             r#gen: 0,
@@ -235,6 +271,34 @@ impl Actor {
             }
             s.send(ev.clone()).is_ok()
         });
+        if matches!(
+            ev,
+            Event::QueueChanged { .. } | Event::Volume(_) | Event::State(_)
+        ) && let Some(sink) = &self.config.persist
+        {
+            sink(PersistState {
+                tracks: self.queue.clone(),
+                resume: self.resume_index(),
+                volume: self.volume,
+            });
+        }
+    }
+
+    /// The index Play would start.
+    fn resume_index(&self) -> Option<usize> {
+        if self.playing.is_some() || self.state != PlayState::Stopped {
+            return self.current;
+        }
+        if self.queue.is_empty() {
+            return None;
+        }
+        if self.cued
+            && let Some(c) = self.current.filter(|c| *c < self.queue.len())
+        {
+            return Some(c);
+        }
+        let next = self.current.map_or(0, |c| c + 1);
+        Some(if next < self.queue.len() { next } else { 0 })
     }
 
     fn set_state(&mut self, state: PlayState) {
@@ -258,6 +322,7 @@ impl Actor {
                     EnqueueMode::Replace => {
                         self.queue = tracks;
                         self.current = None;
+                        self.cued = false;
                     }
                     EnqueueMode::Append => self.queue.extend(tracks),
                 }
@@ -273,11 +338,22 @@ impl Actor {
                     self.play(i);
                 }
             }
+            Command::Cue(i) => {
+                if self.state == PlayState::Stopped
+                    && self.playing.is_none()
+                    && i < self.queue.len()
+                {
+                    self.current = Some(i);
+                    self.cued = true;
+                    self.emit_queue();
+                }
+            }
             Command::Remove(i) => self.remove(i),
             Command::Move { from, to } => self.move_track(from, to),
             Command::Clear => {
                 self.queue.clear();
                 self.current = None;
+                self.cued = false;
                 self.queue_version += 1;
                 self.stop();
                 self.emit_queue();
@@ -341,6 +417,9 @@ impl Actor {
                     self.emit_queue();
                 } else if matches!(self.state, PlayState::Playing | PlayState::Buffering) {
                     self.start(i);
+                } else if self.cued {
+                    // The successor now sits at `i` and takes over the cue.
+                    self.emit_queue();
                 } else {
                     // A paused session stops with the cursor just before the successor: `Next`
                     // then plays it.
@@ -431,7 +510,8 @@ impl Actor {
             // the current track was removed; a finished queue starts again from the top.
             PlayState::Stopped if !self.queue.is_empty() => {
                 let next = self.current.map_or(0, |c| c + 1);
-                self.start(if next < self.queue.len() { next } else { 0 });
+                let cued = self.current.filter(|c| self.cued && *c < self.queue.len());
+                self.start(cued.unwrap_or(if next < self.queue.len() { next } else { 0 }));
             }
             _ => {}
         }
@@ -455,6 +535,7 @@ impl Actor {
         self.started = false;
         self.pre = None;
         self.playing = None;
+        self.cued = false;
         self.strikes = 0;
         self.stream_strikes = 0;
         self.last_parse_failure = None;
@@ -476,6 +557,7 @@ impl Actor {
             return;
         };
         self.current = Some(idx);
+        self.cued = false;
         self.playing = Some(track.clone());
         self.r#gen += 1;
         self.loaded = false;
