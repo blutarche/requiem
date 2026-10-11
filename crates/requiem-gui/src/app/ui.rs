@@ -1166,7 +1166,8 @@ impl Ui {
     }
 
     /// Fades the shown toast's content out at its own size, then lays out the newest pending
-    /// toast and fades that in. Resizing the box mid-fade would clip the old text.
+    /// toast and fades that in as the box takes its size. Resizing the box mid-fade-out would
+    /// clip the old text.
     fn fade_toast_out(&self) {
         let t = &self.toast;
         widgets::animate(
@@ -1190,12 +1191,24 @@ impl Ui {
         let Some(toast) = t.pending.take() else {
             return;
         };
-        self.lay_out_toast(&toast);
+        let from = t.view.frame();
+        let to = self.lay_out_toast(&toast);
+        let duration = widgets::motion(widgets::MICRO);
+        let resize = to != from && !duration.is_zero() && !widgets::reduce_motion();
+        if resize {
+            // Laying out left the box at its new size and the content placed for it. Back at
+            // the old size, the animator grows or shrinks it into the new one, and the content
+            // follows by autoresizing.
+            t.view.setFrame(from);
+        }
         widgets::animate(
             &t.view,
-            widgets::motion(widgets::MICRO),
+            duration,
             widgets::EASE_OUT,
             || {
+                if resize {
+                    t.view.animator().setFrame(to);
+                }
                 for v in t.view.subviews().iter() {
                     v.animator().setAlphaValue(1.0);
                 }
