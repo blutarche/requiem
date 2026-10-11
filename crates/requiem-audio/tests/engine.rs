@@ -7,6 +7,8 @@ use requiem_core::{AudioSource, ByteSource, Engine, EngineEvent, FailureKind, Fo
 
 const RATE: u32 = 48_000;
 const THRESHOLD: f32 = 0.01;
+/// Seconds the last `Position` may fall short of the end: one 500 ms interval plus wake slack.
+const LAST_POSITION_TOLERANCE: f64 = 0.6;
 
 fn fixture(name: &str) -> Vec<u8> {
     let path = format!("{}/tests/fixtures/{name}", env!("CARGO_MANIFEST_DIR"));
@@ -274,9 +276,9 @@ fn opus_plays_to_end() {
     }
     assert!(matches!(ev.last(), Some(EngineEvent::Ended { .. })));
     let pos = positions(&ev, 7);
-    assert!(pos.len() >= 15, "positions {pos:?}");
+    assert!(pos.len() >= 8, "positions {pos:?}");
     assert!(pos.windows(2).all(|w| w[0] <= w[1]));
-    assert!(near(*pos.last().unwrap(), 6.0, 0.4));
+    assert!(near(*pos.last().unwrap(), 6.0, LAST_POSITION_TOLERANCE));
     check_tone(&h, 6.0);
 }
 
@@ -307,9 +309,9 @@ fn seek_right_after_start() {
         .into_iter()
         .filter(|p| *p >= 1.0)
         .collect();
-    assert!(after.len() >= 5, "positions {after:?}");
+    assert!(after.len() >= 2, "positions {after:?}");
     assert!(after.iter().all(|p| *p >= 4.0), "positions {after:?}");
-    assert!(near(*after.last().unwrap(), 6.0, 0.4));
+    assert!(near(*after.last().unwrap(), 6.0, LAST_POSITION_TOLERANCE));
 }
 
 #[test]
@@ -338,7 +340,7 @@ fn pause_parks_output_and_freezes_position() {
     h.wait_ended(1);
     let pos2 = positions(&h.events(), 1);
     assert!(*pos2.last().unwrap() > *pos0.last().unwrap());
-    assert!(near(*pos2.last().unwrap(), 6.0, 0.4));
+    assert!(near(*pos2.last().unwrap(), 6.0, LAST_POSITION_TOLERANCE));
     check_tone(&h, 6.0);
 }
 
@@ -360,7 +362,10 @@ fn position_continues_across_pause() {
     let (last, next) = (before[before.len() - 1], pos[before.len()]);
     assert!(next > last && next - last < 1.0, "{last} -> {next}");
     assert!(pos.windows(2).all(|w| w[0] <= w[1]), "{pos:?}");
-    assert!(near(*pos.last().unwrap(), 6.0, 0.4), "{pos:?}");
+    assert!(
+        near(*pos.last().unwrap(), 6.0, LAST_POSITION_TOLERANCE),
+        "{pos:?}"
+    );
 }
 
 #[test]
@@ -576,7 +581,11 @@ fn load_after_stop_plays() {
     let (first, last) = active_span(&l[f0..]);
     let len = secs(last - first);
     assert!(near(len, 6.0, 0.12), "duration {len}");
-    assert!(near(*positions(&h.events(), 2).last().unwrap(), 6.0, 0.4));
+    assert!(near(
+        *positions(&h.events(), 2).last().unwrap(),
+        6.0,
+        LAST_POSITION_TOLERANCE
+    ));
 }
 
 #[test]

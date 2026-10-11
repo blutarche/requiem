@@ -288,8 +288,8 @@ mod tests {
     #[test]
     fn steady_ticks_are_not_changes() {
         let mut h = Harness::playing();
-        for i in 1..=200 {
-            assert_eq!(h.tick(ms(250), ms(250 * i)), None, "tick {i}");
+        for i in 1..=100 {
+            assert_eq!(h.tick(ms(500), ms(500 * i)), None, "tick {i}");
         }
     }
 
@@ -303,22 +303,22 @@ mod tests {
     #[test]
     fn forward_seek_is_a_change() {
         let mut h = Harness::playing();
-        for i in 1..=40 {
-            h.tick(ms(250), ms(250 * i));
+        for i in 1..=20 {
+            h.tick(ms(500), ms(500 * i));
         }
-        let view = Harness::shown(h.tick(ms(250), secs(60)));
+        let view = Harness::shown(h.tick(ms(500), secs(60)));
         assert_eq!(view.position, secs(60));
         assert_eq!(view.state, PlayState::Playing);
-        assert_eq!(h.tick(ms(250), ms(60_250)), None);
+        assert_eq!(h.tick(ms(500), ms(60_500)), None);
     }
 
     #[test]
     fn backward_seek_is_a_change() {
         let mut h = Harness::playing();
-        for i in 1..=120 {
-            h.tick(ms(250), ms(250 * i));
+        for i in 1..=60 {
+            h.tick(ms(500), ms(500 * i));
         }
-        let view = Harness::shown(h.tick(ms(250), Duration::ZERO));
+        let view = Harness::shown(h.tick(ms(500), Duration::ZERO));
         assert_eq!(view.position, Duration::ZERO);
     }
 
@@ -335,20 +335,20 @@ mod tests {
         let mut h = Harness::playing();
         // The engine falls 50 ms behind the wall clock per tick.
         for i in 1..=40 {
-            assert_eq!(h.tick(ms(250), ms(200 * i)), None, "tick {i}");
+            assert_eq!(h.tick(ms(500), ms(450 * i)), None, "tick {i}");
         }
-        let view = Harness::shown(h.tick(ms(250), ms(200 * 41)));
-        assert_eq!(view.position, ms(8200));
-        assert_eq!(h.tick(ms(250), ms(8450)), None);
+        let view = Harness::shown(h.tick(ms(500), ms(450 * 41)));
+        assert_eq!(view.position, ms(18_450));
+        assert_eq!(h.tick(ms(500), ms(18_950)), None);
     }
 
     #[test]
     fn pause_carries_the_extrapolated_position() {
         let mut h = Harness::playing();
-        for i in 1..=11 {
-            h.tick(ms(250), ms(250 * i));
+        for i in 1..=5 {
+            h.tick(ms(500), ms(500 * i));
         }
-        h.advance(ms(250));
+        h.advance(ms(500));
         let view = Harness::shown(h.apply(Event::State(PlayState::Paused)));
         assert_eq!(view.state, PlayState::Paused);
         assert_eq!(view.position, secs(3));

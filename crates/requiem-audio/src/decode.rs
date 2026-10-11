@@ -26,7 +26,7 @@ use crate::output::{Feed, Shared};
 
 const MAX_DECODE_ERRORS: u32 = 50;
 const RESAMPLE_CHUNK: usize = 1024;
-const POSITION_EVERY: Duration = Duration::from_millis(250);
+const POSITION_EVERY: Duration = Duration::from_millis(500);
 const ACK_TIMEOUT: Duration = Duration::from_secs(2);
 /// Output time added to computed waits so the callback has moved past the target on waking.
 const WAKE_SLACK: Duration = Duration::from_millis(15);
