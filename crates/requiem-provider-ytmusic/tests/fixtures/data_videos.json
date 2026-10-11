@@ -1,0 +1,38 @@
+{
+  "kind": "youtube#videoListResponse",
+  "etag": "etag",
+  "pageInfo": {
+    "totalResults": 2,
+    "resultsPerPage": 2
+  },
+  "items": [
+    {
+      "kind": "youtube#video",
+      "etag": "etag",
+      "id": "kkppQnFl2-8",
+      "contentDetails": {
+        "duration": "PT4M48S",
+        "dimension": "2d",
+        "definition": "hd",
+        "caption": "false",
+        "licensedContent": true,
+        "contentRating": {},
+        "projection": "rectangular"
+      }
+    },
+    {
+      "kind": "youtube#video",
+      "etag": "etag",
+      "id": "bP7rQabXjuw",
+      "contentDetails": {
+        "duration": "PT5M9S",
+        "dimension": "2d",
+        "definition": "sd",
+        "caption": "false",
+        "licensedContent": true,
+        "contentRating": {},
+        "projection": "rectangular"
+      }
+    }
+  ]
+}

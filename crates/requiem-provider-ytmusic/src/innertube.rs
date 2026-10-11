@@ -1,4 +1,4 @@
-//! Innertube client: search (WEB_REMIX) and stream resolution (VISIONOS).
+//! Innertube client: search and browse (WEB_REMIX) and stream resolution (VISIONOS).
 
 use std::sync::{Arc, Mutex};
 
@@ -15,6 +15,7 @@ use crate::range::{FetchError, RangeFetcher, RangeResponse, Refresher};
 use crate::transport::{HttpResponse, Transport};
 
 const SEARCH_URL: &str = "https://music.youtube.com/youtubei/v1/search?prettyPrint=false";
+const BROWSE_URL: &str = "https://music.youtube.com/youtubei/v1/browse?prettyPrint=false";
 // Smallest WEB_REMIX call that returns `responseContext.visitorData`: measured 2026-10-10
 // at 609 bytes, against ~198 KB for a songs search.
 const SUGGESTIONS_URL: &str =
@@ -178,6 +179,14 @@ impl InnertubeClient {
             return self.search_once(query, limit);
         }
         Ok(tracks)
+    }
+
+    /// The first page of an anonymous browse of `browse_id`.
+    pub(crate) fn browse(&self, browse_id: &str) -> Result<Vec<u8>, ProviderError> {
+        let body = json!({"context": Self::music_context(), "browseId": browse_id});
+        Ok(self
+            .post_music(self.family(), "browse", BROWSE_URL, &body)?
+            .body)
     }
 
     /// Forgets the cached visitorData and the connection pool, so the next resolve
@@ -497,6 +506,21 @@ mod tests {
         assert!(reqs[1].body.contains(r#""visitorData":"VD1""#));
         assert!(reqs[1].body.contains(r#""clientName":"VISIONOS""#));
         assert!(reqs[1].body.contains(r#""videoId":"vid""#));
+    }
+
+    #[test]
+    fn browse_posts_the_browse_id_as_web_remix() {
+        let t = FakeTransport::with(vec![(200, r#"{"contents":{}}"#), (404, "{}")]);
+        let c = client(&t);
+        assert_eq!(c.browse("VLPLx").unwrap(), br#"{"contents":{}}"#);
+        assert!(matches!(
+            c.browse("VLgone"),
+            Err(ProviderError::ClientBroken(_))
+        ));
+        assert_eq!(t.urls(), vec!["browse", "browse"]);
+        let reqs = t.requests.lock().unwrap();
+        assert!(reqs[0].body.contains(r#""browseId":"VLPLx""#));
+        assert!(reqs[0].body.contains(r#""clientName":"WEB_REMIX""#));
     }
 
     #[test]

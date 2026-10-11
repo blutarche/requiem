@@ -1,9 +1,11 @@
 //! Live smoke tests against YouTube. Run with `-- --ignored live_ --test-threads=1`.
+//! `live_library` needs a signed-in account: point `REQUIEM_GOOGLE_CLIENT_FILE` and
+//! `REQUIEM_GOOGLE_TOKEN_FILE` at the client JSON and at the token a `signin` saved.
 
 use std::io::{Read, Seek, SeekFrom};
 use std::time::{Duration, Instant};
 
-use requiem_core::{FormatHint, Provider};
+use requiem_core::{AccountState, FormatHint, Item, Page, Provider, Shelf};
 
 use crate::{IpFamily, YtMusicOptions, YtMusicProvider};
 
@@ -101,4 +103,52 @@ fn live_any_family_falls_back() {
         got += n;
     }
     println!("Any: itag {}, read {got} bytes", format.itag);
+}
+
+fn first_collection(shelves: &[Shelf]) -> Option<Page> {
+    shelves.iter().flat_map(|s| &s.items).find_map(|i| match i {
+        Item::Collection(c) => Some(Page::Collection(c.id.clone())),
+        Item::Track(_) => None,
+    })
+}
+
+fn summary(shelves: &[Shelf]) -> Vec<(String, usize)> {
+    shelves
+        .iter()
+        .map(|s| (s.title.clone(), s.items.len()))
+        .collect()
+}
+
+#[test]
+#[ignore]
+fn live_home() {
+    let p = provider(false, IpFamily::Any);
+    let home = p.browse(&Page::Home).unwrap();
+    println!("home: {:?}", summary(&home));
+    assert!(home.iter().all(|s| !s.items.is_empty()));
+    let page = first_collection(&home).expect("a playlist or album on home");
+    let opened = p.browse(&page).unwrap();
+    println!("{page:?}: {:?}", summary(&opened));
+    assert_eq!(opened.len(), 1);
+    assert!(!opened[0].items.is_empty());
+}
+
+#[test]
+#[ignore]
+fn live_library() {
+    let p = provider(false, IpFamily::Any);
+    let account = p.account();
+    println!("account: {account:?}");
+    assert!(matches!(account, AccountState::SignedIn { .. }));
+    let library = p.browse(&Page::Library).unwrap();
+    println!("library: {:?}", summary(&library));
+    let page = first_collection(&library).expect("liked videos");
+    let liked = p.browse(&page).unwrap();
+    println!("{page:?}: {:?}", summary(&liked));
+    for item in liked.iter().flat_map(|s| &s.items).take(3) {
+        let Item::Track(t) = item else {
+            panic!("{item:?}")
+        };
+        assert!(!t.title.is_empty() && !t.artists.is_empty(), "{t:?}");
+    }
 }

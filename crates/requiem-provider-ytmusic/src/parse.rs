@@ -8,6 +8,10 @@ use requiem_core::{FormatHint, ProviderError, ProviderId, Track, TrackId};
 use serde::Deserialize;
 use serde_json::Value;
 
+mod browse;
+
+pub(crate) use browse::{BROWSE_PREFIX, collection_kind, parse_collection, parse_home};
+
 pub(crate) const PROVIDER: &str = "ytmusic";
 
 fn parse_err(msg: impl Into<String>) -> ProviderError {
@@ -38,6 +42,7 @@ pub(crate) fn visitor_data(body: &[u8]) -> Option<String> {
 struct ListItem {
     playlist_item_data: Option<PlaylistItemData>,
     flex_columns: Vec<FlexColumn>,
+    fixed_columns: Vec<FixedColumn>,
     thumbnail: Option<Thumbnail>,
 }
 
@@ -51,6 +56,13 @@ struct PlaylistItemData {
 #[serde(default)]
 struct FlexColumn {
     #[serde(rename = "musicResponsiveListItemFlexColumnRenderer")]
+    renderer: Option<FlexRenderer>,
+}
+
+#[derive(Deserialize, Default)]
+#[serde(default)]
+struct FixedColumn {
+    #[serde(rename = "musicResponsiveListItemFixedColumnRenderer")]
     renderer: Option<FlexRenderer>,
 }
 
@@ -77,12 +89,20 @@ struct Run {
 #[serde(default, rename_all = "camelCase")]
 struct NavEndpoint {
     browse_endpoint: Option<BrowseEndpoint>,
+    watch_endpoint: Option<WatchEndpoint>,
 }
 
 #[derive(Deserialize, Default)]
 #[serde(default, rename_all = "camelCase")]
 struct BrowseEndpoint {
+    browse_id: Option<String>,
     browse_endpoint_context_supported_configs: Option<BrowseConfigs>,
+}
+
+#[derive(Deserialize, Default)]
+#[serde(default, rename_all = "camelCase")]
+struct WatchEndpoint {
+    video_id: Option<String>,
 }
 
 #[derive(Deserialize, Default)]
@@ -168,7 +188,7 @@ struct Subtitle {
 
 /// Column 1: artists, album and duration separated by " • " runs. Typed runs
 /// (`pageType`) win; without any, the first group is the artist and the second the album.
-fn parse_subtitle(runs: &[Run]) -> Subtitle {
+fn parse_subtitle<'a>(runs: impl IntoIterator<Item = &'a Run>) -> Subtitle {
     let mut artists = Vec::new();
     let mut album = None;
     let mut duration = None;
@@ -225,8 +245,11 @@ fn column_runs(item: &ListItem, i: usize) -> &[Run] {
 }
 
 fn largest_thumbnail(item: &ListItem) -> Option<String> {
-    item.thumbnail
-        .as_ref()?
+    largest(item.thumbnail.as_ref())
+}
+
+fn largest(thumbnail: Option<&Thumbnail>) -> Option<String> {
+    thumbnail?
         .renderer
         .as_ref()?
         .thumbnail

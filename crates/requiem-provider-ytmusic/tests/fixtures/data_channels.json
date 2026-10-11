@@ -1,0 +1,37 @@
+{
+  "kind": "youtube#channelListResponse",
+  "etag": "etag",
+  "pageInfo": {
+    "totalResults": 1,
+    "resultsPerPage": 5
+  },
+  "items": [
+    {
+      "kind": "youtube#channel",
+      "etag": "etag",
+      "id": "UCxxxxxxxxxxxxxxxxxxxxxx",
+      "snippet": {
+        "title": "Requiem Tester",
+        "description": "",
+        "publishedAt": "2014-03-01T10:00:00Z",
+        "thumbnails": {
+          "default": {
+            "url": "https://yt3.ggpht.com/example=s88-c-k-c0x00ffffff-no-rj",
+            "width": 88,
+            "height": 88
+          }
+        },
+        "localized": {
+          "title": "Requiem Tester",
+          "description": ""
+        }
+      },
+      "contentDetails": {
+        "relatedPlaylists": {
+          "likes": "LLxxxxxxxxxxxxxxxxxxxxxx",
+          "uploads": "UUxxxxxxxxxxxxxxxxxxxxxx"
+        }
+      }
+    }
+  ]
+}
