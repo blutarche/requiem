@@ -388,6 +388,53 @@ fn paused_load_after_a_paused_track_stays_silent() {
     assert!(near(len, 6.0, 0.12), "duration {len}");
 }
 
+fn slow_probe(ms: u64) -> AudioSource {
+    let mut first = true;
+    hooked(
+        fixture("sine440_48k.webm"),
+        FormatHint::WebmOpus,
+        move |_| {
+            if std::mem::take(&mut first) {
+                std::thread::sleep(Duration::from_millis(ms));
+            }
+            ReadPlan::Full
+        },
+    )
+}
+
+/// Frames rendered, and those audible, between loading gen 2 over a paused gen 1 and gen 2's
+/// `Started`. With `paused_load`, gen 2 loads paused and is resumed while it probes.
+fn old_track_bleed(paused_load: bool) -> (usize, usize) {
+    let mut h = harness(10.0);
+    h.engine.load(1, opus(), false);
+    h.wait_capture_frames(RATE as usize, 20);
+    h.engine.pause();
+    std::thread::sleep(Duration::from_millis(100));
+    let f0 = h.capture.frames();
+    h.engine.load(2, slow_probe(300), paused_load);
+    if paused_load {
+        std::thread::sleep(Duration::from_millis(20));
+        h.engine.resume();
+    }
+    h.wait_started(2);
+    let f1 = h.capture.frames();
+    let l = left(&h.capture.samples());
+    let audible = l[f0..f1].iter().filter(|s| s.abs() > THRESHOLD).count();
+    (f1 - f0, audible)
+}
+
+#[test]
+fn unpaused_load_after_pause_does_not_replay_paused_track() {
+    let (n, a) = old_track_bleed(false);
+    assert_eq!(a, 0, "old track audible for {a} of {n} frames");
+}
+
+#[test]
+fn resume_during_paused_load_does_not_replay_paused_track() {
+    let (n, a) = old_track_bleed(true);
+    assert_eq!(a, 0, "old track audible for {a} of {n} frames");
+}
+
 #[test]
 fn position_continues_across_pause() {
     let mut h = harness(10.0);
@@ -440,6 +487,67 @@ fn seek_while_paused_wakes_decoder_and_lands() {
         reads.lock().unwrap().iter().any(|at| *at > t),
         "decoder did not act on a seek while paused"
     );
+    let f0 = h.capture.frames();
+    h.engine.resume();
+    h.wait_ended(1);
+    let pos = positions(&h.events(), 1);
+    assert!(
+        pos.len() > n && pos[n..].iter().all(|p| *p >= 4.0),
+        "{pos:?}"
+    );
+    let l = left(&h.capture.samples());
+    let (first, last) = active_span(&l[f0..]);
+    let remaining = secs(last - first);
+    assert!(near(remaining, 2.0, 0.2), "remaining {remaining}");
+}
+
+#[test]
+fn many_seeks_while_paused_are_each_acted_on() {
+    let mut h = harness(4.0);
+    let reads: Arc<Mutex<Vec<Instant>>> = Arc::default();
+    let r = reads.clone();
+    h.engine.load(
+        1,
+        hooked(
+            fixture("sine440_48k.webm"),
+            FormatHint::WebmOpus,
+            move |_| {
+                r.lock().unwrap().push(Instant::now());
+                ReadPlan::Full
+            },
+        ),
+        false,
+    );
+    h.wait("positions", 10, |ev| !positions(ev, 1).is_empty());
+    h.engine.pause();
+    std::thread::sleep(Duration::from_millis(100));
+    let n = positions(&h.events(), 1).len();
+    // A parked output adopts no ring, so every seek here hands over one it never takes.
+    for i in 0..12u64 {
+        let quiet = Instant::now() + Duration::from_secs(5);
+        while reads
+            .lock()
+            .unwrap()
+            .last()
+            .is_some_and(|at| at.elapsed() < Duration::from_millis(50))
+        {
+            assert!(
+                Instant::now() < quiet,
+                "decoder never settled before seek {i}"
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        let t = Instant::now();
+        h.engine.seek(Duration::from_millis(1250 + 250 * i));
+        let deadline = t + Duration::from_secs(1);
+        while !reads.lock().unwrap().iter().any(|at| *at > t) {
+            assert!(
+                Instant::now() < deadline,
+                "decoder did not act on seek {i} while paused"
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
     let f0 = h.capture.frames();
     h.engine.resume();
     h.wait_ended(1);
