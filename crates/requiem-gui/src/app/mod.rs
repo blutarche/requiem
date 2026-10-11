@@ -251,6 +251,8 @@ fn validate(ui: &Ui, item: &NSMenuItem) -> bool {
         !in_text && ui.selected_edit(edit).is_some_and(|e| ui.can_edit(e))
     } else if action == sel!(clearQueue:) {
         ui.can_edit(QueueEdit::Clear)
+    } else if action == sel!(quitAndStop:) {
+        ui.can_stop_player()
     } else {
         true
     }

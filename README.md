@@ -12,7 +12,7 @@ Native desktop client for **YouTube Music**, built to stay open all day without 
 - **`requiem-gui`** — the window: search, queue, player bar, and a Cmd+K command palette. It starts the player if needed and quits when its window closes; playback continues. macOS only in v1.
 - **`requiem`** — the CLI. `requiem --connect` drives the running player (starting it if needed); plain `requiem` plays in-process.
 
-They talk over a per-user Unix socket. "Quit requiem" in the menu bar stops the player and closes the window.
+They talk over a per-user Unix socket. "Quit and Stop Music" in the menu bar stops the player and closes the window.
 
 ## Build
 

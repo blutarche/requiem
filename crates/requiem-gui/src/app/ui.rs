@@ -445,13 +445,15 @@ impl Ui {
         (vm.ui().is_playing(), vm.ui().controls())
     }
 
-    /// Stops the player, then the window closes on its goodbye. Without a connected player
-    /// the window just closes.
+    /// Whether "Quit and Stop Music" is available.
+    pub fn can_stop_player(&self) -> bool {
+        self.vm.borrow().ui().can_stop_player()
+    }
+
+    /// Stops the player, then the window closes on its goodbye. Does nothing without a
+    /// connected player; the menu item is disabled then.
     pub fn quit_and_stop(&self) {
-        let app = NSApplication::sharedApplication(self.mtm);
-        let connected = self.vm.borrow().ui().connection == vm::Connection::Connected;
-        if !connected || !self.backend.stop_player() {
-            app.terminate(None);
+        if !self.can_stop_player() || !self.backend.stop_player() {
             return;
         }
         // A player that never says goodbye still lets the window go.

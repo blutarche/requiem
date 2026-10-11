@@ -21,9 +21,11 @@ pub const BANNER_GRACE: Duration = Duration::from_millis(800);
 /// After this long without a connection, the banner adds the reason and what to do.
 pub const STUCK_AFTER: Duration = Duration::from_secs(30);
 
-const OUT_OF_DATE: &str = "An older requiem player is still running. Quit it from the menu \
-                           bar; this window reconnects on its own.";
-const STUCK_HINT: &str = "If this persists, quit requiem from the menu bar and reopen it.";
+// The old player's menu item may still be named "Quit requiem", so this names none.
+const OUT_OF_DATE: &str = "An older requiem player is still running. Quit it from its \
+                           menu-bar icon; this window reconnects on its own.";
+const STUCK_HINT: &str = "If this persists, choose Quit and Stop Music from the requiem \
+                          menu-bar icon, then reopen requiem.";
 
 /// Regions of the window that need refreshing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -246,6 +248,11 @@ impl UiState {
             seek: live && self.now_playing.is_some(),
             player: live,
         }
+    }
+
+    /// Whether "Quit and Stop Music" has a player to stop.
+    pub fn can_stop_player(&self) -> bool {
+        self.connection == Connection::Connected
     }
 
     /// The command `edit` sends, or `None` when it does nothing: disconnected, a row out of
@@ -1613,7 +1620,8 @@ mod tests {
             vm.ui().banner,
             Some(Banner {
                 text: "Player disconnected — reconnecting… (connection refused). If this \
-                       persists, quit requiem from the menu bar and reopen it."
+                       persists, choose Quit and Stop Music from the requiem menu-bar icon, \
+                       then reopen requiem."
                     .into(),
                 error: false
             })
@@ -1642,8 +1650,8 @@ mod tests {
         assert_eq!(
             vm.ui().banner.as_ref().map(|b| b.text.as_str()),
             Some(
-                "Connecting to player… (not found). If this persists, quit requiem from the \
-                 menu bar and reopen it."
+                "Connecting to player… (not found). If this persists, choose Quit and Stop \
+                 Music from the requiem menu-bar icon, then reopen requiem."
             )
         );
         assert!(vm.ui().toast.is_none());
@@ -1774,8 +1782,8 @@ mod tests {
         assert_eq!(
             vm.ui().banner,
             Some(Banner {
-                text: "An older requiem player is still running. Quit it from the menu bar; \
-                       this window reconnects on its own."
+                text: "An older requiem player is still running. Quit it from its menu-bar \
+                       icon; this window reconnects on its own."
                     .into(),
                 error: true
             })
@@ -1963,6 +1971,20 @@ mod tests {
         assert_eq!(vm.ui().controls(), off);
         let (demo, _) = crate::demo::start();
         assert_eq!(demo.ui().controls(), on);
+    }
+
+    #[test]
+    fn only_a_connected_player_can_be_stopped() {
+        let mut vm = Vm::new();
+        assert!(!vm.ui().can_stop_player());
+        vm.link(Link::Connected);
+        assert!(vm.ui().can_stop_player());
+        vm.link(Link::Lost("gone".into()));
+        assert!(!vm.ui().can_stop_player());
+        vm.link(Link::OutOfDate);
+        assert!(!vm.ui().can_stop_player());
+        let (demo, _) = crate::demo::start();
+        assert!(!demo.ui().can_stop_player());
     }
 
     #[test]
