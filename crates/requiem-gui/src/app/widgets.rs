@@ -313,11 +313,24 @@ pub fn icon_view(
 /// The tooltip, and the accessibility label (`label`, or the tooltip when `None`).
 pub fn describe(v: &NSView, tip: &str, label: Option<&str>) {
     v.setToolTip(Some(&NSString::from_str(tip)));
-    let label = NSString::from_str(label.unwrap_or(tip));
+    accessibility_label(v, label.unwrap_or(tip));
+}
+
+/// A control's accessibility element is its cell, which does not take the control's label,
+/// so the cell gets it too.
+pub fn accessibility_label(v: &NSView, label: &str) {
+    let label = NSString::from_str(label);
     v.setAccessibilityLabel(Some(&label));
-    // A button's accessibility element is its cell, which does not take the control's label.
     if let Some(cell) = v.downcast_ref::<NSControl>().and_then(|c| c.cell()) {
         cell.setAccessibilityLabel(Some(&label));
+    }
+}
+
+/// Keeps `v` out of the accessibility tree, and its cell, which stands in for a control.
+pub fn hide_from_accessibility(v: &NSView) {
+    v.setAccessibilityElement(false);
+    if let Some(cell) = v.downcast_ref::<NSControl>().and_then(|c| c.cell()) {
+        cell.setAccessibilityElement(false);
     }
 }
 
@@ -328,7 +341,7 @@ fn as_button(v: &NSView, label: &str) {
     v.setAccessibilityRole(Some(unsafe { NSAccessibilityButtonRole }));
     v.setAccessibilityLabel(Some(&NSString::from_str(label)));
     for sub in v.subviews().iter() {
-        sub.setAccessibilityElement(false);
+        hide_from_accessibility(&sub);
     }
 }
 
@@ -900,6 +913,7 @@ impl Field {
                 &theme::muted(),
                 rect(12.0, (h - 16.0) / 2.0, 16.0, 16.0),
             );
+            hide_from_accessibility(&iv);
             boxv.addSubview(&iv);
             x = 36.0;
         }

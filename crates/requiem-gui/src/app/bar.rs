@@ -189,6 +189,7 @@ impl PlayerBar {
             rect(vx - 26.0, (h - 16.0) / 2.0, 16.0, 16.0),
         );
         vicon.setAutoresizingMask(PIN_RIGHT);
+        widgets::hide_from_accessibility(&vicon);
         let vicon: Retained<NSView> = Retained::into_super(Retained::into_super(vicon));
         let volume = Slider::new(
             mtm,

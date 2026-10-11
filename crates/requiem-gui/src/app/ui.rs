@@ -284,6 +284,7 @@ impl Ui {
         // SAFETY: the field's delegate is weak. It is the app delegate, which `app::run` holds
         // in a local until `app.run()`, which never returns.
         unsafe { search.text.setDelegate(Some(delegate)) };
+        widgets::accessibility_label(&search.text, "Search");
         let status = widgets::placed_label(
             mtm,
             "",
