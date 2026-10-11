@@ -171,9 +171,9 @@ impl PlayerBar {
         prev.set_action(target, sel!(prev:));
         play.set_action(target, sel!(toggle:));
         next.set_action(target, sel!(next:));
-        widgets::describe(&prev, "Previous", None);
-        widgets::describe(&play, "Play", None);
-        widgets::describe(&next, "Next", None);
+        widgets::describe(&prev, "Previous (⌘←)", Some("Previous"));
+        widgets::describe(&play, "Play (Space)", Some("Play"));
+        widgets::describe(&next, "Next (⌘→)", Some("Next"));
         center.addSubview(&prev);
         center.addSubview(&play);
         center.addSubview(&next);
@@ -277,13 +277,13 @@ impl PlayerBar {
 
     pub fn set_playing(&self, playing: bool) {
         if self.playing.replace(playing) != playing {
-            let (icon, name) = if playing {
-                (Icon::Pause, "Pause")
+            let (icon, tip, name) = if playing {
+                (Icon::Pause, "Pause (Space)", "Pause")
             } else {
-                (Icon::Play, "Play")
+                (Icon::Play, "Play (Space)", "Play")
             };
             self.play.set_icon(icon, Self::ICON);
-            widgets::describe(&self.play, name, None);
+            widgets::describe(&self.play, tip, Some(name));
         }
     }
 
