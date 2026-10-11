@@ -18,7 +18,7 @@ use objc2_app_kit::{
     NSCellImagePosition, NSColor, NSControl, NSEvent, NSEventMask, NSEventTrackingRunLoopMode,
     NSEventType, NSFocusRingType, NSFont, NSImageScaling, NSImageView, NSLineBreakMode,
     NSResponder, NSTextAlignment, NSTextField, NSTrackingArea, NSTrackingAreaOptions, NSView,
-    NSWorkspace,
+    NSWindow, NSWindowOcclusionState, NSWorkspace,
 };
 use objc2_core_foundation::CGFloat;
 use objc2_foundation::{
@@ -56,6 +56,15 @@ const KEY_QUIET: Duration = Duration::from_secs(1);
 
 thread_local! {
     static LAST_KEY: Cell<Option<Instant>> = const { Cell::new(None) };
+    static STILL: Cell<bool> = const { Cell::new(false) };
+}
+
+/// Runs `f` with every change it makes applied at once: catching up on what happened while
+/// the window could not be seen shows where things are, not how they got there.
+pub fn still(f: impl FnOnce()) {
+    let was = STILL.with(|s| s.replace(true));
+    f();
+    STILL.with(|s| s.set(was));
 }
 
 /// Marks the change about to be made as asked for from the keyboard.
@@ -107,7 +116,15 @@ pub fn announce(mtm: MainThreadMarker, text: &str) {
 
 /// Whether changes to `view` would be seen animating. A snapshot's window is never shown.
 fn on_screen(view: &NSView) -> bool {
-    view.window().is_some_and(|w| w.isVisible())
+    !STILL.with(Cell::get) && view.window().is_some_and(|w| window_on_screen(&w))
+}
+
+/// Not hidden, minimized, fully covered, or in a hidden app.
+pub fn window_on_screen(w: &NSWindow) -> bool {
+    w.isVisible()
+        && !w.isMiniaturized()
+        && !NSApplication::sharedApplication(w.mtm()).isHidden()
+        && w.occlusionState().contains(NSWindowOcclusionState::Visible)
 }
 
 fn timing(curve: Curve) -> Retained<CAMediaTimingFunction> {
@@ -1309,6 +1326,18 @@ mod tests {
         assert!(!keyboard_quiet(Some(t0), ms(1000)));
         // A key noted after `now` was read still counts.
         assert!(keyboard_quiet(Some(ms(5)), t0));
+    }
+
+    #[test]
+    fn catching_up_holds_still_until_it_ends() {
+        let still_now = || STILL.with(Cell::get);
+        assert!(!still_now());
+        still(|| {
+            assert!(still_now());
+            still(|| assert!(still_now()));
+            assert!(still_now());
+        });
+        assert!(!still_now());
     }
 
     /// Draws as AppKit would after `set` asks for it; returns how many draws `ticks` took.

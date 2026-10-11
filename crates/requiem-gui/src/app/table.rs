@@ -19,7 +19,7 @@ use objc2_app_kit::{
 };
 use objc2_core_foundation::CGFloat;
 use objc2_foundation::{
-    MainThreadMarker, NSAttributedString, NSIndexSet, NSInteger, NSNotification,
+    MainThreadMarker, NSAttributedString, NSEdgeInsets, NSIndexSet, NSInteger, NSNotification,
     NSNotificationCenter, NSObjectProtocol, NSPoint, NSRect, NSSize, NSString,
 };
 use requiem_core::Track;
@@ -1081,6 +1081,20 @@ impl Table {
 
     pub fn selected_row(&self) -> Option<usize> {
         usize::try_from(self.table.selectedRow()).ok()
+    }
+
+    /// Leaves `inset` below the last row, so it can scroll clear of an overlay.
+    pub fn set_bottom_inset(&self, inset: CGFloat) {
+        let Some(scroll) = self.table.enclosingScrollView() else {
+            return;
+        };
+        scroll.setAutomaticallyAdjustsContentInsets(false);
+        scroll.setContentInsets(NSEdgeInsets {
+            top: 0.0,
+            left: 0.0,
+            bottom: inset,
+            right: 0.0,
+        });
     }
 
     /// Swaps row `row`'s "+" for a check, if the row is on screen.

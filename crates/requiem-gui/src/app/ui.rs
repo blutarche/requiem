@@ -12,8 +12,7 @@ use objc2::{MainThreadOnly, define_class, msg_send, sel};
 use objc2_app_kit::{
     NSAnimatablePropertyContainer, NSApplication, NSAttributedStringNSStringDrawing, NSEvent,
     NSLineBreakMode, NSResponder, NSTextAlignment, NSTextField, NSTextFieldDelegate,
-    NSTrackingAreaOptions, NSView, NSWindow, NSWindowOcclusionState, NSWindowStyleMask,
-    NSWindowTitleVisibility,
+    NSTrackingAreaOptions, NSView, NSWindow, NSWindowStyleMask, NSWindowTitleVisibility,
 };
 use objc2_core_foundation::CGFloat;
 use objc2_foundation::{MainThreadMarker, NSPoint, NSRect, NSSize, NSString};
@@ -71,6 +70,11 @@ const TOAST_ACTION_H: CGFloat = 48.0;
 const TOAST_BUTTON_H: CGFloat = 32.0;
 /// How far below its place a toast starts as it fades in.
 const TOAST_RISE: CGFloat = 8.0;
+/// The toast's distance from the window's right edge, and from the player bar.
+const TOAST_RIGHT: CGFloat = 24.0;
+const TOAST_BOTTOM: CGFloat = 16.0;
+/// Leaving is quicker than entering.
+const TOAST_EXIT: Duration = Duration::from_millis(150);
 /// How long "Quit and Stop Music" waits for the player's goodbye.
 const QUIT_GRACE: Duration = Duration::from_secs(3);
 
@@ -140,7 +144,14 @@ struct ToastView {
     accent: Retained<NSView>,
     label: Retained<NSTextField>,
     action: Retained<HoverButton>,
+    /// The toast shown, or about to be once a swap's fade-out ends.
     id: Cell<u64>,
+    /// The toast whose countdown runs: the view model's, seen or not.
+    counting: Cell<u64>,
+    /// The toast and text last read out.
+    said: RefCell<(u64, String)>,
+    /// The toast to lay out once the shown one has faded out.
+    pending: RefCell<Option<Toast>>,
     /// False from the start of the exit; the view hides once the exit ends.
     shown: Cell<bool>,
     /// The pointer is on the toast.
@@ -410,7 +421,12 @@ impl Ui {
 
     fn toast_view(mtm: MainThreadMarker, target: &AnyObject) -> ToastView {
         let w = 320.0;
-        let frame = rect(WIN_W - 16.0 - w, PlayerBar::H + 16.0, w, TOAST_H);
+        let frame = rect(
+            WIN_W - TOAST_RIGHT - w,
+            PlayerBar::H + TOAST_BOTTOM,
+            w,
+            TOAST_H,
+        );
         // SAFETY: `initWithFrame:` is NSView's designated initializer.
         let panel: Retained<ToastPanel> =
             unsafe { msg_send![ToastPanel::alloc(mtm), initWithFrame: frame] };
@@ -472,6 +488,9 @@ impl Ui {
             label,
             action,
             id: Cell::new(0),
+            counting: Cell::new(0),
+            said: RefCell::new((0, String::new())),
+            pending: RefCell::new(None),
             shown: Cell::new(false),
             hovered: Cell::new(false),
             clock: Cell::new(Countdown::Held(Duration::ZERO)),
@@ -756,7 +775,7 @@ impl Ui {
             t.clock.get().resume(now)
         };
         t.clock.set(clock);
-        self.schedule_dismissal(t.id.get(), clock);
+        self.schedule_dismissal(t.counting.get(), clock);
     }
 
     /// Starts toast `id`'s countdown, held if the pointer already rests on `frame`.
@@ -766,9 +785,13 @@ impl Ui {
             .convertPoint_fromView(self.window.mouseLocationOutsideOfEventStream(), None);
         let (o, s) = (frame.origin, frame.size);
         let over = at.x >= o.x && at.x < o.x + s.width && at.y >= o.y && at.y < o.y + s.height;
+        self.start_clock(id, over);
+    }
+
+    fn start_clock(&self, id: u64, held: bool) {
         let t = &self.toast;
-        t.hovered.set(over);
-        let clock = Countdown::new(Instant::now(), over);
+        t.hovered.set(held);
+        let clock = Countdown::new(Instant::now(), held);
         t.clock.set(clock);
         self.schedule_dismissal(id, clock);
     }
@@ -788,7 +811,7 @@ impl Ui {
     /// Dismisses toast `id`, unless another replaced it or its countdown was held since.
     fn countdown_ended(&self, id: u64, end: Instant) {
         let t = &self.toast;
-        if t.id.get() == id && t.clock.get() == Countdown::Running(end) {
+        if t.counting.get() == id && t.clock.get() == Countdown::Running(end) {
             self.dismiss_toast(id);
         }
     }
@@ -834,14 +857,26 @@ impl Ui {
         if self.on_screen() {
             self.render_now();
         } else {
+            self.count_toast();
             self.schedule_tick();
         }
     }
 
-    /// Renders what changed while the window couldn't be seen, once it can.
+    /// Renders what changed while the window couldn't be seen, once it can, without motion.
     pub fn catch_up(&self) {
         if self.on_screen() {
-            self.render_now();
+            widgets::still(|| self.render_now());
+        }
+    }
+
+    /// Starts the countdown of a toast raised while the window can't be seen, so one that
+    /// runs out meanwhile is dropped rather than shown late.
+    fn count_toast(&self) {
+        let id = self.vm.borrow().ui().toast.as_ref().map(|t| t.id);
+        if let Some(id) = id
+            && self.toast.counting.replace(id) != id
+        {
+            self.start_clock(id, false);
         }
     }
 
@@ -865,13 +900,8 @@ impl Ui {
         self.schedule_tick();
     }
 
-    /// Not hidden, minimized or fully covered.
     fn on_screen(&self) -> bool {
-        let w = &self.window;
-        w.isVisible()
-            && !w.isMiniaturized()
-            && !NSApplication::sharedApplication(self.mtm).isHidden()
-            && w.occlusionState().contains(NSWindowOcclusionState::Visible)
+        widgets::window_on_screen(&self.window)
     }
 
     /// Wakes the view model when the banner is due to change on its own.
@@ -1095,21 +1125,81 @@ impl Ui {
     fn show_toast(&self, toast: Option<Toast>) {
         let t = &self.toast;
         let Some(toast) = toast else {
+            t.pending.take();
             if t.shown.replace(false) {
                 self.leave_toast();
             }
             return;
         };
         let swap = t.shown.replace(true);
-        if swap {
-            widgets::crossfade(&t.view, widgets::motion(widgets::MICRO));
-        }
-        // A toast amended in place keeps its countdown.
-        let new = t.id.replace(toast.id) != toast.id;
-        // An amended text is read out again; a re-render is not.
-        if new || t.label.stringValue().to_string() != toast.text {
+        t.id.set(toast.id);
+        // A new toast, or an amended text, is read out; a re-render is not.
+        let said = (toast.id, toast.text.clone());
+        if *t.said.borrow() != said {
             widgets::announce(self.mtm, &toast.text);
+            *t.said.borrow_mut() = said;
         }
+        // A toast amended in place keeps its countdown, as does one counted while hidden.
+        let new = t.counting.replace(toast.id) != toast.id;
+        if swap {
+            if new {
+                self.start_clock(toast.id, t.hovered.get());
+            }
+            if t.pending.replace(Some(toast)).is_none() {
+                self.fade_toast_out();
+            }
+            return;
+        }
+        let frame = self.lay_out_toast(&toast);
+        if new {
+            self.start_countdown(toast.id, frame);
+        }
+        self.enter_toast();
+    }
+
+    /// Fades the shown toast's content out at its own size, then lays out the newest pending
+    /// toast and fades that in. Resizing the box mid-fade would clip the old text.
+    fn fade_toast_out(&self) {
+        let t = &self.toast;
+        widgets::animate(
+            &t.view,
+            widgets::motion(widgets::MICRO),
+            widgets::EASE_OUT,
+            || {
+                for v in t.view.subviews().iter() {
+                    v.animator().setAlphaValue(0.0);
+                }
+            },
+            || {
+                with(|ui| ui.fade_toast_in());
+            },
+        );
+    }
+
+    fn fade_toast_in(&self) {
+        let t = &self.toast;
+        // Dismissed meanwhile: the exit is under way.
+        let Some(toast) = t.pending.take() else {
+            return;
+        };
+        self.lay_out_toast(&toast);
+        widgets::animate(
+            &t.view,
+            widgets::motion(widgets::MICRO),
+            widgets::EASE_OUT,
+            || {
+                for v in t.view.subviews().iter() {
+                    v.animator().setAlphaValue(1.0);
+                }
+            },
+            || {},
+        );
+    }
+
+    /// Sizes the toast for `toast` and fills it in; returns its frame. The tables scroll
+    /// clear of it.
+    fn lay_out_toast(&self, toast: &Toast) -> NSRect {
+        let t = &self.toast;
         widgets::set_text(&t.label, &toast.text);
         t.accent.setHidden(!toast.error);
         let text_w = t.label.fittingSize().width;
@@ -1127,7 +1217,12 @@ impl Ui {
         };
         let h = base_h + (lines - 1.0) * (line_h - 2.0);
         let root = self.root.bounds();
-        let frame = rect(root.size.width - 16.0 - w, PlayerBar::H + 16.0, w, h);
+        let frame = rect(
+            root.size.width - TOAST_RIGHT - w,
+            PlayerBar::H + TOAST_BOTTOM,
+            w,
+            h,
+        );
         t.view.setFrame(frame);
         let text_h = lines * line_h;
         t.label.setFrame(rect(
@@ -1145,12 +1240,13 @@ impl Ui {
             ));
         }
         t.label.setToolTip(Some(&NSString::from_str(&toast.text)));
-        if new {
-            self.start_countdown(toast.id, frame);
-        }
-        if !swap {
-            self.enter_toast();
-        }
+        self.set_toast_inset(TOAST_BOTTOM + h);
+        frame
+    }
+
+    fn set_toast_inset(&self, inset: CGFloat) {
+        self.results.set_bottom_inset(inset);
+        self.queue.set_bottom_inset(inset);
     }
 
     /// Fades the toast in as it rises into the frame it was given.
@@ -1164,6 +1260,10 @@ impl Ui {
         };
         v.setAlphaValue(0.0);
         v.setFrameOrigin(NSPoint::new(at.x, at.y - rise));
+        // A swap's fade-out cut short by a dismissal leaves the content clear.
+        for c in v.subviews().iter() {
+            c.setAlphaValue(1.0);
+        }
         v.setHidden(false);
         widgets::animate(
             v,
@@ -1190,7 +1290,7 @@ impl Ui {
         let id = t.id.get();
         widgets::animate(
             v,
-            widgets::motion(widgets::STANDARD),
+            widgets::motion(TOAST_EXIT),
             widgets::EASE_OUT,
             || {
                 v.animator().setAlphaValue(0.0);
@@ -1201,6 +1301,7 @@ impl Ui {
                     let t = &ui.toast;
                     if t.id.get() == id && !t.shown.get() {
                         t.view.setHidden(true);
+                        ui.set_toast_inset(0.0);
                     }
                 });
             },
