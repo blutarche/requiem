@@ -131,6 +131,7 @@ impl Palette {
         // SAFETY: the field's delegate is weak. It is the app delegate, which `app::run` holds
         // in a local until `app.run()`, which never returns.
         unsafe { field.text.setDelegate(Some(delegate)) };
+        widgets::accessibility_label(&field.text, "Command");
         panel.addSubview(&field.ring);
 
         let font = theme::font(14.0, Weight::Regular);
@@ -175,8 +176,8 @@ impl Palette {
                 view.setAccessibilityLabel(Some(&objc2_foundation::NSString::from_str(
                     action.label(),
                 )));
-                label.setAccessibilityElement(false);
-                keys.setAccessibilityElement(false);
+                widgets::hide_from_accessibility(&label);
+                widgets::hide_from_accessibility(&keys);
                 widgets::track_hover(&view, NSTrackingAreaOptions::empty());
                 panel.addSubview(&view);
                 Row {
