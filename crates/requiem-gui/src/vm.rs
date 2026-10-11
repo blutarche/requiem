@@ -257,6 +257,18 @@ impl UiState {
         }
     }
 
+    /// The seek bar's value as VoiceOver reads it, "1:23 of 3:45"; empty with nothing loaded.
+    pub fn seek_spoken(&self) -> String {
+        if self.now_playing.is_none() {
+            return String::new();
+        }
+        let at = fmt_time(self.position);
+        match self.total_text() {
+            total if total.is_empty() => at,
+            total => format!("{at} of {total}"),
+        }
+    }
+
     /// Playback progress in `0.0..=1.0`.
     pub fn progress(&self) -> f64 {
         match self.duration {
@@ -1291,6 +1303,25 @@ mod tests {
     }
 
     #[test]
+    fn seek_bar_value_is_spoken_as_time() {
+        assert_eq!(connected().ui().seek_spoken(), "");
+        let mut vm = playing(225);
+        vm.apply(Event::Position(Duration::from_secs(83)));
+        assert_eq!(vm.ui().seek_spoken(), "1:23 of 3:45");
+        // No duration known: the time alone.
+        let mut vm = connected();
+        let t = Track {
+            duration: None,
+            ..track("x", 1)
+        };
+        vm.apply(Event::NowPlaying {
+            track: t,
+            duration: None,
+        });
+        assert_eq!(vm.ui().seek_spoken(), "0:00");
+    }
+
+    #[test]
     fn state_change_marks_state_and_elapsed() {
         let mut vm = playing(225);
         vm.apply(Event::State(PlayState::Paused));
@@ -1306,6 +1337,8 @@ mod tests {
         vm.apply(Event::Position(Duration::from_secs(10)));
         vm.apply(Event::State(PlayState::Buffering));
         assert_eq!(vm.ui().elapsed_text(), "Buffering…");
+        // VoiceOver still hears the time.
+        assert_eq!(vm.ui().seek_spoken(), "0:10 of 3:45");
         assert!(vm.ui().is_playing());
         vm.apply(Event::State(PlayState::Playing));
         assert_eq!(vm.ui().elapsed_text(), "0:10");

@@ -916,6 +916,9 @@ impl Ui {
         if let Some(e) = p.elapsed {
             self.bar.set_elapsed(&e);
         }
+        if let Some(s) = p.seek_spoken {
+            self.bar.set_seek_spoken(&s);
+        }
         if let Some(f) = p.progress {
             self.bar.set_progress(f);
         }
@@ -995,6 +998,11 @@ impl Ui {
         let b = self.main.bounds();
         let shown = banner.is_some();
         if let Some(banner) = &banner {
+            if !self.banner_shown.get()
+                || self.banner_label.stringValue().to_string() != banner.text
+            {
+                widgets::announce(self.mtm, &banner.text);
+            }
             widgets::set_text(&self.banner_label, &banner.text);
             // Two lines can still be too few at the minimum width.
             self.banner_label
@@ -1064,6 +1072,10 @@ impl Ui {
         }
         // A toast amended in place keeps its countdown.
         let new = t.id.replace(toast.id) != toast.id;
+        // An amended text is read out again; a re-render is not.
+        if new || t.label.stringValue().to_string() != toast.text {
+            widgets::announce(self.mtm, &toast.text);
+        }
         widgets::set_text(&t.label, &toast.text);
         t.accent.setHidden(!toast.error);
         let text_w = t.label.fittingSize().width;
@@ -1177,6 +1189,7 @@ struct Patch {
     queue_badge: Option<Option<String>>,
     now_playing: Option<NowPlaying>,
     elapsed: Option<String>,
+    seek_spoken: Option<String>,
     progress: Option<f64>,
     playing: Option<bool>,
     volume: Option<u8>,
@@ -1202,6 +1215,7 @@ impl Patch {
             }),
             elapsed: (any(Dirty::ELAPSED) || any(Dirty::STATE) || any(Dirty::NOW_PLAYING))
                 .then(|| s.elapsed_text()),
+            seek_spoken: (any(Dirty::ELAPSED) || any(Dirty::NOW_PLAYING)).then(|| s.seek_spoken()),
             progress: (any(Dirty::SEEK) || any(Dirty::NOW_PLAYING) || any(Dirty::STATE))
                 .then(|| s.progress()),
             playing: any(Dirty::STATE).then(|| s.is_playing()),

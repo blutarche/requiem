@@ -266,6 +266,10 @@ impl PlayerBar {
         widgets::set_text(&self.elapsed, text);
     }
 
+    pub fn set_seek_spoken(&self, text: &str) {
+        self.seek.set_spoken(text);
+    }
+
     pub fn set_progress(&self, fraction: f64) {
         self.seek.set_value(fraction);
     }

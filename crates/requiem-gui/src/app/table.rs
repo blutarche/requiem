@@ -29,6 +29,7 @@ use super::widgets::{self, FLEX_H, FLEX_W, HoverButton, PIN_BOTTOM, PIN_LEFT, PI
 use crate::vm::{self, Intent, QueueEdit};
 
 pub const ROW_H: CGFloat = 36.0;
+const FOCUS_RING: CGFloat = 2.0;
 const HEADER_H: CGFloat = 32.0;
 const PAD: CGFloat = 12.0;
 
@@ -165,6 +166,9 @@ define_class!(
                     rv.ivars().selected.set(row == selected);
                     rv.paint();
                 });
+                if let Some(t) = table.downcast_ref::<KeyTable>() {
+                    t.show_focus();
+                }
             }
         }
     }
@@ -337,11 +341,27 @@ impl Controller {
 
 pub struct KeyTableIvars {
     focused: Cell<bool>,
+    ring: OnceCell<Retained<FocusRing>>,
 }
 
 define_class!(
-    /// A table that tells its rows when it holds keyboard focus. It draws no focus ring;
-    /// the selected row turns from neutral to accent instead.
+    /// An outline over the rows that lets clicks through to them.
+    // SAFETY: NSView has no subclassing requirements; no ivars; no Drop impl.
+    #[unsafe(super(NSView, NSResponder, NSObject))]
+    #[thread_kind = MainThreadOnly]
+    pub struct FocusRing;
+
+    impl FocusRing {
+        #[unsafe(method_id(hitTest:))]
+        fn hit_test(&self, _point: NSPoint) -> Option<Retained<NSView>> {
+            None
+        }
+    }
+);
+
+define_class!(
+    /// A table that tells its rows when it holds keyboard focus. The selected row turns from
+    /// neutral to accent; with no row selected, a ring over the rows shows focus.
     // SAFETY: NSTableView has no subclassing requirements; no Drop impl.
     #[unsafe(super(NSTableView, objc2_app_kit::NSControl, NSView, NSResponder, NSObject))]
     #[thread_kind = MainThreadOnly]
@@ -375,6 +395,7 @@ impl KeyTable {
     fn new_table(mtm: MainThreadMarker, frame: NSRect) -> Retained<NSTableView> {
         let this = Self::alloc(mtm).set_ivars(KeyTableIvars {
             focused: Cell::new(false),
+            ring: OnceCell::new(),
         });
         // SAFETY: `initWithFrame:` is NSView's designated initializer.
         let this: Retained<Self> = unsafe { msg_send![super(this), initWithFrame: frame] };
@@ -393,6 +414,14 @@ impl KeyTable {
             rv.ivars().focused.set(focused);
             rv.paint();
         });
+        self.show_focus();
+    }
+
+    /// The ring, while the table has focus and no selected row to show it.
+    fn show_focus(&self) {
+        if let Some(ring) = self.ivars().ring.get() {
+            ring.setHidden(!(self.focused() && self.selectedRow() < 0));
+        }
     }
 }
 
@@ -936,6 +965,16 @@ impl Table {
         scroll.contentView().setDrawsBackground(false);
         scroll.setFocusRingType(NSFocusRingType::None);
         view.addSubview(&scroll);
+        // SAFETY: `initWithFrame:` is NSView's designated initializer.
+        let ring: Retained<FocusRing> =
+            unsafe { msg_send![FocusRing::alloc(mtm), initWithFrame: scroll.frame()] };
+        ring.setAutoresizingMask(FLEX_W | FLEX_H);
+        widgets::border(&ring, &theme::accent(), FOCUS_RING);
+        ring.setHidden(true);
+        view.addSubview(&ring);
+        if let Some(t) = table.downcast_ref::<KeyTable>() {
+            let _ = t.ivars().ring.set(ring);
+        }
         let clip = scroll.contentView();
         // SAFETY: the header implements the selector, and it lives as long as the table, in
         // the installed `Ui`, until exit; the observation goes with it.
@@ -959,6 +998,10 @@ impl Table {
     pub fn set_rows(&self, rows: Vec<RowText>, current: Option<usize>) {
         self.controller.set_rows(rows, current);
         self.table.reloadData();
+        // Reloading can drop the selection.
+        if let Some(t) = self.table.downcast_ref::<KeyTable>() {
+            t.show_focus();
+        }
         // Column widths settle when the table tiles.
         self.header.setNeedsDisplay(true);
     }

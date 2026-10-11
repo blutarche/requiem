@@ -1,7 +1,7 @@
 //! Small views. Backgrounds, borders and radii are layer properties rather than `drawRect:`
 //! so they cost no backing store; only the seek bar draws.
 
-use std::cell::{Cell, OnceCell};
+use std::cell::{Cell, OnceCell, RefCell};
 use std::ptr::NonNull;
 use std::time::{Duration, Instant};
 
@@ -10,12 +10,15 @@ use objc2::rc::{Retained, Weak};
 use objc2::runtime::{AnyObject, Sel};
 use objc2::{AnyThread, DefinedClass, MainThreadOnly, Message, define_class, msg_send};
 use objc2_app_kit::{
-    NSAccessibility, NSAccessibilityButtonRole, NSAccessibilitySliderRole, NSAnimationContext,
-    NSApplication, NSAttributedStringNSStringDrawing, NSAutoresizingMaskOptions, NSBezierPath,
-    NSButton, NSCellImagePosition, NSColor, NSControl, NSEvent, NSEventMask,
-    NSEventTrackingRunLoopMode, NSEventType, NSFocusRingType, NSFont, NSImageScaling, NSImageView,
-    NSLineBreakMode, NSResponder, NSTextAlignment, NSTextField, NSTrackingArea,
-    NSTrackingAreaOptions, NSView, NSWorkspace,
+    NSAccessibility, NSAccessibilityAnnouncementKey,
+    NSAccessibilityAnnouncementRequestedNotification, NSAccessibilityButtonRole,
+    NSAccessibilityPostNotificationWithUserInfo, NSAccessibilityPriorityKey,
+    NSAccessibilityPriorityLevel, NSAccessibilitySliderRole, NSAnimationContext, NSApplication,
+    NSAttributedStringNSStringDrawing, NSAutoresizingMaskOptions, NSBezierPath, NSButton,
+    NSCellImagePosition, NSColor, NSControl, NSEvent, NSEventMask, NSEventTrackingRunLoopMode,
+    NSEventType, NSFocusRingType, NSFont, NSImageScaling, NSImageView, NSLineBreakMode,
+    NSResponder, NSTextAlignment, NSTextField, NSTrackingArea, NSTrackingAreaOptions, NSView,
+    NSWorkspace,
 };
 use objc2_core_foundation::CGFloat;
 use objc2_foundation::{
@@ -81,6 +84,25 @@ pub fn motion(duration: Duration) -> Duration {
 
 fn keyboard_quiet(last_key: Option<Instant>, now: Instant) -> bool {
     last_key.is_some_and(|k| now.saturating_duration_since(k) < KEY_QUIET)
+}
+
+/// Has VoiceOver read `text` out now, ahead of other speech.
+pub fn announce(mtm: MainThreadMarker, text: &str) {
+    let app = NSApplication::sharedApplication(mtm);
+    let text = NSString::from_str(text);
+    let priority = NSNumber::new_isize(NSAccessibilityPriorityLevel::High.0);
+    // SAFETY: the key statics are immutable framework constants.
+    let keys = unsafe { [NSAccessibilityAnnouncementKey, NSAccessibilityPriorityKey] };
+    let info = NSDictionary::<NSString, AnyObject>::from_slices(&keys, &[&text, &priority]);
+    // SAFETY: the element is the app; the info dictionary holds the announcement as a string
+    // and the priority as a number, as the notification requires.
+    unsafe {
+        NSAccessibilityPostNotificationWithUserInfo(
+            &app,
+            NSAccessibilityAnnouncementRequestedNotification,
+            Some(&info),
+        );
+    }
 }
 
 /// Whether changes to `view` would be seen animating. A snapshot's window is never shown.
@@ -941,6 +963,8 @@ impl Fill {
 pub struct SliderIvars {
     kind: SliderKind,
     fill: Cell<Fill>,
+    /// The value VoiceOver reads, when not a percent.
+    spoken: RefCell<String>,
     dragging: Cell<bool>,
     hovered: Cell<bool>,
     enabled: Cell<bool>,
@@ -1006,13 +1030,18 @@ define_class!(
             true
         }
 
-        /// Percent, as VoiceOver reads it.
+        /// The spoken value if there is one, as the seek bar's time, else a percent.
         #[unsafe(method_id(accessibilityValue))]
         fn accessibility_value(&self) -> Option<Retained<AnyObject>> {
-            let pct = (self.ivars().fill.get().value * 100.0).round();
-            Some(Retained::into_super(Retained::into_super(Retained::into_super(
-                NSNumber::new_f64(pct),
-            ))))
+            let spoken = self.ivars().spoken.borrow();
+            if spoken.is_empty() {
+                let pct = (self.ivars().fill.get().value * 100.0).round();
+                Some(Retained::into_super(Retained::into_super(Retained::into_super(
+                    NSNumber::new_f64(pct),
+                ))))
+            } else {
+                Some(Retained::into_super(Retained::into_super(NSString::from_str(&spoken))))
+            }
         }
 
         #[unsafe(method(isAccessibilityEnabled))]
@@ -1044,6 +1073,7 @@ impl Slider {
         let this = Self::alloc(mtm).set_ivars(SliderIvars {
             kind,
             fill: Cell::new(Fill::default()),
+            spoken: RefCell::new(String::new()),
             dragging: Cell::new(false),
             hovered: Cell::new(false),
             enabled: Cell::new(true),
@@ -1084,6 +1114,14 @@ impl Slider {
         iv.fill.set(fill);
         if redraw {
             self.setNeedsDisplay(true);
+        }
+    }
+
+    /// What VoiceOver reads as the value instead of a percent; empty for the percent.
+    pub fn set_spoken(&self, text: &str) {
+        let mut spoken = self.ivars().spoken.borrow_mut();
+        if *spoken != text {
+            text.clone_into(&mut spoken);
         }
     }
 
