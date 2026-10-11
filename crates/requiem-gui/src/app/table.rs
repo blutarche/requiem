@@ -9,13 +9,13 @@ use objc2::rc::{Retained, Weak};
 use objc2::runtime::{AnyObject, NSObject, ProtocolObject, Sel};
 use objc2::{DefinedClass, MainThreadOnly, Message, define_class, msg_send, sel};
 use objc2_app_kit::{
-    NSAttributedStringNSStringDrawing, NSBezierPath, NSBorderType, NSColor,
-    NSControlTextEditingDelegate, NSEvent, NSFocusRingType, NSMenu, NSMenuDelegate, NSMenuItem,
-    NSResponder, NSScrollView, NSTableColumn, NSTableColumnResizingOptions, NSTableRowView,
-    NSTableView, NSTableViewColumnAutoresizingStyle, NSTableViewDataSource, NSTableViewDelegate,
-    NSTableViewSelectionHighlightStyle, NSTableViewStyle, NSTextAlignment, NSTextField,
-    NSTrackingAreaOptions, NSUserInterfaceItemIdentification, NSView,
-    NSViewFrameDidChangeNotification,
+    NSAccessibility, NSAccessibilityCellRole, NSAttributedStringNSStringDrawing, NSBezierPath,
+    NSBorderType, NSColor, NSControlTextEditingDelegate, NSEvent, NSFocusRingType, NSMenu,
+    NSMenuDelegate, NSMenuItem, NSResponder, NSScrollView, NSTableColumn,
+    NSTableColumnResizingOptions, NSTableRowView, NSTableView, NSTableViewColumnAutoresizingStyle,
+    NSTableViewDataSource, NSTableViewDelegate, NSTableViewSelectionHighlightStyle,
+    NSTableViewStyle, NSTextAlignment, NSTextField, NSTrackingAreaOptions,
+    NSUserInterfaceItemIdentification, NSView, NSViewFrameDidChangeNotification,
 };
 use objc2_core_foundation::CGFloat;
 use objc2_foundation::{
@@ -371,7 +371,7 @@ impl Controller {
         if let Some(l) = iv.label.get() {
             widgets::set_text(l, text);
             if col == Col::Title {
-                widgets::accessibility_label(l, &spoken_title(text, current));
+                cell.setAccessibilityLabel(Some(&NSString::from_str(&spoken_title(text, current))));
             }
         }
         if let Some(bar) = iv.bar.get() {
@@ -671,6 +671,12 @@ impl TextCell {
             bar.setHidden(true);
             this.addSubview(&bar);
             let _ = this.ivars().bar.set(bar);
+            // VoiceOver reads a label's text, never its accessibility label, so the cell speaks
+            // for the title and can name the current row.
+            widgets::hide_from_accessibility(&label);
+            this.setAccessibilityElement(true);
+            // SAFETY: the role static is an immutable framework constant.
+            this.setAccessibilityRole(Some(unsafe { NSAccessibilityCellRole }));
         }
         let _ = this.ivars().label.set(label);
         this
