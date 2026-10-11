@@ -324,7 +324,8 @@ impl FadeLabel {
 
     /// Changes the text and its colour, and moves the frame to `origin`, unless the label
     /// is already headed there. A change made before the last one has finished replaces it:
-    /// the fade-out carries on from where it got to, then the newest text fades in.
+    /// mid-fade-in, the text fades out from where it got to; mid-fade-out, the alpha is already
+    /// headed to 0, so the group ends at once and the newest text fades in from there.
     pub fn set(&self, text: &str, color: &NSColor, origin: NSPoint) {
         {
             let t = self.target.borrow();
