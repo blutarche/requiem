@@ -676,6 +676,12 @@ define_class!(
             true
         }
 
+        /// A plain view reports itself disabled, which VoiceOver reads as dimmed.
+        #[unsafe(method(isAccessibilityEnabled))]
+        fn accessibility_enabled(&self) -> bool {
+            true
+        }
+
         /// Clicks on the icon or label land on the item itself.
         #[unsafe(method_id(hitTest:))]
         fn hit_test(&self, point: NSPoint) -> Option<Retained<NSView>> {
@@ -748,12 +754,15 @@ impl NavItem {
         let _ = this.ivars().label.set(label);
         let _ = this.ivars().count.set(count);
         as_button(&this, text);
+        this.setAccessibilitySelected(false);
         track_hover(&this, NSTrackingAreaOptions::empty());
         this.paint();
         this
     }
 
+    /// The active item is the selected one, for VoiceOver too.
     pub fn set_active(&self, active: bool) {
+        self.setAccessibilitySelected(active);
         if self.ivars().active.replace(active) != active {
             self.paint();
         }
