@@ -915,9 +915,32 @@ impl SliderKind {
     }
 }
 
+/// A slider's value, and the value its fill was last drawn at.
+#[derive(Debug, Clone, Copy, Default)]
+struct Fill {
+    value: f64,
+    drawn: f64,
+}
+
+impl Fill {
+    /// Takes `v`; true when the fill on screen, `w` points long at 1, is now off by half a
+    /// point or more, or should appear or vanish. Measured from the drawn value, not the
+    /// last one set: on a long track no single tick moves half a point.
+    fn set(&mut self, v: f64, w: CGFloat) -> bool {
+        self.value = v;
+        ((self.drawn - v) * w).abs() >= 0.5 || (v == 0.0) != (self.drawn == 0.0)
+    }
+
+    /// The value to draw, which is then the one on screen.
+    fn draw(&mut self) -> f64 {
+        self.drawn = self.value;
+        self.value
+    }
+}
+
 pub struct SliderIvars {
     kind: SliderKind,
-    value: Cell<f64>,
+    fill: Cell<Fill>,
     dragging: Cell<bool>,
     hovered: Cell<bool>,
     enabled: Cell<bool>,
@@ -935,7 +958,9 @@ define_class!(
         #[unsafe(method(drawRect:))]
         fn draw_rect(&self, _dirty: NSRect) {
             let (x0, w, mid) = self.track();
-            let v = self.ivars().value.get();
+            let mut fill = self.ivars().fill.get();
+            let v = fill.draw();
+            self.ivars().fill.set(fill);
             theme::line_2().setFill();
             NSBezierPath::bezierPathWithRoundedRect_xRadius_yRadius(rect(x0, mid - 2.0, w, 4.0), 2.0, 2.0)
                 .fill();
@@ -984,7 +1009,7 @@ define_class!(
         /// Percent, as VoiceOver reads it.
         #[unsafe(method_id(accessibilityValue))]
         fn accessibility_value(&self) -> Option<Retained<AnyObject>> {
-            let pct = (self.ivars().value.get() * 100.0).round();
+            let pct = (self.ivars().fill.get().value * 100.0).round();
             Some(Retained::into_super(Retained::into_super(Retained::into_super(
                 NSNumber::new_f64(pct),
             ))))
@@ -1018,7 +1043,7 @@ impl Slider {
     ) -> Retained<Self> {
         let this = Self::alloc(mtm).set_ivars(SliderIvars {
             kind,
-            value: Cell::new(0.0),
+            fill: Cell::new(Fill::default()),
             dragging: Cell::new(false),
             hovered: Cell::new(false),
             enabled: Cell::new(true),
@@ -1047,16 +1072,17 @@ impl Slider {
         true
     }
 
-    /// Ignored mid-drag. Redraws only when the fill moves by at least half a point.
+    /// Ignored mid-drag. Redraws only when the fill would move by at least half a point.
     pub fn set_value(&self, v: f64) {
         let iv = self.ivars();
         if iv.dragging.get() {
             return;
         }
-        let v = v.clamp(0.0, 1.0);
         let (_, w, _) = self.track();
-        let old = iv.value.replace(v);
-        if ((old - v) * w).abs() >= 0.5 || (v == 0.0) != (old == 0.0) {
+        let mut fill = iv.fill.get();
+        let redraw = fill.set(v.clamp(0.0, 1.0), w);
+        iv.fill.set(fill);
+        if redraw {
             self.setNeedsDisplay(true);
         }
     }
@@ -1119,7 +1145,9 @@ impl Slider {
         let p = self.convertPoint_fromView(event.locationInWindow(), None);
         let (x0, w, _) = self.track();
         let v = ((p.x - x0) / w).clamp(0.0, 1.0);
-        self.ivars().value.set(v);
+        let mut fill = self.ivars().fill.get();
+        fill.value = v;
+        self.ivars().fill.set(fill);
         self.setNeedsDisplay(true);
         let kind = self.ivars().kind;
         match kind {
@@ -1243,5 +1271,38 @@ mod tests {
         assert!(!keyboard_quiet(Some(t0), ms(1000)));
         // A key noted after `now` was read still counts.
         assert!(keyboard_quiet(Some(ms(5)), t0));
+    }
+
+    /// Draws as AppKit would after `set` asks for it; returns how many draws `ticks` took.
+    fn draws(fill: &mut Fill, ticks: impl IntoIterator<Item = f64>, w: CGFloat) -> usize {
+        let mut n = 0;
+        for v in ticks {
+            if fill.set(v, w) {
+                fill.draw();
+                n += 1;
+            }
+        }
+        n
+    }
+
+    #[test]
+    fn a_long_track_still_moves_the_fill() {
+        // A track of about 10 minutes on a 300 pt bar moves 0.12 pt per 250 ms tick, so the
+        // fill moves every fifth tick.
+        let mut fill = Fill::default();
+        fill.set(0.1, 300.0);
+        fill.draw();
+        let ticks = (1..=40).map(|i| 0.1 + f64::from(i) * 0.0004);
+        assert_eq!(draws(&mut fill, ticks, 300.0), 8);
+        // Under half a point from what is drawn: no draw.
+        assert!(!fill.set(fill.drawn + 0.001, 300.0));
+    }
+
+    #[test]
+    fn the_fill_appears_and_vanishes_at_once() {
+        let mut fill = Fill::default();
+        assert!(fill.set(0.0001, 300.0));
+        fill.draw();
+        assert!(fill.set(0.0, 300.0));
     }
 }
