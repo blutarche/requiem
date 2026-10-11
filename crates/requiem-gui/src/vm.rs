@@ -762,7 +762,7 @@ impl Vm {
                     let mut after: Vec<TrackId> =
                         self.ui.queue.iter().map(|t| t.id.clone()).collect();
                     after.remove(i);
-                    self.offer_undo(&text, "Undo Remove", after);
+                    self.offer_undo(&text, "Undo Remove from Queue", after);
                 }
                 vec![cmd]
             }
@@ -2694,7 +2694,7 @@ mod tests {
             (t.text.as_str(), t.error, t.action),
             ("Removed “Title 2”", false, Some("Undo"))
         );
-        assert_eq!(vm.undo_title(), Some("Undo Remove"));
+        assert_eq!(vm.undo_title(), Some("Undo Remove from Queue"));
         assert_eq!(
             vm.intent(Intent::Undo),
             [
@@ -2751,7 +2751,7 @@ mod tests {
             tracks: old[..2].to_vec(),
             current: None,
         });
-        assert_eq!(vm.undo_title(), Some("Undo Remove"));
+        assert_eq!(vm.undo_title(), Some("Undo Remove from Queue"));
         assert!(vm.ui().toast.is_some());
         // Any other change ends it.
         vm.apply(Event::QueueChanged {
