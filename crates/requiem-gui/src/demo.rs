@@ -693,4 +693,44 @@ mod tests {
         assert_eq!(vm.ui().current, Some(2));
         assert_eq!(vm.ui().elapsed_text(), "1:23");
     }
+
+    /// Runs `intent`, then what the view model raises in answer, as the app does.
+    fn settle(vm: &mut Vm, d: &mut Daemon, intent: Intent) {
+        run(vm, d, intent);
+        loop {
+            let cmds = vm.take_commands();
+            if cmds.is_empty() {
+                break;
+            }
+            for cmd in cmds {
+                for ev in d.apply(cmd) {
+                    vm.apply(ev);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn undo_leaves_a_paused_queue_paused() {
+        for change in [
+            Intent::PlayResult(25),
+            Intent::EditQueue {
+                edit: QueueEdit::Clear,
+                selected: None,
+            },
+        ] {
+            let (mut vm, mut d) = start();
+            let queue = vm.ui().queue.clone();
+            settle(&mut vm, &mut d, Intent::Toggle);
+            assert_eq!(vm.ui().state, PlayState::Paused);
+            settle(&mut vm, &mut d, change);
+            settle(&mut vm, &mut d, Intent::Undo);
+            let ui = vm.ui();
+            assert_eq!(ui.queue, queue);
+            assert_eq!(ui.current, Some(2));
+            assert_eq!(ui.now_playing.as_ref(), Some(&queue[2]));
+            assert_eq!(ui.state, PlayState::Paused);
+            assert_eq!(ui.elapsed_text(), "1:23");
+        }
+    }
 }

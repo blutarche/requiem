@@ -458,6 +458,8 @@ struct Undo {
     tracks: Vec<Track>,
     /// The playing index and position, when a track was loaded.
     playing: Option<(usize, Duration)>,
+    /// That track was paused.
+    paused: bool,
 }
 
 #[derive(Debug)]
@@ -465,6 +467,7 @@ struct Restore {
     index: usize,
     track: TrackId,
     position: Duration,
+    paused: bool,
 }
 
 /// A local value that wins over disagreeing echoes until `until`.
@@ -612,8 +615,15 @@ impl Vm {
                 self.set_position(Duration::ZERO);
                 self.dirty |= Dirty::NOW_PLAYING | Dirty::ELAPSED | Dirty::SEEK;
                 if let Some(r) = restore {
-                    let seek = self.seek_to(r.position, now);
-                    self.outbox.extend(seek);
+                    // The session starts every track playing, and pauses only one that has
+                    // started, so this `Pause` lets the first moments play.
+                    if r.paused {
+                        self.outbox.push(Command::Pause);
+                    }
+                    if !r.position.is_zero() {
+                        let seek = self.seek_to(r.position, now);
+                        self.outbox.extend(seek);
+                    }
                 }
             }
             Event::Position(at) => {
@@ -810,7 +820,7 @@ impl Vm {
     }
 
     /// Shows `text` with Undo, which restores the queue as it is now: its tracks, and the
-    /// playing track and position. `after` is the queue the change leaves.
+    /// playing track, position and pause. `after` is the queue the change leaves.
     fn offer_undo(&mut self, text: &str, title: &'static str, after: Vec<TrackId>) {
         let tracks = self.ui.queue.clone();
         let playing = self
@@ -826,6 +836,7 @@ impl Vm {
             landed: false,
             tracks,
             playing,
+            paused: self.ui.state == PlayState::Paused,
         });
     }
 
@@ -836,20 +847,22 @@ impl Vm {
         }
     }
 
-    /// Restores the queue: `Enqueue` and `PlayIndex` now, and the `Seek` once the restored
-    /// track starts. A seek sent before then reaches the previous track's decoder, because
-    /// the session loads the new one only after resolving it.
+    /// Restores the queue: `Enqueue` and `PlayIndex` now, and the `Pause` and `Seek` once the
+    /// restored track starts. A seek sent before then reaches the previous track's decoder,
+    /// because the session loads the new one only after resolving it, and loading plays.
     fn undo(&mut self) -> Vec<Command> {
         let Some(undo) = self.undo.take() else {
             return Vec::new();
         };
         self.dismiss_toast(undo.toast);
+        let paused = undo.paused;
         self.restore = undo.playing.and_then(|(index, position)| {
             let track = undo.tracks.get(index)?;
-            (!position.is_zero()).then(|| Restore {
+            (paused || !position.is_zero()).then(|| Restore {
                 index,
                 track: track.id.clone(),
                 position,
+                paused,
             })
         });
         let mut cmds = vec![Command::Enqueue {
@@ -2297,6 +2310,46 @@ mod tests {
         // Held against the zero positions the daemon sends before it seeks.
         vm.apply(Event::Position(Duration::ZERO));
         assert_eq!(vm.ui().elapsed_text(), "1:01");
+    }
+
+    #[test]
+    fn undo_keeps_a_paused_queue_paused() {
+        let restored = |at: u64| {
+            let mut vm = with_results(4);
+            let old = tracks(3);
+            vm.apply(Event::QueueChanged {
+                tracks: old.clone(),
+                current: Some(2),
+            });
+            vm.apply(Event::NowPlaying {
+                track: old[2].clone(),
+                duration: old[2].duration,
+            });
+            vm.apply(Event::State(PlayState::Paused));
+            vm.apply(Event::Position(Duration::from_secs(at)));
+            vm.intent(Intent::PlayResult(1));
+            vm.apply(Event::State(PlayState::Playing));
+            vm.intent(Intent::Undo);
+            vm.apply(Event::QueueChanged {
+                tracks: old.clone(),
+                current: Some(2),
+            });
+            assert!(vm.take_commands().is_empty());
+            vm.apply(Event::NowPlaying {
+                track: old[2].clone(),
+                duration: old[2].duration,
+            });
+            vm.take_commands()
+        };
+        assert_eq!(
+            restored(61),
+            [
+                Command::Pause,
+                Command::Seek(SeekTarget::Absolute(Duration::from_secs(61)))
+            ]
+        );
+        // Paused at the very start: nothing to seek.
+        assert_eq!(restored(0), [Command::Pause]);
     }
 
     #[test]
