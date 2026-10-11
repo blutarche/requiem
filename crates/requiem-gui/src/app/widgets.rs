@@ -105,9 +105,18 @@ fn keyboard_quiet(last_key: Option<Instant>, now: Instant) -> bool {
 
 /// Has VoiceOver read `text` out now, ahead of other speech.
 pub fn announce(mtm: MainThreadMarker, text: &str) {
+    post_announcement(mtm, text, NSAccessibilityPriorityLevel::High);
+}
+
+/// Has VoiceOver read `text` out once current speech ends, instead of interrupting it.
+pub fn announce_after_speech(mtm: MainThreadMarker, text: &str) {
+    post_announcement(mtm, text, NSAccessibilityPriorityLevel::Medium);
+}
+
+fn post_announcement(mtm: MainThreadMarker, text: &str, level: NSAccessibilityPriorityLevel) {
     let app = NSApplication::sharedApplication(mtm);
     let text = NSString::from_str(text);
-    let priority = NSNumber::new_isize(NSAccessibilityPriorityLevel::High.0);
+    let priority = NSNumber::new_isize(level.0);
     // SAFETY: the key statics are immutable framework constants.
     let keys = unsafe { [NSAccessibilityAnnouncementKey, NSAccessibilityPriorityKey] };
     let info = NSDictionary::<NSString, AnyObject>::from_slices(&keys, &[&text, &priority]);

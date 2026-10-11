@@ -232,7 +232,7 @@ impl Palette {
         if let Some(w) = self.overlay.window() {
             w.makeFirstResponder(Some(&self.field.text));
         }
-        self.announce_selected();
+        self.announce_selected(widgets::announce_after_speech);
     }
 
     pub fn close(&self) {
@@ -256,7 +256,7 @@ impl Palette {
         self.selected.set(kept.or_else(|| step(&flags, None, 1)));
         self.repaint();
         if self.open.get() && self.highlight_text() != was {
-            self.announce_selected();
+            self.announce_selected(widgets::announce_after_speech);
         }
     }
 
@@ -283,13 +283,13 @@ impl Palette {
         self.repaint();
         // Closed, it is being built or opened, and `open` speaks once focus is in the field.
         if self.open.get() && self.highlight_text() != was {
-            self.announce_selected();
+            self.announce_selected(widgets::announce);
         }
     }
 
     /// Focus stays in the field, so VoiceOver hears the highlighted row only from this.
-    fn announce_selected(&self) {
-        widgets::announce(self.panel.mtm(), &self.highlight_text());
+    fn announce_selected(&self, say: fn(MainThreadMarker, &str)) {
+        say(self.panel.mtm(), &self.highlight_text());
     }
 
     /// What VoiceOver says for the current highlight, so a change is told by its words.
@@ -378,7 +378,7 @@ impl Palette {
         let next = step(&self.shown_enabled(), self.selected.get(), delta);
         if next.is_some() && self.selected.replace(next) != next {
             self.repaint();
-            self.announce_selected();
+            self.announce_selected(widgets::announce);
         }
     }
 
