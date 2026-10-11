@@ -266,11 +266,10 @@ impl Daemon {
                 _ => self.seek(Duration::ZERO),
             },
             Command::Pause => self.set_state(PlayState::Paused),
-            Command::Resume => self.set_state(PlayState::Playing),
+            Command::Resume => self.resume(),
             Command::TogglePause => match self.state {
                 PlayState::Playing | PlayState::Buffering => self.set_state(PlayState::Paused),
-                PlayState::Paused => self.set_state(PlayState::Playing),
-                PlayState::Stopped => Vec::new(),
+                PlayState::Paused | PlayState::Stopped => self.resume(),
             },
             Command::Seek(SeekTarget::Absolute(to)) => self.seek(to),
             Command::Seek(SeekTarget::Relative(s)) => {
@@ -379,6 +378,19 @@ impl Daemon {
             Event::State(PlayState::Playing),
             Event::Position(Duration::ZERO),
         ]
+    }
+
+    /// As the session: a stopped queue starts after the last track played, or from the top
+    /// once it is past the end.
+    fn resume(&mut self) -> Vec<Event> {
+        match self.state {
+            PlayState::Paused => self.set_state(PlayState::Playing),
+            PlayState::Stopped if !self.queue.is_empty() => {
+                let next = self.current.map_or(0, |c| c + 1);
+                self.start(if next < self.queue.len() { next } else { 0 })
+            }
+            _ => Vec::new(),
+        }
     }
 
     fn stop(&mut self) -> Vec<Event> {
@@ -564,6 +576,66 @@ mod tests {
         run(&mut vm, &mut d, Intent::Next);
         assert_eq!(vm.ui().state, PlayState::Stopped);
         assert!(vm.ui().now_playing.is_none());
+    }
+
+    #[test]
+    fn play_while_stopped_starts_from_the_top_once_past_the_end() {
+        let (mut vm, mut d) = start();
+        run(&mut vm, &mut d, Intent::PlayQueue(7));
+        run(&mut vm, &mut d, Intent::Next);
+        assert_eq!(vm.ui().state, PlayState::Stopped);
+        run(&mut vm, &mut d, Intent::Toggle);
+        assert_eq!(vm.ui().state, PlayState::Playing);
+        assert_eq!(vm.ui().current, Some(0));
+        assert_eq!(vm.ui().now_playing.as_ref(), Some(&vm.ui().queue[0]));
+
+        let (mut vm, mut d) = start();
+        run(&mut vm, &mut d, Intent::PlayQueue(7));
+        run(&mut vm, &mut d, Intent::Next);
+        for ev in d.apply(Command::Resume) {
+            vm.apply(ev);
+        }
+        assert_eq!(
+            (vm.ui().state, vm.ui().current),
+            (PlayState::Playing, Some(0))
+        );
+    }
+
+    #[test]
+    fn play_while_stopped_starts_after_the_last_track_played() {
+        let (mut vm, mut d) = start();
+        let after = vm.ui().queue[3].clone();
+        run(&mut vm, &mut d, Intent::Toggle);
+        // Removing the paused current track stops, with the cursor just before its place.
+        edit(&mut vm, &mut d, QueueEdit::Remove(2), None);
+        assert_eq!(vm.ui().state, PlayState::Stopped);
+        assert_eq!(vm.ui().current, Some(1));
+        run(&mut vm, &mut d, Intent::Toggle);
+        assert_eq!(
+            (vm.ui().state, vm.ui().current),
+            (PlayState::Playing, Some(2))
+        );
+        assert_eq!(vm.ui().now_playing.as_ref(), Some(&after));
+
+        // Resume does the same; paused, it only resumes.
+        let (mut vm, mut d) = start();
+        run(&mut vm, &mut d, Intent::Toggle);
+        for ev in d.apply(Command::Resume) {
+            vm.apply(ev);
+        }
+        assert_eq!(
+            (vm.ui().state, vm.ui().current),
+            (PlayState::Playing, Some(2))
+        );
+        assert_eq!(vm.ui().elapsed_text(), "1:23");
+    }
+
+    #[test]
+    fn play_with_an_empty_queue_does_nothing() {
+        let mut d = Daemon::default();
+        d.apply(Command::Clear);
+        assert!(d.apply(Command::Resume).is_empty());
+        assert!(d.apply(Command::TogglePause).is_empty());
     }
 
     #[test]
