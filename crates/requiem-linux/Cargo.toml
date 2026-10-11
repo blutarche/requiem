@@ -1,0 +1,15 @@
+[package]
+name = "requiem-linux"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+requiem-core.workspace = true
+crossbeam-channel.workspace = true
+
+[target.'cfg(target_os = "linux")'.dependencies]
+ksni.workspace = true
+zbus.workspace = true

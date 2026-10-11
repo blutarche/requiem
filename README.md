@@ -4,7 +4,7 @@ A lightweight music app that uses about as many resources as a dead person 💀
 
 Native desktop client for **YouTube Music**, built to stay open all day without hogging RAM or CPU. Spotify support is deferred (see [`docs/plans/2026-10-10-spotify-spike.md`](docs/plans/2026-10-10-spotify-spike.md)).
 
-> **Status:** v1 — YouTube Music on macOS (menu-bar player + native window), plus a CLI. Linux runs the player and CLI headless. Design: [`docs/plans/2026-10-11-v1-design.md`](docs/plans/2026-10-11-v1-design.md).
+> **Status:** v1 — YouTube Music on macOS (menu-bar player + native window), plus a CLI. Linux runs the player and CLI, with a tray icon and MPRIS. Design: [`docs/plans/2026-10-11-v1-design.md`](docs/plans/2026-10-11-v1-design.md).
 
 ## How it fits together
 
@@ -13,6 +13,8 @@ Native desktop client for **YouTube Music**, built to stay open all day without 
 - **`requiem`** — the CLI. `requiem --connect` drives the running player (starting it if needed); plain `requiem` plays in-process.
 
 They talk over a per-user Unix socket. "Quit and Stop Music" in the menu bar stops the player and closes the window.
+
+On Linux, `requiemd` shows a StatusNotifierItem tray icon (play/pause state, a menu with Play/Pause, Next, Previous and Quit, click to toggle) and publishes MPRIS2 as `org.mpris.MediaPlayer2.requiem`, so media keys, desktop widgets and `playerctl` control it. Both use the session D-Bus through pure-Rust crates: no GTK, appindicator or libdbus, so no new system libraries. GNOME shows tray icons only with the AppIndicator extension; without it the tray is skipped and MPRIS still works, and with no session bus the player runs headless. Either way it logs one line. Check with `playerctl -l` and `playerctl -p requiem status`.
 
 ## Build
 
