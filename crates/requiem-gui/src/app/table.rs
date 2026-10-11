@@ -96,6 +96,17 @@ pub fn rows(tracks: &[Track]) -> Vec<RowText> {
         .collect()
 }
 
+/// Where the row `was`, selected at `at` before `rows` replaced the list, is now: at `at`
+/// if it is still there, else the nearest row with the same text, else none.
+fn reselect(rows: &[RowText], was: &RowText, at: usize) -> Option<usize> {
+    if rows.get(at) == Some(was) {
+        return Some(at);
+    }
+    (0..rows.len())
+        .filter(|&i| rows[i] == *was)
+        .min_by_key(|&i| i.abs_diff(at))
+}
+
 pub struct ControllerIvars {
     kind: Kind,
     rows: RefCell<Vec<RowText>>,
@@ -1077,16 +1088,24 @@ impl Table {
     }
 
     pub fn set_rows(&self, rows: Vec<RowText>, current: Option<usize>) {
-        let selected = self.table.selectedRow();
+        let selected = usize::try_from(self.table.selectedRow()).ok();
+        let was = selected.and_then(|i| self.controller.ivars().rows.borrow().get(i).cloned());
         self.controller.set_rows(rows, current);
         self.table.reloadData();
-        // Reloading drops the selection. A row still in range keeps it; callers that want
-        // a different one (a new search, an edit's landing row) select or deselect after.
-        if selected >= 0 && selected < self.table.numberOfRows() && self.table.selectedRow() < 0 {
-            self.table.selectRowIndexes_byExtendingSelection(
-                &NSIndexSet::indexSetWithIndex(selected as usize),
-                false,
-            );
+        // Reloading drops the selection. It stays with its track: on the same row, else where
+        // that track moved, else nowhere. Callers that want a different one (a new search, an
+        // edit's landing row) select or deselect after.
+        if let Some(at) = selected
+            && let Some(was) = was
+            && self.table.selectedRow() < 0
+        {
+            let now = reselect(&self.controller.ivars().rows.borrow(), &was, at);
+            if let Some(i) = now {
+                self.table.selectRowIndexes_byExtendingSelection(
+                    &NSIndexSet::indexSetWithIndex(i),
+                    false,
+                );
+            }
         }
         if let Some(t) = self.table.downcast_ref::<KeyTable>() {
             t.show_focus();
@@ -1244,6 +1263,40 @@ mod tests {
             album: album.into(),
             duration: duration.into(),
         }
+    }
+
+    fn named(titles: &[&str]) -> Vec<RowText> {
+        titles.iter().map(|t| row(t, "", "", "")).collect()
+    }
+
+    #[test]
+    fn reselect_keeps_the_same_row() {
+        let rows = named(&["a", "b", "c"]);
+        assert_eq!(reselect(&rows, &row("c", "", "", ""), 2), Some(2));
+    }
+
+    #[test]
+    fn reselect_follows_its_track_up_when_a_row_above_goes() {
+        let rows = named(&["b", "c", "d"]);
+        assert_eq!(reselect(&rows, &row("c", "", "", ""), 2), Some(1));
+    }
+
+    #[test]
+    fn reselect_drops_a_removed_track() {
+        let rows = named(&["a", "b", "d"]);
+        assert_eq!(reselect(&rows, &row("c", "", "", ""), 2), None);
+    }
+
+    #[test]
+    fn reselect_follows_its_track_down() {
+        let rows = named(&["x", "y", "a", "b", "c"]);
+        assert_eq!(reselect(&rows, &row("c", "", "", ""), 2), Some(4));
+    }
+
+    #[test]
+    fn reselect_picks_the_nearest_duplicate() {
+        let rows = named(&["c", "a", "b", "c", "c", "c"]);
+        assert_eq!(reselect(&rows, &row("c", "", "", ""), 2), Some(3));
     }
 
     #[test]
