@@ -126,9 +126,9 @@ impl LinkError {
 
     pub fn text(self) -> &'static str {
         match self {
-            LinkError::NotRunning => "The player isn't running.",
+            LinkError::NotRunning => "The player isn’t running.",
             LinkError::NotResponding => "The player stopped responding.",
-            LinkError::Unreachable => "The player couldn't be reached.",
+            LinkError::Unreachable => "The player couldn’t be reached.",
         }
     }
 }
@@ -619,7 +619,7 @@ impl Vm {
                 }
             }
             Event::TrackFailed { track, error } => {
-                self.toast(format!("Couldn't play “{}”: {error}", track.title), true);
+                self.toast(format!("Couldn’t play “{}”: {error}", track.title), true);
                 self.failed_toast = Some(self.last_toast);
             }
             // The detail is for stderr, which the backend writes it to.
@@ -1452,7 +1452,7 @@ mod tests {
         });
         let t = vm.ui().toast.clone().unwrap();
         assert!(t.error);
-        assert_eq!(t.text, "Couldn't play “Title a”: unplayable: private");
+        assert_eq!(t.text, "Couldn’t play “Title a”: unplayable: private");
         assert_eq!(vm.take_dirty(), Dirty::TOAST);
     }
 
@@ -1788,7 +1788,7 @@ mod tests {
         assert_eq!(
             vm.ui().banner,
             Some(Banner {
-                text: "Player disconnected — reconnecting… The player isn't running. If \
+                text: "Player disconnected — reconnecting… The player isn’t running. If \
                        this persists, choose Quit and Stop Music from the requiem menu-bar \
                        icon, then reopen requiem."
                     .into(),
@@ -1822,7 +1822,7 @@ mod tests {
         assert_eq!(
             vm.ui().banner.as_ref().map(|b| b.text.as_str()),
             Some(
-                "Connecting to player… The player isn't running. If this persists, choose \
+                "Connecting to player… The player isn’t running. If this persists, choose \
                  Quit and Stop Music from the requiem menu-bar icon, then reopen requiem."
             )
         );
@@ -1845,14 +1845,14 @@ mod tests {
         ] {
             assert_eq!(LinkError::from_io(kind), want, "{kind:?}");
         }
-        assert_eq!(LinkError::NotRunning.text(), "The player isn't running.");
+        assert_eq!(LinkError::NotRunning.text(), "The player isn’t running.");
         assert_eq!(
             LinkError::NotResponding.text(),
             "The player stopped responding."
         );
         assert_eq!(
             LinkError::Unreachable.text(),
-            "The player couldn't be reached."
+            "The player couldn’t be reached."
         );
         // The stuck banner says it in those words.
         let mut vm = playing(225);
@@ -1862,7 +1862,7 @@ mod tests {
         let text = vm.ui().banner.clone().unwrap().text;
         assert!(
             text.starts_with(
-                "Player disconnected — reconnecting… The player couldn't be reached. If this"
+                "Player disconnected — reconnecting… The player couldn’t be reached. If this"
             ),
             "{text}"
         );
@@ -2497,7 +2497,7 @@ mod tests {
         });
         assert_eq!(
             vm.ui().toast.as_ref().unwrap().text,
-            "Couldn't play “Title a”: video unavailable. Skipped to the next track."
+            "Couldn’t play “Title a”: video unavailable. Skipped to the next track."
         );
 
         let mut vm = playing(225);
@@ -2508,7 +2508,7 @@ mod tests {
         vm.apply(Event::State(PlayState::Stopped));
         assert_eq!(
             vm.ui().toast.as_ref().unwrap().text,
-            "Couldn't play “Title a”: video unavailable. Playback stopped."
+            "Couldn’t play “Title a”: video unavailable. Playback stopped."
         );
         // Only the event right after the failure tells its outcome.
         vm.apply(Event::QueueChanged {

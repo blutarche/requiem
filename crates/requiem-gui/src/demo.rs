@@ -516,7 +516,7 @@ mod tests {
         assert!(t.error);
         assert_eq!(
             t.text,
-            "Couldn't play “Fever in the Valley”: video unavailable. Skipped to the next track."
+            "Couldn’t play “Fever in the Valley”: video unavailable. Skipped to the next track."
         );
         assert!(vm.ui().banner.is_none());
         assert_eq!(vm.ui().results.len(), 30);
