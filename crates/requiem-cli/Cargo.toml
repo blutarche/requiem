@@ -16,6 +16,7 @@ requiem-audio.workspace = true
 requiem-provider-ytmusic.workspace = true
 requiem-ipc.workspace = true
 crossbeam-channel.workspace = true
+serde_json.workspace = true
 
 [dev-dependencies]
 requiem-core = { workspace = true, features = ["test-util"] }

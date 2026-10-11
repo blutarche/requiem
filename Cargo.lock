@@ -778,6 +778,7 @@ dependencies = [
  "requiem-core",
  "requiem-ipc",
  "requiem-provider-ytmusic",
+ "serde_json",
 ]
 
 [[package]]

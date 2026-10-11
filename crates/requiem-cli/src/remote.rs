@@ -1,5 +1,5 @@
 use std::io;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::thread;
 use std::time::Duration;
@@ -9,6 +9,22 @@ use requiem_core::{Command, Event};
 use requiem_ipc::{Client, Incoming, Role};
 
 use crate::app::Player;
+
+/// Where a CLI at `cli_exe` finds `requiemd`: next to itself, else the helper app inside the
+/// bundle it ships in. Falls back to the sibling when neither exists, so a spawn failure names it.
+pub fn daemon_exe(cli_exe: &Path, exists: impl Fn(&Path) -> bool) -> PathBuf {
+    let sibling = cli_exe.with_file_name("requiemd");
+    if exists(&sibling) {
+        return sibling;
+    }
+    if let Some(dir) = cli_exe.parent() {
+        let bundled = dir.join("../Helpers/requiemd.app/Contents/MacOS/requiemd");
+        if exists(&bundled) {
+            return bundled;
+        }
+    }
+    sibling
+}
 
 /// A daemon reached over IPC.
 pub struct RemotePlayer {

@@ -3,7 +3,7 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
-use requiem_cli::app::{self, App, Flow};
+use requiem_cli::app::{self, App, Flow, Format};
 use requiem_core::testing::{EngineCall, FakeEngineHandle, FakeProvider, Gate, Step};
 use requiem_core::{EngineEvent, ProviderId, SeekTarget, Session, SessionConfig, Track, TrackId};
 
@@ -68,6 +68,24 @@ impl Rig {
     fn app(&self, script: bool) -> App<'_> {
         App::new(&self.session, self.out.clone(), script)
     }
+}
+
+impl Rig {
+    fn json_app(&self) -> App<'_> {
+        App::with_format(&self.session, self.out.clone(), true, Format::Json)
+    }
+
+    fn json_lines(&self) -> Vec<serde_json::Value> {
+        self.out
+            .text()
+            .lines()
+            .map(|l| serde_json::from_str(l).unwrap_or_else(|e| panic!("{l}: {e}")))
+            .collect()
+    }
+}
+
+fn of_type<'a>(lines: &'a [serde_json::Value], ty: &str) -> Vec<&'a serde_json::Value> {
+    lines.iter().filter(|l| l["type"] == ty).collect()
 }
 
 fn exec_all(app: &App<'_>, lines: &str) -> Flow {
@@ -386,4 +404,91 @@ fn remove_and_move_reject_bad_arguments() {
     );
     exec_all(&app, "queue");
     assert!(r.out.text().contains("queue: 3 tracks"), "{}", r.out.text());
+}
+
+#[test]
+fn json_search_results_are_one_object_each() {
+    let r = rig();
+    let mut t2 = track("t2");
+    t2.album = None;
+    t2.duration = None;
+    t2.artwork_url = Some("https://img/t2.jpg".into());
+    r.provider
+        .script_search("q", vec![Step::ok(vec![track("t1"), t2])]);
+    let app = r.json_app();
+    exec_all(&app, "search q\nawait results 5");
+    let lines = r.json_lines();
+    assert_eq!(of_type(&lines, "ack")[0]["command"], "search");
+    let results = of_type(&lines, "result");
+    assert_eq!(results.len(), 2);
+    assert_eq!(
+        *results[0],
+        serde_json::json!({
+            "type": "result",
+            "index": 1,
+            "title": "Title t1",
+            "artists": ["A", "B"],
+            "album": "Album",
+            "duration_ms": 125000,
+            "artwork_url": null,
+        })
+    );
+    assert_eq!(results[1]["index"], 2);
+    assert_eq!(results[1]["album"], serde_json::Value::Null);
+    assert_eq!(results[1]["duration_ms"], serde_json::Value::Null);
+    assert_eq!(results[1]["artwork_url"], "https://img/t2.jpg");
+}
+
+#[test]
+fn json_status_and_errors() {
+    let r = rig();
+    r.provider
+        .script_search("q", vec![Step::ok(vec![track("t1")])]);
+    let app = r.json_app();
+    exec_all(&app, "status\nplay 1\nsearch q\nawait results 5\nplay 1");
+    r.engine.wait_load(1);
+    r.engine.emit(EngineEvent::Started {
+        r#gen: gen_of_first_load(&r),
+        duration: Some(Duration::from_secs(125)),
+    });
+    exec_all(&app, "await playing 5\nstatus");
+    let lines = r.json_lines();
+    let status = of_type(&lines, "status");
+    assert_eq!(status[0]["state"], "stopped");
+    assert_eq!(status[0]["track"], serde_json::Value::Null);
+    assert_eq!(status[1]["state"], "playing");
+    assert_eq!(status[1]["track"]["title"], "Title t1");
+    assert_eq!(status[1]["duration_ms"], 125000);
+    assert_eq!(status[1]["volume"], 100);
+    assert_eq!(
+        *of_type(&lines, "error")[0],
+        serde_json::json!({"type": "error", "message": "no search results yet"})
+    );
+}
+
+#[test]
+fn json_queue_marks_the_current_track() {
+    let r = rig();
+    r.provider
+        .script_search("q", vec![Step::ok(vec![track("t1")])]);
+    let app = r.json_app();
+    exec_all(&app, "queue");
+    assert_eq!(of_type(&r.json_lines(), "queue_empty").len(), 1);
+    exec_all(&app, "search q\nawait results 5\nplay 1");
+    r.engine.wait_load(1);
+    r.engine.emit(EngineEvent::Started {
+        r#gen: gen_of_first_load(&r),
+        duration: None,
+    });
+    exec_all(&app, "await nowplaying 5\nqueue");
+    let lines = r.json_lines();
+    let changed = of_type(&lines, "queue_changed");
+    assert_eq!(changed.last().unwrap()["count"], 1);
+    assert_eq!(changed.last().unwrap()["current"], 1);
+    let items = of_type(&lines, "queue_item");
+    assert_eq!(items.len(), 1);
+    assert_eq!(items[0]["index"], 1);
+    assert_eq!(items[0]["current"], true);
+    assert_eq!(items[0]["title"], "Title t1");
+    assert_eq!(of_type(&lines, "ack")[1]["command"], "play");
 }
