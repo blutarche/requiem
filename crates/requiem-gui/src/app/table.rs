@@ -1052,9 +1052,17 @@ impl Table {
     }
 
     pub fn set_rows(&self, rows: Vec<RowText>, current: Option<usize>) {
+        let selected = self.table.selectedRow();
         self.controller.set_rows(rows, current);
         self.table.reloadData();
-        // Reloading can drop the selection.
+        // Reloading drops the selection. A row still in range keeps it; callers that want
+        // a different one (a new search, an edit's landing row) select or deselect after.
+        if selected >= 0 && selected < self.table.numberOfRows() && self.table.selectedRow() < 0 {
+            self.table.selectRowIndexes_byExtendingSelection(
+                &NSIndexSet::indexSetWithIndex(selected as usize),
+                false,
+            );
+        }
         if let Some(t) = self.table.downcast_ref::<KeyTable>() {
             t.show_focus();
         }
