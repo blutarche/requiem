@@ -739,7 +739,8 @@ define_class!(
             let size = 11.0;
             let attrs = widgets::attrs(
                 &theme::font(size, Weight::Medium),
-                &theme::muted_2(),
+                // muted, not the spec's muted-2: 2.74:1 on bg-2 is too faint to read.
+                &theme::muted(),
                 Some(0.12 * size),
             );
             let columns = table.tableColumns();

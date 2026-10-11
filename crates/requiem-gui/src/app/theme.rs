@@ -39,6 +39,7 @@ pub const BG_2: u32 = 0x121216;
 pub const BG_3: u32 = 0x1A1A20;
 pub const LINE_2: u32 = 0x34343F;
 pub const ACCENT: u32 = 0x7C70F5;
+const ACCENT_DEEP: u32 = 0x5A4FC0;
 /// Alphas of `accent_soft` and `selection`.
 pub const SOFT: CGFloat = 0.10;
 pub const SELECTED: CGFloat = 0.32;
@@ -99,6 +100,11 @@ pub fn accent() -> Retained<NSColor> {
 }
 pub fn accent_hi() -> Retained<NSColor> {
     rgb(0x9088F8)
+}
+/// A primary button's hover: the accent darkened toward accent-deep, so the white label keeps
+/// 4.64:1. Lightening it to accent-hi would leave 2.97:1, under the 3:1 large text needs.
+pub fn accent_hover() -> Retained<NSColor> {
+    mix(ACCENT, ACCENT_DEEP, 0.4)
 }
 pub fn accent_soft() -> Retained<NSColor> {
     rgba(ACCENT, SOFT)

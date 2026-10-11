@@ -80,6 +80,7 @@ struct Row {
     action: PaletteAction,
     view: Retained<ActionRow>,
     label: Retained<NSTextField>,
+    keys: Retained<NSTextField>,
 }
 
 pub struct Palette {
@@ -180,6 +181,7 @@ impl Palette {
                     action,
                     view,
                     label,
+                    keys,
                 }
             })
             .collect();
@@ -288,16 +290,19 @@ impl Palette {
         let shown = self.shown.borrow();
         let sel = shown.get(self.selected.get()).copied();
         for (i, r) in self.rows.iter().enumerate() {
-            let (bg, ink) = if Some(i) == sel {
+            // Muted keys on the accent-tinted row would fall to 3.64:1.
+            let (bg, ink, keys) = if Some(i) == sel {
                 (
                     Some(theme::mix(theme::BG_2, theme::ACCENT, theme::SELECTED)),
                     theme::ink(),
+                    theme::ink_2(),
                 )
             } else {
-                (None, theme::ink_2())
+                (None, theme::ink_2(), theme::muted())
             };
             widgets::fill(&r.view, bg.as_deref());
             r.label.setTextColor(Some(&ink));
+            r.keys.setTextColor(Some(&keys));
         }
     }
 

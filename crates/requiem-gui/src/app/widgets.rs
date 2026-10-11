@@ -398,7 +398,7 @@ impl HoverButton {
             mtm,
             frame,
             Some(&theme::accent()),
-            &theme::accent_hi(),
+            &theme::accent_hover(),
             theme::RADIUS,
         );
         this.setImagePosition(NSCellImagePosition::NoImage);
