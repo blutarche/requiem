@@ -752,6 +752,18 @@ impl Vm {
                     };
                     self.offer_undo(text, "Undo Clear Queue", Vec::new());
                 }
+                // Showing the queue selects the playing row, so one stray Delete would drop the
+                // track; any other row is cheap to re-add and undoing it would reload the track.
+                if let QueueEdit::Remove(i) = edit
+                    && self.ui.current == Some(i)
+                    && let Some(track) = self.ui.queue.get(i)
+                {
+                    let text = format!("Removed “{}”", track.title);
+                    let mut after: Vec<TrackId> =
+                        self.ui.queue.iter().map(|t| t.id.clone()).collect();
+                    after.remove(i);
+                    self.offer_undo(&text, "Undo Remove", after);
+                }
                 vec![cmd]
             }
             _ => Vec::new(),
@@ -2661,6 +2673,101 @@ mod tests {
         // Without a selection there is nothing to follow.
         edit(&mut vm, QueueEdit::Remove(0), None);
         assert_eq!(answer(&mut vm, 3), None);
+    }
+
+    #[test]
+    fn removing_the_playing_row_offers_undo() {
+        let (mut vm, old) = removed_playing();
+        let t = vm.ui().toast.clone().unwrap();
+        assert_eq!(
+            (t.text.as_str(), t.error, t.action),
+            ("Removed “Title 2”", false, Some("Undo"))
+        );
+        assert_eq!(vm.undo_title(), Some("Undo Remove"));
+        assert_eq!(
+            vm.intent(Intent::Undo),
+            [
+                Command::Enqueue {
+                    tracks: old.clone(),
+                    mode: EnqueueMode::Replace
+                },
+                Command::PlayIndex(2)
+            ]
+        );
+        vm.apply(Event::QueueChanged {
+            tracks: old.clone(),
+            current: Some(2),
+        });
+        vm.apply(Event::NowPlaying {
+            track: old[2].clone(),
+            duration: old[2].duration,
+        });
+        assert_eq!(
+            vm.take_commands(),
+            vec![Command::Seek(SeekTarget::Absolute(Duration::from_secs(61)))]
+        );
+    }
+
+    #[test]
+    fn removing_another_row_offers_no_undo() {
+        let mut vm = {
+            let old = tracks(3);
+            let mut vm = connected();
+            vm.apply(Event::QueueChanged {
+                tracks: old.clone(),
+                current: Some(2),
+            });
+            vm.apply(Event::NowPlaying {
+                track: old[2].clone(),
+                duration: old[2].duration,
+            });
+            vm
+        };
+        assert_eq!(
+            edit(&mut vm, QueueEdit::Remove(0), None),
+            [Command::Remove(0)]
+        );
+        assert!(vm.ui().toast.is_none());
+        assert_eq!(vm.undo_title(), None);
+        assert!(vm.intent(Intent::Undo).is_empty());
+    }
+
+    #[test]
+    fn remove_undo_survives_the_sessions_answer() {
+        let (mut vm, old) = removed_playing();
+        // The session starts the next track or stops; both leave the queue without row 2.
+        vm.apply(Event::QueueChanged {
+            tracks: old[..2].to_vec(),
+            current: None,
+        });
+        assert_eq!(vm.undo_title(), Some("Undo Remove"));
+        assert!(vm.ui().toast.is_some());
+        // Any other change ends it.
+        vm.apply(Event::QueueChanged {
+            tracks: old[..1].to_vec(),
+            current: None,
+        });
+        assert_eq!(vm.undo_title(), None);
+    }
+
+    /// Playing the third of three queued tracks at 1:01, then that row removed.
+    fn removed_playing() -> (Vm, Vec<Track>) {
+        let mut vm = connected();
+        let old = tracks(3);
+        vm.apply(Event::QueueChanged {
+            tracks: old.clone(),
+            current: Some(2),
+        });
+        vm.apply(Event::NowPlaying {
+            track: old[2].clone(),
+            duration: old[2].duration,
+        });
+        vm.apply(Event::Position(Duration::from_secs(61)));
+        assert_eq!(
+            edit(&mut vm, QueueEdit::Remove(2), None),
+            [Command::Remove(2)]
+        );
+        (vm, old)
     }
 
     /// Playing the third of three queued tracks at 1:01, then cleared.
