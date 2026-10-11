@@ -691,3 +691,22 @@ fn seek_reports_the_new_position_even_while_paused() {
     r.send(Command::Seek(SeekTarget::Absolute(SECS(500))));
     r.wait_event(|e| *e == Event::Position(SECS(100)));
 }
+
+#[test]
+fn play_while_stopped_starts_after_the_cursor_or_from_the_top() {
+    let r = rig(config());
+    r.enqueue(&["a", "b"]);
+    r.send(Command::TogglePause);
+    let (r#gen, payload) = r.engine.wait_load(1);
+    assert_eq!(payload, "a");
+    r.start(r#gen, None);
+
+    r.send(Command::Next);
+    let (r#gen, _) = r.engine.wait_load(2);
+    r.start(r#gen, None);
+    r.send(Command::Next);
+    r.wait_event(|e| *e == Event::State(PlayState::Stopped));
+    r.send(Command::Resume);
+    let (_, payload) = r.engine.wait_load(3);
+    assert_eq!(payload, "a");
+}

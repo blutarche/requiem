@@ -297,8 +297,7 @@ impl Actor {
             Command::Resume => self.resume(),
             Command::TogglePause => match self.state {
                 PlayState::Playing | PlayState::Buffering => self.pause(),
-                PlayState::Paused => self.resume(),
-                PlayState::Stopped => {}
+                PlayState::Paused | PlayState::Stopped => self.resume(),
             },
             Command::Seek(target) => {
                 let to = match target {
@@ -412,9 +411,18 @@ impl Actor {
     }
 
     fn resume(&mut self) {
-        if self.state == PlayState::Paused {
-            self.engine.resume();
-            self.set_state(PlayState::Playing);
+        match self.state {
+            PlayState::Paused => {
+                self.engine.resume();
+                self.set_state(PlayState::Playing);
+            }
+            // The cursor is the last track played, or sits just before the next one after
+            // the current track was removed; a finished queue starts again from the top.
+            PlayState::Stopped if !self.queue.is_empty() => {
+                let next = self.current.map_or(0, |c| c + 1);
+                self.start(if next < self.queue.len() { next } else { 0 });
+            }
+            _ => {}
         }
     }
 
