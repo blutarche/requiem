@@ -464,7 +464,7 @@ pub fn hide_from_accessibility(v: &NSView) {
 }
 
 /// Makes `v` one accessibility button named `label`; its subviews stay out of the tree.
-fn as_button(v: &NSView, label: &str) {
+pub fn as_button(v: &NSView, label: &str) {
     v.setAccessibilityElement(true);
     // SAFETY: the role static is an immutable framework constant.
     v.setAccessibilityRole(Some(unsafe { NSAccessibilityButtonRole }));
@@ -1391,11 +1391,15 @@ pub struct EmptyState {
     heading: Retained<NSTextField>,
     sub: Retained<NSTextField>,
     action: Retained<HoverButton>,
+    /// How much taller than one line the detail is now, which lifts the heading and icon.
+    extra: Cell<CGFloat>,
 }
 
 impl EmptyState {
     const BUTTON_H: CGFloat = 36.0;
     const GROUP_H: CGFloat = 136.0;
+    /// The detail wraps within this, centred.
+    const SUB_MAX_W: CGFloat = 560.0;
 
     /// The action button sends `action` to `target`.
     pub fn new(
@@ -1447,6 +1451,12 @@ impl EmptyState {
             FLEX_W,
         );
         sub.setAlignment(NSTextAlignment::Center);
+        sub.setUsesSingleLineMode(false);
+        sub.setMaximumNumberOfLines(0);
+        sub.setLineBreakMode(NSLineBreakMode::ByWordWrapping);
+        // So a path in the detail can be copied.
+        sub.setSelectable(true);
+        sub.setAutoresizingMask(centred);
         let action_sel = action;
         let action = HoverButton::primary(mtm, rect(0.0, 0.0, 0.0, Self::BUTTON_H));
         action.setAutoresizingMask(centred);
@@ -1463,7 +1473,37 @@ impl EmptyState {
             heading,
             sub,
             action,
+            extra: Cell::new(0.0),
         }
+    }
+
+    /// Wraps the detail within `SUB_MAX_W`, centred, and makes room for the lines it needs.
+    fn fit_sub(&self) {
+        let w = self.view.bounds().size.width;
+        let sw = Self::SUB_MAX_W.min(w - 48.0).max(0.0);
+        let font = self
+            .sub
+            .font()
+            .unwrap_or_else(|| theme::font(14.0, Weight::Regular));
+        let line = line_height(&font);
+        let need = self.sub.cell().map_or(line, |c| {
+            c.cellSizeForBounds(rect(0.0, 0.0, sw, 10_000.0))
+                .height
+                .ceil()
+        });
+        let extra = (need - line).max(0.0);
+        let f = self.sub.frame();
+        self.sub
+            .setFrame(rect(((w - sw) / 2.0).round(), f.origin.y, sw, line + extra));
+        let delta = extra - self.extra.replace(extra);
+        for v in [&*self.heading, &*self.icon as &NSView] {
+            let o = v.frame().origin;
+            v.setFrameOrigin(NSPoint::new(o.x, o.y + delta));
+        }
+        let gh = Self::GROUP_H + extra;
+        let h = self.view.bounds().size.height;
+        self.group
+            .setFrame(rect(0.0, ((h - gh) / 2.0 + 8.0).round(), w, gh));
     }
 
     /// With no `action`, the button hides.
@@ -1471,6 +1511,7 @@ impl EmptyState {
         self.icon.setImage(icon.image(32.0).as_deref());
         set_text(&self.heading, heading);
         set_text(&self.sub, sub);
+        self.fit_sub();
         self.action.setHidden(action.is_none());
         // Lowers the rows by half the space a missing button leaves, so the block stays
         // centred.

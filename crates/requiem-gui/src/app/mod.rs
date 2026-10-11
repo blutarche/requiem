@@ -4,6 +4,7 @@
 mod backend;
 mod bar;
 mod palette;
+mod shelves;
 mod snapshot;
 mod table;
 pub mod theme;
@@ -12,7 +13,7 @@ mod widgets;
 
 use std::cell::RefCell;
 use std::ptr::{self, NonNull};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use block2::RcBlock;
 use dispatch2::{DispatchQueue, DispatchTime};
@@ -124,6 +125,72 @@ define_class!(
         #[unsafe(method(toastAction:))]
         fn toast_action(&self, _sender: Option<&AnyObject>) {
             ui::with(|ui| ui.toast_action());
+        }
+
+        #[unsafe(method(showHome:))]
+        fn show_home(&self, _sender: Option<&AnyObject>) {
+            ui::with(|ui| {
+                ui.close_palette();
+                ui.show(AppView::Home);
+            });
+        }
+
+        #[unsafe(method(showLibrary:))]
+        fn show_library(&self, _sender: Option<&AnyObject>) {
+            ui::with(|ui| {
+                ui.close_palette();
+                ui.show(AppView::Library);
+            });
+        }
+
+        #[unsafe(method(refresh:))]
+        fn refresh(&self, _sender: Option<&AnyObject>) {
+            ui::with(|ui| ui.refresh());
+        }
+
+        #[unsafe(method(goBack:))]
+        fn go_back(&self, _sender: Option<&AnyObject>) {
+            ui::with(|ui| ui.go_back());
+        }
+
+        #[unsafe(method(signIn:))]
+        fn sign_in(&self, _sender: Option<&AnyObject>) {
+            ui::with(|ui| ui.intent(Intent::SignIn));
+        }
+
+        #[unsafe(method(signOut:))]
+        fn sign_out(&self, _sender: Option<&AnyObject>) {
+            ui::with(|ui| ui.confirm_sign_out());
+        }
+
+        #[unsafe(method(libraryAction:))]
+        fn library_action(&self, _sender: Option<&AnyObject>) {
+            ui::with(|ui| ui.library_action());
+        }
+
+        #[unsafe(method(copyCode:))]
+        fn copy_code(&self, _sender: Option<&AnyObject>) {
+            ui::with(|ui| ui.copy_code());
+        }
+
+        #[unsafe(method(openHost:))]
+        fn open_host(&self, _sender: Option<&AnyObject>) {
+            ui::with(|ui| ui.open_host());
+        }
+
+        #[unsafe(method(cancelSignIn:))]
+        fn cancel_sign_in(&self, _sender: Option<&AnyObject>) {
+            ui::with(|ui| ui.cancel_sign_in());
+        }
+
+        #[unsafe(method(playCollection:))]
+        fn play_collection(&self, _sender: Option<&AnyObject>) {
+            ui::with(|ui| ui.play_collection());
+        }
+
+        #[unsafe(method(addCollection:))]
+        fn add_collection(&self, _sender: Option<&AnyObject>) {
+            ui::with(|ui| ui.add_collection());
         }
 
         #[unsafe(method(showSearch:))]
@@ -327,6 +394,8 @@ fn validate(ui: &Ui, item: &NSMenuItem) -> bool {
     } else if let Some(edit) = row_edit(action) {
         // For Remove, the key monitor's conditions for Delete, which its item only shows.
         !in_text && ui.selected_edit(edit).is_some_and(|e| ui.can_edit(e))
+    } else if action == sel!(goBack:) {
+        ui.can_go_back()
     } else if action == sel!(quitAndStop:) {
         ui.can_stop_player()
     } else {
@@ -343,8 +412,13 @@ fn palette_action(action: Sel) -> Option<PaletteAction> {
         (sel!(playSelected:), PaletteAction::PlaySelected),
         (sel!(addToQueue:), PaletteAction::AddToQueue),
         (sel!(focusSearch:), PaletteAction::FocusSearch),
+        (sel!(showHome:), PaletteAction::ShowHome),
         (sel!(showSearch:), PaletteAction::ShowSearch),
+        (sel!(showLibrary:), PaletteAction::ShowLibrary),
         (sel!(showQueue:), PaletteAction::ShowQueue),
+        (sel!(refresh:), PaletteAction::Refresh),
+        (sel!(signIn:), PaletteAction::SignIn),
+        (sel!(signOut:), PaletteAction::SignOut),
         (sel!(volumeUp:), PaletteAction::VolumeUp),
         (sel!(volumeDown:), PaletteAction::VolumeDown),
         (sel!(clearQueue:), PaletteAction::ClearQueue),
@@ -570,8 +644,16 @@ fn menu_bar(mtm: MainThreadMarker, target: &Delegate) -> (Retained<NSMenu>, Reta
     submenu(
         "View",
         vec![
-            item("Search", Some(sel!(showSearch:)), "1", true),
-            item("Queue", Some(sel!(showQueue:)), "2", true),
+            item("Home", Some(sel!(showHome:)), "1", true),
+            item("Search", Some(sel!(showSearch:)), "2", true),
+            item("Library", Some(sel!(showLibrary:)), "3", true),
+            item("Queue", Some(sel!(showQueue:)), "4", true),
+            sep(),
+            item("Refresh", Some(sel!(refresh:)), "r", true),
+            item("Back", Some(sel!(goBack:)), "[", true),
+            sep(),
+            item("Sign In to Google", Some(sel!(signIn:)), "", true),
+            item("Sign Out of Google\u{2026}", Some(sel!(signOut:)), "", true),
             sep(),
             item("Command Palette", Some(sel!(openPalette:)), "k", true),
         ],
@@ -630,9 +712,55 @@ fn menu_bar(mtm: MainThreadMarker, target: &Delegate) -> (Retained<NSMenu>, Reta
 
 /// Caches the demo tracks' made-up artwork, so it shows without any fetch.
 fn seed_demo_artwork(mtm: MainThreadMarker) {
-    for (i, track) in demo::results().iter().enumerate() {
-        if let Some(url) = &track.artwork_url {
-            artwork::insert(mtm, url, &artwork::demo_cover(i, 64.0));
+    for (url, seed) in demo::covers() {
+        artwork::insert(mtm, &url, &artwork::demo_cover(seed, 64.0));
+    }
+}
+
+/// How long a snapshot of the connected window waits for its page and covers.
+const SNAPSHOT_WAIT: Duration = Duration::from_secs(20);
+const SNAPSHOT_POLL: Duration = Duration::from_millis(100);
+
+/// Writes the connected window's snapshot once its page is in, polling from the run loop;
+/// exits 0 when written, 1 when the page failed or never came.
+fn snapshot_when_ready(path: std::path::PathBuf, started: Instant) {
+    let state = ui::with(|ui| {
+        // The window is not on screen, so changes only pile up until forced in.
+        ui.render_now();
+        ui.snapshot_state()
+    });
+    let waited = started.elapsed();
+    let write = |ui: &Ui| match snapshot::write(&ui.root, &path) {
+        Ok(()) => std::process::exit(0),
+        Err(e) => {
+            eprintln!("requiem-gui: snapshot failed: {e}");
+            std::process::exit(1);
+        }
+    };
+    match state {
+        Some(ui::SnapshotState::Loaded { covers: false }) => {
+            ui::with(write);
+        }
+        Some(ui::SnapshotState::Loaded { covers: true }) if waited >= SNAPSHOT_WAIT => {
+            // Covers that never arrive show their placeholders.
+            ui::with(write);
+        }
+        Some(ui::SnapshotState::Failed(e)) => {
+            eprintln!("requiem-gui: the page did not load: {e}");
+            std::process::exit(1);
+        }
+        _ if waited >= SNAPSHOT_WAIT => {
+            eprintln!(
+                "requiem-gui: the page did not load in {} s",
+                SNAPSHOT_WAIT.as_secs()
+            );
+            std::process::exit(1);
+        }
+        _ => {
+            if let Ok(when) = DispatchTime::try_from(SNAPSHOT_POLL) {
+                let _ =
+                    DispatchQueue::main().after(when, move || snapshot_when_ready(path, started));
+            }
         }
     }
 }
@@ -663,6 +791,11 @@ pub fn run(args: Args) {
     // The window is not on screen yet, which `render` waits for.
     ui.render_now();
     match args.view {
+        View::Home => ui.show(AppView::Home),
+        View::Library | View::LibrarySignedOut | View::LibraryUnavailable | View::SignIn => {
+            ui.show(AppView::Library)
+        }
+        View::Collection => ui.show(AppView::Collection),
         View::Queue => ui.show(AppView::Queue),
         View::Palette => ui.open_palette(),
         View::Search | View::Empty | View::Disconnected | View::Toast | View::OutOfDate => {
@@ -670,17 +803,23 @@ pub fn run(args: Args) {
         }
     }
 
+    app.setDelegate(Some(ProtocolObject::from_ref(&*delegate)));
     if let Some(path) = &args.snapshot {
-        match snapshot::write(&ui.root, path) {
-            Ok(()) => std::process::exit(0),
-            Err(e) => {
-                eprintln!("requiem-gui: snapshot failed: {e}");
-                std::process::exit(1);
+        if args.uses_demo_data() {
+            match snapshot::write(&ui.root, path) {
+                Ok(()) => std::process::exit(0),
+                Err(e) => {
+                    eprintln!("requiem-gui: snapshot failed: {e}");
+                    std::process::exit(1);
+                }
             }
         }
+        // Connected: the run loop delivers the daemon's answers, which the window then shows.
+        snapshot_when_ready(path.clone(), Instant::now());
+        app.run();
+        return;
     }
 
-    app.setDelegate(Some(ProtocolObject::from_ref(&*delegate)));
     let (menu, window_menu) = menu_bar(mtm, &delegate);
     app.setMainMenu(Some(&menu));
     app.setWindowsMenu(Some(&window_menu));

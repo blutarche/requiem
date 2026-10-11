@@ -1,14 +1,15 @@
 //! `--demo`: fixed fake data and a stand-in for the daemon, so screenshots are deterministic.
 //! All names are made up.
 
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use requiem_core::{
-    Command, EnqueueMode, Event, PlayState, ProviderId, SeekTarget, Track, TrackId,
+    AccountState, Collection, CollectionId, CollectionKind, Command, EnqueueMode, Event, Item,
+    Page, PlayState, ProviderId, SeekTarget, Shelf, Track, TrackId,
 };
 
 use crate::args::View;
-use crate::vm::{BANNER_GRACE, Intent, Link, LinkError, Vm};
+use crate::vm::{BANNER_GRACE, Intent, Link, LinkError, Place, Vm};
 
 pub const QUERY: &str = "night drive";
 
@@ -178,6 +179,187 @@ pub fn artwork_url(i: usize) -> Option<String> {
     (i % 4 != 3).then(|| format!("demo:{i:02}"))
 }
 
+const ALBUMS: [(&str, &str); 8] = [
+    ("Low Tide Radio", "Hollow Coast"),
+    ("Glasshouse", "Mira Vance"),
+    ("Orbit Hymns", "The Lantern Choir"),
+    ("After Hours Transit", "Velvet Static"),
+    ("Wildfire Season", "Saint Ember"),
+    ("Signal & Noise", "Cobalt Garden"),
+    ("Small Hours", "Elias Wren"),
+    ("Second Bloom", "Juniper & Ash"),
+];
+
+const MIXES: [&str; 8] = [
+    "Late Night Drive",
+    "Rainy Day Focus",
+    "Songs to Drive Through the Rain at Midnight With the Windows Down",
+    "Sunday Slow Down",
+    "Road Trip Echoes",
+    "Deep Work",
+    "Neon Evenings",
+    "Quiet Hours",
+];
+
+const LIBRARY_ADJECTIVES: [&str; 5] = ["Golden", "Quiet", "Midnight", "Early", "Slow"];
+const LIBRARY_NOUNS: [&str; 4] = ["Mornings", "Roads", "Rooms", "Waves"];
+
+/// The first demo cover URL index of each group; every URL is `demo:NN`.
+const HOME_TRACK_ART: usize = 30;
+const HOME_ALBUM_ART: usize = 42;
+const HOME_MIX_ART: usize = 50;
+const LIBRARY_ART: usize = 60;
+const LIBRARY_LEN: usize = 20;
+const COLLECTION_LEN: usize = 15;
+
+fn demo_url(i: usize) -> String {
+    format!("demo:{i:02}")
+}
+
+/// Every demo cover URL with the seed it is drawn from, for the app to cache.
+pub fn covers() -> Vec<(String, usize)> {
+    let mut out: Vec<(String, usize)> = (0..RESULTS.len())
+        .filter_map(|i| artwork_url(i).map(|u| (u, i)))
+        .collect();
+    out.extend((HOME_TRACK_ART..LIBRARY_ART + LIBRARY_LEN).map(|i| (demo_url(i), i)));
+    out
+}
+
+fn collection_id(kind: &str, i: usize) -> CollectionId {
+    CollectionId {
+        provider: ProviderId("demo".into()),
+        id: format!("demo-{kind}-{i:02}"),
+    }
+}
+
+fn home_tracks() -> Vec<Track> {
+    let mut tracks = results();
+    tracks.drain(..12);
+    tracks.truncate(12);
+    for (k, t) in tracks.iter_mut().enumerate() {
+        t.artwork_url = (k % 5 != 4).then(|| demo_url(HOME_TRACK_ART + k));
+    }
+    tracks
+}
+
+/// Home: a Quick picks grid of tracks, then two shelves of cards.
+pub fn home() -> Vec<Shelf> {
+    let albums = ALBUMS
+        .iter()
+        .enumerate()
+        .map(|(i, (title, artist))| {
+            Item::Collection(Collection {
+                id: collection_id("album", i),
+                kind: CollectionKind::Album,
+                title: (*title).to_owned(),
+                subtitle: Some(format!("Album · {artist}")),
+                artwork_url: Some(demo_url(HOME_ALBUM_ART + i)),
+            })
+        })
+        .collect();
+    let mixes = MIXES
+        .iter()
+        .enumerate()
+        .map(|(i, title)| {
+            Item::Collection(Collection {
+                id: collection_id("mix", i),
+                kind: CollectionKind::Playlist,
+                title: (*title).to_owned(),
+                subtitle: Some(format!("Playlist · {} songs", 12 + 3 * i)),
+                artwork_url: (i != 5).then(|| demo_url(HOME_MIX_ART + i)),
+            })
+        })
+        .collect();
+    vec![
+        Shelf {
+            title: "Quick picks".into(),
+            items: home_tracks().into_iter().map(Item::Track).collect(),
+        },
+        Shelf {
+            title: "Listen again".into(),
+            items: albums,
+        },
+        Shelf {
+            title: "Mixed for you".into(),
+            items: mixes,
+        },
+    ]
+}
+
+pub fn library() -> Vec<Shelf> {
+    let items = (0..LIBRARY_LEN)
+        .map(|i| {
+            let (title, subtitle) = if i == 0 {
+                (
+                    "Liked videos".to_owned(),
+                    "Auto playlist · 312 videos".to_owned(),
+                )
+            } else {
+                (
+                    format!(
+                        "{} {}",
+                        LIBRARY_ADJECTIVES[i % LIBRARY_ADJECTIVES.len()],
+                        LIBRARY_NOUNS[i % LIBRARY_NOUNS.len()]
+                    ),
+                    format!("Playlist · {} videos", 8 + 7 * i),
+                )
+            };
+            Item::Collection(Collection {
+                id: collection_id("lib", i),
+                kind: CollectionKind::Playlist,
+                title,
+                subtitle: Some(subtitle),
+                artwork_url: (i % 6 != 5).then(|| demo_url(LIBRARY_ART + i)),
+            })
+        })
+        .collect();
+    vec![Shelf {
+        title: "Playlists".into(),
+        items,
+    }]
+}
+
+/// The collection the `collection` view opens: the Library's second playlist.
+pub fn collection() -> Collection {
+    match library().remove(0).items.remove(1) {
+        Item::Collection(c) => c,
+        Item::Track(_) => unreachable!("the Library lists playlists"),
+    }
+}
+
+fn collection_tracks() -> Vec<Track> {
+    let mut tracks = results();
+    tracks.truncate(COLLECTION_LEN);
+    tracks
+}
+
+pub fn provider() -> ProviderId {
+    ProviderId("ytmusic".into())
+}
+
+fn unix_now() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs())
+}
+
+/// The state a pending sign-in shows: 15 minutes, with half a minute of slack for the render.
+fn pending() -> AccountState {
+    AccountState::Pending {
+        verification_url: "https://www.google.com/device".into(),
+        user_code: "WXYZ-ABCD".into(),
+        expires_at_unix: unix_now() + 14 * 60 + 30,
+    }
+}
+
+fn unavailable() -> AccountState {
+    AccountState::Unavailable(
+        "Save your Google OAuth client as ~/Library/Application Support/requiem/google-client.json, \
+         then reopen requiem."
+            .into(),
+    )
+}
+
 pub fn results() -> Vec<Track> {
     RESULTS
         .iter()
@@ -205,6 +387,7 @@ pub struct Daemon {
     state: PlayState,
     volume: u8,
     position: Duration,
+    account: AccountState,
 }
 
 impl Default for Daemon {
@@ -218,6 +401,9 @@ impl Default for Daemon {
             state: PlayState::Playing,
             volume: VOLUME,
             position: POSITION,
+            account: AccountState::SignedIn {
+                name: Some("Demo Listener".into()),
+            },
         }
     }
 }
@@ -225,10 +411,16 @@ impl Default for Daemon {
 impl Daemon {
     /// The events a daemon sends a new client, in the protocol's snapshot order.
     pub fn snapshot(&self) -> Vec<Event> {
-        let mut evs = vec![Event::QueueChanged {
-            tracks: self.queue.clone(),
-            current: self.current,
-        }];
+        let mut evs = vec![
+            Event::Account {
+                provider: provider(),
+                state: self.account.clone(),
+            },
+            Event::QueueChanged {
+                tracks: self.queue.clone(),
+                current: self.current,
+            },
+        ];
         let playing = self.playing();
         if let Some(t) = &playing {
             evs.push(Event::NowPlaying {
@@ -299,9 +491,19 @@ impl Daemon {
                 evs.push(self.queue_changed());
                 evs
             }
+            Command::Browse { req, page } => {
+                let shelves = match page {
+                    Page::Home => home(),
+                    Page::Library => library(),
+                    Page::Collection(_) => vec![Shelf {
+                        title: String::new(),
+                        items: collection_tracks().into_iter().map(Item::Track).collect(),
+                    }],
+                };
+                vec![Event::BrowseResults { req, page, shelves }]
+            }
             Command::Shutdown
             | Command::Cue(_)
-            | Command::Browse { .. }
             | Command::SignIn { .. }
             | Command::SignOut { .. } => Vec::new(),
         }
@@ -430,22 +632,50 @@ pub fn start() -> (Vm, Daemon) {
     start_in(View::Search)
 }
 
-/// `start`, staged for a demo-only `view`: `Empty` skips the search; `Disconnected`,
-/// `OutOfDate` and `Toast` add their banner or toast. Other views get the plain start.
-pub fn start_in(view: View) -> (Vm, Daemon) {
-    let t0 = Instant::now();
-    let mut vm = Vm::new_at(t0);
-    let mut daemon = Daemon::default();
-    vm.link(Link::Demo);
-    for ev in daemon.snapshot() {
-        vm.apply(ev);
-    }
-    if view != View::Empty {
-        for cmd in vm.intent(Intent::Search(QUERY.into())) {
+/// Sends what the view model has to say, and applies the answers, until it is quiet.
+fn settle(vm: &mut Vm, daemon: &mut Daemon) {
+    loop {
+        let cmds = vm.take_commands();
+        if cmds.is_empty() {
+            return;
+        }
+        for cmd in cmds {
             for ev in daemon.apply(cmd) {
                 vm.apply(ev);
             }
         }
+    }
+}
+
+fn run_intent(vm: &mut Vm, daemon: &mut Daemon, intent: Intent) {
+    for cmd in vm.intent(intent) {
+        for ev in daemon.apply(cmd) {
+            vm.apply(ev);
+        }
+    }
+    settle(vm, daemon);
+}
+
+/// `start`, staged for a demo-only `view`: `Empty` skips the search; `Disconnected`,
+/// `OutOfDate` and `Toast` add their banner or toast; the Library views set the account.
+/// Other views get the plain start.
+pub fn start_in(view: View) -> (Vm, Daemon) {
+    let t0 = Instant::now();
+    let mut vm = Vm::new_at(t0);
+    let mut daemon = Daemon::default();
+    match view {
+        View::LibrarySignedOut => daemon.account = AccountState::SignedOut,
+        View::LibraryUnavailable => daemon.account = unavailable(),
+        View::SignIn => daemon.account = pending(),
+        _ => {}
+    }
+    vm.link(Link::Demo);
+    for ev in daemon.snapshot() {
+        vm.apply(ev);
+    }
+    settle(&mut vm, &mut daemon);
+    if view != View::Empty {
+        run_intent(&mut vm, &mut daemon, Intent::Search(QUERY.into()));
     }
     match view {
         View::Disconnected => {
@@ -461,6 +691,18 @@ pub fn start_in(view: View) -> (Vm, Daemon) {
             });
             vm.apply(daemon.queue_changed());
         }
+        View::Home => run_intent(&mut vm, &mut daemon, Intent::Visit(Place::Home)),
+        View::Library | View::LibrarySignedOut | View::LibraryUnavailable | View::SignIn => {
+            run_intent(&mut vm, &mut daemon, Intent::Visit(Place::Library));
+        }
+        View::Collection => {
+            run_intent(&mut vm, &mut daemon, Intent::Visit(Place::Library));
+            let open = Intent::OpenCollection {
+                collection: collection(),
+                from: Place::Library,
+            };
+            run_intent(&mut vm, &mut daemon, open);
+        }
         View::Search | View::Queue | View::Palette | View::Empty => {}
     }
     (vm, daemon)
@@ -469,7 +711,7 @@ pub fn start_in(view: View) -> (Vm, Daemon) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::vm::{Connection, QueueEdit, SearchStatus};
+    use crate::vm::{Connection, List, QueueEdit, SearchStatus};
 
     fn run(vm: &mut Vm, daemon: &mut Daemon, intent: Intent) {
         for cmd in vm.intent(intent) {
@@ -552,7 +794,14 @@ mod tests {
     #[test]
     fn play_result_replaces_queue_and_plays() {
         let (mut vm, mut d) = start();
-        run(&mut vm, &mut d, Intent::PlayResult(25));
+        run(
+            &mut vm,
+            &mut d,
+            Intent::PlayFrom {
+                list: List::Results,
+                from: 25,
+            },
+        );
         let ui = vm.ui();
         assert_eq!(ui.queue.len(), 5);
         assert_eq!(ui.current, Some(0));
@@ -563,7 +812,14 @@ mod tests {
     #[test]
     fn append_and_queue_click() {
         let (mut vm, mut d) = start();
-        run(&mut vm, &mut d, Intent::AppendResult(1));
+        run(
+            &mut vm,
+            &mut d,
+            Intent::Append {
+                list: List::Results,
+                index: 1,
+            },
+        );
         assert_eq!(vm.ui().queue.len(), 9);
         assert_eq!(vm.ui().queue[8].title, "Paper Lanterns");
         run(&mut vm, &mut d, Intent::PlayQueue(8));
@@ -722,7 +978,10 @@ mod tests {
     #[test]
     fn undo_leaves_a_paused_queue_paused() {
         for change in [
-            Intent::PlayResult(25),
+            Intent::PlayFrom {
+                list: List::Results,
+                from: 25,
+            },
             Intent::EditQueue {
                 edit: QueueEdit::Clear,
                 selected: None,

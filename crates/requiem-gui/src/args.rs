@@ -7,17 +7,30 @@ usage: requiem-gui [--demo] [--smoke] [--snapshot <png>] [--view <view>]
 
   --demo             fill the window with fixed fake data; no player daemon
   --smoke            like --demo, then exit 0 after 2 s
-  --snapshot <png>   with --demo: render the window to a PNG and exit 0
-  --view <view>      the view shown at start: search (default), queue or palette;
-                     with --demo also empty, disconnected, toast or out-of-date";
+  --snapshot <png>   render the window to a PNG and exit 0. With --demo, from fake data;
+                     without it, for home or library, from the running player once the page
+                     and its covers have loaded (20 s at most); exits 1 if the page fails
+  --view <view>      the view shown at start: home (default), search, library, queue or
+                     palette; with --demo also collection, library-signed-out,
+                     library-unavailable, signin, empty, disconnected, toast or out-of-date";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum View {
     #[default]
+    Home,
     Search,
+    Library,
     Queue,
     /// The search view with the command palette open.
     Palette,
+    /// Demo only: a playlist's tracks, opened from the Library.
+    Collection,
+    /// Demo only: the Library with the account signed out.
+    LibrarySignedOut,
+    /// Demo only: the Library with no Google client set up.
+    LibraryUnavailable,
+    /// Demo only: the Library showing a sign-in code.
+    SignIn,
     /// Demo only: the search view before any query.
     Empty,
     /// Demo only: the reconnecting banner.
@@ -29,10 +42,16 @@ pub enum View {
 }
 
 impl View {
-    const NAMES: [(&str, View); 7] = [
+    const NAMES: [(&str, View); 13] = [
+        ("home", View::Home),
         ("search", View::Search),
+        ("library", View::Library),
         ("queue", View::Queue),
         ("palette", View::Palette),
+        ("collection", View::Collection),
+        ("library-signed-out", View::LibrarySignedOut),
+        ("library-unavailable", View::LibraryUnavailable),
+        ("signin", View::SignIn),
         ("empty", View::Empty),
         ("disconnected", View::Disconnected),
         ("toast", View::Toast),
@@ -41,7 +60,15 @@ impl View {
 
     /// Whether the view is a staged demo state rather than a place in the app.
     pub fn is_demo_only(self) -> bool {
-        !matches!(self, View::Search | View::Queue | View::Palette)
+        !matches!(
+            self,
+            View::Home | View::Search | View::Library | View::Queue | View::Palette
+        )
+    }
+
+    /// Whether a snapshot can wait on the running player's answers to show it.
+    fn snapshots_live(self) -> bool {
+        matches!(self, View::Home | View::Library)
     }
 }
 
@@ -92,8 +119,10 @@ pub fn parse(args: impl IntoIterator<Item = String>) -> Result<Args, ArgsError> 
             other => return Err(ArgsError::Bad(format!("unknown argument {other:?}"))),
         }
     }
-    if out.snapshot.is_some() && !out.demo {
-        return Err(ArgsError::Bad("--snapshot needs --demo".into()));
+    if out.snapshot.is_some() && !out.demo && !out.view.snapshots_live() {
+        return Err(ArgsError::Bad(
+            "--snapshot needs --demo, except for --view home or library".into(),
+        ));
     }
     if out.view.is_demo_only() && !out.uses_demo_data() {
         return Err(ArgsError::Bad("this --view needs --demo".into()));
@@ -122,9 +151,10 @@ mod tests {
     }
 
     #[test]
-    fn no_args_is_live_search() {
+    fn no_args_is_live_home() {
         let a = p(&[]).unwrap();
         assert_eq!(a, Args::default());
+        assert_eq!(a.view, View::Home);
         assert!(!a.uses_demo_data());
     }
 
@@ -151,7 +181,7 @@ mod tests {
         assert_eq!(p(&["--help"]), Err(ArgsError::Help));
         assert!(matches!(p(&["--snapshot"]), Err(ArgsError::Bad(_))));
         assert!(matches!(
-            p(&["--snapshot", "x.png"]),
+            p(&["--snapshot", "x.png", "--view", "queue"]),
             Err(ArgsError::Bad(_))
         ));
         assert!(matches!(
@@ -165,8 +195,25 @@ mod tests {
     }
 
     #[test]
+    fn home_and_library_snapshot_the_running_player() {
+        for (name, view) in [("home", View::Home), ("library", View::Library)] {
+            let a = p(&["--snapshot", "x.png", "--view", name]).unwrap();
+            assert_eq!((a.view, a.demo), (view, false));
+        }
+        assert_eq!(
+            p(&["--snapshot", "x.png"]).unwrap().view,
+            View::Home,
+            "home is the default view"
+        );
+    }
+
+    #[test]
     fn demo_states_need_demo_data() {
         for (name, view) in [
+            ("collection", View::Collection),
+            ("library-signed-out", View::LibrarySignedOut),
+            ("library-unavailable", View::LibraryUnavailable),
+            ("signin", View::SignIn),
             ("empty", View::Empty),
             ("disconnected", View::Disconnected),
             ("toast", View::Toast),

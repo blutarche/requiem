@@ -55,6 +55,10 @@ pub fn bg_2() -> Retained<NSColor> {
 pub fn bg_3() -> Retained<NSColor> {
     rgb(BG_3)
 }
+/// The fill of a hovered row or card.
+pub fn row_hover() -> Retained<NSColor> {
+    rgb(ROW_HOVER)
+}
 pub fn bg_4() -> Retained<NSColor> {
     rgb(0x24242C)
 }
@@ -267,6 +271,8 @@ pub enum Icon {
     X,
     Music,
     Check,
+    Home,
+    Library,
 }
 
 impl Icon {
@@ -283,6 +289,8 @@ impl Icon {
             Icon::X => include_bytes!("../../assets/icons/x.svg"),
             Icon::Music => include_bytes!("../../assets/icons/music.svg"),
             Icon::Check => include_bytes!("../../assets/icons/check.svg"),
+            Icon::Home => include_bytes!("../../assets/icons/house.svg"),
+            Icon::Library => include_bytes!("../../assets/icons/library.svg"),
         }
     }
 
@@ -335,6 +343,8 @@ mod tests {
             Icon::X,
             Icon::Music,
             Icon::Check,
+            Icon::Home,
+            Icon::Library,
         ] {
             assert!(icon.image(16.0).is_some(), "{icon:?}");
         }

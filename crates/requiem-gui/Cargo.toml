@@ -48,6 +48,7 @@ objc2-foundation = { version = "0.3.2", default-features = false, features = [
     "NSObject",
     "NSRange",
     "NSString",
+    "NSURL",
     "NSValue",
 ] }
 objc2-app-kit = { version = "0.3.2", default-features = false, features = [
@@ -59,6 +60,7 @@ objc2-app-kit = { version = "0.3.2", default-features = false, features = [
     "NSAccessibility",
     "NSAccessibilityConstants",
     "NSAccessibilityProtocols",
+    "NSAlert",
     "NSAnimation",
     "NSAnimationContext",
     "NSAppearance",
@@ -83,6 +85,7 @@ objc2-app-kit = { version = "0.3.2", default-features = false, features = [
     "NSMenu",
     "NSMenuItem",
     "NSParagraphStyle",
+    "NSPasteboard",
     "NSResponder",
     "NSRunningApplication",
     "NSScrollView",
