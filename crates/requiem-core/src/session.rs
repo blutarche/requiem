@@ -145,6 +145,8 @@ struct Actor {
     playing: Option<Track>,
     queue_version: u64,
     r#gen: u64,
+    /// The engine holds this generation's track.
+    loaded: bool,
     started: bool,
     state: PlayState,
     volume: u8,
@@ -189,6 +191,7 @@ impl Actor {
             playing: None,
             queue_version: 0,
             r#gen: 0,
+            loaded: false,
             started: false,
             state: PlayState::Stopped,
             volume: 100,
@@ -267,7 +270,7 @@ impl Actor {
             }
             Command::PlayIndex(i) => {
                 if i < self.queue.len() {
-                    self.start(i);
+                    self.play(i);
                 }
             }
             Command::Remove(i) => self.remove(i),
@@ -282,14 +285,14 @@ impl Actor {
             Command::Next => {
                 let next = self.current.map_or(0, |c| c + 1);
                 if next < self.queue.len() {
-                    self.start(next);
+                    self.play(next);
                 } else {
                     self.stop();
                 }
             }
             Command::Prev => match self.current {
                 Some(c) if c > 0 && self.last_pos <= self.config.prev_restart_threshold => {
-                    self.start(c - 1)
+                    self.play(c - 1)
                 }
                 _ => self.seek_to(Duration::ZERO),
             },
@@ -339,8 +342,8 @@ impl Actor {
                 } else if matches!(self.state, PlayState::Playing | PlayState::Buffering) {
                     self.start(i);
                 } else {
-                    // The engine cannot load paused, so a paused session stops with the
-                    // cursor just before the successor: `Next` then plays it.
+                    // A paused session stops with the cursor just before the successor: `Next`
+                    // then plays it.
                     self.current = i.checked_sub(1);
                     if self.state != PlayState::Stopped {
                         self.stop();
@@ -412,9 +415,17 @@ impl Actor {
 
     fn resume(&mut self) {
         match self.state {
-            PlayState::Paused => {
+            PlayState::Paused if self.started => {
                 self.engine.resume();
                 self.set_state(PlayState::Playing);
+            }
+            // Still loading: `Started` moves on to `Playing`. Before the load, the engine
+            // holds only the previous track, which stays paused.
+            PlayState::Paused => {
+                if self.loaded {
+                    self.engine.resume();
+                }
+                self.set_state(PlayState::Buffering);
             }
             // The cursor is the last track played, or sits just before the next one after
             // the current track was removed; a finished queue starts again from the top.
@@ -440,6 +451,7 @@ impl Actor {
     fn stop(&mut self) {
         self.engine.stop();
         self.r#gen += 1;
+        self.loaded = false;
         self.started = false;
         self.pre = None;
         self.playing = None;
@@ -449,6 +461,15 @@ impl Actor {
         self.set_state(PlayState::Stopped);
     }
 
+    /// Starts `idx` because the user picked it, which ends a pause.
+    fn play(&mut self, idx: usize) {
+        if self.state == PlayState::Paused {
+            self.set_state(PlayState::Buffering);
+        }
+        self.start(idx);
+    }
+
+    /// Keeps a pause: a track moved to on its own loads paused.
     fn start(&mut self, idx: usize) {
         let Some(track) = self.queue.get(idx).cloned() else {
             self.stop();
@@ -457,16 +478,20 @@ impl Actor {
         self.current = Some(idx);
         self.playing = Some(track.clone());
         self.r#gen += 1;
+        self.loaded = false;
         self.started = false;
         self.last_pos = Duration::ZERO;
         self.duration = None;
         self.emit_queue();
+        if self.state == PlayState::Stopped {
+            self.set_state(PlayState::Buffering);
+        }
 
         let r#gen = self.r#gen;
         match self.pre.take() {
             Some(mut slot) if slot.matches(self.queue_version, idx, &track.id) => {
                 match slot.state {
-                    PreState::Ready(src) => self.engine.load(r#gen, src),
+                    PreState::Ready(src) => self.load(r#gen, src),
                     PreState::Pending => {
                         slot.waiting = Some(r#gen);
                         self.pre = Some(slot);
@@ -475,6 +500,13 @@ impl Actor {
             }
             _ => self.spawn_resolve(track.id, Purpose::Start { r#gen }),
         }
+    }
+
+    /// Loads paused if the user paused while the track resolved.
+    fn load(&mut self, r#gen: u64, src: AudioSource) {
+        self.loaded = true;
+        self.engine
+            .load(r#gen, src, self.state == PlayState::Paused);
     }
 
     /// Discards the pre-resolve slot. A start already waiting on it is resolved afresh.
@@ -544,7 +576,7 @@ impl Actor {
                     return;
                 }
                 match result {
-                    Ok(src) => self.engine.load(r#gen, src),
+                    Ok(src) => self.load(r#gen, src),
                     Err(e) => self.on_resolve_error(e),
                 }
             }
@@ -563,7 +595,7 @@ impl Actor {
                 match (result, waiting) {
                     (Ok(src), Some(r#gen)) => {
                         self.pre = None;
-                        self.engine.load(r#gen, src);
+                        self.load(r#gen, src);
                     }
                     (Ok(src), None) => slot.state = PreState::Ready(src),
                     // A failed pre-resolve is never a strike; the track is resolved
@@ -636,7 +668,9 @@ impl Actor {
                 self.duration = duration.or(track.duration);
                 let duration = self.duration;
                 self.emit(Event::NowPlaying { track, duration });
-                self.set_state(PlayState::Playing);
+                if self.state != PlayState::Paused {
+                    self.set_state(PlayState::Playing);
+                }
                 self.ensure_pre_resolve();
             }
             EngineEvent::Position { at, .. } => {

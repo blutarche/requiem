@@ -137,7 +137,7 @@ fn daemon_flow() {
     .unwrap();
     gui.send(Command::PlayIndex(1)).unwrap();
     assert_eq!(
-        take(&gui_rx, 2),
+        take(&gui_rx, 3),
         [
             Event::QueueChanged {
                 tracks: found.clone(),
@@ -147,6 +147,7 @@ fn daemon_flow() {
                 tracks: found.clone(),
                 current: Some(1),
             },
+            Event::State(PlayState::Buffering),
         ]
     );
     let (r#gen, payload) = engine.wait_load(1);
