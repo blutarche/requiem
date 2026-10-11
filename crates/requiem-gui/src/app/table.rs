@@ -366,14 +366,27 @@ impl Controller {
             Col::Duration => &r.duration,
             Col::Add => unreachable!(),
         };
+        let current = self.ivars().current.get() == Some(row);
         let iv = cell.ivars();
         if let Some(l) = iv.label.get() {
             widgets::set_text(l, text);
+            if col == Col::Title {
+                widgets::accessibility_label(l, &spoken_title(text, current));
+            }
         }
         if let Some(bar) = iv.bar.get() {
-            bar.setHidden(self.ivars().current.get() != Some(row));
+            bar.setHidden(!current);
         }
         Some(Retained::into_super(cell))
+    }
+}
+
+/// What VoiceOver reads for a title cell. The current row is otherwise marked only in paint.
+fn spoken_title(title: &str, current: bool) -> String {
+    if current {
+        format!("Now playing, {title}")
+    } else {
+        title.to_owned()
     }
 }
 
@@ -1297,6 +1310,12 @@ mod tests {
     fn reselect_picks_the_nearest_duplicate() {
         let rows = named(&["c", "a", "b", "c", "c", "c"]);
         assert_eq!(reselect(&rows, &row("c", "", "", ""), 2), Some(3));
+    }
+
+    #[test]
+    fn only_the_current_title_reads_as_now_playing() {
+        assert_eq!(spoken_title("One", true), "Now playing, One");
+        assert_eq!(spoken_title("One", false), "One");
     }
 
     #[test]
