@@ -814,14 +814,25 @@ impl Vm {
     }
 
     /// Shows `text` with Undo, which restores the queue as it is now: its tracks, and the
-    /// playing track, position and pause. `after` is the queue the change leaves.
+    /// playing track, position and pause. `after` is the queue the change leaves. A track
+    /// still loading has no position yet, so it restores from its start.
     fn offer_undo(&mut self, text: &str, title: &'static str, after: Vec<TrackId>) {
         let tracks = self.ui.queue.clone();
         let playing = self
             .ui
             .current
-            .filter(|_| self.ui.now_playing.is_some())
-            .map(|c| (c, self.ui.position));
+            .zip(self.ui.now_playing.as_ref())
+            .map(|(c, np)| {
+                let loaded = self.ui.queue.get(c).is_some_and(|t| t.id == np.id);
+                (
+                    c,
+                    if loaded {
+                        self.ui.position
+                    } else {
+                        Duration::ZERO
+                    },
+                )
+            });
         self.toast_with(text.to_owned(), false, Some("Undo"));
         self.undo = Some(Undo {
             toast: self.last_toast,
@@ -2748,6 +2759,50 @@ mod tests {
             current: None,
         });
         assert_eq!(vm.undo_title(), None);
+    }
+
+    #[test]
+    fn undo_while_the_next_track_loads_starts_it_from_the_top() {
+        let mut vm = connected();
+        let old = tracks(3);
+        vm.apply(Event::QueueChanged {
+            tracks: old.clone(),
+            current: Some(0),
+        });
+        vm.apply(Event::NowPlaying {
+            track: old[0].clone(),
+            duration: old[0].duration,
+        });
+        vm.apply(Event::Position(Duration::from_secs(200)));
+        // The session moves `current` at load start; NowPlaying and position lag until Started.
+        vm.apply(Event::QueueChanged {
+            tracks: old.clone(),
+            current: Some(1),
+        });
+        vm.apply(Event::State(PlayState::Buffering));
+        assert_eq!(
+            edit(&mut vm, QueueEdit::Remove(1), None),
+            [Command::Remove(1)]
+        );
+        assert_eq!(
+            vm.intent(Intent::Undo),
+            [
+                Command::Enqueue {
+                    tracks: old.clone(),
+                    mode: EnqueueMode::Replace
+                },
+                Command::PlayIndex(1)
+            ]
+        );
+        vm.apply(Event::QueueChanged {
+            tracks: old.clone(),
+            current: Some(1),
+        });
+        vm.apply(Event::NowPlaying {
+            track: old[1].clone(),
+            duration: old[1].duration,
+        });
+        assert!(vm.take_commands().is_empty());
     }
 
     /// Playing the third of three queued tracks at 1:01, then that row removed.
