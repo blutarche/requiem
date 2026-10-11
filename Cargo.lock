@@ -799,6 +799,8 @@ dependencies = [
  "requiem-ipc",
  "requiem-macos",
  "requiem-provider-ytmusic",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

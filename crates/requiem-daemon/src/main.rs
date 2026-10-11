@@ -6,7 +6,9 @@ use std::time::{Duration, Instant};
 
 use crossbeam_channel::{Receiver, RecvTimeoutError, Sender, bounded};
 use requiem_audio::{AudioEngine, AudioOptions};
-use requiem_core::{EngineEventSink, Event, PlayState, Session, SessionConfig};
+use requiem_core::{
+    Command, EngineEventSink, EnqueueMode, Event, PersistSink, PlayState, Session, SessionConfig,
+};
 use requiem_ipc::{ServeError, Server, ServerHooks};
 use requiem_provider_ytmusic::{YtMusicOptions, YtMusicProvider};
 
@@ -29,6 +31,7 @@ macro_rules! debug {
 }
 
 mod idle;
+mod persist;
 mod ui;
 
 fn idle_limit() -> Duration {
@@ -77,13 +80,29 @@ fn main() -> ExitCode {
         prefer_aac,
         ..YtMusicOptions::default()
     }));
+    let state_path = persist::state_path();
+    let restored = state_path.as_deref().and_then(persist::load);
+    // Nothing is sent to the writer before the server is up, so an early return writes nothing.
+    let (persist_sink, writer) = match state_path {
+        Some(path) => {
+            let (tx, handle) = persist::spawn_writer(path, restored.clone());
+            let sink: PersistSink = Arc::new(move |state| {
+                let _ = tx.send(state);
+            });
+            (Some(sink), Some(handle))
+        }
+        None => (None, None),
+    };
     let session = Session::spawn(
         vec![provider],
         move |sink| {
             let _ = slot.set(sink);
             Box::new(engine)
         },
-        SessionConfig::default(),
+        SessionConfig {
+            persist: persist_sink,
+            ..SessionConfig::default()
+        },
     );
 
     // The hub's state mirror assumes a fresh Session: nothing may be sent to it before
@@ -106,6 +125,19 @@ fn main() -> ExitCode {
     };
     debug!("listening");
 
+    if let Some(state) = restored {
+        if !state.tracks.is_empty() {
+            server.send(Command::Enqueue {
+                tracks: state.tracks,
+                mode: EnqueueMode::Replace,
+            });
+        }
+        server.send(Command::SetVolume(state.volume));
+        if let Some(i) = state.resume {
+            server.send(Command::Cue(i));
+        }
+    }
+
     let stopped = Arc::new(AtomicBool::new(true));
     watch_state(server.subscribe(), stopped.clone());
     let (done_tx, done_rx) = bounded::<()>(0);
@@ -116,6 +148,10 @@ fn main() -> ExitCode {
     });
     debug!("shutting down");
     server.shutdown();
+    // Shutting the Session down drops its sink and so closes the writer's channel.
+    if let Some(writer) = writer {
+        let _ = writer.join();
+    }
     ExitCode::SUCCESS
 }
 

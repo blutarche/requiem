@@ -18,3 +18,5 @@ requiem-ipc.workspace = true
 requiem-macos.workspace = true
 crossbeam-channel.workspace = true
 libc.workspace = true
+serde.workspace = true
+serde_json.workspace = true
