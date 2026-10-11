@@ -299,7 +299,11 @@ impl Daemon {
                 evs.push(self.queue_changed());
                 evs
             }
-            Command::Shutdown | Command::Cue(_) => Vec::new(),
+            Command::Shutdown
+            | Command::Cue(_)
+            | Command::Browse { .. }
+            | Command::SignIn { .. }
+            | Command::SignOut { .. } => Vec::new(),
         }
     }
 

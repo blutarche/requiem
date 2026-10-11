@@ -14,8 +14,8 @@ use std::time::{Duration, Instant};
 use crossbeam_channel::{Receiver, RecvTimeoutError, unbounded};
 use requiem_core::testing::{EngineCall, FakeEngineHandle, FakeProvider, Gate, Step};
 use requiem_core::{
-    Command, EngineEvent, EnqueueMode, Event, PlayState, ProviderError, ProviderId, Session,
-    SessionConfig, Track, TrackId,
+    AccountState, Command, EngineEvent, EnqueueMode, Event, PlayState, ProviderError, ProviderId,
+    Session, SessionConfig, Track, TrackId,
 };
 
 use crate::frame::{self, Deadline, MAX_FRAME};
@@ -29,6 +29,16 @@ use crate::{server, sys};
 
 const WAIT: Duration = Duration::from_secs(5);
 const SECS: fn(u64) -> Duration = Duration::from_secs;
+/// Events in the join snapshot of a stopped player with an empty queue.
+const IDLE_SNAPSHOT: usize = 4;
+
+/// The fake provider's account as every snapshot carries it.
+fn account() -> Event {
+    Event::Account {
+        provider: ProviderId("fake".into()),
+        state: AccountState::SignedOut,
+    }
+}
 
 struct TempDir(PathBuf);
 
@@ -349,6 +359,7 @@ fn handshake_welcome_then_snapshot() {
             current: None,
         },
         Event::State(PlayState::Stopped),
+        account(),
         Event::Volume(100),
     ];
     for ev in &snapshot {
@@ -358,7 +369,7 @@ fn handshake_welcome_then_snapshot() {
     assert_eq!(read_msg(&s), ServerMsg::Pong(42));
 
     let (_c, rx) = rig.client(Role::Cli);
-    assert_eq!(take(&rx, 3), snapshot);
+    assert_eq!(take(&rx, IDLE_SNAPSHOT), snapshot);
     assert_eq!(rig.server.clients(), ClientCounts { gui: 1, cli: 1 });
 }
 
@@ -445,10 +456,11 @@ fn snapshot_replays_state_in_order() {
         },
         Event::State(PlayState::Playing),
         Event::Position(SECS(42)),
+        account(),
         Event::Volume(30),
     ];
     let (_c, rx) = rig.client(Role::Gui);
-    assert_eq!(take(&rx, 5), playing);
+    assert_eq!(take(&rx, 6), playing);
     rig.engine.emit(EngineEvent::Position {
         r#gen,
         at: SECS(43),
@@ -456,10 +468,10 @@ fn snapshot_replays_state_in_order() {
     assert_eq!(next_event(&rx), Event::Position(SECS(43)));
 
     let sub2 = rig.server.subscribe();
-    let got: Vec<Event> = (0..5).map(|_| sub2.recv_timeout(WAIT).unwrap()).collect();
+    let got: Vec<Event> = (0..6).map(|_| sub2.recv_timeout(WAIT).unwrap()).collect();
     assert_eq!(got[..3], playing[..3]);
     assert_eq!(got[3], Event::Position(SECS(43)));
-    assert_eq!(got[4], Event::Volume(30));
+    assert_eq!(got[4..], playing[4..]);
 
     // Stopped means no track is loaded: no NowPlaying or Position.
     rig.server.send(Command::Next);
@@ -467,13 +479,14 @@ fn snapshot_replays_state_in_order() {
     wait_sub(&sub, |e| *e == Event::State(PlayState::Stopped));
     let (_c2, rx2) = rig.client(Role::Cli);
     assert_eq!(
-        take(&rx2, 3),
+        take(&rx2, IDLE_SNAPSHOT),
         [
             Event::QueueChanged {
                 tracks: tracks(&["a", "b"]),
                 current: Some(1),
             },
             Event::State(PlayState::Stopped),
+            account(),
             Event::Volume(30),
         ]
     );
@@ -495,6 +508,7 @@ fn snapshot_then_live_has_no_gap_or_overlap() {
         let (_c, rx) = rig.client(Role::Cli);
         assert!(matches!(next_event(&rx), Event::QueueChanged { .. }));
         assert_eq!(next_event(&rx), Event::State(PlayState::Stopped));
+        assert_eq!(next_event(&rx), account());
         let Event::Volume(first) = next_event(&rx) else {
             panic!("snapshot has no Volume");
         };
@@ -517,8 +531,8 @@ fn search_results_go_only_to_the_requester_under_its_own_id() {
     let (a, arx) = rig.client(Role::Gui);
     let (b, brx) = rig.client(Role::Cli);
     let sub = rig.server.subscribe();
-    take(&arx, 3);
-    take(&brx, 3);
+    take(&arx, IDLE_SNAPSHOT);
+    take(&brx, IDLE_SNAPSHOT);
 
     // Same local id from both, both in flight at once.
     let search = |query: &str, req| Command::Search {
@@ -566,6 +580,74 @@ fn search_results_go_only_to_the_requester_under_its_own_id() {
     rig.server.send(Command::SetVolume(55));
     assert_eq!(next_event(&arx), Event::Volume(55));
     assert_eq!(next_event(&brx), Event::Volume(55));
+}
+
+#[test]
+fn browse_results_go_only_to_the_requester_and_accounts_to_everyone() {
+    let rig = rig();
+    let shelf = requiem_core::Shelf {
+        title: "Shelf".into(),
+        items: vec![requiem_core::Item::Track(track("h1"))],
+    };
+    let p = &rig.provider;
+    p.script_browse(
+        requiem_core::Page::Home,
+        vec![Step::ok(vec![shelf.clone()])],
+    );
+    p.script_browse(
+        requiem_core::Page::Library,
+        vec![Step::err(ProviderError::SignInRequired("sign in".into()))],
+    );
+    let (a, arx) = rig.client(Role::Gui);
+    let (b, brx) = rig.client(Role::Cli);
+    take(&arx, IDLE_SNAPSHOT);
+    take(&brx, IDLE_SNAPSHOT);
+
+    a.send(Command::Browse {
+        req: 3,
+        page: requiem_core::Page::Home,
+    })
+    .unwrap();
+    assert_eq!(
+        next_event(&arx),
+        Event::BrowseResults {
+            req: 3,
+            page: requiem_core::Page::Home,
+            shelves: vec![shelf],
+        }
+    );
+    b.send(Command::Browse {
+        req: 3,
+        page: requiem_core::Page::Library,
+    })
+    .unwrap();
+    assert_eq!(
+        next_event(&brx),
+        Event::BrowseFailed {
+            req: 3,
+            error: "sign-in required: sign in".into(),
+            sign_in_required: true,
+        }
+    );
+
+    p.script_sign_in(requiem_core::testing::SignInScript {
+        pending: None,
+        gate: None,
+        outcome: Ok(AccountState::SignedIn { name: None }),
+    });
+    b.send(Command::SignIn {
+        provider: ProviderId("fake".into()),
+    })
+    .unwrap();
+    let signed_in = Event::Account {
+        provider: ProviderId("fake".into()),
+        state: AccountState::SignedIn { name: None },
+    };
+    assert_eq!(next_event(&arx), signed_in);
+    assert_eq!(next_event(&brx), signed_in);
+    let (_c, crx) = rig.client(Role::Cli);
+    let snapshot = take(&crx, IDLE_SNAPSHOT);
+    assert_eq!(snapshot[2], signed_in);
 }
 
 #[test]
@@ -650,11 +732,11 @@ fn raise_reaches_gui_clients_only() {
     let (_gui, gui_rx) = rig.client(Role::Gui);
     assert_eq!(rig.server.clients(), ClientCounts { gui: 1, cli: 1 });
     assert!(rig.server.raise_gui());
-    take(&gui_rx, 3);
+    take(&gui_rx, IDLE_SNAPSHOT);
     assert_eq!(gui_rx.recv_timeout(WAIT).unwrap(), Incoming::Raise);
 
     rig.server.send(Command::SetVolume(5));
-    take(&cli_rx, 3);
+    take(&cli_rx, IDLE_SNAPSHOT);
     assert_eq!(next_event(&cli_rx), Event::Volume(5));
 }
 
@@ -662,7 +744,7 @@ fn raise_reaches_gui_clients_only() {
 fn shutdown_command_runs_the_hook_and_leaves_the_session_to_the_daemon() {
     let rig = rig();
     let (c, rx) = rig.client(Role::Cli);
-    take(&rx, 3);
+    take(&rx, IDLE_SNAPSHOT);
     c.send(Command::Shutdown).unwrap();
     rig.shutdowns.recv_timeout(WAIT).unwrap();
     c.send(Command::SetVolume(7)).unwrap();
@@ -861,7 +943,7 @@ fn stop_says_goodbye_without_waiting_on_a_stuck_client() {
     server::admit(2, theirs, &hub);
     stuck.set_read_timeout(Some(WAIT)).unwrap();
     hello(&stuck, PROTOCOL, Role::Cli);
-    for _ in 0..4 {
+    for _ in 0..=IDLE_SNAPSHOT {
         read_msg(&stuck);
     }
 
@@ -884,7 +966,7 @@ fn stop_says_goodbye_without_waiting_on_a_stuck_client() {
     let is_filler =
         |e: &Event| matches!(e, Event::QueueChanged { tracks, .. } if tracks.len() == 3000);
     wait_sub(&sub, is_filler);
-    take(&rx, 3);
+    take(&rx, IDLE_SNAPSHOT);
     assert!(is_filler(&next_event(&rx)));
 
     let started = Instant::now();

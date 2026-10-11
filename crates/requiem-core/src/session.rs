@@ -1,15 +1,17 @@
+use std::collections::HashSet;
 use std::fmt;
 use std::sync::Arc;
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
-use crossbeam_channel::{Receiver, Sender, unbounded};
+use crossbeam_channel::{Receiver, Sender, bounded, unbounded};
 
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    AudioSource, Command, Engine, EngineEvent, EngineEventSink, EnqueueMode, Event, FailureKind,
-    PlayState, Provider, ProviderError, SeekTarget, Track, TrackId,
+    AccountState, AudioSource, Command, Engine, EngineEvent, EngineEventSink, EnqueueMode, Event,
+    FailureKind, Page, PlayState, Provider, ProviderError, ProviderId, SeekTarget, Shelf, Track,
+    TrackId,
 };
 
 /// What a restart restores. `resume` is the queue index Play would start.
@@ -77,11 +79,28 @@ enum Purpose {
 
 enum Msg {
     Command(Command),
-    Subscribe(Sender<Event>),
+    /// The second sender is dropped once the subscriber has been sent the account states.
+    Subscribe(Sender<Event>, Sender<()>),
     Engine(EngineEvent),
     Searched {
         req: u64,
         result: Result<Vec<Track>, ProviderError>,
+    },
+    /// `account` is the provider's state after the browse, which may have signed it out.
+    Browsed {
+        req: u64,
+        page: Page,
+        result: Result<Vec<Shelf>, ProviderError>,
+        account: Option<(ProviderId, AccountState)>,
+    },
+    Account {
+        provider: ProviderId,
+        state: AccountState,
+    },
+    SignInDone {
+        provider: ProviderId,
+        result: Result<(), ProviderError>,
+        state: AccountState,
     },
     Resolved {
         purpose: Purpose,
@@ -122,9 +141,14 @@ impl Session {
         let _ = self.tx.send(Msg::Command(cmd));
     }
 
+    /// Returns once the session has queued every provider's `Account` on the new receiver,
+    /// ahead of anything else.
     pub fn subscribe(&self) -> Receiver<Event> {
         let (tx, rx) = unbounded();
-        let _ = self.tx.send(Msg::Subscribe(tx));
+        let (done_tx, done) = bounded(0);
+        if self.tx.send(Msg::Subscribe(tx, done_tx)).is_ok() {
+            let _ = done.recv();
+        }
         rx
     }
 
@@ -192,6 +216,22 @@ struct Actor {
     strikes: u32,
     stream_strikes: u32,
     last_parse_failure: Option<TrackId>,
+
+    /// The last state seen for each provider, in provider order.
+    accounts: Vec<(ProviderId, AccountState)>,
+    /// Providers with a sign-in worker running.
+    signing_in: HashSet<ProviderId>,
+}
+
+/// The provider's own words, except that a network failure keeps its "network error" prefix.
+fn sign_in_error(e: &ProviderError) -> String {
+    match e {
+        ProviderError::Network(_) => e.to_string(),
+        ProviderError::Unplayable(m)
+        | ProviderError::ClientBroken(m)
+        | ProviderError::Parse(m)
+        | ProviderError::SignInRequired(m) => m.clone(),
+    }
 }
 
 fn resolve_with_retry(
@@ -215,6 +255,7 @@ impl Actor {
         config: SessionConfig,
         tx: Sender<Msg>,
     ) -> Self {
+        let accounts = providers.iter().map(|p| (p.id(), p.account())).collect();
         Self {
             providers,
             engine,
@@ -237,6 +278,8 @@ impl Actor {
             strikes: 0,
             stream_strikes: 0,
             last_parse_failure: None,
+            accounts,
+            signing_in: HashSet::new(),
         }
     }
 
@@ -248,7 +291,15 @@ impl Actor {
                     return;
                 }
                 Msg::Command(cmd) => self.on_command(cmd),
-                Msg::Subscribe(s) => self.subs.push(s),
+                Msg::Subscribe(s, _done) => {
+                    for (provider, state) in &self.accounts {
+                        let _ = s.send(Event::Account {
+                            provider: provider.clone(),
+                            state: state.clone(),
+                        });
+                    }
+                    self.subs.push(s);
+                }
                 Msg::Engine(ev) => self.on_engine(ev),
                 Msg::Searched { req, result } => match result {
                     Ok(tracks) => self.emit(Event::SearchResults { req, tracks }),
@@ -258,6 +309,40 @@ impl Actor {
                     }),
                 },
                 Msg::Resolved { purpose, result } => self.on_resolved(purpose, result),
+                Msg::Browsed {
+                    req,
+                    page,
+                    result,
+                    account,
+                } => {
+                    match result {
+                        Ok(shelves) => self.emit(Event::BrowseResults { req, page, shelves }),
+                        Err(e) => self.emit(Event::BrowseFailed {
+                            req,
+                            sign_in_required: matches!(e, ProviderError::SignInRequired(_)),
+                            error: e.to_string(),
+                        }),
+                    }
+                    if let Some((provider, state)) = account {
+                        self.set_account(provider, state, false);
+                    }
+                }
+                Msg::Account { provider, state } => self.set_account(provider, state, false),
+                Msg::SignInDone {
+                    provider,
+                    result,
+                    state,
+                } => {
+                    self.signing_in.remove(&provider);
+                    if let Err(e) = result {
+                        self.emit(Event::SignInFailed {
+                            provider: provider.clone(),
+                            error: sign_in_error(&e),
+                        });
+                    }
+                    // Always announced, so a client waiting on its `SignIn` hears the outcome.
+                    self.set_account(provider, state, true);
+                }
             }
         }
     }
@@ -398,6 +483,9 @@ impl Actor {
                 self.engine.set_volume(f32::from(self.volume) / 100.0);
                 self.emit(Event::Volume(self.volume));
             }
+            Command::Browse { req, page } => self.browse(req, page),
+            Command::SignIn { provider } => self.sign_in(provider),
+            Command::SignOut { provider } => self.sign_out(provider),
             Command::Shutdown => unreachable!("handled in run"),
         }
     }
@@ -482,6 +570,110 @@ impl Actor {
         thread::spawn(move || {
             let result = provider.search(&query, limit);
             let _ = tx.send(Msg::Searched { req, result });
+        });
+    }
+
+    fn provider(&self, id: &ProviderId) -> Option<Arc<dyn Provider>> {
+        self.providers.iter().find(|p| p.id() == *id).cloned()
+    }
+
+    fn browse(&mut self, req: u64, page: Page) {
+        let provider = match &page {
+            Page::Collection(c) => self.provider(&c.provider),
+            Page::Home | Page::Library => self.providers.first().cloned(),
+        };
+        let Some(provider) = provider else {
+            self.emit(Event::BrowseFailed {
+                req,
+                error: "no provider for this page".into(),
+                sign_in_required: false,
+            });
+            return;
+        };
+        let tx = self.tx.clone();
+        thread::spawn(move || {
+            let result = provider.browse(&page);
+            let account = Some((provider.id(), provider.account()));
+            let _ = tx.send(Msg::Browsed {
+                req,
+                page,
+                result,
+                account,
+            });
+        });
+    }
+
+    fn account_of(&self, provider: &ProviderId) -> Option<&AccountState> {
+        self.accounts
+            .iter()
+            .find(|(p, _)| p == provider)
+            .map(|(_, s)| s)
+    }
+
+    /// Records `state` and announces it if it changed, or always with `force`.
+    fn set_account(&mut self, provider: ProviderId, state: AccountState, force: bool) {
+        match self.accounts.iter_mut().find(|(p, _)| *p == provider) {
+            Some((_, known)) if *known == state && !force => return,
+            Some((_, known)) => *known = state.clone(),
+            None => self.accounts.push((provider.clone(), state.clone())),
+        }
+        self.emit(Event::Account { provider, state });
+    }
+
+    fn sign_in(&mut self, id: ProviderId) {
+        let Some(provider) = self.provider(&id) else {
+            return;
+        };
+        let current = self.account_of(&id).cloned();
+        if self.signing_in.contains(&id) {
+            // Before the code arrives there is nothing to repeat; its `Pending` reaches everyone.
+            if let Some(state @ AccountState::Pending { .. }) = current {
+                self.emit(Event::Account {
+                    provider: id,
+                    state,
+                });
+            }
+            return;
+        }
+        if let Some(state @ AccountState::SignedIn { .. }) = current {
+            self.emit(Event::Account {
+                provider: id,
+                state,
+            });
+            return;
+        }
+        self.signing_in.insert(id.clone());
+        let tx = self.tx.clone();
+        thread::spawn(move || {
+            let report = tx.clone();
+            let reporter = id.clone();
+            let result = provider.sign_in(&move |state| {
+                let _ = report.send(Msg::Account {
+                    provider: reporter.clone(),
+                    state,
+                });
+            });
+            let state = provider.account();
+            let _ = tx.send(Msg::SignInDone {
+                provider: id,
+                result,
+                state,
+            });
+        });
+    }
+
+    fn sign_out(&mut self, id: ProviderId) {
+        let Some(provider) = self.provider(&id) else {
+            return;
+        };
+        let tx = self.tx.clone();
+        thread::spawn(move || {
+            provider.sign_out();
+            let state = provider.account();
+            let _ = tx.send(Msg::Account {
+                provider: id,
+                state,
+            });
         });
     }
 
@@ -720,7 +912,9 @@ impl Actor {
                     self.track_failed(format!("parse error: {d}"), false);
                 }
             }
-            e @ (ProviderError::Unplayable(_) | ProviderError::Network(_)) => {
+            e @ (ProviderError::Unplayable(_)
+            | ProviderError::Network(_)
+            | ProviderError::SignInRequired(_)) => {
                 self.last_parse_failure = None;
                 self.track_failed(e.to_string(), false);
             }

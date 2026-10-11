@@ -226,6 +226,10 @@ impl Hub {
                     json!({ "type": "provider_broken", "detail": detail }),
                 );
             }
+            Event::BrowseResults { .. }
+            | Event::BrowseFailed { .. }
+            | Event::Account { .. }
+            | Event::SignInFailed { .. } => {}
         }
         drop(ui);
         self.changed.notify_all();

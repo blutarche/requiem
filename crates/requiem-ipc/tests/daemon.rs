@@ -11,8 +11,8 @@ use std::time::{Duration, Instant};
 use crossbeam_channel::{Receiver, unbounded};
 use requiem_core::testing::{FakeEngineHandle, FakeProvider, Step};
 use requiem_core::{
-    Command, EngineEvent, EnqueueMode, Event, PlayState, ProviderId, Session, SessionConfig, Track,
-    TrackId,
+    AccountState, Command, EngineEvent, EnqueueMode, Event, PlayState, ProviderId, Session,
+    SessionConfig, Track, TrackId,
 };
 use requiem_ipc::{Client, ClientCounts, Incoming, Role, Server, ServerHooks, socket_path};
 
@@ -105,15 +105,20 @@ fn daemon_flow() {
     };
     let server = Server::start(session, hooks).unwrap();
 
+    let account = Event::Account {
+        provider: ProviderId("fake".into()),
+        state: AccountState::SignedOut,
+    };
     let (gui, gui_rx) = Client::connect(&path, Role::Gui).unwrap();
     assert_eq!(
-        take(&gui_rx, 3),
+        take(&gui_rx, 4),
         [
             Event::QueueChanged {
                 tracks: vec![],
                 current: None,
             },
             Event::State(PlayState::Stopped),
+            account.clone(),
             Event::Volume(100),
         ]
     );
@@ -183,10 +188,11 @@ fn daemon_flow() {
             now_playing.clone(),
             Event::State(state),
             Event::Position(SECS(5)),
+            account.clone(),
             Event::Volume(40),
         ]
     };
-    assert_eq!(take(&cli_rx, 5), snapshot(PlayState::Playing));
+    assert_eq!(take(&cli_rx, 6), snapshot(PlayState::Playing));
     assert_eq!(server.clients(), ClientCounts { gui: 1, cli: 1 });
 
     cli.send(Command::Pause).unwrap();
@@ -199,7 +205,7 @@ fn daemon_flow() {
     wait_disconnected(&gui_rx);
     wait_clients(&server, ClientCounts { gui: 0, cli: 1 });
     let (_gui, gui_rx) = Client::connect(&path, Role::Gui).unwrap();
-    assert_eq!(take(&gui_rx, 5), snapshot(PlayState::Paused));
+    assert_eq!(take(&gui_rx, 6), snapshot(PlayState::Paused));
 
     // The CLI's `shutdown-daemon`.
     cli.send(Command::Shutdown).unwrap();
