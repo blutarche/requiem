@@ -221,9 +221,9 @@ impl Hub {
                 );
             }
             Event::Account { provider, state } => self.on_account(&mut ui, provider, state),
-            Event::SignInFailed { provider, error } => self.emit(
-                &format!("sign-in failed: {error}"),
-                json!({ "type": "sign_in_failed", "provider": provider.0, "error": error }),
+            Event::AccountError { provider, error } => self.emit(
+                &format!("account error: {error}"),
+                json!({ "type": "account_error", "provider": provider.0, "error": error }),
             ),
             Event::QueueChanged { tracks, current } => {
                 let cur = current.map_or("none".to_owned(), |i| (i + 1).to_string());

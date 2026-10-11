@@ -137,7 +137,7 @@ impl Provider for YtMusicProvider {
         self.google.sign_in(on_state)
     }
 
-    fn sign_out(&self) {
-        self.google.sign_out();
+    fn sign_out(&self) -> Result<(), ProviderError> {
+        self.google.sign_out()
     }
 }

@@ -46,7 +46,7 @@ The bundle embeds Homebrew's libopus. Its minimum macOS version is whatever that
 | `item` | `index`, `kind` (`track`, `playlist` or `album`), `id` (`provider`, `id`), `title`, `subtitle`, `artwork_url`; a track also carries the track fields above, and its `subtitle` is its artists |
 | `browse_failed` | `error`, `sign_in_required` (bool: `signin` would let it succeed) |
 | `account` | `provider`, `state`: `unavailable` (with `detail`, what to set up), `signed_out`, `pending` (with `verification_url`, `user_code`, `expires_at_unix`) or `signed_in` (with `name`, possibly `null`) |
-| `sign_in_failed` | `provider`, `error` |
+| `account_error` | `provider`, `error` |
 | `no_accounts` | none |
 | `queue_item` | `index`, `current` (bool), plus the track fields above |
 | `queue_changed` | `count`, `current` (`null` if none) |

@@ -1267,10 +1267,10 @@ fn failed_sign_in_says_why_then_reports_the_state() {
         provider: fake_id(),
     });
     r.wait_event(is_account(pending()));
-    let ev = r.wait_event(|e| matches!(e, Event::SignInFailed { .. }));
+    let ev = r.wait_event(|e| matches!(e, Event::AccountError { .. }));
     assert_eq!(
         ev,
-        Event::SignInFailed {
+        Event::AccountError {
             provider: fake_id(),
             error: "access was denied".into(),
         }
@@ -1284,7 +1284,7 @@ fn an_unchanged_state_after_a_failed_sign_in_is_still_announced() {
     r.send(Command::SignIn {
         provider: fake_id(),
     });
-    r.wait_event(|e| matches!(e, Event::SignInFailed { .. }));
+    r.wait_event(|e| matches!(e, Event::AccountError { .. }));
     r.wait_event(is_account(AccountState::SignedOut));
 }
 

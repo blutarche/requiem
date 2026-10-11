@@ -320,10 +320,11 @@ impl Provider for FakeProvider {
         }
     }
 
-    fn sign_out(&self) {
+    fn sign_out(&self) -> Result<(), ProviderError> {
         let mut st = self.state.lock().unwrap();
         st.sign_out_calls += 1;
         st.account = AccountState::SignedOut;
+        Ok(())
     }
 
     fn resolve(&self, track: &TrackId) -> Result<AudioSource, ProviderError> {

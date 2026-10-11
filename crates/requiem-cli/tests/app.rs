@@ -839,7 +839,7 @@ fn a_failed_signin_says_why_and_exits_2_in_script_mode() {
     assert_eq!(r.app(true).exec("signin"), Flow::Exit(2));
     let text = r.out.text();
     assert!(
-        text.contains("sign-in failed: access was denied\n"),
+        text.contains("account error: access was denied\n"),
         "{text}"
     );
     assert!(text.ends_with("signed out\n"), "{text}");
@@ -872,8 +872,8 @@ fn signin_without_a_client_prints_the_hint() {
         })
     );
     assert_eq!(
-        *of_type(&lines, "sign_in_failed")[0],
-        serde_json::json!({"type": "sign_in_failed", "provider": "fake", "error": hint})
+        *of_type(&lines, "account_error")[0],
+        serde_json::json!({"type": "account_error", "provider": "fake", "error": hint})
     );
 }
 
