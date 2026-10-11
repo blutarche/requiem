@@ -250,12 +250,12 @@ impl Palette {
         if !changed {
             return;
         }
-        let was = self.selected_row();
+        let was = self.highlight_text();
         let flags = self.shown_enabled();
         let kept = self.selected.get().filter(|&i| flags[i]);
         self.selected.set(kept.or_else(|| step(&flags, None, 1)));
         self.repaint();
-        if self.open.get() && self.selected_row() != was {
+        if self.open.get() && self.highlight_text() != was {
             self.announce_selected();
         }
     }
@@ -276,31 +276,32 @@ impl Palette {
             .filter(|(_, r)| matches.contains(&r.action))
             .map(|(i, _)| i)
             .collect();
-        let was = self.selected_row();
+        let was = self.highlight_text();
         *self.shown.borrow_mut() = shown;
         self.layout();
         self.selected.set(step(&self.shown_enabled(), None, 1));
         self.repaint();
         // Closed, it is being built or opened, and `open` speaks once focus is in the field.
-        if self.open.get() && self.selected_row() != was {
+        if self.open.get() && self.highlight_text() != was {
             self.announce_selected();
         }
     }
 
-    /// The highlighted row's index in `rows`.
-    fn selected_row(&self) -> Option<usize> {
-        let shown = self.shown.borrow();
-        self.selected.get().and_then(|s| shown.get(s).copied())
-    }
-
     /// Focus stays in the field, so VoiceOver hears the highlighted row only from this.
     fn announce_selected(&self) {
-        let text = match self.selected_row() {
-            Some(i) => self.rows[i].action.label(),
-            None if self.shown.borrow().is_empty() => NO_MATCH,
-            None => return,
-        };
-        widgets::announce(self.panel.mtm(), text);
+        widgets::announce(self.panel.mtm(), &self.highlight_text());
+    }
+
+    /// What VoiceOver says for the current highlight, so a change is told by its words.
+    fn highlight_text(&self) -> String {
+        let shown = self.shown.borrow();
+        let label = |i: usize| self.rows[i].action.label();
+        let selected = self
+            .selected
+            .get()
+            .and_then(|s| shown.get(s))
+            .map(|&i| label(i));
+        highlight_words(selected, shown.first().map(|&i| label(i)))
     }
 
     /// Places the panel and its shown rows for the window's current size.
@@ -423,6 +424,16 @@ fn panel_top(height: CGFloat, panel_h: CGFloat) -> CGFloat {
     (height * 0.2).round().min(height - panel_h - 16.0)
 }
 
+/// The words for a highlight: the selected row's label; else, when rows are shown but none is
+/// enabled, the first one's label as unavailable; else the no-match line.
+fn highlight_words(selected: Option<&str>, first_shown: Option<&str>) -> String {
+    match (selected, first_shown) {
+        (Some(label), _) => label.to_owned(),
+        (None, Some(first)) => format!("{first}, unavailable"),
+        (None, None) => NO_MATCH.to_owned(),
+    }
+}
+
 /// The enabled slot `delta` (±1) steps from `from`, wrapping and passing over disabled ones;
 /// from no selection, the first enabled slot. `None` when no slot is enabled.
 fn step(enabled: &[bool], from: Option<usize>, delta: isize) -> Option<usize> {
@@ -446,6 +457,16 @@ mod tests {
         let top = panel_top(500.0, full);
         assert!(top >= 0.0 && top + full <= 500.0 - 16.0, "top {top}");
         assert_eq!(panel_top(500.0, 100.0), 100.0);
+    }
+
+    #[test]
+    fn a_highlight_with_no_enabled_row_is_spoken_as_unavailable() {
+        assert_eq!(highlight_words(Some("Next"), Some("Next")), "Next");
+        assert_eq!(
+            highlight_words(None, Some("Add to queue")),
+            "Add to queue, unavailable"
+        );
+        assert_eq!(highlight_words(None, None), NO_MATCH);
     }
 
     #[test]
