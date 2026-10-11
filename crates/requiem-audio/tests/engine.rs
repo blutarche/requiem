@@ -95,7 +95,8 @@ fn hooked(
     }
 }
 
-type Log = Arc<Mutex<Vec<(Instant, EngineEvent)>>>;
+/// Each event, when it came, and the frames captured by then.
+type Log = Arc<Mutex<Vec<(Instant, EngineEvent, usize)>>>;
 
 struct Harness {
     engine: AudioEngine,
@@ -107,8 +108,9 @@ fn harness(speed: f32) -> Harness {
     let capture = CaptureBuffer::default();
     let log: Log = Arc::default();
     let l = log.clone();
+    let c = capture.clone();
     let engine = AudioEngine::new(
-        Arc::new(move |ev| l.lock().unwrap().push((Instant::now(), ev))),
+        Arc::new(move |ev| l.lock().unwrap().push((Instant::now(), ev, c.frames()))),
         AudioOptions {
             output: OutputChoice::Capture {
                 sample_rate: RATE,
@@ -163,6 +165,19 @@ impl Harness {
             ev.iter()
                 .any(|e| matches!(e, EngineEvent::Started { r#gen: x, .. } if *x == g))
         });
+    }
+
+    /// Frames captured when gen `g` started. `Started` comes before its first samples are
+    /// pushed, so unlike a poll after it, nothing of the new track can precede this.
+    fn frames_at_started(&self, g: u64) -> usize {
+        self.log
+            .lock()
+            .unwrap()
+            .iter()
+            .find_map(|(_, e, f)| {
+                matches!(e, EngineEvent::Started { r#gen: x, .. } if *x == g).then_some(*f)
+            })
+            .unwrap()
     }
 
     fn wait_failed(&self, g: u64) -> (FailureKind, String) {
@@ -417,7 +432,7 @@ fn old_track_bleed(paused_load: bool) -> (usize, usize) {
         h.engine.resume();
     }
     h.wait_started(2);
-    let f1 = h.capture.frames();
+    let f1 = h.frames_at_started(2);
     let l = left(&h.capture.samples());
     let audible = l[f0..f1].iter().filter(|s| s.abs() > THRESHOLD).count();
     (f1 - f0, audible)
