@@ -8,7 +8,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Sender};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::thread::JoinHandle;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use requiem_core::{AudioSource, Engine, EngineEvent, EngineEventSink, FailureKind};
 use rtrb::PushError;
@@ -17,6 +17,11 @@ use crate::decode::{Cmd, Job};
 use crate::output::{
     CaptureOutput, DeviceOutput, Feed, NO_GEN, Output, Shared, SupMsg, new_shared,
 };
+
+/// How long `stop` waits for the output to take the silent feed. Shorter than the decode
+/// thread's handover wait because `stop` runs on the caller's thread, and a miss only keeps
+/// the old ring until the next load.
+const STOP_ACK_TIMEOUT: Duration = Duration::from_millis(250);
 
 /// Interleaved stereo f32 samples captured by `OutputChoice::Capture`.
 #[derive(Clone, Default)]
@@ -158,8 +163,9 @@ impl AudioEngine {
         );
     }
 
-    /// Replaces the callback's ring with an empty finished one: silence, no underruns.
-    fn silence(&self) {
+    /// Replaces the callback's ring with an empty finished one: silence, no underruns. Returns
+    /// the new feed's id, or `None` if the handoff stayed full.
+    fn silence(&self) -> Option<u64> {
         for _ in 0..5 {
             let mut link = self
                 .shared
@@ -175,12 +181,26 @@ impl AudioEngine {
                 eof: Arc::new(AtomicBool::new(true)),
             };
             match link.handoff.push(feed) {
-                Ok(()) => return,
+                Ok(()) => return Some(id),
                 Err(PushError::Full(_)) => {
                     drop(link);
                     std::thread::sleep(Duration::from_millis(1));
                 }
             }
+        }
+        None
+    }
+
+    /// Waits, bounded, until the callback reads feed `id` and so has retired the ring before
+    /// it. A parked or dead output renders nothing, so it is not waited for.
+    fn await_adopted(&self, id: u64) {
+        let deadline = Instant::now() + STOP_ACK_TIMEOUT;
+        while self.shared.active_ring.load(Ordering::Acquire) != id
+            && Instant::now() < deadline
+            && !self.shared.dead.load(Ordering::Relaxed)
+            && !self.shared.parked.load(Ordering::Acquire)
+        {
+            std::thread::sleep(Duration::from_millis(1));
         }
     }
 }
@@ -294,8 +314,17 @@ impl Engine for AudioEngine {
     fn stop(&mut self) {
         self.cancel_live();
         self.shared.cur_gen.store(NO_GEN, Ordering::Release);
-        self.silence();
+        if let Some(id) = self.silence() {
+            // Parking stops the callback, which would otherwise hold the old ring until the
+            // next load.
+            self.await_adopted(id);
+        }
         let _ = self.sup_tx.send(SupMsg::Pause);
+        self.shared
+            .link
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .reap();
     }
 }
 

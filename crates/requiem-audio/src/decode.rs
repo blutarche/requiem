@@ -28,9 +28,6 @@ const MAX_DECODE_ERRORS: u32 = 50;
 const RESAMPLE_CHUNK: usize = 1024;
 const POSITION_EVERY: Duration = Duration::from_millis(250);
 const ACK_TIMEOUT: Duration = Duration::from_secs(2);
-/// Idle wait while paused. Resume, seek and cancel end it early; the bound is a backstop for
-/// changes that send no command, such as an output reopen at another rate.
-const PAUSED_WAIT: Duration = Duration::from_secs(1);
 /// Output time added to computed waits so the callback has moved past the target on waking.
 const WAKE_SLACK: Duration = Duration::from_millis(15);
 
@@ -124,42 +121,7 @@ fn run(job: Job) {
             }
         }) as Box<dyn Fn(EngineEvent) + Send>
     };
-    let mut p = Player {
-        gen_: r#gen,
-        cancel,
-        cmds,
-        shared,
-        emit,
-        fmt: None,
-        dec: None,
-        track_id: 0,
-        time_base: None,
-        in_rate: 0,
-        out_rate: 0,
-        rs: None,
-        rs_skip: 0,
-        rs_in: 0,
-        rs_out: 0,
-        pending: Vec::new(),
-        rs_buf: Vec::new(),
-        tmp: Vec::new(),
-        stereo: Vec::new(),
-        prod: None,
-        ring_cap: 0,
-        eof_flag: Arc::new(AtomicBool::new(false)),
-        started: false,
-        eof: false,
-        full: false,
-        pending_seek: None,
-        skip_frames: 0,
-        base_time: 0.0,
-        base_played: 0,
-        last_emit_played: 0,
-        epoch: 0,
-        seen_underruns: 0,
-        buffering: false,
-        errors: 0,
-    };
+    let mut p = Player::new(r#gen, cancel, cmds, shared, emit);
     match p.play(src) {
         Ok(()) | Err(Exit::Cancelled) => {}
         Err(Exit::Fail(kind, detail)) => {
@@ -217,6 +179,51 @@ struct Player {
 }
 
 impl Player {
+    fn new(
+        gen_: u64,
+        cancel: Arc<AtomicBool>,
+        cmds: Receiver<Cmd>,
+        shared: Arc<Shared>,
+        emit: Box<dyn Fn(EngineEvent) + Send>,
+    ) -> Self {
+        Self {
+            gen_,
+            cancel,
+            cmds,
+            shared,
+            emit,
+            fmt: None,
+            dec: None,
+            track_id: 0,
+            time_base: None,
+            in_rate: 0,
+            out_rate: 0,
+            rs: None,
+            rs_skip: 0,
+            rs_in: 0,
+            rs_out: 0,
+            pending: Vec::new(),
+            rs_buf: Vec::new(),
+            tmp: Vec::new(),
+            stereo: Vec::new(),
+            prod: None,
+            ring_cap: 0,
+            eof_flag: Arc::new(AtomicBool::new(false)),
+            started: false,
+            eof: false,
+            full: false,
+            pending_seek: None,
+            skip_frames: 0,
+            base_time: 0.0,
+            base_played: 0,
+            last_emit_played: 0,
+            epoch: 0,
+            seen_underruns: 0,
+            buffering: false,
+            errors: 0,
+        }
+    }
+
     fn play(&mut self, src: AudioSource) -> R<()> {
         let AudioSource::Encoded { bytes, hint } = src;
         if self.shared.dead.load(Ordering::Acquire) {
@@ -368,9 +375,12 @@ impl Player {
         self.fill_samples() == 0
     }
 
-    /// Samples at or below which a full ring takes writes again: refills come in bursts.
+    /// Samples at or below which a full ring takes writes again. Refills come in bursts of
+    /// 0.5 s, so a slow network read still has most of the ring to play from. The burst is at
+    /// most half the ring: at `ring_cap` the thread would wake every `WAKE_SLACK`.
     fn refill_level(&self) -> usize {
-        self.ring_cap / 3 * 2
+        let half_second = self.out_rate as usize; // 0.5 s of stereo samples
+        self.ring_cap - half_second.min(self.ring_cap / 2)
     }
 
     fn position_every(&self) -> u64 {
@@ -384,22 +394,29 @@ impl Player {
         }
     }
 
-    /// Blocks until a command arrives or `timeout` passes. The engine drops the sender when it
-    /// cancels this thread, which ends the wait at once.
-    fn wait(&mut self, timeout: Duration) -> R<()> {
-        match self.cmds.recv_timeout(timeout) {
-            Ok(cmd) => self.on_cmd(cmd),
-            Err(RecvTimeoutError::Timeout) => {}
-            Err(RecvTimeoutError::Disconnected) => return Err(Exit::Cancelled),
-        }
+    /// Blocks until a command arrives or `timeout`, if any, passes. The engine drops the sender
+    /// when it cancels this thread, which ends the wait at once.
+    fn wait(&mut self, timeout: Option<Duration>) -> R<()> {
+        let cmd = match timeout {
+            Some(timeout) => match self.cmds.recv_timeout(timeout) {
+                Ok(cmd) => cmd,
+                Err(RecvTimeoutError::Timeout) => return Ok(()),
+                Err(RecvTimeoutError::Disconnected) => return Err(Exit::Cancelled),
+            },
+            None => self.cmds.recv().map_err(|_| Exit::Cancelled)?,
+        };
+        self.on_cmd(cmd);
         Ok(())
     }
 
     /// Time until the next Position is due or the ring next needs attention: refill at
     /// `refill_level`, or drained after EOF.
-    fn idle_wait(&self) -> Duration {
+    ///
+    /// `None` while paused: resume, seek and cancel each reach this thread as a command, and an
+    /// output reopen at another rate is picked up by `service` once resume wakes it.
+    fn idle_wait(&self) -> Option<Duration> {
         if self.shared.paused.load(Ordering::Relaxed) {
-            return PAUSED_WAIT;
+            return None;
         }
         let played = self.shared.played.load(Ordering::Relaxed);
         let to_position = self
@@ -413,7 +430,7 @@ impl Player {
         } / 2;
         let frames = to_position.min(to_ring as u64);
         let secs = frames as f64 / f64::from(self.out_rate.max(1)) + WAKE_SLACK.as_secs_f64();
-        Duration::from_secs_f64(secs / self.shared.speed())
+        Some(Duration::from_secs_f64(secs / self.shared.speed()))
     }
 
     /// Cancel check, queued commands, output reopen, position and buffering reports.
@@ -710,5 +727,76 @@ fn to_stereo(buf: &GenericAudioBufferRef<'_>, tmp: &mut Vec<f32>, out: &mut Vec<
         1 => out.extend(tmp.iter().flat_map(|&s| [s, s])),
         2 => out.extend_from_slice(tmp),
         _ => out.extend(tmp.chunks_exact(ch).flat_map(|f| [f[0], f[1]])),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::mpsc;
+    use std::thread;
+
+    use super::*;
+    use crate::output::new_shared;
+
+    const RATE: u32 = 48_000;
+
+    fn shared() -> Arc<Shared> {
+        let (shared, _cb) = new_shared(3.0, false);
+        shared.rate.store(RATE, Ordering::Release);
+        shared
+    }
+
+    fn player(cmds: Receiver<Cmd>, shared: Arc<Shared>) -> Player {
+        Player::new(
+            1,
+            Arc::default(),
+            cmds,
+            shared,
+            Box::new(|_: EngineEvent| {}),
+        )
+    }
+
+    /// A player whose ring holds `samples`, at `RATE`.
+    fn with_ring(samples: usize) -> Player {
+        let (_tx, rx) = mpsc::channel();
+        let mut p = player(rx, shared());
+        p.out_rate = RATE;
+        p.ring_cap = samples;
+        p
+    }
+
+    #[test]
+    fn refill_leaves_half_a_second_of_room() {
+        let p = with_ring(3 * RATE as usize * 2);
+        assert_eq!(p.refill_level(), p.ring_cap - RATE as usize);
+    }
+
+    #[test]
+    fn refill_burst_is_at_most_half_a_small_ring() {
+        assert_eq!(with_ring(2048).refill_level(), 1024);
+    }
+
+    #[test]
+    fn paused_wait_lasts_until_a_command() {
+        let shared = shared();
+        shared.paused.store(true, Ordering::Relaxed);
+        let (tx, rx) = mpsc::channel();
+        let (done_tx, done) = mpsc::channel();
+        let waiter = thread::spawn(move || {
+            let mut p = player(rx, shared);
+            for _ in 0..2 {
+                let ended = p.wait(p.idle_wait());
+                done_tx.send(ended.is_ok()).unwrap();
+            }
+        });
+        assert!(
+            done.recv_timeout(Duration::from_millis(1500)).is_err(),
+            "paused wait ended without a command"
+        );
+        tx.send(Cmd::Wake).unwrap();
+        assert_eq!(done.recv_timeout(Duration::from_secs(1)), Ok(true));
+        drop(tx);
+        assert_eq!(done.recv_timeout(Duration::from_secs(1)), Ok(false));
+        waiter.join().unwrap();
     }
 }
