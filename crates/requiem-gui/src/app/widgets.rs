@@ -313,7 +313,12 @@ pub fn icon_view(
 /// The tooltip, and the accessibility label (`label`, or the tooltip when `None`).
 pub fn describe(v: &NSView, tip: &str, label: Option<&str>) {
     v.setToolTip(Some(&NSString::from_str(tip)));
-    v.setAccessibilityLabel(Some(&NSString::from_str(label.unwrap_or(tip))));
+    let label = NSString::from_str(label.unwrap_or(tip));
+    v.setAccessibilityLabel(Some(&label));
+    // A button's accessibility element is its cell, which does not take the control's label.
+    if let Some(cell) = v.downcast_ref::<NSControl>().and_then(|c| c.cell()) {
+        cell.setAccessibilityLabel(Some(&label));
+    }
 }
 
 /// Makes `v` one accessibility button named `label`; its subviews stay out of the tree.
