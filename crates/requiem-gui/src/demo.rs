@@ -460,7 +460,7 @@ pub fn start_in(view: View) -> (Vm, Daemon) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::vm::{Connection, EmptyAction, QueueEdit, SearchStatus};
+    use crate::vm::{Connection, QueueEdit, SearchStatus};
 
     fn run(vm: &mut Vm, daemon: &mut Daemon, intent: Intent) {
         for cmd in vm.intent(intent) {
@@ -496,7 +496,7 @@ mod tests {
         assert_eq!(ui.search, SearchStatus::Idle);
         let empty = ui.results_empty().unwrap();
         assert_eq!(empty.heading, "Search YouTube Music");
-        assert_eq!(empty.action, EmptyAction::StartSearch);
+        assert_eq!(empty.action, None);
         assert_eq!(ui.state, PlayState::Playing);
     }
 

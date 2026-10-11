@@ -1301,13 +1301,25 @@ impl EmptyState {
         }
     }
 
-    pub fn set(&self, icon: Icon, heading: &str, sub: &str, action: &str) {
+    /// With no `action`, the button hides.
+    pub fn set(&self, icon: Icon, heading: &str, sub: &str, action: Option<&str>) {
         self.icon.setImage(icon.image(32.0).as_deref());
         set_text(&self.heading, heading);
         set_text(&self.sub, sub);
-        let w = self.action.set_label(action);
-        let x = ((self.group.bounds().size.width - w) / 2.0).round();
-        self.action.setFrame(rect(x, 0.0, w, Self::BUTTON_H));
+        self.action.setHidden(action.is_none());
+        // Lowers the rows by half the space a missing button leaves, so the block stays
+        // centred.
+        let drop = if action.is_none() {
+            (self.sub.frame().origin.y / 2.0).round()
+        } else {
+            0.0
+        };
+        self.group.setBoundsOrigin(NSPoint::new(0.0, drop));
+        if let Some(action) = action {
+            let w = self.action.set_label(action);
+            let x = ((self.group.bounds().size.width - w) / 2.0).round();
+            self.action.setFrame(rect(x, 0.0, w, Self::BUTTON_H));
+        }
     }
 }
 

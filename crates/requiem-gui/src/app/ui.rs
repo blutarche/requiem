@@ -28,8 +28,8 @@ use super::widgets::{
 };
 use super::{Delegate, MainWindow};
 use crate::vm::{
-    self, Banner, Controls, Dirty, EmptyAction, EmptyText, Intent, PaletteAction, QueueEdit,
-    Selection, Toast, UiState, Vm,
+    self, Banner, Controls, Dirty, EmptyText, Intent, PaletteAction, QueueEdit, Selection, Toast,
+    UiState, Vm,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -341,7 +341,7 @@ impl Ui {
             Icon::ListMusic,
             "Queue is empty",
             "Play or add a search result",
-            "Go to search",
+            Some("Go to search"),
         );
         queue_page.addSubview(&heading);
         queue_page.addSubview(&queue_count);
@@ -661,15 +661,9 @@ impl Ui {
         }
     }
 
-    /// The results empty state's button: "Start a search" runs the typed query, or focuses
-    /// the empty field; "Edit search" focuses the field.
+    /// The results empty state's button, "Edit search".
     pub fn empty_action(&self) {
-        let action = self.vm.borrow().ui().results_empty().map(|e| e.action);
-        if action == Some(EmptyAction::StartSearch) && !self.search.value().trim().is_empty() {
-            self.search_submitted();
-        } else {
-            self.focus_search();
-        }
+        self.focus_search();
     }
 
     pub fn search_submitted(&self) {
@@ -950,7 +944,7 @@ impl Ui {
             self.results_empty.view.setHidden(has_rows);
             if let Some(e) = empty {
                 self.results_empty
-                    .set(Icon::Search, &e.heading, &e.sub, e.action.label());
+                    .set(Icon::Search, &e.heading, &e.sub, e.action);
             }
         }
         if let Some(badge) = p.queue_badge {
@@ -1454,6 +1448,6 @@ mod tests {
         let (vm, _) = demo::start_in(crate::args::View::Empty);
         let (rows, empty) = Patch::new(Dirty::RESULTS, vm.ui()).results.unwrap();
         assert!(rows.is_empty());
-        assert_eq!(empty.unwrap().action, EmptyAction::StartSearch);
+        assert_eq!(empty.unwrap().heading, "Search YouTube Music");
     }
 }

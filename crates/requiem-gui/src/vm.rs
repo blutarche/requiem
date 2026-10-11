@@ -361,13 +361,13 @@ impl UiState {
             EmptyText {
                 heading: "No results".to_owned(),
                 sub: format!("Nothing matched “{}”", self.query),
-                action: EmptyAction::EditSearch,
+                action: Some("Edit search"),
             }
         } else {
             EmptyText {
                 heading: "Search YouTube Music".to_owned(),
-                sub: "Type a song, artist or album, then press Return.".to_owned(),
-                action: EmptyAction::StartSearch,
+                sub: "Type a song, artist or album, then press Return".to_owned(),
+                action: None,
             }
         })
     }
@@ -395,24 +395,8 @@ pub struct Banner {
 pub struct EmptyText {
     pub heading: String,
     pub sub: String,
-    pub action: EmptyAction,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum EmptyAction {
-    /// Runs the search when the field has text, and focuses the field otherwise.
-    StartSearch,
-    /// Focuses the search field.
-    EditSearch,
-}
-
-impl EmptyAction {
-    pub fn label(self) -> &'static str {
-        match self {
-            EmptyAction::StartSearch => "Start a search",
-            EmptyAction::EditSearch => "Edit search",
-        }
-    }
+    /// The label of the button that focuses the search field, if there is one.
+    pub action: Option<&'static str>,
 }
 
 #[derive(Debug, Default)]
@@ -643,13 +627,14 @@ impl Vm {
                 }
             }
             Event::TrackFailed { track, error } => {
-                self.toast(format!("Couldn't play “{}”: {error}.", track.title), true);
+                self.toast(format!("Couldn't play “{}”: {error}", track.title), true);
                 self.failed_toast = Some(self.last_toast);
             }
-            Event::ProviderBroken { provider, detail } => {
+            // The detail is for stderr, which the backend writes it to.
+            Event::ProviderBroken { provider, .. } => {
                 self.toast(
                     format!(
-                        "{} stopped working ({detail}); requiem may need an update",
+                        "{} stopped working; requiem may need an update",
                         provider_name(&provider.0)
                     ),
                     true,
@@ -768,7 +753,12 @@ impl Vm {
                 };
                 self.select_after = selected.and_then(|s| follow(s, &cmd));
                 if edit == QueueEdit::Clear {
-                    self.offer_undo("Queue cleared", "Undo Clear Queue", Vec::new());
+                    let text = if self.ui.is_playing() {
+                        "Queue cleared and playback stopped"
+                    } else {
+                        "Queue cleared"
+                    };
+                    self.offer_undo(text, "Undo Clear Queue", Vec::new());
                 }
                 vec![cmd]
             }
@@ -908,7 +898,8 @@ impl Vm {
     /// Adds what happened next to a `TrackFailed` toast that is still shown.
     fn amend_failure(&mut self, failed: Option<u64>, outcome: &str) {
         if let Some(t) = self.ui.toast.as_mut().filter(|t| Some(t.id) == failed) {
-            t.text = format!("{} {outcome}", t.text);
+            // Two sentences now, so both end in a period.
+            t.text = format!("{}. {outcome}", t.text);
             self.dirty |= Dirty::TOAST;
         }
     }
@@ -1467,7 +1458,7 @@ mod tests {
         });
         let t = vm.ui().toast.clone().unwrap();
         assert!(t.error);
-        assert_eq!(t.text, "Couldn't play “Title a”: unplayable: private.");
+        assert_eq!(t.text, "Couldn't play “Title a”: unplayable: private");
         assert_eq!(vm.take_dirty(), Dirty::TOAST);
     }
 
@@ -1480,8 +1471,10 @@ mod tests {
         });
         let t = vm.ui().toast.clone().unwrap();
         assert!(t.error);
-        assert!(t.text.starts_with("YouTube Music stopped working"));
-        assert!(t.text.contains("3 consecutive failures"));
+        assert_eq!(
+            t.text,
+            "YouTube Music stopped working; requiem may need an update"
+        );
     }
 
     #[test]
@@ -2059,8 +2052,8 @@ mod tests {
             vm.ui().results_empty(),
             Some(EmptyText {
                 heading: "Search YouTube Music".into(),
-                sub: "Type a song, artist or album, then press Return.".into(),
-                action: EmptyAction::StartSearch,
+                sub: "Type a song, artist or album, then press Return".into(),
+                action: None,
             })
         );
         let req = search_req(&mut vm, "zzz");
@@ -2073,7 +2066,7 @@ mod tests {
             Some(EmptyText {
                 heading: "No results".into(),
                 sub: "Nothing matched “zzz”".into(),
-                action: EmptyAction::EditSearch,
+                action: Some("Edit search"),
             })
         );
         assert_eq!(with_results(1).ui().results_empty(), None);
@@ -2689,6 +2682,24 @@ mod tests {
         });
         vm.apply(Event::State(PlayState::Stopped));
         (vm, old)
+    }
+
+    #[test]
+    fn clear_toast_says_whether_playback_stopped() {
+        let text = |state: Option<PlayState>| {
+            let mut vm = queued(3);
+            if let Some(s) = state {
+                vm.apply(Event::State(s));
+            }
+            edit(&mut vm, QueueEdit::Clear, None);
+            vm.ui().toast.clone().unwrap().text
+        };
+        let stopped = "Queue cleared and playback stopped";
+        assert_eq!(text(Some(PlayState::Playing)), stopped);
+        assert_eq!(text(Some(PlayState::Buffering)), stopped);
+        // Nothing was heard, so nothing stopped.
+        assert_eq!(text(Some(PlayState::Paused)), "Queue cleared");
+        assert_eq!(text(None), "Queue cleared");
     }
 
     #[test]

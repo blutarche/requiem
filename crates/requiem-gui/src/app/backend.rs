@@ -169,7 +169,13 @@ fn connection(daemon: PathBuf, slot: Slot) {
                     let mut goodbye = false;
                     for inc in std::iter::once(first).chain(events.try_iter()) {
                         match inc {
-                            Incoming::Event(ev) => batch.push(Msg::Event(ev)),
+                            Incoming::Event(ev) => {
+                                // The toast stays plain; the cause goes here.
+                                if let Event::ProviderBroken { provider, detail } = &ev {
+                                    eprintln!("requiem-gui: {} broke: {detail}", provider.0);
+                                }
+                                batch.push(Msg::Event(ev));
+                            }
                             Incoming::Raise => batch.push(Msg::Raise),
                             Incoming::Disconnected(r) => {
                                 reason = r;
