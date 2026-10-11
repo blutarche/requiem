@@ -25,7 +25,9 @@ use objc2_foundation::{
     MainThreadMarker, NSAttributedString, NSDate, NSDictionary, NSNotification, NSNumber,
     NSObjectProtocol, NSPoint, NSRect, NSSize, NSString, ns_string,
 };
-use objc2_quartz_core::{CAMediaTiming, CAMediaTimingFunction, CATransition, kCATransitionFade};
+use objc2_quartz_core::{
+    CAMediaTiming, CAMediaTimingFunction, CATransaction, CATransition, kCATransitionFade,
+};
 
 use super::theme::{self, Icon, Weight};
 use super::ui::{self, AppView};
@@ -149,6 +151,10 @@ pub fn animate(
         done();
         return;
     }
+    // Animator proxies start from the presentation layer, which shows the last committed
+    // state, not the start state a caller set just before (an entering toast's lowered,
+    // transparent frame): uncommitted, the toast slides in from where it last was.
+    CATransaction::flush();
     let timing = timing(curve);
     let group = StackBlock::new(|ctx: NonNull<NSAnimationContext>| {
         // SAFETY: AppKit passes the live context of the group it is running.
