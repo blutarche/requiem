@@ -4,8 +4,11 @@ use std::thread;
 use std::time::Duration;
 
 use requiem_cli::app::{self, App, Flow, Format};
-use requiem_core::testing::{EngineCall, FakeEngineHandle, FakeProvider, Gate, Step};
-use requiem_core::{EngineEvent, ProviderId, SeekTarget, Session, SessionConfig, Track, TrackId};
+use requiem_core::testing::{EngineCall, FakeEngineHandle, FakeProvider, Gate, SignInScript, Step};
+use requiem_core::{
+    AccountState, Collection, CollectionId, CollectionKind, EngineEvent, Item, Page, ProviderError,
+    ProviderId, SeekTarget, Session, SessionConfig, Shelf, Track, TrackId,
+};
 
 #[derive(Clone, Default)]
 struct Buf(Arc<Mutex<Vec<u8>>>);
@@ -35,7 +38,11 @@ struct Rig {
 }
 
 fn rig() -> Rig {
-    let provider = FakeProvider::new("fake");
+    rig_with(FakeProvider::new("fake"))
+}
+
+/// For a provider whose starting state the test sets before the session reads it.
+fn rig_with(provider: Arc<FakeProvider>) -> Rig {
     let engine = FakeEngineHandle::new();
     let session = Session::spawn(
         vec![provider.clone()],
@@ -570,4 +577,313 @@ fn malformed_track_json_errors_and_leaves_the_queue_alone() {
     assert_eq!(of_type(&lines, "queue_empty").len(), 1);
     assert!(of_type(&lines, "ack").is_empty());
     assert!(r.engine.calls().is_empty());
+}
+
+fn playlist(id: &str, title: &str) -> Collection {
+    Collection {
+        id: CollectionId {
+            provider: ProviderId("fake".into()),
+            id: id.into(),
+        },
+        kind: CollectionKind::Playlist,
+        title: title.into(),
+        subtitle: Some("by me".into()),
+        artwork_url: Some("https://img/p.jpg".into()),
+    }
+}
+
+/// Home: two tracks on one shelf and a playlist on the next; the playlist holds `t3`.
+fn script_home(r: &Rig) {
+    let list = playlist("p1", "Mix");
+    r.provider.script_browse(
+        Page::Home,
+        vec![Step::ok(vec![
+            Shelf {
+                title: "Quick picks".into(),
+                items: vec![Item::Track(track("t1")), Item::Track(track("t2"))],
+            },
+            Shelf {
+                title: "Empty".into(),
+                items: vec![],
+            },
+            Shelf {
+                title: "Playlists".into(),
+                items: vec![Item::Collection(list.clone())],
+            },
+        ])],
+    );
+    r.provider.script_browse(
+        Page::Collection(list.id),
+        vec![Step::ok(vec![Shelf {
+            title: "Mix".into(),
+            items: vec![Item::Track(track("t3"))],
+        }])],
+    );
+}
+
+#[test]
+fn home_numbers_items_across_shelves_and_open_lists_a_playlist() {
+    let r = rig();
+    script_home(&r);
+    let app = r.app(true);
+    exec_all(&app, "home\nawait results 5");
+    let text = r.out.text();
+    assert!(
+        text.contains(
+            "Quick picks:\n  1. A, B — Title t1 [Album] (2:05)\n  2. A, B — Title t2 [Album] (2:05)\n\
+             Playlists:\n  3. [playlist] Mix — by me\n"
+        ),
+        "{text}"
+    );
+    assert!(!text.contains("Empty"), "{text}");
+
+    exec_all(&app, "play 3\nopen 1\nopen 4\nplay 2");
+    let text = r.out.text();
+    assert!(
+        text.contains("error: result 3 is a playlist; use open 3\n"),
+        "{text}"
+    );
+    assert!(
+        text.contains("error: result 1 is a track; use play 1\n"),
+        "{text}"
+    );
+    assert!(text.contains("error: no result 4\n"), "{text}");
+    assert_eq!(r.engine.wait_load(1).1, "t2");
+
+    // `open` starts a new listing, numbered from 1.
+    exec_all(&app, "open 3\nawait results 5\nadd 1\nplay 1");
+    assert!(
+        r.out
+            .text()
+            .contains("Mix:\n  1. A, B — Title t3 [Album] (2:05)\n"),
+        "{}",
+        r.out.text()
+    );
+    assert_eq!(r.engine.wait_load(2).1, "t3");
+    assert_eq!(
+        r.provider.browse_calls(),
+        [Page::Home, Page::Collection(playlist("p1", "Mix").id)]
+    );
+}
+
+#[test]
+fn a_search_replaces_a_browse_listing() {
+    let r = rig();
+    script_home(&r);
+    r.provider
+        .script_search("q", vec![Step::ok(vec![track("s1")])]);
+    let app = r.app(true);
+    exec_all(
+        &app,
+        "home\nawait results 5\nsearch q\nopen 3\nawait results 5\nplay 1",
+    );
+    let text = r.out.text();
+    // `open 3` ran before the search returned, against no listing.
+    assert!(text.contains("error: no search results yet\n"), "{text}");
+    assert_eq!(r.engine.wait_load(1).1, "s1");
+}
+
+#[test]
+fn json_browse_prints_shelves_and_items() {
+    let r = rig();
+    script_home(&r);
+    let app = r.json_app();
+    exec_all(&app, "home\nawait results 5");
+    let lines = r.json_lines();
+    assert_eq!(of_type(&lines, "ack")[0]["command"], "home");
+    let shelves: Vec<&serde_json::Value> = of_type(&lines, "shelf");
+    assert_eq!(
+        shelves,
+        [
+            &serde_json::json!({"type": "shelf", "title": "Quick picks"}),
+            &serde_json::json!({"type": "shelf", "title": "Playlists"}),
+        ]
+    );
+    let items = of_type(&lines, "item");
+    assert_eq!(items.len(), 3);
+    assert_eq!(
+        *items[0],
+        serde_json::json!({
+            "type": "item",
+            "index": 1,
+            "kind": "track",
+            "id": {"provider": "fake", "id": "t1"},
+            "title": "Title t1",
+            "subtitle": "A, B",
+            "artists": ["A", "B"],
+            "album": "Album",
+            "duration_ms": 125000,
+            "artwork_url": null,
+        })
+    );
+    assert_eq!(
+        *items[2],
+        serde_json::json!({
+            "type": "item",
+            "index": 3,
+            "kind": "playlist",
+            "id": {"provider": "fake", "id": "p1"},
+            "title": "Mix",
+            "subtitle": "by me",
+            "artwork_url": "https://img/p.jpg",
+        })
+    );
+    // A track item line plays as is.
+    exec_all(&app, &format!("play-track {}", items[1]));
+    assert_eq!(r.engine.wait_load(1).1, "t2");
+}
+
+#[test]
+fn library_that_needs_sign_in_says_so() {
+    let r = rig();
+    r.provider.script_browse(
+        Page::Library,
+        vec![Step::err(ProviderError::SignInRequired(
+            "sign in to Google to see your library".into(),
+        ))],
+    );
+    let app = r.json_app();
+    exec_all(&app, "library");
+    wait_out(&r, "browse_failed", 1);
+    let lines = r.json_lines();
+    assert_eq!(
+        *of_type(&lines, "browse_failed")[0],
+        serde_json::json!({
+            "type": "browse_failed",
+            "error": "sign-in required: sign in to Google to see your library",
+            "sign_in_required": true,
+        })
+    );
+}
+
+fn pending() -> AccountState {
+    AccountState::Pending {
+        verification_url: "https://www.google.com/device".into(),
+        user_code: "GQVQ-JKEC".into(),
+        expires_at_unix: 4_000_000_000,
+    }
+}
+
+#[test]
+fn signin_prints_the_code_and_waits_for_the_outcome() {
+    let r = rig();
+    let gate = Gate::new();
+    r.provider.script_sign_in(SignInScript {
+        pending: Some(pending()),
+        gate: Some(gate.clone()),
+        outcome: Ok(AccountState::SignedIn {
+            name: Some("Me".into()),
+        }),
+    });
+    let flow = thread::scope(|s| {
+        let waiter = s.spawn(|| r.app(true).exec("signin"));
+        wait_out(
+            &r,
+            "Go to https://www.google.com/device and enter GQVQ-JKEC\n",
+            1,
+        );
+        assert!(!waiter.is_finished());
+        gate.release();
+        waiter.join().unwrap()
+    });
+    assert_eq!(flow, Flow::Continue);
+    let text = r.out.text();
+    assert!(
+        text.ends_with(
+            "Go to https://www.google.com/device and enter GQVQ-JKEC\nsigned in as Me\n"
+        ),
+        "{text}"
+    );
+    let app = r.app(true);
+    exec_all(&app, "account");
+    assert!(r.out.text().ends_with("fake: signed in as Me\n"));
+
+    // Signing in again only repeats the state.
+    assert_eq!(app.exec("signin"), Flow::Continue);
+    assert!(r.out.text().ends_with("signed in as Me\n"));
+    assert_eq!(r.provider.sign_in_calls(), 1);
+}
+
+#[test]
+fn a_failed_signin_says_why_and_exits_2_in_script_mode() {
+    let r = rig();
+    for _ in 0..2 {
+        r.provider.script_sign_in(SignInScript {
+            pending: Some(pending()),
+            gate: None,
+            outcome: Err(ProviderError::SignInRequired("access was denied".into())),
+        });
+    }
+    assert_eq!(r.app(true).exec("signin"), Flow::Exit(2));
+    let text = r.out.text();
+    assert!(
+        text.contains("sign-in failed: access was denied\n"),
+        "{text}"
+    );
+    assert!(text.ends_with("signed out\n"), "{text}");
+    assert_eq!(r.app(false).exec("signin"), Flow::Continue);
+}
+
+#[test]
+fn signin_without_a_client_prints_the_hint() {
+    let provider = FakeProvider::new("fake");
+    let hint = "no Google OAuth client: save the JSON of a \"TVs and Limited Input devices\" \
+                client to /cfg/requiem/google-client.json";
+    provider.set_account(AccountState::Unavailable(hint.into()));
+    provider.script_sign_in(SignInScript {
+        pending: None,
+        gate: None,
+        outcome: Err(ProviderError::SignInRequired(hint.into())),
+    });
+    let r = rig_with(provider);
+    let app = r.json_app();
+    exec_all(&app, "account");
+    assert_eq!(app.exec("signin"), Flow::Exit(2));
+    let lines = r.json_lines();
+    assert_eq!(
+        *of_type(&lines, "account")[0],
+        serde_json::json!({
+            "type": "account",
+            "provider": "fake",
+            "state": "unavailable",
+            "detail": hint,
+        })
+    );
+    assert_eq!(
+        *of_type(&lines, "sign_in_failed")[0],
+        serde_json::json!({"type": "sign_in_failed", "provider": "fake", "error": hint})
+    );
+}
+
+#[test]
+fn json_signin_and_signout_report_the_account() {
+    let r = rig();
+    r.provider.script_sign_in(SignInScript {
+        pending: Some(pending()),
+        gate: None,
+        outcome: Ok(AccountState::SignedIn { name: None }),
+    });
+    let app = r.json_app();
+    assert_eq!(app.exec("signin"), Flow::Continue);
+    exec_all(&app, "signout");
+    wait_out(&r, "signed_out", 1);
+    let lines = r.json_lines();
+    let accounts = of_type(&lines, "account");
+    assert_eq!(
+        *accounts[0],
+        serde_json::json!({
+            "type": "account",
+            "provider": "fake",
+            "state": "pending",
+            "verification_url": "https://www.google.com/device",
+            "user_code": "GQVQ-JKEC",
+            "expires_at_unix": 4_000_000_000u64,
+        })
+    );
+    assert_eq!(
+        *accounts[1],
+        serde_json::json!({"type": "account", "provider": "fake", "state": "signed_in", "name": null})
+    );
+    assert_eq!(accounts[2]["state"], "signed_out");
+    assert_eq!(r.provider.sign_out_calls(), 1);
 }

@@ -4,7 +4,8 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use crossbeam_channel::Receiver;
 use requiem_core::{
-    Command, EnqueueMode, Event, PlayState, ProviderId, SeekTarget, Session, Track, TrackId,
+    AccountState, Collection, CollectionKind, Command, EnqueueMode, Event, Item, Page, PlayState,
+    ProviderId, SeekTarget, Session, Shelf, Track, TrackId,
 };
 use serde_json::{Value, json};
 
@@ -14,12 +15,20 @@ const DEFAULT_AWAIT_SECS: f64 = 30.0;
 /// write timeout.
 const SYNC_TIMEOUT: Duration = Duration::from_secs(2);
 
+/// How long `signin` waits for the sign-in code.
+const SIGN_IN_START: Duration = Duration::from_secs(60);
+/// How long `signin` waits past the code's expiry for the provider to report it.
+const SIGN_IN_GRACE: Duration = Duration::from_secs(30);
+
 const HELP: &str = "\
 commands:
   search <query>        search; prints numbered results
-  play <n>              replace the queue with result n and play it
-  add <n>               append result n to the queue
-  play-track <json>     like play, with the track object a --json result line prints
+  home                  the YouTube Music home page; prints numbered items under each shelf
+  library               your playlists and liked videos (needs signin)
+  open <n>              list the tracks of playlist or album n
+  play <n>              replace the queue with track n of the last listing and play it
+  add <n>               append track n of the last listing to the queue
+  play-track <json>     like play, with the track object a --json result or item line prints
   add-track <json>      like add, with that track object
   queue                 show the queue (> marks the current track)
   jump <n>              play queue position n
@@ -33,7 +42,11 @@ commands:
   status                state, track, position / duration, volume
   sleep <secs>          wait (fractional ok)
   await <results|playing|stopped|nowplaying> [timeout_secs=30]
-                        wait for that event since the last play/next/prev/search
+                        wait for that event since the last play/next/prev/search/browse
+  signin [provider]     sign in to Google: prints a code to enter on another device and
+                        waits until it is entered or expires
+  signout [provider]    sign out and forget the saved sign-in
+  account               show the sign-in state
   mark <name>           print MARK <name> <unix_millis>
   shutdown-daemon       with --connect: stop the daemon and exit
   help | quit           quit leaves a --connect daemon running";
@@ -83,10 +96,22 @@ struct Seen {
     nowplaying: bool,
 }
 
+/// A `signin` waiting for its outcome.
+struct SignInWait {
+    provider: ProviderId,
+    expires_at_unix: Option<u64>,
+    /// The first state after `Pending`.
+    ended: Option<AccountState>,
+}
+
 struct Ui {
+    /// The latest search or browse; earlier answers are dropped.
     latest_req: u64,
-    /// `None` until the latest search has returned.
-    results: Option<Vec<Track>>,
+    /// What `play <n>` and `open <n>` number: `None` until the latest search or browse has
+    /// returned.
+    listing: Option<Vec<Item>>,
+    accounts: Vec<(ProviderId, AccountState)>,
+    sign_in: Option<SignInWait>,
     queue: Vec<Track>,
     current: Option<usize>,
     state: PlayState,
@@ -159,12 +184,46 @@ impl Hub {
                         track_json("result", t, [("index", json!(i + 1))]),
                     );
                 }
-                ui.results = Some(tracks);
+                ui.listing = Some(tracks.into_iter().map(Item::Track).collect());
                 ui.seen.results = true;
             }
             Event::SearchFailed { error, .. } => self.emit(
                 &format!("search failed: {error}"),
                 json!({ "type": "search_failed", "error": error }),
+            ),
+            Event::BrowseResults { req, shelves, .. } => {
+                if req != ui.latest_req {
+                    return;
+                }
+                ui.listing = Some(self.print_shelves(shelves));
+                ui.seen.results = true;
+            }
+            Event::BrowseFailed {
+                req,
+                error,
+                sign_in_required,
+            } => {
+                if req != ui.latest_req {
+                    return;
+                }
+                let hint = if sign_in_required {
+                    " (try signin)"
+                } else {
+                    ""
+                };
+                self.emit(
+                    &format!("browse failed: {error}{hint}"),
+                    json!({
+                        "type": "browse_failed",
+                        "error": error,
+                        "sign_in_required": sign_in_required,
+                    }),
+                );
+            }
+            Event::Account { provider, state } => self.on_account(&mut ui, provider, state),
+            Event::SignInFailed { provider, error } => self.emit(
+                &format!("sign-in failed: {error}"),
+                json!({ "type": "sign_in_failed", "provider": provider.0, "error": error }),
             ),
             Event::QueueChanged { tracks, current } => {
                 let cur = current.map_or("none".to_owned(), |i| (i + 1).to_string());
@@ -226,13 +285,65 @@ impl Hub {
                     json!({ "type": "provider_broken", "detail": detail }),
                 );
             }
-            Event::BrowseResults { .. }
-            | Event::BrowseFailed { .. }
-            | Event::Account { .. }
-            | Event::SignInFailed { .. } => {}
         }
         drop(ui);
         self.changed.notify_all();
+    }
+
+    /// Prints each shelf's title and its items, numbered across shelves; returns the items.
+    fn print_shelves(&self, shelves: Vec<Shelf>) -> Vec<Item> {
+        if shelves.iter().all(|s| s.items.is_empty()) {
+            self.emit("no results", json!({ "type": "no_results" }));
+        }
+        let mut listing = Vec::new();
+        for shelf in shelves {
+            if shelf.items.is_empty() {
+                continue;
+            }
+            self.emit(
+                &format!("{}:", shelf.title),
+                json!({ "type": "shelf", "title": shelf.title }),
+            );
+            for item in shelf.items {
+                let n = listing.len() + 1;
+                self.emit(&format!("  {n}. {}", item_line(&item)), item_json(&item, n));
+                listing.push(item);
+            }
+        }
+        listing
+    }
+
+    /// The first state a provider reports is its starting state and is not printed; later
+    /// ones are printed when they change it, and while a `signin` waits on that provider.
+    fn on_account(&self, ui: &mut Ui, provider: ProviderId, state: AccountState) {
+        let waiting = ui.sign_in.as_mut().filter(|w| w.provider == provider);
+        let repeat = waiting.is_some()
+            && matches!(
+                state,
+                AccountState::Pending { .. } | AccountState::SignedIn { .. }
+            );
+        if let Some(w) = waiting {
+            match &state {
+                AccountState::Pending {
+                    expires_at_unix, ..
+                } => w.expires_at_unix = Some(*expires_at_unix),
+                other => w.ended = Some(other.clone()),
+            }
+        }
+        match ui.accounts.iter_mut().find(|(p, _)| *p == provider) {
+            Some((_, known)) => {
+                if *known != state || repeat {
+                    self.emit(&account_text(&state), account_json(&provider, &state));
+                }
+                *known = state;
+            }
+            None => {
+                if repeat {
+                    self.emit(&account_text(&state), account_json(&provider, &state));
+                }
+                ui.accounts.push((provider, state));
+            }
+        }
     }
 }
 
@@ -306,6 +417,98 @@ fn parse_track(text: &str) -> Result<Track, String> {
     })
 }
 
+fn kind_name(k: CollectionKind) -> &'static str {
+    match k {
+        CollectionKind::Playlist => "playlist",
+        CollectionKind::Album => "album",
+    }
+}
+
+fn collection_line(c: &Collection) -> String {
+    let mut s = format!("[{}] {}", kind_name(c.kind), c.title);
+    if let Some(sub) = &c.subtitle {
+        s.push_str(&format!(" — {sub}"));
+    }
+    s
+}
+
+fn item_line(item: &Item) -> String {
+    match item {
+        Item::Track(t) => track_line(t),
+        Item::Collection(c) => collection_line(c),
+    }
+}
+
+/// An `item` line. Tracks carry every `track_json` field, so `play-track` takes them as is.
+fn item_json(item: &Item, index: usize) -> Value {
+    match item {
+        Item::Track(t) => track_json(
+            "item",
+            t,
+            [
+                ("index", json!(index)),
+                ("kind", json!("track")),
+                ("subtitle", json!(t.artists.join(", "))),
+            ],
+        ),
+        Item::Collection(c) => json!({
+            "type": "item",
+            "index": index,
+            "kind": kind_name(c.kind),
+            "id": { "provider": c.id.provider.0, "id": c.id.id },
+            "title": c.title,
+            "subtitle": c.subtitle,
+            "artwork_url": c.artwork_url,
+        }),
+    }
+}
+
+fn account_text(state: &AccountState) -> String {
+    match state {
+        AccountState::Unavailable(hint) => format!("sign-in unavailable: {hint}"),
+        AccountState::SignedOut => "signed out".to_owned(),
+        AccountState::Pending {
+            verification_url,
+            user_code,
+            ..
+        } => format!("Go to {verification_url} and enter {user_code}"),
+        AccountState::SignedIn { name: Some(n) } => format!("signed in as {n}"),
+        AccountState::SignedIn { name: None } => "signed in".to_owned(),
+    }
+}
+
+fn account_json(provider: &ProviderId, state: &AccountState) -> Value {
+    let mut o = json!({ "type": "account", "provider": provider.0 });
+    match state {
+        AccountState::Unavailable(hint) => {
+            o["state"] = json!("unavailable");
+            o["detail"] = json!(hint);
+        }
+        AccountState::SignedOut => o["state"] = json!("signed_out"),
+        AccountState::Pending {
+            verification_url,
+            user_code,
+            expires_at_unix,
+        } => {
+            o["state"] = json!("pending");
+            o["verification_url"] = json!(verification_url);
+            o["user_code"] = json!(user_code);
+            o["expires_at_unix"] = json!(expires_at_unix);
+        }
+        AccountState::SignedIn { name } => {
+            o["state"] = json!("signed_in");
+            o["name"] = json!(name);
+        }
+    }
+    o
+}
+
+fn unix_now() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs())
+}
+
 fn track_label(t: &Track) -> String {
     format!("{} — {}", t.artists.join(", "), t.title)
 }
@@ -368,7 +571,9 @@ impl<'a> App<'a> {
         let hub = Arc::new(Hub {
             ui: Mutex::new(Ui {
                 latest_req: 0,
-                results: None,
+                listing: None,
+                accounts: Vec::new(),
+                sign_in: None,
                 queue: Vec::new(),
                 current: None,
                 state: PlayState::Stopped,
@@ -450,18 +655,41 @@ impl<'a> App<'a> {
                     self.hub.error("usage: search <query>");
                     return Flow::Continue;
                 }
-                let req = {
-                    let mut ui = self.hub.lock_ui();
-                    ui.latest_req += 1;
-                    ui.results = None;
-                    ui.seen.results = false;
-                    ui.latest_req
-                };
+                let req = self.next_listing();
                 self.player.send(Command::Search {
                     req,
                     query: arg.to_owned(),
                 });
                 self.hub.ack(cmd);
+            }
+            "home" => self.browse(cmd, Page::Home),
+            "library" => self.browse(cmd, Page::Library),
+            "open" => match self.pick(arg) {
+                Some(Item::Collection(c)) => self.browse(cmd, Page::Collection(c.id)),
+                Some(Item::Track(_)) => self
+                    .hub
+                    .error(&format!("result {arg} is a track; use play {arg}")),
+                None => {}
+            },
+            "signin" => return self.sign_in(cmd, arg),
+            "signout" => {
+                if let Some(provider) = self.account_provider(arg) {
+                    self.player.send(Command::SignOut { provider });
+                    self.hub.ack(cmd);
+                }
+            }
+            "account" => {
+                let ui = self.accounts_known();
+                if ui.accounts.is_empty() {
+                    self.hub
+                        .emit("no accounts", json!({ "type": "no_accounts" }));
+                }
+                for (p, state) in &ui.accounts {
+                    self.hub.emit(
+                        &format!("{}: {}", p.0, account_text(state)),
+                        account_json(p, state),
+                    );
+                }
             }
             "play" | "add" | "play-track" | "add-track" => {
                 let track = if cmd.ends_with("-track") {
@@ -473,10 +701,17 @@ impl<'a> App<'a> {
                         }
                     }
                 } else {
-                    let Some(t) = self.pick(arg) else {
-                        return Flow::Continue;
-                    };
-                    t
+                    match self.pick(arg) {
+                        Some(Item::Track(t)) => t,
+                        Some(Item::Collection(c)) => {
+                            self.hub.error(&format!(
+                                "result {arg} is a {}; use open {arg}",
+                                kind_name(c.kind)
+                            ));
+                            return Flow::Continue;
+                        }
+                        None => return Flow::Continue,
+                    }
                 };
                 if cmd.starts_with("play") {
                     self.clear_playback_seen();
@@ -612,22 +847,135 @@ impl<'a> App<'a> {
         Flow::Continue
     }
 
-    /// The track for `play <n>` / `add <n>`; prints the error and returns `None` otherwise.
-    fn pick(&self, arg: &str) -> Option<Track> {
+    /// Item `arg` of the last listing; prints the error and returns `None` otherwise.
+    fn pick(&self, arg: &str) -> Option<Item> {
         let ui = self.hub.lock_ui();
-        let Some(results) = &ui.results else {
+        let Some(listing) = &ui.listing else {
             self.hub.error("no search results yet");
             return None;
         };
-        let track = arg
+        let item = arg
             .parse::<usize>()
             .ok()
             .and_then(|n| n.checked_sub(1))
-            .and_then(|i| results.get(i));
-        if track.is_none() {
+            .and_then(|i| listing.get(i));
+        if item.is_none() {
             self.hub.error(&format!("no result {arg}"));
         }
-        track.cloned()
+        item.cloned()
+    }
+
+    /// Starts a new listing: answers to earlier searches and browses are dropped from now on.
+    fn next_listing(&self) -> u64 {
+        let mut ui = self.hub.lock_ui();
+        ui.latest_req += 1;
+        ui.listing = None;
+        ui.seen.results = false;
+        ui.latest_req
+    }
+
+    fn browse(&self, cmd: &str, page: Page) {
+        let req = self.next_listing();
+        self.player.send(Command::Browse { req, page });
+        self.hub.ack(cmd);
+    }
+
+    /// The UI once it knows of an account, or after `SYNC_TIMEOUT`. The session announces
+    /// accounts on subscribe; this covers a printer thread that is behind.
+    fn accounts_known(&self) -> MutexGuard<'_, Ui> {
+        let deadline = Instant::now() + SYNC_TIMEOUT;
+        let mut ui = self.hub.lock_ui();
+        while ui.accounts.is_empty() && !ui.closed {
+            let Some(left) = deadline.checked_duration_since(Instant::now()) else {
+                break;
+            };
+            ui = self
+                .hub
+                .changed
+                .wait_timeout(ui, left)
+                .unwrap_or_else(PoisonError::into_inner)
+                .0;
+        }
+        ui
+    }
+
+    /// The provider named by `arg`, else the first with an account.
+    fn account_provider(&self, arg: &str) -> Option<ProviderId> {
+        if !arg.is_empty() {
+            return Some(ProviderId(arg.to_owned()));
+        }
+        let first = self
+            .accounts_known()
+            .accounts
+            .first()
+            .map(|(p, _)| p.clone());
+        if first.is_none() {
+            self.hub.error("no provider has accounts");
+        }
+        first
+    }
+
+    /// Sends `SignIn` and waits until the sign-in ends: up to `SIGN_IN_START` for the code,
+    /// then until the code expires.
+    fn sign_in(&self, cmd: &str, arg: &str) -> Flow {
+        let Some(provider) = self.account_provider(arg) else {
+            return if self.script {
+                Flow::Exit(2)
+            } else {
+                Flow::Continue
+            };
+        };
+        self.hub.lock_ui().sign_in = Some(SignInWait {
+            provider: provider.clone(),
+            expires_at_unix: None,
+            ended: None,
+        });
+        self.player.send(Command::SignIn { provider });
+        self.hub.ack(cmd);
+        let started = Instant::now();
+        let mut ui = self.hub.lock_ui();
+        let outcome = loop {
+            let w = ui.sign_in.as_ref().expect("set above");
+            if let Some(state) = &w.ended {
+                break Some(matches!(state, AccountState::SignedIn { .. }));
+            }
+            if ui.closed {
+                break None;
+            }
+            let deadline = match w.expires_at_unix {
+                Some(at) => {
+                    Instant::now()
+                        + Duration::from_secs(at.saturating_sub(unix_now()))
+                        + SIGN_IN_GRACE
+                }
+                None => started + SIGN_IN_START,
+            };
+            let Some(left) = deadline.checked_duration_since(Instant::now()) else {
+                break Some(false);
+            };
+            ui = self
+                .hub
+                .changed
+                .wait_timeout(ui, left)
+                .unwrap_or_else(PoisonError::into_inner)
+                .0;
+        };
+        let timed_out = ui.sign_in.take().is_some_and(|w| w.ended.is_none());
+        drop(ui);
+        match outcome {
+            Some(true) => Flow::Continue,
+            None => self.lost(true).unwrap_or(Flow::Continue),
+            Some(false) => {
+                if timed_out {
+                    self.hub.error("timed out waiting for sign-in");
+                }
+                if self.script {
+                    Flow::Exit(2)
+                } else {
+                    Flow::Continue
+                }
+            }
+        }
     }
 
     /// The 0-based queue index for a 1-based `queue` position, if it exists.
