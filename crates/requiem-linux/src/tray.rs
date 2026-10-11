@@ -12,16 +12,21 @@ pub const ID: &str = "requiem";
 
 pub struct Tray {
     snap: Snapshot,
-    actions: Sender<Action>,
+    /// `None` once the handle is dropped.
+    actions: Option<Sender<Action>>,
 }
 
 impl Tray {
+    fn send(&self, action: Action) {
+        if let Some(actions) = &self.actions {
+            let _ = actions.send(action);
+        }
+    }
+
     fn item(label: &str, action: Action) -> MenuItem<Self> {
         StandardItem {
             label: label.into(),
-            activate: Box::new(move |t: &mut Self| {
-                let _ = t.actions.send(action);
-            }),
+            activate: Box::new(move |t: &mut Self| t.send(action)),
             ..Default::default()
         }
         .into()
@@ -56,7 +61,7 @@ impl ksni::Tray for Tray {
     }
 
     fn activate(&mut self, _x: i32, _y: i32) {
-        let _ = self.actions.send(Action::Toggle);
+        self.send(Action::Toggle);
     }
 
     fn menu(&self) -> Vec<MenuItem<Self>> {
@@ -86,7 +91,7 @@ impl TrayHandle {
     pub fn start(actions: Sender<Action>) -> Result<Self, ksni::Error> {
         let tray = Tray {
             snap: Snapshot::default(),
-            actions,
+            actions: Some(actions),
         };
         tray.spawn().map(Self)
     }
@@ -98,6 +103,9 @@ impl TrayHandle {
 
 impl Drop for TrayHandle {
     fn drop(&mut self) {
+        // ksni drops the tray only when its connection's tasks finish, which can be never once
+        // their driver stops; the daemon's action thread waits for every sender to go.
+        self.0.update(|t| t.actions = None);
         self.0.shutdown().wait();
     }
 }
