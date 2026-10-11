@@ -707,11 +707,10 @@ impl Ui {
         self.intent(Intent::EditQueue { edit, selected });
     }
 
-    /// Plays queue row `i` and drops the selection, so the current-row marker is what
-    /// stands out.
+    /// Plays queue row `i`. The selection stays, so the arrow keys, Delete and the moves
+    /// carry on from that row; its current-row marker shows under the selection.
     pub fn play_queue(&self, i: usize) {
         self.intent(Intent::PlayQueue(i));
-        self.queue.deselect();
     }
 
     pub fn seek_fraction(&self, fraction: f64) {
