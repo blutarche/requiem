@@ -1092,7 +1092,8 @@ impl Ui {
         } else {
             Duration::ZERO
         };
-        widgets::animate(&self.main, shift, widgets::EASE_IN_OUT, place_pages, || {});
+        // The banner's own curve, so the pages and the fade move as one.
+        widgets::animate(&self.main, shift, widgets::EASE_OUT, place_pages, || {});
         if !changed {
             return;
         }

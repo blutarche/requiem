@@ -39,7 +39,6 @@ const RING_W: CGFloat = 2.0;
 /// Cubic Bézier control points of a timing curve.
 pub type Curve = [f32; 4];
 pub const EASE_OUT: Curve = [0.23, 1.0, 0.32, 1.0];
-pub const EASE_IN_OUT: Curve = [0.77, 0.0, 0.175, 1.0];
 /// Small swaps: a toast's text, an icon.
 pub const MICRO: Duration = Duration::from_millis(120);
 /// Things entering, leaving or moving.
