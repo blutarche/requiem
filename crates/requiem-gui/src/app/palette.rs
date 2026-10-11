@@ -275,7 +275,8 @@ impl Palette {
         self.layout();
         self.selected.set(step(&self.shown_enabled(), None, 1));
         self.repaint();
-        if self.selected_row() != was {
+        // Closed, it is being built or opened, and focus landing in the field speaks for it.
+        if self.open.get() && self.selected_row() != was {
             self.announce_selected();
         }
     }
