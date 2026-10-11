@@ -307,10 +307,12 @@ impl Ui {
         // Queue page.
         let queue_page = widgets::view(mtm, rect(0.0, 0.0, mw, mh), FLEX_W | FLEX_H);
         let head_y = field_y + Field::H / 2.0;
+        let heading_font = theme::font(20.0, Weight::SemiBold);
+        let count_font = theme::font(12.0, Weight::Regular);
         let heading = widgets::placed_label(
             mtm,
             "Queue",
-            &theme::font(20.0, Weight::SemiBold),
+            &heading_font,
             &theme::ink(),
             PAD,
             head_y,
@@ -320,7 +322,7 @@ impl Ui {
         let queue_count = widgets::placed_label(
             mtm,
             "",
-            &theme::font(12.0, Weight::Regular),
+            &count_font,
             &theme::muted(),
             mw - PAD - 200.0,
             head_y,
@@ -328,12 +330,13 @@ impl Ui {
             PIN_TOP | PIN_RIGHT,
         );
         queue_count.setAlignment(NSTextAlignment::Right);
-        // On the heading's baseline rather than its centre line. Labels draw their text from
-        // the top of their frame, so the baseline is the top less the first-baseline offset.
+        // On the heading's baseline rather than its centre line. Labels set their first
+        // baseline the font's ascender, rounded to a point, below their frame's top; the
+        // count's own `firstBaselineOffsetFromTop` is no use while it is still empty.
         let baseline = heading.frame().origin.y + heading.frame().size.height
-            - heading.firstBaselineOffsetFromTop();
+            - heading_font.ascender().round();
         let mut f = queue_count.frame();
-        f.origin.y = baseline + queue_count.firstBaselineOffsetFromTop() - f.size.height;
+        f.origin.y = baseline + count_font.ascender().round() - f.size.height;
         queue_count.setFrame(f);
         let queue = Table::new(mtm, list, Kind::Queue);
         let queue_empty = EmptyState::new(mtm, list, Icon::ListMusic, target, sel!(focusSearch:));

@@ -245,7 +245,9 @@ pub fn label(
     l.setFont(Some(font));
     l.setTextColor(Some(color));
     l.setLineBreakMode(NSLineBreakMode::ByTruncatingTail);
-    l.setUsesSingleLineMode(true);
+    // One line without single-line mode, which lays the line out with the default 13 pt
+    // font's metrics: larger type then draws above its frame's baseline.
+    l.setMaximumNumberOfLines(1);
     l
 }
 
