@@ -209,11 +209,15 @@ if not samples:
 
 rows = []
 if not missing and samples:
-    def nearest(ms):
-        return min(samples, key=lambda s: abs(s[0] - ms))
+    # Each window stays inside its marks: a sample past the end mark would charge the
+    # next phase's start-up (or a sample of the exiting process) to this one.
+    def at_or_after(ms):
+        return next((s for s in samples if s[0] >= ms), samples[-1])
+    def at_or_before(ms):
+        return next((s for s in reversed(samples) if s[0] <= ms), samples[0])
     for name, nxt in zip(phases, names[1:]):
         a, b = marks[name], marks[nxt]
-        sa, sb = nearest(a), nearest(b)
+        sa, sb = at_or_after(a), at_or_before(b)
         inside = [s for s in samples if sa[0] <= s[0] <= sb[0]]
         peak = max(s[1] for s in inside) if inside else 0
         peak_fp = max(s[3] for s in inside) if inside else 0
