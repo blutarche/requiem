@@ -11,7 +11,6 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use requiem_core::{AudioSource, Engine, EngineEvent, EngineEventSink, FailureKind};
-use rtrb::PushError;
 
 use crate::decode::{Cmd, Job};
 use crate::output::{
@@ -164,31 +163,22 @@ impl AudioEngine {
     }
 
     /// Replaces the callback's ring with an empty finished one: silence, no underruns. Returns
-    /// the new feed's id, or `None` if the handoff stayed full.
-    fn silence(&self) -> Option<u64> {
-        for _ in 0..5 {
-            let mut link = self
-                .shared
-                .link
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner);
-            link.reap();
-            let (_prod, cons) = rtrb::RingBuffer::new(2);
-            let id = self.shared.next_ring_id.fetch_add(1, Ordering::Relaxed) + 1;
-            let feed = Feed {
-                id,
-                cons,
-                eof: Arc::new(AtomicBool::new(true)),
-            };
-            match link.handoff.push(feed) {
-                Ok(()) => return Some(id),
-                Err(PushError::Full(_)) => {
-                    drop(link);
-                    std::thread::sleep(Duration::from_millis(1));
-                }
-            }
-        }
-        None
+    /// the new feed's id.
+    fn silence(&self) -> u64 {
+        let mut link = self
+            .shared
+            .link
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        link.reap();
+        let (_prod, cons) = rtrb::RingBuffer::new(2);
+        let id = self.shared.next_ring_id.fetch_add(1, Ordering::Relaxed) + 1;
+        link.hand_over(Feed {
+            id,
+            cons,
+            eof: Arc::new(AtomicBool::new(true)),
+        });
+        id
     }
 
     /// Waits, bounded, until the callback reads feed `id` and so has retired the ring before
@@ -318,11 +308,10 @@ impl Engine for AudioEngine {
     fn stop(&mut self) {
         self.cancel_live();
         self.shared.cur_gen.store(NO_GEN, Ordering::Release);
-        if let Some(id) = self.silence() {
-            // Parking stops the callback, which would otherwise hold the old ring until the
-            // next load.
-            self.await_adopted(id);
-        }
+        let id = self.silence();
+        // Parking stops the callback, which would otherwise hold the old ring until the next
+        // load.
+        self.await_adopted(id);
         let _ = self.sup_tx.send(SupMsg::Pause);
         self.shared
             .link

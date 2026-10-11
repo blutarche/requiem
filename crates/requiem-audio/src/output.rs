@@ -1,6 +1,7 @@
 //! Shared engine state, the realtime callback and the two `Output` implementations.
 
-use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
+use std::ptr;
+use std::sync::atomic::{AtomicBool, AtomicPtr, AtomicU32, AtomicU64, Ordering};
 use std::sync::mpsc::Sender;
 use std::sync::{Arc, Condvar, Mutex, PoisonError};
 use std::thread::JoinHandle;
@@ -12,7 +13,6 @@ use rtrb::{Consumer, Producer, PushError, RingBuffer};
 
 use crate::{AudioError, CaptureBuffer};
 
-const HANDOFF_SLOTS: usize = 8;
 const RETIRE_SLOTS: usize = 32;
 /// Upper bound on frames rendered per callback pass, so the conversion scratch never grows.
 const SCRATCH_FRAMES: usize = 4096;
@@ -28,13 +28,54 @@ pub(crate) struct Feed {
     pub eof: Arc<AtomicBool>,
 }
 
-/// Decode-thread side of the callback's rings.
+// `Handoff` moves feeds across threads through a raw pointer, which does not require `Send`.
+const _: fn() = || {
+    fn assert_send<T: Send>() {}
+    assert_send::<Feed>();
+};
+
+/// Single-slot mailbox from the decode side to the callback. A feed put while another is still
+/// pending supersedes it, so nothing piles up while the output is parked.
+struct Handoff(AtomicPtr<Feed>);
+
+impl Handoff {
+    fn swap(&self, new: *mut Feed, order: Ordering) -> Option<Box<Feed>> {
+        let old = self.0.swap(new, order);
+        // SAFETY: the slot only ever holds null or a pointer from `Box::into_raw`, and the swap
+        // that removes a pointer hands sole ownership of it to its caller.
+        (!old.is_null()).then(|| unsafe { Box::from_raw(old) })
+    }
+
+    /// Publishes `feed`; returns the pending feed it superseded, which the callback never saw.
+    fn put(&self, feed: Box<Feed>) -> Option<Box<Feed>> {
+        self.swap(Box::into_raw(feed), Ordering::AcqRel)
+    }
+
+    /// Takes the pending feed. One atomic swap: no lock, allocation or free.
+    fn take(&self) -> Option<Box<Feed>> {
+        self.swap(ptr::null_mut(), Ordering::Acquire)
+    }
+}
+
+impl Drop for Handoff {
+    fn drop(&mut self) {
+        drop(self.take());
+    }
+}
+
+/// Decode-thread side of the callback's handoff and retire ring.
 pub(crate) struct Link {
-    pub handoff: Producer<Feed>,
-    retire: Consumer<Feed>,
+    handoff: Arc<Handoff>,
+    retire: Consumer<Box<Feed>>,
 }
 
 impl Link {
+    /// Offers `feed` to the callback. A feed still pending from an earlier call was never
+    /// adopted and is freed here.
+    pub fn hand_over(&mut self, feed: Feed) {
+        drop(self.handoff.put(Box::new(feed)));
+    }
+
     /// Drops feeds the callback retired. Runs on non-realtime threads only.
     pub fn reap(&mut self) {
         while self.retire.pop().is_ok() {}
@@ -56,7 +97,7 @@ pub(crate) struct Shared {
     /// Output is gone and could not be reopened.
     pub dead: AtomicBool,
     /// Set only while the output is stopped with no render in flight. The next render then
-    /// takes any queued feed before reading, so the current ring can no longer add to `played`.
+    /// takes any pending feed before reading, so the current ring can no longer add to `played`.
     pub parked: AtomicBool,
     /// Output clock relative to realtime, as f32 bits; only `CaptureOutput` runs faster.
     pub speed: AtomicU32,
@@ -90,11 +131,11 @@ impl Shared {
 }
 
 pub(crate) fn new_shared(ring_seconds: f32, debug: bool) -> (Arc<Shared>, Callback) {
-    let (hand_p, hand_c) = RingBuffer::new(HANDOFF_SLOTS);
+    let handoff = Arc::new(Handoff(AtomicPtr::new(ptr::null_mut())));
     let (ret_p, ret_c) = RingBuffer::new(RETIRE_SLOTS);
     let shared = Arc::new(Shared {
         link: Mutex::new(Link {
-            handoff: hand_p,
+            handoff: handoff.clone(),
             retire: ret_c,
         }),
         paused: AtomicBool::new(false),
@@ -115,7 +156,7 @@ pub(crate) fn new_shared(ring_seconds: f32, debug: bool) -> (Arc<Shared>, Callba
     });
     let cb = Callback {
         shared: shared.clone(),
-        handoff: hand_c,
+        handoff,
         retire: ret_p,
         cur: None,
         primed: false,
@@ -127,9 +168,10 @@ pub(crate) fn new_shared(ring_seconds: f32, debug: bool) -> (Arc<Shared>, Callba
 /// channel and never calls the event sink.
 pub(crate) struct Callback {
     shared: Arc<Shared>,
-    handoff: Consumer<Feed>,
-    retire: Producer<Feed>,
-    cur: Option<Feed>,
+    handoff: Arc<Handoff>,
+    retire: Producer<Box<Feed>>,
+    /// Boxed so adopting and retiring a feed only move a pointer.
+    cur: Option<Box<Feed>>,
     primed: bool,
 }
 
@@ -138,7 +180,7 @@ impl Callback {
     /// callback thread. `push` moves into a preallocated slot and does not allocate. If the
     /// retire ring is full (a reaper has not run for `RETIRE_SLOTS` swaps) the feed is dropped
     /// inline, which can free memory; that is accepted over blocking or leaking.
-    fn retire(&mut self, feed: Feed) {
+    fn retire(&mut self, feed: Box<Feed>) {
         if let Err(PushError::Full(f)) = self.retire.push(feed) {
             drop(f);
         }
@@ -146,16 +188,13 @@ impl Callback {
 
     /// Fills `out` with interleaved stereo f32.
     pub fn render(&mut self, out: &mut [f32]) {
-        let mut swapped = false;
-        while let Ok(feed) = self.handoff.pop() {
+        if let Some(feed) = self.handoff.take() {
+            let id = feed.id;
             if let Some(old) = self.cur.replace(feed) {
                 self.retire(old);
             }
             self.primed = false;
-            swapped = true;
-        }
-        if swapped && let Some(cur) = &self.cur {
-            self.shared.active_ring.store(cur.id, Ordering::Release);
+            self.shared.active_ring.store(id, Ordering::Release);
         }
 
         let Some(feed) = self.cur.as_mut() else {
@@ -485,5 +524,45 @@ impl Output for DeviceOutput {
                 .pause()
                 .map_err(|e| AudioError(format!("pause stream: {e}")))
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A finished empty feed, and its `eof` flag for counting live references.
+    fn feed(id: u64) -> (Feed, Arc<AtomicBool>) {
+        let (_prod, cons) = RingBuffer::new(2);
+        let eof = Arc::new(AtomicBool::new(true));
+        (
+            Feed {
+                id,
+                cons,
+                eof: eof.clone(),
+            },
+            eof,
+        )
+    }
+
+    #[test]
+    fn handoff_keeps_only_the_newest_feed_and_frees_the_rest() {
+        let (shared, mut cb) = new_shared(1.0, false);
+        let mut eofs = Vec::new();
+        for id in 1..=3 {
+            let (f, eof) = feed(id);
+            shared.link.lock().unwrap().hand_over(f);
+            eofs.push(eof);
+        }
+        let live: Vec<usize> = eofs.iter().map(Arc::strong_count).collect();
+        assert_eq!(live, [1, 1, 2]);
+        cb.render(&mut [0.0; 2]);
+        assert_eq!(shared.active_ring.load(Ordering::Acquire), 3);
+        let (f, pending) = feed(4);
+        shared.link.lock().unwrap().hand_over(f);
+        drop(cb);
+        drop(shared);
+        assert_eq!(Arc::strong_count(&eofs[2]), 1);
+        assert_eq!(Arc::strong_count(&pending), 1);
     }
 }

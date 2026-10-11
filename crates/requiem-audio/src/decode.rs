@@ -495,27 +495,21 @@ impl Player {
         let (prod, cons) = RingBuffer::new(self.ring_cap);
         let id = self.shared.next_ring_id.fetch_add(1, Ordering::Relaxed) + 1;
         self.eof_flag = Arc::new(AtomicBool::new(false));
-        let mut feed = Some(Feed {
+        let feed = Feed {
             id,
             cons,
             eof: self.eof_flag.clone(),
-        });
-        loop {
-            {
-                let mut link = self
-                    .shared
-                    .link
-                    .lock()
-                    .unwrap_or_else(PoisonError::into_inner);
-                link.reap();
-                // Checked under the lock so a cancelled thread can never replace a newer feed.
-                self.checked()?;
-                match link.handoff.push(feed.take().unwrap()) {
-                    Ok(()) => break,
-                    Err(rtrb::PushError::Full(f)) => feed = Some(f),
-                }
-            }
-            std::thread::sleep(Duration::from_millis(2));
+        };
+        {
+            let mut link = self
+                .shared
+                .link
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            link.reap();
+            // Checked under the lock so a cancelled thread can never replace a newer feed.
+            self.checked()?;
+            link.hand_over(feed);
         }
         self.prod = Some(prod);
         self.eof = false;
