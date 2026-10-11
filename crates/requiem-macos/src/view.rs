@@ -101,6 +101,7 @@ impl ViewTracker {
             duration: self.duration,
             position: self.position_at(now),
             state: self.state,
+            artwork_url: track.artwork_url.clone(),
         })
     }
 }
@@ -128,7 +129,43 @@ pub(crate) fn changed(
         || shown.album != next.album
         || shown.duration != next.duration
         || shown.state != next.state
+        || shown.artwork_url != next.artwork_url
         || expected.abs_diff(next.position) > tolerance
+}
+
+/// Where `view`, applied at `at`, has played to by `now`.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+pub(crate) fn position_now(view: &PlayerView, at: Instant, now: Instant) -> Duration {
+    let pos = if view.state == PlayState::Playing {
+        view.position + now.saturating_duration_since(at)
+    } else {
+        view.position
+    };
+    view.duration.map_or(pos, |d| pos.min(d))
+}
+
+/// "Artists · Album", or whichever of the two there is.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+pub(crate) fn subtitle(view: &PlayerView) -> String {
+    match (view.artists.as_str(), view.album.as_deref()) {
+        (artists, Some(album)) if !artists.is_empty() && !album.is_empty() => {
+            format!("{artists} · {album}")
+        }
+        ("", Some(album)) => album.to_owned(),
+        (artists, _) => artists.to_owned(),
+    }
+}
+
+/// "m:ss", or "h:mm:ss" from an hour.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+pub(crate) fn clock(d: Duration) -> String {
+    let s = d.as_secs();
+    let (h, m, s) = (s / 3600, s / 60 % 60, s % 60);
+    if h > 0 {
+        format!("{h}:{m:02}:{s:02}")
+    } else {
+        format!("{m}:{s:02}")
+    }
 }
 
 /// "Title — Artists", cut to 40 chars with an ellipsis.
@@ -287,7 +324,23 @@ mod tests {
                 duration: Some(secs(180)),
                 position: Duration::ZERO,
                 state: PlayState::Playing,
+                artwork_url: None,
             }
+        );
+    }
+
+    #[test]
+    fn new_artwork_is_a_change() {
+        let mut h = Harness::playing();
+        let mut with_art = track("A");
+        with_art.artwork_url = Some("https://lh3.googleusercontent.com/a=w120-h120".into());
+        let view = Harness::shown(h.apply(Event::NowPlaying {
+            track: with_art,
+            duration: Some(secs(200)),
+        }));
+        assert_eq!(
+            view.artwork_url.as_deref(),
+            Some("https://lh3.googleusercontent.com/a=w120-h120")
         );
     }
 
@@ -494,7 +547,42 @@ mod tests {
             duration: None,
             position: Duration::ZERO,
             state: PlayState::Playing,
+            artwork_url: None,
         }
+    }
+
+    #[test]
+    fn position_now_runs_only_while_playing_and_stops_at_the_end() {
+        let at = Instant::now();
+        let mut v = view("A", "");
+        v.position = secs(10);
+        v.duration = Some(secs(12));
+        assert_eq!(position_now(&v, at, at + secs(1)), secs(11));
+        assert_eq!(position_now(&v, at, at + secs(5)), secs(12));
+        v.state = PlayState::Paused;
+        assert_eq!(position_now(&v, at, at + secs(1)), secs(10));
+        v.state = PlayState::Buffering;
+        assert_eq!(position_now(&v, at, at + secs(1)), secs(10));
+    }
+
+    #[test]
+    fn subtitle_joins_artists_and_album() {
+        let mut v = view("A", "Ann, Bo");
+        assert_eq!(subtitle(&v), "Ann, Bo");
+        v.album = Some("LP".into());
+        assert_eq!(subtitle(&v), "Ann, Bo · LP");
+        v.artists.clear();
+        assert_eq!(subtitle(&v), "LP");
+        v.album = Some(String::new());
+        assert_eq!(subtitle(&v), "");
+    }
+
+    #[test]
+    fn clock_shows_minutes_then_hours() {
+        assert_eq!(clock(Duration::ZERO), "0:00");
+        assert_eq!(clock(ms(59_999)), "0:59");
+        assert_eq!(clock(secs(225)), "3:45");
+        assert_eq!(clock(secs(3725)), "1:02:05");
     }
 
     #[test]

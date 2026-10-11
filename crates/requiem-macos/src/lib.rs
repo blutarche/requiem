@@ -3,6 +3,7 @@
 //!
 //! On other OSes the types still exist and `run` only waits for `stop`.
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use crossbeam_channel::{Receiver, Sender};
@@ -17,9 +18,13 @@ mod view;
 /// Artwork loading and the cover view.
 #[cfg(target_os = "macos")]
 pub use macos::art as artwork;
+#[cfg(target_os = "macos")]
+#[doc(hidden)]
+pub use macos::mini_player_snapshot;
 pub use view::ViewTracker;
 
-/// What the status item and Now Playing show. `artists` is joined for display.
+/// What the status item, the mini player and Now Playing show. `artists` is joined for
+/// display.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PlayerView {
     pub title: String,
@@ -28,6 +33,7 @@ pub struct PlayerView {
     pub duration: Option<Duration>,
     pub position: Duration,
     pub state: PlayState,
+    pub artwork_url: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -36,26 +42,49 @@ pub enum UiAction {
     Next,
     Prev,
     Seek(Duration),
+    SetVolume(u8),
     OpenGui,
     Quit,
 }
 
+/// Something for `run` to show.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum UiUpdate {
+    /// What is playing, as [`ViewTracker`] reports it.
+    View(Option<PlayerView>),
+    /// The engine's position; send it only while [`wants_positions`].
+    Position(Duration),
+    Volume(u8),
+}
+
+/// Set while the mini player is open.
+static WANTS_POSITIONS: AtomicBool = AtomicBool::new(false);
+
+/// Whether `run` shows every position, which it does only while the mini player is open.
+/// Otherwise the view's position, which [`ViewTracker`] corrects on seeks, is enough.
+pub fn wants_positions() -> bool {
+    WANTS_POSITIONS.load(Ordering::Relaxed)
+}
+
 /// Runs the AppKit loop on the calling (main) thread until `stop` fires.
-/// `views` delivers updates; of those pending at a [`wake`], only the latest is applied.
+/// `updates` are applied in order, except that of the views pending at a [`wake`] only the
+/// latest is applied, and positions before it are dropped.
 ///
-/// On macOS the loop reads `views` and `stop` only when woken: call [`wake`] after every send
-/// on either. A disconnected `stop` counts as fired. On macOS this panics off the main thread.
-pub fn run(views: Receiver<Option<PlayerView>>, actions: Sender<UiAction>, stop: Receiver<()>) {
+/// On macOS the loop reads `updates` and `stop` only when woken: call [`wake`] after every
+/// send on either. A disconnected `stop` counts as fired. On macOS this panics off the main
+/// thread.
+pub fn run(updates: Receiver<UiUpdate>, actions: Sender<UiAction>, stop: Receiver<()>) {
     #[cfg(target_os = "macos")]
-    macos::run(views, actions, stop);
+    macos::run(updates, actions, stop);
     #[cfg(not(target_os = "macos"))]
     {
-        let _ = (views, actions);
+        let _ = (updates, actions);
         let _ = stop.recv();
     }
 }
 
-/// Has `run` read `views` and `stop` soon. Callable from any thread, before or during `run`.
+/// Has `run` read `updates` and `stop` soon. Callable from any thread, before or during
+/// `run`.
 pub fn wake() {
     #[cfg(target_os = "macos")]
     macos::wake();
@@ -71,10 +100,10 @@ mod tests {
 
     #[test]
     fn run_returns_when_stop_fires() {
-        let (_views_tx, views) = unbounded();
+        let (_updates_tx, updates) = unbounded();
         let (actions, _actions_rx) = unbounded();
         let (stop_tx, stop) = unbounded();
-        let handle = thread::spawn(move || run(views, actions, stop));
+        let handle = thread::spawn(move || run(updates, actions, stop));
         stop_tx.send(()).unwrap();
         handle.join().unwrap();
     }
