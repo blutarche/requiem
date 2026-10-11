@@ -258,12 +258,17 @@ impl Engine for AudioEngine {
             cancel: cancel.clone(),
             cmds: tx,
         });
+        // The callback keeps the previous track's ring until the new one is adopted. After a
+        // pause, or with a paused load resumed while it probes, the next `Play` would sound that
+        // ring, so the silent feed replaces it first. The decoder's own feed is newer and wins.
+        if paused || self.shared.paused.load(Ordering::Relaxed) {
+            self.silence();
+        }
         self.shared.cur_gen.store(r#gen, Ordering::Release);
         self.shared.paused.store(paused, Ordering::Relaxed);
         // Sent before spawning so the output is normally running, or parked when paused, by
         // the ring handover; a handover that finds it parked skips the ack wait (see
-        // `Shared::parked`). A paused load never sends `Play`, so the previous track's ring
-        // cannot sound in between.
+        // `Shared::parked`).
         let _ = self
             .sup_tx
             .send(if paused { SupMsg::Pause } else { SupMsg::Play });

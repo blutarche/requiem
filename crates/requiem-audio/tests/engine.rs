@@ -388,6 +388,53 @@ fn paused_load_after_a_paused_track_stays_silent() {
     assert!(near(len, 6.0, 0.12), "duration {len}");
 }
 
+fn slow_probe(ms: u64) -> AudioSource {
+    let mut first = true;
+    hooked(
+        fixture("sine440_48k.webm"),
+        FormatHint::WebmOpus,
+        move |_| {
+            if std::mem::take(&mut first) {
+                std::thread::sleep(Duration::from_millis(ms));
+            }
+            ReadPlan::Full
+        },
+    )
+}
+
+/// Frames rendered, and those audible, between loading gen 2 over a paused gen 1 and gen 2's
+/// `Started`. With `paused_load`, gen 2 loads paused and is resumed while it probes.
+fn old_track_bleed(paused_load: bool) -> (usize, usize) {
+    let mut h = harness(10.0);
+    h.engine.load(1, opus(), false);
+    h.wait_capture_frames(RATE as usize, 20);
+    h.engine.pause();
+    std::thread::sleep(Duration::from_millis(100));
+    let f0 = h.capture.frames();
+    h.engine.load(2, slow_probe(300), paused_load);
+    if paused_load {
+        std::thread::sleep(Duration::from_millis(20));
+        h.engine.resume();
+    }
+    h.wait_started(2);
+    let f1 = h.capture.frames();
+    let l = left(&h.capture.samples());
+    let audible = l[f0..f1].iter().filter(|s| s.abs() > THRESHOLD).count();
+    (f1 - f0, audible)
+}
+
+#[test]
+fn unpaused_load_after_pause_does_not_replay_paused_track() {
+    let (n, a) = old_track_bleed(false);
+    assert_eq!(a, 0, "old track audible for {a} of {n} frames");
+}
+
+#[test]
+fn resume_during_paused_load_does_not_replay_paused_track() {
+    let (n, a) = old_track_bleed(true);
+    assert_eq!(a, 0, "old track audible for {a} of {n} frames");
+}
+
 #[test]
 fn position_continues_across_pause() {
     let mut h = harness(10.0);
