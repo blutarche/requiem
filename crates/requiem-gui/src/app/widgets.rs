@@ -3,7 +3,7 @@
 
 use std::cell::{Cell, OnceCell};
 use std::ptr::NonNull;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use block2::{RcBlock, StackBlock};
 use objc2::rc::{Retained, Weak};
@@ -11,11 +11,11 @@ use objc2::runtime::{AnyObject, Sel};
 use objc2::{AnyThread, DefinedClass, MainThreadOnly, Message, define_class, msg_send};
 use objc2_app_kit::{
     NSAccessibility, NSAccessibilityButtonRole, NSAccessibilitySliderRole, NSAnimationContext,
-    NSAttributedStringNSStringDrawing, NSAutoresizingMaskOptions, NSBezierPath, NSButton,
-    NSCellImagePosition, NSColor, NSControl, NSEvent, NSEventMask, NSEventTrackingRunLoopMode,
-    NSEventType, NSFocusRingType, NSFont, NSImageScaling, NSImageView, NSLineBreakMode,
-    NSResponder, NSTextAlignment, NSTextField, NSTrackingArea, NSTrackingAreaOptions, NSView,
-    NSWorkspace,
+    NSApplication, NSAttributedStringNSStringDrawing, NSAutoresizingMaskOptions, NSBezierPath,
+    NSButton, NSCellImagePosition, NSColor, NSControl, NSEvent, NSEventMask,
+    NSEventTrackingRunLoopMode, NSEventType, NSFocusRingType, NSFont, NSImageScaling, NSImageView,
+    NSLineBreakMode, NSResponder, NSTextAlignment, NSTextField, NSTrackingArea,
+    NSTrackingAreaOptions, NSView, NSWorkspace,
 };
 use objc2_core_foundation::CGFloat;
 use objc2_foundation::{
@@ -45,6 +45,42 @@ pub const STANDARD: Duration = Duration::from_millis(200);
 /// The user's Reduce Motion setting; read per animation, as it can change at any time.
 pub fn reduce_motion() -> bool {
     NSWorkspace::sharedWorkspace().accessibilityDisplayShouldReduceMotion()
+}
+
+/// How long after a key asked for something its changes still apply at once, so results
+/// that arrive later, such as the next title after Cmd+Right, count too.
+const KEY_QUIET: Duration = Duration::from_secs(1);
+
+thread_local! {
+    static LAST_KEY: Cell<Option<Instant>> = const { Cell::new(None) };
+}
+
+/// Marks the change about to be made as asked for from the keyboard.
+pub fn note_key_intent() {
+    LAST_KEY.with(|k| k.set(Some(Instant::now())));
+}
+
+/// Marks it so if the event being handled is a key press: a key the window's monitor
+/// handles, a menu key equivalent, or a field's Return.
+pub fn note_key_event(mtm: MainThreadMarker) {
+    let event = NSApplication::sharedApplication(mtm).currentEvent();
+    if event.is_some_and(|e| e.r#type() == NSEventType::KeyDown) {
+        note_key_intent();
+    }
+}
+
+/// `duration`, or none for a change the keyboard asked for: who drives by keys wants the
+/// result, not the motion.
+pub fn motion(duration: Duration) -> Duration {
+    if keyboard_quiet(LAST_KEY.with(Cell::get), Instant::now()) {
+        Duration::ZERO
+    } else {
+        duration
+    }
+}
+
+fn keyboard_quiet(last_key: Option<Instant>, now: Instant) -> bool {
+    last_key.is_some_and(|k| now.saturating_duration_since(k) < KEY_QUIET)
 }
 
 /// Whether changes to `view` would be seen animating. A snapshot's window is never shown.
@@ -90,7 +126,8 @@ pub fn animate(
 
 /// Cross-fades `view` from how it looks now to how the changes made next leave it.
 pub fn crossfade(view: &NSView, duration: Duration) {
-    if !on_screen(view) {
+    // A zero duration would be Core Animation's default 0.25 s.
+    if duration.is_zero() || !on_screen(view) {
         return;
     }
     let Some(layer) = view.layer() else { return };
@@ -1189,5 +1226,22 @@ impl EmptyState {
         let w = self.action.set_label(action);
         let x = ((self.group.bounds().size.width - w) / 2.0).round();
         self.action.setFrame(rect(x, 0.0, w, Self::BUTTON_H));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn keyboard_changes_apply_at_once_for_a_second() {
+        let t0 = Instant::now();
+        let ms = |n| t0 + Duration::from_millis(n);
+        assert!(!keyboard_quiet(None, t0));
+        assert!(keyboard_quiet(Some(t0), t0));
+        assert!(keyboard_quiet(Some(t0), ms(999)));
+        assert!(!keyboard_quiet(Some(t0), ms(1000)));
+        // A key noted after `now` was read still counts.
+        assert!(keyboard_quiet(Some(ms(5)), t0));
     }
 }

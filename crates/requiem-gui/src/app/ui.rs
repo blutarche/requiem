@@ -570,6 +570,8 @@ impl Ui {
     }
 
     pub fn run_action(&self, action: PaletteAction) {
+        // Clicked or not, the palette is a keyboard tool.
+        widgets::note_key_intent();
         self.close_palette();
         match action {
             PaletteAction::PlayPause => self.intent(Intent::Toggle),
@@ -587,6 +589,7 @@ impl Ui {
     }
 
     pub fn intent(&self, intent: Intent) {
+        widgets::note_key_event(self.mtm);
         let cmds = self.vm.borrow_mut().intent(intent);
         self.send(cmds);
         self.render();
@@ -687,6 +690,7 @@ impl Ui {
     }
 
     pub fn close_toast(&self) {
+        widgets::note_key_event(self.mtm);
         self.dismiss_toast(self.toast.id.get());
     }
 
@@ -1056,7 +1060,7 @@ impl Ui {
         };
         let swap = t.shown.replace(true);
         if swap {
-            widgets::crossfade(&t.view, widgets::MICRO);
+            widgets::crossfade(&t.view, widgets::motion(widgets::MICRO));
         }
         // A toast amended in place keeps its countdown.
         let new = t.id.replace(toast.id) != toast.id;
@@ -1117,7 +1121,7 @@ impl Ui {
         v.setHidden(false);
         widgets::animate(
             v,
-            widgets::STANDARD,
+            widgets::motion(widgets::STANDARD),
             widgets::EASE_OUT,
             || {
                 v.animator().setAlphaValue(1.0);
@@ -1140,7 +1144,7 @@ impl Ui {
         let id = t.id.get();
         widgets::animate(
             v,
-            widgets::STANDARD,
+            widgets::motion(widgets::STANDARD),
             widgets::EASE_OUT,
             || {
                 v.animator().setAlphaValue(0.0);

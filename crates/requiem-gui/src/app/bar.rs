@@ -217,19 +217,20 @@ impl PlayerBar {
 
     /// `None` when nothing is loaded.
     pub fn set_track(&self, track: Option<(&str, &str)>, total: &str) {
+        let fade = widgets::motion(widgets::STANDARD);
         let artists = match track {
             Some((title, artists)) => {
-                widgets::fade_text(&self.title, title, widgets::STANDARD);
+                widgets::fade_text(&self.title, title, fade);
                 self.title.setTextColor(Some(&theme::ink()));
                 artists
             }
             None => {
-                widgets::fade_text(&self.title, "Nothing playing", widgets::STANDARD);
+                widgets::fade_text(&self.title, "Nothing playing", fade);
                 self.title.setTextColor(Some(&theme::muted()));
                 ""
             }
         };
-        widgets::fade_text(&self.artists, artists, widgets::STANDARD);
+        widgets::fade_text(&self.artists, artists, fade);
         let mid = if artists.is_empty() {
             Self::TITLE_ALONE_Y
         } else {
