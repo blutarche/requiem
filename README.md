@@ -29,7 +29,7 @@ The bundle embeds Homebrew's libopus. Its minimum macOS version is whatever that
 ## Use
 
 - **Window:** type a query and press Enter; Return or a double-click plays a result, Cmd+Return (or the row's +) adds it to the queue. In the queue, Delete removes the selected track and Option+Cmd+Up / Option+Cmd+Down move it; right-click a queue row for Remove from Queue, Move Up, Move Down or Clear Queue (its toast offers Undo). Cmd+Z undoes a replaced or cleared queue until the queue changes again. Space toggles play/pause, Left / Right seek 5 s, Cmd+Left / Cmd+Right skip, Cmd+Up / Cmd+Down change the volume, Cmd+F focuses search, Cmd+1 / Cmd+2 switch between Search and Queue, Cmd+K opens the palette. Cmd+Q closes the window and the music keeps playing; Option+Cmd+Q ("Quit and Stop Music") stops the player too.
-- **CLI:** `requiem --connect`, then `help`. Commands: `search <query>`, `play <n>`, `add <n>`, `queue`, `remove <n>`, `move <from> <to>`, `clear`, `next`, `prev`, `pause`, `resume`, `toggle`, `seek <secs|+secs|-secs>`, `vol <0-100>`, `status`, `shutdown-daemon`, `quit`. `--script <file>` runs commands from a file; `--script -` reads them from stdin.
+- **CLI:** `requiem --connect`, then `help`. Commands: `search <query>`, `play <n>`, `add <n>`, `queue`, `jump <n>`, `remove <n>`, `move <from> <to>`, `clear`, `next`, `prev`, `pause`, `resume`, `toggle`, `seek <secs|+secs|-secs>`, `vol <0-100>`, `status`, `shutdown-daemon`, `quit`. `--script <file>` runs commands from a file; `--script -` reads them from stdin.
 
 ### JSON output
 
@@ -48,7 +48,7 @@ The bundle embeds Homebrew's libopus. Its minimum macOS version is whatever that
 | `volume` | `volume` |
 | `track_failed` | `title`, `error` |
 | `provider_broken` | `detail` |
-| `ack` | `command`: a command was sent (search, play, add, remove, move, clear, next, prev, pause, resume, toggle, seek, vol, shutdown-daemon) |
+| `ack` | `command`: a command was sent (search, play, add, jump, remove, move, clear, next, prev, pause, resume, toggle, seek, vol, shutdown-daemon) |
 | `mark` | `name`, `unix_millis` |
 | `help` | `text` |
 | `error` | `message` |

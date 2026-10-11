@@ -378,6 +378,23 @@ fn remove_move_clear_map_one_based_positions() {
 }
 
 #[test]
+fn jump_plays_the_one_based_queue_position() {
+    let r = rig();
+    let app = r.app(true);
+    started_queue(&r, &app);
+    r.engine.wait_load(1);
+    exec_all(&app, "jump 3\njump 4\njump x");
+    assert_eq!(r.engine.wait_load(2).1, "t3");
+    wait_out(&r, "queue: 3 tracks, current 3", 1);
+    assert_eq!(
+        r.out.text().matches("error: no queue position").count(),
+        2,
+        "{}",
+        r.out.text()
+    );
+}
+
+#[test]
 fn remove_and_move_reject_bad_arguments() {
     let r = rig();
     let app = r.app(true);

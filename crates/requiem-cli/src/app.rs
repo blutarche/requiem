@@ -18,6 +18,7 @@ commands:
   play <n>              replace the queue with result n and play it
   add <n>               append result n to the queue
   queue                 show the queue (> marks the current track)
+  jump <n>              play queue position n
   remove <n>            remove queue position n
   move <from> <to>      move queue position from so it ends up at to
   clear                 empty the queue and stop
@@ -453,6 +454,14 @@ impl<'a> App<'a> {
                     );
                 }
             }
+            "jump" => match self.queue_pos(arg) {
+                Some(i) => {
+                    self.clear_playback_seen();
+                    self.player.send(Command::PlayIndex(i));
+                    self.hub.ack(cmd);
+                }
+                None => self.say_no_position(arg),
+            },
             "remove" => match self.queue_pos(arg) {
                 Some(i) => {
                     self.player.send(Command::Remove(i));
