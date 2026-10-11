@@ -2,13 +2,14 @@ use objc2::rc::Retained;
 use objc2::runtime::{AnyObject, Sel};
 use objc2::{MainThreadMarker, MainThreadOnly};
 use objc2_app_kit::{
-    NSImage, NSMenu, NSMenuItem, NSStatusBar, NSStatusItem, NSVariableStatusItemLength,
+    NSCellImagePosition, NSFont, NSImage, NSMenu, NSMenuItem, NSStatusBar, NSStatusItem,
+    NSVariableStatusItemLength,
 };
 use objc2_foundation::{NSString, ns_string};
 use requiem_core::PlayState;
 
 use super::is_active;
-use crate::view::menu_title;
+use crate::view::{menu_title, status_title};
 use crate::{PlayerView, UiAction};
 
 /// Menu item tags index this.
@@ -101,6 +102,9 @@ impl StatusMenu {
 
         let item = NSStatusBar::systemStatusBar().statusItemWithLength(NSVariableStatusItemLength);
         item.setMenu(Some(&menu));
+        if let Some(button) = item.button(mtm) {
+            button.setFont(Some(&NSFont::menuBarFontOfSize(0.0)));
+        }
 
         let status = Self {
             mtm,
@@ -137,9 +141,17 @@ impl StatusMenu {
         };
         if let Some(button) = self.item.button(self.mtm) {
             button.setImage(icon.as_deref());
-            if icon.is_none() {
-                button.setTitle(ns_string!("requiem"));
-            }
+            let title = match view {
+                Some(view) if state != PlayState::Stopped => status_title(view),
+                _ if icon.is_none() => "requiem".to_owned(),
+                _ => String::new(),
+            };
+            button.setImagePosition(if title.is_empty() {
+                NSCellImagePosition::ImageOnly
+            } else {
+                NSCellImagePosition::ImageLeading
+            });
+            button.setTitle(&NSString::from_str(&title));
         }
 
         match view {

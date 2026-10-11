@@ -9,6 +9,8 @@ const SEEK_TOLERANCE: Duration = Duration::from_secs(2);
 
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 const MENU_TITLE_CHARS: usize = 40;
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+const STATUS_TITLE_CHARS: usize = 24;
 
 /// Folds core `Event`s into the current [`PlayerView`].
 ///
@@ -137,10 +139,21 @@ pub(crate) fn menu_title(view: &PlayerView) -> String {
     } else {
         format!("{} — {}", view.title, view.artists)
     };
-    if full.chars().count() <= MENU_TITLE_CHARS {
-        return full;
+    truncate(&full, MENU_TITLE_CHARS)
+}
+
+/// The title beside the status item's icon, cut to 24 chars with an ellipsis.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+pub(crate) fn status_title(view: &PlayerView) -> String {
+    truncate(&view.title, STATUS_TITLE_CHARS)
+}
+
+/// `text` in at most `max` chars, the last an ellipsis if it was cut.
+fn truncate(text: &str, max: usize) -> String {
+    if text.chars().count() <= max {
+        return text.to_owned();
     }
-    let cut: String = full.chars().take(MENU_TITLE_CHARS - 1).collect();
+    let cut: String = text.chars().take(max - 1).collect();
     format!("{}…", cut.trim_end())
 }
 
@@ -504,6 +517,34 @@ mod tests {
 
         let shown = menu_title(&view("Requiem in D minor, K. 626: Lacrimosa", "Mozart"));
         assert_eq!(shown, "Requiem in D minor, K. 626: Lacrimosa —…");
+    }
+
+    #[test]
+    fn status_title_keeps_twenty_four_chars() {
+        let title = "x".repeat(24);
+        assert_eq!(status_title(&view(&title, "Ann")), title);
+        assert_eq!(status_title(&view("Song", "Ann")), "Song");
+    }
+
+    #[test]
+    fn status_title_truncates_with_an_ellipsis() {
+        let shown = status_title(&view(&"x".repeat(25), ""));
+        assert_eq!(shown, format!("{}…", "x".repeat(23)));
+        assert_eq!(shown.chars().count(), 24);
+
+        let shown = status_title(&view("Requiem in D minor, K. 626: Lacrimosa", "Mozart"));
+        assert_eq!(shown, "Requiem in D minor, K.…");
+    }
+
+    #[test]
+    fn status_title_counts_chars_not_bytes() {
+        let title = "音".repeat(24);
+        assert_eq!(status_title(&view(&title, "")), title);
+        let shown = status_title(&view(&"音".repeat(25), ""));
+        assert_eq!(shown, format!("{}…", "音".repeat(23)));
+        let shown = status_title(&view("Café Ñandú — Señorita 🎶🎶 Überlänge", ""));
+        assert_eq!(shown, "Café Ñandú — Señorita 🎶…");
+        assert_eq!(shown.chars().count(), 24);
     }
 
     #[test]
