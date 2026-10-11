@@ -3,6 +3,7 @@
 
 use std::cell::{Cell, OnceCell, RefCell};
 use std::ptr::NonNull;
+use std::rc::Rc;
 use std::time::{Duration, Instant};
 
 use block2::{RcBlock, StackBlock};
@@ -13,12 +14,12 @@ use objc2_app_kit::{
     NSAccessibility, NSAccessibilityAnnouncementKey,
     NSAccessibilityAnnouncementRequestedNotification, NSAccessibilityButtonRole,
     NSAccessibilityPostNotificationWithUserInfo, NSAccessibilityPriorityKey,
-    NSAccessibilityPriorityLevel, NSAccessibilitySliderRole, NSAnimationContext, NSApplication,
-    NSAttributedStringNSStringDrawing, NSAutoresizingMaskOptions, NSBezierPath, NSButton,
-    NSCellImagePosition, NSColor, NSControl, NSEvent, NSEventMask, NSEventTrackingRunLoopMode,
-    NSEventType, NSFocusRingType, NSFont, NSImageScaling, NSImageView, NSLineBreakMode,
-    NSResponder, NSTextAlignment, NSTextField, NSTrackingArea, NSTrackingAreaOptions, NSView,
-    NSWindow, NSWindowOcclusionState, NSWorkspace,
+    NSAccessibilityPriorityLevel, NSAccessibilitySliderRole, NSAnimatablePropertyContainer,
+    NSAnimationContext, NSApplication, NSAttributedStringNSStringDrawing,
+    NSAutoresizingMaskOptions, NSBezierPath, NSButton, NSCellImagePosition, NSColor, NSControl,
+    NSEvent, NSEventMask, NSEventTrackingRunLoopMode, NSEventType, NSFocusRingType, NSFont,
+    NSImageScaling, NSImageView, NSLineBreakMode, NSResponder, NSTextAlignment, NSTextField,
+    NSTrackingArea, NSTrackingAreaOptions, NSView, NSWindow, NSWindowOcclusionState, NSWorkspace,
 };
 use objc2_core_foundation::CGFloat;
 use objc2_foundation::{
@@ -41,6 +42,8 @@ const RING_W: CGFloat = 2.0;
 /// Cubic Bézier control points of a timing curve.
 pub type Curve = [f32; 4];
 pub const EASE_OUT: Curve = [0.23, 1.0, 0.32, 1.0];
+/// Clearing the way: old text fading out before the new text fades in.
+pub const QUICK: Duration = Duration::from_millis(80);
 /// Small swaps: a toast's text, an icon.
 pub const MICRO: Duration = Duration::from_millis(120);
 /// Things entering, leaving or moving.
@@ -85,11 +88,15 @@ pub fn note_key_event(mtm: MainThreadMarker) {
 /// `duration`, or none for a change the keyboard asked for: who drives by keys wants the
 /// result, not the motion.
 pub fn motion(duration: Duration) -> Duration {
-    if keyboard_quiet(LAST_KEY.with(Cell::get), Instant::now()) {
+    if key_quiet() {
         Duration::ZERO
     } else {
         duration
     }
+}
+
+fn key_quiet() -> bool {
+    keyboard_quiet(LAST_KEY.with(Cell::get), Instant::now())
 }
 
 fn keyboard_quiet(last_key: Option<Instant>, now: Instant) -> bool {
@@ -288,11 +295,106 @@ pub fn set_text(l: &NSTextField, text: &str) {
     }
 }
 
-/// `set_text` that cross-fades a change.
-pub fn fade_text(l: &NSTextField, text: &str, duration: Duration) {
-    if l.stringValue().to_string() != text {
-        crossfade(l, duration);
-        l.setStringValue(&NSString::from_str(text));
+/// How far a `FadeLabel`'s new text rises into place.
+const TEXT_RISE: CGFloat = 4.0;
+
+/// A label that changes its text in two steps: the old text fades out, then the new text
+/// fades in as it rises into place, so the two never show at once.
+pub struct FadeLabel {
+    pub view: Retained<NSTextField>,
+    /// Bumped on every change, so the swap of a change a newer one replaced does nothing.
+    generation: Rc<Cell<u64>>,
+    /// The text, colour and frame origin the label ends at.
+    target: RefCell<(String, Retained<NSColor>, NSPoint)>,
+}
+
+impl FadeLabel {
+    pub fn new(view: Retained<NSTextField>) -> FadeLabel {
+        let target = (
+            view.stringValue().to_string(),
+            view.textColor().unwrap_or_else(theme::ink),
+            view.frame().origin,
+        );
+        FadeLabel {
+            view,
+            generation: Rc::new(Cell::new(0)),
+            target: RefCell::new(target),
+        }
+    }
+
+    /// Changes the text and its colour, and moves the frame to `origin`, unless the label
+    /// is already headed there. A change made before the last one has finished replaces it:
+    /// the fade-out carries on from where it got to, then the newest text fades in.
+    pub fn set(&self, text: &str, color: &NSColor, origin: NSPoint) {
+        {
+            let t = self.target.borrow();
+            if t.0 == text && t.1.isEqual(Some(color)) && t.2 == origin {
+                return;
+            }
+        }
+        *self.target.borrow_mut() = (text.to_owned(), color.retain(), origin);
+        let generation = self.generation.get() + 1;
+        self.generation.set(generation);
+        let (out, fade_in, rise) = swap_steps(key_quiet(), reduce_motion());
+        let latest = Rc::clone(&self.generation);
+        let label = self.view.retain();
+        let (text, color) = (NSString::from_str(text), color.retain());
+        animate(
+            &self.view,
+            out,
+            EASE_OUT,
+            || self.view.animator().setAlphaValue(0.0),
+            move || {
+                if latest.get() == generation {
+                    rise_in(&label, &text, &color, origin, fade_in, rise);
+                }
+            },
+        );
+    }
+}
+
+/// Puts `text` in `l`, transparent and `rise` below `origin`, and fades it in rising there.
+fn rise_in(
+    l: &NSTextField,
+    text: &NSString,
+    color: &NSColor,
+    origin: NSPoint,
+    duration: Duration,
+    rise: CGFloat,
+) {
+    // What an interrupted change left running would carry on from where it got to, not
+    // from the start set here.
+    if let Some(layer) = l.layer() {
+        layer.removeAllAnimations();
+    }
+    l.setStringValue(text);
+    l.setTextColor(Some(color));
+    // SAFETY: a superview holds its subviews, so it is alive while `l` is in it.
+    let flipped = unsafe { l.superview() }.is_some_and(|s| s.isFlipped());
+    let below = if flipped { rise } else { -rise };
+    l.setAlphaValue(0.0);
+    l.setFrameOrigin(NSPoint::new(origin.x, origin.y + below));
+    animate(
+        l,
+        duration,
+        EASE_OUT,
+        || {
+            l.animator().setAlphaValue(1.0);
+            l.animator().setFrameOrigin(origin);
+        },
+        || {},
+    );
+}
+
+/// A text change's fade-out, fade-in and rise. None for a change the keyboard asked for;
+/// with Reduce Motion, the fades without the rise.
+fn swap_steps(quiet: bool, reduce: bool) -> (Duration, Duration, CGFloat) {
+    if quiet {
+        (Duration::ZERO, Duration::ZERO, 0.0)
+    } else if reduce {
+        (QUICK, MICRO, 0.0)
+    } else {
+        (QUICK, MICRO, TEXT_RISE)
     }
 }
 
@@ -1372,6 +1474,19 @@ mod tests {
         assert!(!keyboard_quiet(Some(t0), ms(1000)));
         // A key noted after `now` was read still counts.
         assert!(keyboard_quiet(Some(ms(5)), t0));
+    }
+
+    #[test]
+    fn a_text_change_fades_out_then_in_within_the_standard_time() {
+        let (out, fade_in, rise) = swap_steps(false, false);
+        assert_eq!(out + fade_in, STANDARD);
+        assert!(out < fade_in && rise > 0.0);
+        // Reduce Motion keeps the fades and drops the rise.
+        assert_eq!(swap_steps(false, true), (out, fade_in, 0.0));
+        assert_eq!(
+            swap_steps(true, false),
+            (Duration::ZERO, Duration::ZERO, 0.0)
+        );
     }
 
     #[test]

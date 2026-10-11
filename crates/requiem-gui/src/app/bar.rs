@@ -7,18 +7,19 @@ use objc2::runtime::AnyObject;
 use objc2::sel;
 use objc2_app_kit::{NSTextAlignment, NSTextField, NSView};
 use objc2_core_foundation::CGFloat;
-use objc2_foundation::MainThreadMarker;
+use objc2_foundation::{MainThreadMarker, NSPoint};
 
 use super::theme::{self, Icon, Weight};
 use super::widgets::{
-    self, FLEX_W, HoverButton, PIN_BOTTOM, PIN_LEFT, PIN_RIGHT, PIN_TOP, Slider, SliderKind, rect,
+    self, FLEX_W, FadeLabel, HoverButton, PIN_BOTTOM, PIN_LEFT, PIN_RIGHT, PIN_TOP, Slider,
+    SliderKind, rect,
 };
 use crate::vm::Controls;
 
 pub struct PlayerBar {
     pub view: Retained<NSView>,
-    title: Retained<NSTextField>,
-    artists: Retained<NSTextField>,
+    title: FadeLabel,
+    artists: FadeLabel,
     prev: Retained<HoverButton>,
     play: Retained<HoverButton>,
     next: Retained<HoverButton>,
@@ -41,6 +42,7 @@ impl PlayerBar {
     /// The title's centre with an artist line below it, and alone.
     const TITLE_Y: CGFloat = 45.0;
     const TITLE_ALONE_Y: CGFloat = Self::H / 2.0;
+    const ARTISTS_Y: CGFloat = 26.0;
 
     pub fn new(mtm: MainThreadMarker, width: CGFloat, target: &AnyObject) -> PlayerBar {
         let h = Self::H;
@@ -77,7 +79,7 @@ impl PlayerBar {
             &theme::font(12.0, Weight::Regular),
             &theme::muted(),
             20.0,
-            26.0,
+            Self::ARTISTS_Y,
             left_w,
             FLEX_W | PIN_LEFT,
         );
@@ -202,8 +204,8 @@ impl PlayerBar {
 
         PlayerBar {
             view,
-            title,
-            artists,
+            title: FadeLabel::new(title),
+            artists: FadeLabel::new(artists),
             prev,
             play,
             next,
@@ -218,31 +220,18 @@ impl PlayerBar {
 
     /// `None` when nothing is loaded.
     pub fn set_track(&self, track: Option<(&str, &str)>, total: &str) {
-        let fade = widgets::motion(widgets::STANDARD);
-        let artists = match track {
-            Some((title, artists)) => {
-                widgets::fade_text(&self.title, title, fade);
-                self.title.setTextColor(Some(&theme::ink()));
-                artists
-            }
-            None => {
-                widgets::fade_text(&self.title, "Nothing playing", fade);
-                self.title.setTextColor(Some(&theme::muted()));
-                ""
-            }
+        let (title, artists, color) = match track {
+            Some((title, artists)) => (title, artists, theme::ink()),
+            None => ("Nothing playing", "", theme::muted()),
         };
-        widgets::fade_text(&self.artists, artists, fade);
         let mid = if artists.is_empty() {
             Self::TITLE_ALONE_Y
         } else {
             Self::TITLE_Y
         };
-        let f = self.title.frame();
-        let y = (mid - f.size.height / 2.0).round();
-        if f.origin.y != y {
-            self.title
-                .setFrameOrigin(objc2_foundation::NSPoint::new(f.origin.x, y));
-        }
+        self.title.set(title, &color, rest(&self.title.view, mid));
+        let at = rest(&self.artists.view, Self::ARTISTS_Y);
+        self.artists.set(artists, &theme::muted(), at);
         widgets::set_text(&self.total, total);
     }
 
@@ -290,4 +279,11 @@ impl PlayerBar {
     pub fn set_volume(&self, volume: u8) {
         self.volume.set_value(f64::from(volume) / 100.0);
     }
+}
+
+/// Where `l`'s frame sits with its text box centred on `mid_y`, as `placed_label` puts it.
+/// Only the height and x are read, which no change animates.
+fn rest(l: &NSTextField, mid_y: CGFloat) -> NSPoint {
+    let f = l.frame();
+    NSPoint::new(f.origin.x, (mid_y - f.size.height / 2.0).round())
 }
