@@ -67,6 +67,11 @@ define_class!(
         fn window_did_deminiaturize(&self, _notification: &NSNotification) {
             ui::with(|ui| ui.catch_up());
         }
+
+        #[unsafe(method(windowDidResize:))]
+        fn window_did_resize(&self, _notification: &NSNotification) {
+            ui::with(|ui| ui.window_resized());
+        }
     }
 
     // SAFETY: the implemented methods have the protocol's signatures.

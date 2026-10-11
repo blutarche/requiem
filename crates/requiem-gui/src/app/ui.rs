@@ -10,9 +10,9 @@ use objc2::rc::Retained;
 use objc2::runtime::{AnyObject, ProtocolObject};
 use objc2::{MainThreadOnly, sel};
 use objc2_app_kit::{
-    NSAnimatablePropertyContainer, NSApplication, NSBackingStoreType, NSLineBreakMode,
-    NSTextAlignment, NSTextField, NSTextFieldDelegate, NSView, NSWindow, NSWindowOcclusionState,
-    NSWindowStyleMask, NSWindowTitleVisibility,
+    NSAnimatablePropertyContainer, NSApplication, NSAttributedStringNSStringDrawing,
+    NSBackingStoreType, NSLineBreakMode, NSTextAlignment, NSTextField, NSTextFieldDelegate, NSView,
+    NSWindow, NSWindowOcclusionState, NSWindowStyleMask, NSWindowTitleVisibility,
 };
 use objc2_core_foundation::CGFloat;
 use objc2_foundation::{MainThreadMarker, NSPoint, NSSize, NSString};
@@ -57,6 +57,7 @@ const WIN_H: CGFloat = 720.0;
 const MIN_W: CGFloat = 800.0;
 const MIN_H: CGFloat = 500.0;
 const SIDEBAR_W: CGFloat = 240.0;
+/// One line; a second adds a line's height.
 const BANNER_H: CGFloat = 32.0;
 const PAD: CGFloat = 24.0;
 /// The window has a transparent title bar over the content; the page headers start below
@@ -96,6 +97,8 @@ pub struct Ui {
     banner_label: Retained<NSTextField>,
     /// False from the start of the fade-out; the view hides once it ends.
     banner_shown: Cell<bool>,
+    /// How far the banner pushes the pages down.
+    banner_inset: Cell<CGFloat>,
     search_page: Retained<NSView>,
     pub search: Field,
     status: Retained<NSTextField>,
@@ -291,6 +294,13 @@ impl Ui {
             FLEX_W,
         );
         banner_label.setAlignment(NSTextAlignment::Center);
+        // The stuck banner can outgrow a narrow window; it wraps rather than losing its end.
+        banner_label.setUsesSingleLineMode(false);
+        banner_label.setMaximumNumberOfLines(2);
+        banner_label.setLineBreakMode(NSLineBreakMode::ByWordWrapping);
+        if let Some(cell) = banner_label.cell() {
+            cell.setTruncatesLastVisibleLine(true);
+        }
         banner.addSubview(&banner_rule);
         banner.addSubview(&banner_label);
         banner.setHidden(true);
@@ -315,6 +325,7 @@ impl Ui {
             banner,
             banner_label,
             banner_shown: Cell::new(false),
+            banner_inset: Cell::new(0.0),
             search_page,
             search,
             status,
@@ -810,12 +821,52 @@ impl Ui {
         self.results_empty.view.setFrame(list);
     }
 
+    /// Fits the banner to its text at the current width: one line, or two when one is too
+    /// narrow. Returns its height.
+    fn layout_banner(&self) -> CGFloat {
+        let b = self.main.bounds();
+        let l = &self.banner_label;
+        let room = b.size.width - 2.0 * PAD;
+        let font = l
+            .font()
+            .unwrap_or_else(|| theme::font(12.0, Weight::Medium));
+        let text = l.stringValue().to_string();
+        // The label's cell pads its text by 2 pt a side.
+        let text_w = widgets::attributed(&text, &font, &theme::ink_2())
+            .size()
+            .width
+            .ceil()
+            + 4.0;
+        let lines: CGFloat = if text_w > room { 2.0 } else { 1.0 };
+        let line_h = widgets::line_height(&font);
+        let h = BANNER_H + (lines - 1.0) * (line_h - 2.0);
+        self.banner
+            .setFrame(rect(0.0, b.size.height - h, b.size.width, h));
+        let text_h = lines * line_h;
+        l.setFrame(rect(PAD, ((h - text_h) / 2.0).round(), room, text_h));
+        h
+    }
+
+    /// Keeps a shown banner fitted to the window's width.
+    pub fn window_resized(&self) {
+        if !self.banner_shown.get() {
+            return;
+        }
+        let h = self.layout_banner();
+        if self.banner_inset.replace(h) != h {
+            let b = self.main.bounds();
+            let page = rect(0.0, 0.0, b.size.width, b.size.height - h);
+            self.search_page.setFrame(page);
+            self.queue_page.setFrame(page);
+        }
+    }
+
     fn show_banner(&self, banner: Option<Banner>) {
         let b = self.main.bounds();
         let shown = banner.is_some();
         if let Some(banner) = &banner {
             widgets::set_text(&self.banner_label, &banner.text);
-            // The stuck banner can outgrow a narrow window.
+            // Two lines can still be too few at the minimum width.
             self.banner_label
                 .setToolTip(Some(&NSString::from_str(&banner.text)));
             let c = if banner.error {
@@ -825,14 +876,16 @@ impl Ui {
             };
             self.banner_label.setTextColor(Some(&c));
         }
-        let h = b.size.height - if shown { BANNER_H } else { 0.0 };
-        let page = rect(0.0, 0.0, b.size.width, h);
+        let inset = if shown { self.layout_banner() } else { 0.0 };
+        let page = rect(0.0, 0.0, b.size.width, b.size.height - inset);
         let place_pages = || {
             self.search_page.animator().setFrame(page);
             self.queue_page.animator().setFrame(page);
         };
         let changed = self.banner_shown.replace(shown) != shown;
-        let shift = if changed && !widgets::reduce_motion() {
+        // Also when a shown banner grows to a second line.
+        let moved = self.banner_inset.replace(inset) != inset;
+        let shift = if moved && !widgets::reduce_motion() {
             widgets::STANDARD
         } else {
             Duration::ZERO

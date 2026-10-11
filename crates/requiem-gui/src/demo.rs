@@ -8,7 +8,7 @@ use requiem_core::{
 };
 
 use crate::args::View;
-use crate::vm::{BANNER_GRACE, Intent, Link, Vm};
+use crate::vm::{BANNER_GRACE, Intent, Link, LinkError, Vm};
 
 pub const QUERY: &str = "night drive";
 
@@ -441,7 +441,7 @@ pub fn start_in(view: View) -> (Vm, Daemon) {
     match view {
         View::Disconnected => {
             // Past the grace, as a real outage would be by the time its banner shows.
-            vm.link_at(Link::Lost("demo".into()), t0);
+            vm.link_at(Link::Lost(LinkError::NotResponding), t0);
             vm.tick_at(t0 + BANNER_GRACE);
         }
         View::OutOfDate => vm.link(Link::OutOfDate),

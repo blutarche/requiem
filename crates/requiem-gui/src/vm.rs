@@ -1,6 +1,7 @@
 //! View model: folds daemon events and connection status into `UiState`, and maps user
 //! intents to `Command`s. No AppKit types, so it is unit-tested on every OS.
 
+use std::io;
 use std::ops::{BitOr, BitOrAssign};
 use std::time::{Duration, Instant};
 
@@ -82,7 +83,7 @@ pub enum Connection {
     Connecting,
     Connected,
     /// Lost after a connection; the backend retries with backoff. Holds the reason.
-    Reconnecting(String),
+    Reconnecting(LinkError),
     /// The daemon speaks another protocol version; the backend retries until it is gone.
     OutOfDate,
     /// `--demo`: fixed fake data, no daemon.
@@ -93,9 +94,43 @@ pub enum Connection {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Link {
     Connected,
-    Lost(String),
+    Lost(LinkError),
     OutOfDate,
     Demo,
+}
+
+/// Why the player can't be reached, as the banner puts it. The raw error goes to stderr only.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LinkError {
+    /// Nothing listens on the socket.
+    NotRunning,
+    /// A timeout, or the connection closed.
+    NotResponding,
+    Unreachable,
+}
+
+impl LinkError {
+    pub fn from_io(kind: io::ErrorKind) -> LinkError {
+        use io::ErrorKind as K;
+        match kind {
+            K::NotFound | K::ConnectionRefused => LinkError::NotRunning,
+            K::TimedOut
+            | K::UnexpectedEof
+            | K::ConnectionReset
+            | K::ConnectionAborted
+            | K::BrokenPipe
+            | K::NotConnected => LinkError::NotResponding,
+            _ => LinkError::Unreachable,
+        }
+    }
+
+    pub fn text(self) -> &'static str {
+        match self {
+            LinkError::NotRunning => "The player isn't running.",
+            LinkError::NotResponding => "The player stopped responding.",
+            LinkError::Unreachable => "The player couldn't be reached.",
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -355,7 +390,7 @@ pub struct Vm {
     /// When the current spell without a connection began; `None` while connected.
     offline_since: Option<Instant>,
     /// Why the last connect attempt before the first connection failed.
-    connect_error: Option<String>,
+    connect_error: Option<LinkError>,
     /// The banner already shows the reason and the hint.
     stuck: bool,
     /// The previous queue while the "Queue replaced" toast is shown.
@@ -801,10 +836,8 @@ impl Vm {
     fn refresh_banner(&mut self, now: Instant) {
         let waited = self.offline_since.map(|t| now.saturating_duration_since(t));
         let (text, reason) = match &self.ui.connection {
-            Connection::Connecting => ("Connecting to player…", self.connect_error.as_deref()),
-            Connection::Reconnecting(r) => {
-                ("Player disconnected — reconnecting…", Some(r.as_str()))
-            }
+            Connection::Connecting => ("Connecting to player…", self.connect_error),
+            Connection::Reconnecting(r) => ("Player disconnected — reconnecting…", Some(*r)),
             Connection::OutOfDate => (OUT_OF_DATE, None),
             Connection::Connected | Connection::Demo => ("", None),
         };
@@ -817,7 +850,7 @@ impl Vm {
             Some(w) if w < BANNER_GRACE => None,
             Some(_) if self.stuck => Some(Banner {
                 text: match reason {
-                    Some(r) => format!("{text} ({r}). {STUCK_HINT}"),
+                    Some(r) => format!("{text} {} {STUCK_HINT}", r.text()),
                     None => format!("{text} {STUCK_HINT}"),
                 },
                 error: false,
@@ -1569,10 +1602,10 @@ mod tests {
     #[test]
     fn losing_connection_raises_no_toast() {
         let mut vm = playing(225);
-        vm.link(Link::Lost("daemon closed the connection".into()));
+        vm.link(Link::Lost(LinkError::NotResponding));
         assert_eq!(
             vm.ui().connection,
-            Connection::Reconnecting("daemon closed the connection".into())
+            Connection::Reconnecting(LinkError::NotResponding)
         );
         assert!(vm.ui().toast.is_none());
         assert!(vm.take_dirty().contains(Dirty::CONNECTION));
@@ -1583,7 +1616,7 @@ mod tests {
         let mut vm = playing(225);
         let t0 = Instant::now();
         let ms = |n| t0 + Duration::from_millis(n);
-        vm.link_at(Link::Lost("gone".into()), t0);
+        vm.link_at(Link::Lost(LinkError::NotResponding), t0);
         assert_eq!(vm.ui().banner, None);
         assert_eq!(vm.next_tick(), Some(t0 + BANNER_GRACE));
         vm.take_dirty();
@@ -1607,10 +1640,10 @@ mod tests {
         let mut vm = playing(225);
         let t0 = Instant::now();
         let s = |n| t0 + Duration::from_secs(n);
-        vm.link_at(Link::Lost("gone".into()), t0);
+        vm.link_at(Link::Lost(LinkError::NotResponding), t0);
         // Each failed retry reports Lost again with the latest reason.
-        vm.link_at(Link::Lost("connection refused".into()), s(4));
-        vm.link_at(Link::Lost("connection refused".into()), s(29));
+        vm.link_at(Link::Lost(LinkError::NotRunning), s(4));
+        vm.link_at(Link::Lost(LinkError::NotRunning), s(29));
         assert_eq!(
             vm.ui().banner.as_ref().map(|b| b.text.as_str()),
             Some("Player disconnected — reconnecting…")
@@ -1619,9 +1652,9 @@ mod tests {
         assert_eq!(
             vm.ui().banner,
             Some(Banner {
-                text: "Player disconnected — reconnecting… (connection refused). If this \
-                       persists, choose Quit and Stop Music from the requiem menu-bar icon, \
-                       then reopen requiem."
+                text: "Player disconnected — reconnecting… The player isn't running. If \
+                       this persists, choose Quit and Stop Music from the requiem menu-bar \
+                       icon, then reopen requiem."
                     .into(),
                 error: false
             })
@@ -1644,17 +1677,59 @@ mod tests {
             })
         );
         // A failed first connect is still connecting: nothing was disconnected.
-        vm.link_at(Link::Lost("not found".into()), t0 + Duration::from_secs(3));
+        vm.link_at(
+            Link::Lost(LinkError::NotRunning),
+            t0 + Duration::from_secs(3),
+        );
         assert_eq!(vm.ui().connection, Connection::Connecting);
         vm.tick_at(t0 + STUCK_AFTER);
         assert_eq!(
             vm.ui().banner.as_ref().map(|b| b.text.as_str()),
             Some(
-                "Connecting to player… (not found). If this persists, choose Quit and Stop \
-                 Music from the requiem menu-bar icon, then reopen requiem."
+                "Connecting to player… The player isn't running. If this persists, choose \
+                 Quit and Stop Music from the requiem menu-bar icon, then reopen requiem."
             )
         );
         assert!(vm.ui().toast.is_none());
+    }
+
+    #[test]
+    fn link_errors_are_put_in_plain_words() {
+        use io::ErrorKind as K;
+        for (kind, want) in [
+            (K::ConnectionRefused, LinkError::NotRunning),
+            (K::NotFound, LinkError::NotRunning),
+            (K::TimedOut, LinkError::NotResponding),
+            (K::UnexpectedEof, LinkError::NotResponding),
+            (K::ConnectionReset, LinkError::NotResponding),
+            (K::BrokenPipe, LinkError::NotResponding),
+            (K::PermissionDenied, LinkError::Unreachable),
+            (K::InvalidData, LinkError::Unreachable),
+            (K::Other, LinkError::Unreachable),
+        ] {
+            assert_eq!(LinkError::from_io(kind), want, "{kind:?}");
+        }
+        assert_eq!(LinkError::NotRunning.text(), "The player isn't running.");
+        assert_eq!(
+            LinkError::NotResponding.text(),
+            "The player stopped responding."
+        );
+        assert_eq!(
+            LinkError::Unreachable.text(),
+            "The player couldn't be reached."
+        );
+        // The stuck banner says it in those words.
+        let mut vm = playing(225);
+        let t0 = Instant::now();
+        vm.link_at(Link::Lost(LinkError::Unreachable), t0);
+        vm.tick_at(t0 + STUCK_AFTER);
+        let text = vm.ui().banner.clone().unwrap().text;
+        assert!(
+            text.starts_with(
+                "Player disconnected — reconnecting… The player couldn't be reached. If this"
+            ),
+            "{text}"
+        );
     }
 
     #[test]
@@ -1666,7 +1741,7 @@ mod tests {
         assert_eq!(vm.next_tick(), None);
 
         let mut vm = playing(225);
-        vm.link_at(Link::Lost("gone".into()), t0);
+        vm.link_at(Link::Lost(LinkError::NotResponding), t0);
         vm.link_at(Link::Connected, t0 + Duration::from_millis(700));
         assert_eq!(vm.ui().banner, None);
         assert!(vm.ui().toast.is_none());
@@ -1680,7 +1755,7 @@ mod tests {
             current: Some(1),
         });
         let t0 = Instant::now();
-        vm.link_at(Link::Lost("gone".into()), t0);
+        vm.link_at(Link::Lost(LinkError::NotResponding), t0);
         vm.tick_at(t0 + Duration::from_secs(2));
         vm.take_dirty();
         vm.link_at(Link::Connected, t0 + Duration::from_secs(3));
@@ -1703,7 +1778,7 @@ mod tests {
     #[test]
     fn snapshot_after_reconnect_rebuilds_state() {
         let mut vm = playing(225);
-        vm.link(Link::Lost("gone".into()));
+        vm.link(Link::Lost(LinkError::NotResponding));
         vm.link(Link::Connected);
         let q = tracks(4);
         vm.apply(Event::QueueChanged {
@@ -1729,7 +1804,7 @@ mod tests {
     fn pending_search_survives_disconnect_and_is_resent() {
         let mut vm = connected();
         let req = search_req(&mut vm, "a");
-        vm.link(Link::Lost("gone".into()));
+        vm.link(Link::Lost(LinkError::NotResponding));
         assert_eq!(vm.ui().search, SearchStatus::Pending);
         assert!(vm.take_commands().is_empty());
         vm.link(Link::Connected);
@@ -1965,7 +2040,7 @@ mod tests {
             player: true,
         };
         assert_eq!(vm.ui().controls(), on);
-        vm.link(Link::Lost("gone".into()));
+        vm.link(Link::Lost(LinkError::NotResponding));
         assert_eq!(vm.ui().controls(), off);
         vm.link(Link::OutOfDate);
         assert_eq!(vm.ui().controls(), off);
@@ -1979,7 +2054,7 @@ mod tests {
         assert!(!vm.ui().can_stop_player());
         vm.link(Link::Connected);
         assert!(vm.ui().can_stop_player());
-        vm.link(Link::Lost("gone".into()));
+        vm.link(Link::Lost(LinkError::NotResponding));
         assert!(!vm.ui().can_stop_player());
         vm.link(Link::OutOfDate);
         assert!(!vm.ui().can_stop_player());
@@ -1994,7 +2069,7 @@ mod tests {
         assert!(vm.intent(Intent::Toggle).is_empty());
         assert!(vm.intent(Intent::Next).is_empty());
         assert!(vm.intent(Intent::Prev).is_empty());
-        vm.link(Link::Lost("gone".into()));
+        vm.link(Link::Lost(LinkError::NotResponding));
         for i in [
             Intent::PlayResult(0),
             Intent::AppendResult(0),
@@ -2242,7 +2317,7 @@ mod tests {
         assert_eq!(queued(0).ui().edit_command(QueueEdit::Clear), None);
 
         let mut vm = queued(5);
-        vm.link(Link::Lost("gone".into()));
+        vm.link(Link::Lost(LinkError::NotResponding));
         for e in [
             QueueEdit::Remove(0),
             QueueEdit::MoveDown(0),
