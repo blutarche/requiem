@@ -317,6 +317,13 @@ impl Ui {
             PIN_TOP | PIN_RIGHT,
         );
         queue_count.setAlignment(NSTextAlignment::Right);
+        // On the heading's baseline rather than its centre line. Labels draw their text from
+        // the top of their frame, so the baseline is the top less the first-baseline offset.
+        let baseline = heading.frame().origin.y + heading.frame().size.height
+            - heading.firstBaselineOffsetFromTop();
+        let mut f = queue_count.frame();
+        f.origin.y = baseline + queue_count.firstBaselineOffsetFromTop() - f.size.height;
+        queue_count.setFrame(f);
         let queue = Table::new(mtm, list, Kind::Queue);
         let queue_empty = EmptyState::new(mtm, list, Icon::ListMusic, target, sel!(focusSearch:));
         queue_empty.set(
@@ -589,10 +596,24 @@ impl Ui {
     }
 
     pub fn intent(&self, intent: Intent) {
+        self.run(intent);
+    }
+
+    /// Appends result `i`, and confirms it on the row's "+" when it was sent.
+    pub fn append_result(&self, i: usize) {
+        if self.run(Intent::AppendResult(i)) {
+            self.results.confirm_add(i);
+        }
+    }
+
+    /// `intent`; true when it sent anything.
+    fn run(&self, intent: Intent) -> bool {
         widgets::note_key_event(self.mtm);
         let cmds = self.vm.borrow_mut().intent(intent);
+        let sent = !cmds.is_empty();
         self.send(cmds);
         self.render();
+        sent
     }
 
     /// Sends `cmds`, then whatever the view model raised in answer: the demo backend answers
@@ -628,15 +649,11 @@ impl Ui {
     /// Plays (or with `append`, appends) the keyboard-selected row of the visible table.
     pub fn activate_selection(&self, append: bool) {
         match self.view.get() {
-            AppView::Search => {
-                if let Some(i) = self.results.selected_row() {
-                    self.intent(if append {
-                        Intent::AppendResult(i)
-                    } else {
-                        Intent::PlayResult(i)
-                    });
-                }
-            }
+            AppView::Search => match self.results.selected_row() {
+                Some(i) if append => self.append_result(i),
+                Some(i) => self.intent(Intent::PlayResult(i)),
+                None => {}
+            },
             AppView::Queue => {
                 if let Some(i) = self.queue.selected_row().filter(|_| !append) {
                     self.play_queue(i);
