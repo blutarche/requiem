@@ -1144,7 +1144,7 @@ impl Ui {
         // A new toast, or an amended text, is read out; a re-render is not.
         let said = (toast.id, toast.text.clone());
         if *t.said.borrow() != said {
-            widgets::announce(self.mtm, &toast.text);
+            widgets::announce(self.mtm, &spoken(&toast));
             *t.said.borrow_mut() = said;
         }
         // A toast amended in place keeps its countdown, as does one counted while hidden.
@@ -1317,6 +1317,15 @@ impl Ui {
     }
 }
 
+/// What VoiceOver reads for `toast`: an undoable one also names the key that undoes it,
+/// which outlasts the toast and its button.
+fn spoken(toast: &Toast) -> String {
+    match toast.action {
+        Some("Undo") => format!("{}. Undo with Command-Z", toast.text),
+        _ => toast.text.clone(),
+    }
+}
+
 struct NowPlaying {
     track: Option<(String, String)>,
     total: String,
@@ -1454,6 +1463,21 @@ mod tests {
         );
         // Held past its end, it resumes with nothing left.
         assert_eq!(c.hold(s(6)).resume(s(7)), Countdown::Running(s(7)));
+    }
+
+    #[test]
+    fn an_undoable_toast_is_read_with_its_key() {
+        let toast = |action| Toast {
+            id: 1,
+            text: "Queue cleared".into(),
+            error: false,
+            action,
+        };
+        assert_eq!(
+            spoken(&toast(Some("Undo"))),
+            "Queue cleared. Undo with Command-Z"
+        );
+        assert_eq!(spoken(&toast(None)), "Queue cleared");
     }
 
     #[test]
