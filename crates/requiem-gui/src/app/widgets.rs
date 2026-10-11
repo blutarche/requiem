@@ -480,15 +480,14 @@ impl HoverButton {
         this
     }
 
-    /// A primary text button: accent fill, white title. `set_label` sizes its width.
+    /// A primary text button: primary fill, white title. `set_label` sizes its width.
     pub fn primary(mtm: MainThreadMarker, frame: NSRect) -> Retained<Self> {
-        let this = Self::filled(
-            mtm,
-            frame,
-            Some(&theme::accent()),
-            &theme::accent_hover(),
-            theme::RADIUS,
-        );
+        let this = Self::alloc(mtm).set_ivars(ButtonIvars {
+            title_color: theme::white(),
+            ring: theme::ink(),
+            ..Self::ivars_for(Some(&theme::primary()), &theme::accent_deep())
+        });
+        let this = Self::init(this, frame, theme::RADIUS);
         this.setImagePosition(NSCellImagePosition::NoImage);
         this
     }

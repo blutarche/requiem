@@ -101,10 +101,15 @@ pub fn accent() -> Retained<NSColor> {
 pub fn accent_hi() -> Retained<NSColor> {
     rgb(0x9088F8)
 }
-/// A primary button's hover: the accent darkened toward accent-deep, so the white label keeps
-/// 4.64:1. Lightening it to accent-hi would leave 2.97:1, under the 3:1 large text needs.
-pub fn accent_hover() -> Retained<NSColor> {
+/// A primary button's fill: the accent darkened 40% toward accent-deep, so the white label
+/// keeps 4.64:1, where on the accent itself it would have 3.82:1.
+pub fn primary() -> Retained<NSColor> {
     mix(ACCENT, ACCENT_DEEP, 0.4)
+}
+/// A primary button's hover, darker still: 6.34:1 under the white label. Lightening it to
+/// accent-hi would leave 2.97:1.
+pub fn accent_deep() -> Retained<NSColor> {
+    rgb(ACCENT_DEEP)
 }
 pub fn accent_soft() -> Retained<NSColor> {
     rgba(ACCENT, SOFT)
