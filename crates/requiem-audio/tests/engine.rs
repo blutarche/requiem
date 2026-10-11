@@ -257,7 +257,7 @@ fn check_tone(h: &Harness, expect_secs: f64) {
 #[test]
 fn opus_plays_to_end() {
     let mut h = harness(10.0);
-    h.engine.load(7, opus());
+    h.engine.load(7, opus(), false);
     h.wait_ended(7);
     let ev = h.events();
     assert!(ev.iter().all(|e| gen_of(e) == 7));
@@ -286,8 +286,11 @@ fn opus_plays_to_end() {
 fn aac_is_resampled_to_output_rate() {
     // Slower capture: the unoptimised resampler must keep ahead of the callback.
     let mut h = harness(4.0);
-    h.engine
-        .load(1, mem(fixture("sine440_44k.m4a"), FormatHint::Mp4Aac));
+    h.engine.load(
+        1,
+        mem(fixture("sine440_44k.m4a"), FormatHint::Mp4Aac),
+        false,
+    );
     h.wait_ended(1);
     check_tone(&h, 6.0);
 }
@@ -295,7 +298,7 @@ fn aac_is_resampled_to_output_rate() {
 #[test]
 fn seek_right_after_start() {
     let mut h = harness(4.0);
-    h.engine.load(1, opus());
+    h.engine.load(1, opus(), false);
     h.wait_started(1);
     let before_seek = h.capture.frames();
     h.engine.seek(Duration::from_secs(4));
@@ -324,7 +327,7 @@ fn output_is_parked_until_load() {
 #[test]
 fn pause_parks_output_and_freezes_position() {
     let mut h = harness(10.0);
-    h.engine.load(1, opus());
+    h.engine.load(1, opus(), false);
     h.wait_capture_frames(RATE as usize, 20);
     h.engine.pause();
     std::thread::sleep(Duration::from_millis(50));
@@ -345,9 +348,50 @@ fn pause_parks_output_and_freezes_position() {
 }
 
 #[test]
+fn paused_load_starts_without_playing() {
+    let mut h = harness(10.0);
+    h.engine.load(1, opus(), true);
+    h.wait_started(1);
+    match &h.events()[0] {
+        EngineEvent::Started {
+            duration: Some(d), ..
+        } => assert!(near(d.as_secs_f64(), 6.0, 0.1), "duration {d:?}"),
+        other => panic!("first event {other:?}"),
+    }
+    // 2 s of output time at 10x realtime.
+    std::thread::sleep(Duration::from_millis(200));
+    assert_eq!(h.capture.frames(), 0, "output rendered while paused");
+    assert!(positions(&h.events(), 1).is_empty(), "{:?}", h.events());
+    h.engine.resume();
+    h.wait_ended(1);
+    check_tone(&h, 6.0);
+}
+
+#[test]
+fn paused_load_after_a_paused_track_stays_silent() {
+    let mut h = harness(10.0);
+    h.engine.load(1, opus(), false);
+    h.wait_capture_frames(RATE as usize, 20);
+    h.engine.pause();
+    std::thread::sleep(Duration::from_millis(50));
+    let f0 = h.capture.frames();
+    h.engine.load(2, opus(), true);
+    h.wait_started(2);
+    std::thread::sleep(Duration::from_millis(200));
+    assert_eq!(h.capture.frames(), f0, "output rendered while paused");
+    assert!(positions(&h.events(), 2).is_empty(), "{:?}", h.events());
+    h.engine.resume();
+    h.wait_ended(2);
+    let l = left(&h.capture.samples());
+    let (first, last) = active_span(&l[f0..]);
+    let len = secs(last - first);
+    assert!(near(len, 6.0, 0.12), "duration {len}");
+}
+
+#[test]
 fn position_continues_across_pause() {
     let mut h = harness(10.0);
-    h.engine.load(1, opus());
+    h.engine.load(1, opus(), false);
     h.wait("positions", 10, |ev| {
         positions(ev, 1).iter().any(|p| *p >= 2.0)
     });
@@ -383,6 +427,7 @@ fn seek_while_paused_wakes_decoder_and_lands() {
                 ReadPlan::Full
             },
         ),
+        false,
     );
     h.wait("positions", 10, |ev| !positions(ev, 1).is_empty());
     h.engine.pause();
@@ -412,7 +457,7 @@ fn seek_while_paused_wakes_decoder_and_lands() {
 fn rms_of_play(volume: f32) -> f64 {
     let mut h = harness(10.0);
     h.engine.set_volume(volume);
-    h.engine.load(1, opus());
+    h.engine.load(1, opus(), false);
     h.wait_ended(1);
     let l = left(&h.capture.samples());
     let (first, _) = active_span(&l);
@@ -431,8 +476,8 @@ fn volume_scales_rms() {
 #[test]
 fn newer_load_silences_older_gen() {
     let mut h = harness(10.0);
-    h.engine.load(1, opus());
-    h.engine.load(2, opus());
+    h.engine.load(1, opus(), false);
+    h.engine.load(2, opus(), false);
     let at_load = h.events().len();
     h.wait_ended(2);
     let ev = h.events();
@@ -460,10 +505,11 @@ fn blocked_read_does_not_delay_next_load() {
                 ReadPlan::Full
             },
         ),
+        false,
     );
     std::thread::sleep(Duration::from_millis(100));
     let t = Instant::now();
-    h.engine.load(2, opus());
+    h.engine.load(2, opus(), false);
     h.wait_started(2);
     assert!(
         t.elapsed() < Duration::from_millis(500),
@@ -487,6 +533,7 @@ fn io_error_fails_as_stream() {
                 ReadPlan::Full
             }
         }),
+        false,
     );
     let (kind, detail) = h.wait_failed(1);
     assert_eq!(kind, FailureKind::Stream, "{detail}");
@@ -504,7 +551,7 @@ fn garbage_fails_as_decode() {
             (x >> 24) as u8
         })
         .collect();
-    h.engine.load(1, mem(junk, FormatHint::WebmOpus));
+    h.engine.load(1, mem(junk, FormatHint::WebmOpus), false);
     let (kind, detail) = h.wait_failed(1);
     assert_eq!(kind, FailureKind::Decode, "{detail}");
 }
@@ -528,6 +575,7 @@ fn slow_source_reports_buffering() {
                 ReadPlan::Cap(512)
             },
         ),
+        false,
     );
     h.wait_ended(1);
     let flags: Vec<bool> = h
@@ -549,7 +597,7 @@ fn slow_source_reports_buffering() {
 #[test]
 fn stop_goes_silent_and_parks_output() {
     let mut h = harness(4.0);
-    h.engine.load(1, opus());
+    h.engine.load(1, opus(), false);
     h.wait("positions", 10, |ev| positions(ev, 1).len() >= 2);
     h.engine.stop();
     let n_events = h.events().len();
@@ -570,12 +618,12 @@ fn stop_goes_silent_and_parks_output() {
 #[test]
 fn load_after_stop_plays() {
     let mut h = harness(10.0);
-    h.engine.load(1, opus());
+    h.engine.load(1, opus(), false);
     h.wait("positions", 10, |ev| positions(ev, 1).len() >= 2);
     h.engine.stop();
     std::thread::sleep(Duration::from_millis(50));
     let f0 = h.capture.frames();
-    h.engine.load(2, opus());
+    h.engine.load(2, opus(), false);
     h.wait_ended(2);
     let l = left(&h.capture.samples());
     let (first, last) = active_span(&l[f0..]);
@@ -591,7 +639,7 @@ fn load_after_stop_plays() {
 #[test]
 fn drop_is_quick() {
     let mut h = harness(10.0);
-    h.engine.load(1, opus());
+    h.engine.load(1, opus(), false);
     h.wait_started(1);
     let t = Instant::now();
     drop(h.engine);
@@ -624,7 +672,7 @@ fn real_files() {
         };
         let bytes = std::fs::read(&path).unwrap();
         let mut h = harness(10.0);
-        h.engine.load(1, mem(bytes, hint));
+        h.engine.load(1, mem(bytes, hint), false);
         h.wait_started(1);
         h.wait_capture_frames(10 * RATE as usize, 120);
         h.engine.seek(Duration::from_secs(60));

@@ -260,7 +260,7 @@ fn reopen(output: &mut dyn Output, shared: &Shared, sink: &EngineEventSink, deta
 }
 
 impl Engine for AudioEngine {
-    fn load(&mut self, r#gen: u64, src: AudioSource) {
+    fn load(&mut self, r#gen: u64, src: AudioSource, paused: bool) {
         self.cancel_live();
         let cancel = Arc::new(AtomicBool::new(false));
         let (tx, rx) = mpsc::channel();
@@ -269,10 +269,14 @@ impl Engine for AudioEngine {
             cmds: tx,
         });
         self.shared.cur_gen.store(r#gen, Ordering::Release);
-        self.shared.paused.store(false, Ordering::Relaxed);
-        // Sent before spawning so the output is normally running by the ring handover; a
-        // handover that still finds it parked skips the ack wait (see `Shared::parked`).
-        let _ = self.sup_tx.send(SupMsg::Play);
+        self.shared.paused.store(paused, Ordering::Relaxed);
+        // Sent before spawning so the output is normally running, or parked when paused, by
+        // the ring handover; a handover that finds it parked skips the ack wait (see
+        // `Shared::parked`). A paused load never sends `Play`, so the previous track's ring
+        // cannot sound in between.
+        let _ = self
+            .sup_tx
+            .send(if paused { SupMsg::Pause } else { SupMsg::Play });
         decode::spawn(Job {
             r#gen,
             src,

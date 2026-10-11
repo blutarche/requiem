@@ -710,3 +710,177 @@ fn play_while_stopped_starts_after_the_cursor_or_from_the_top() {
     let (_, payload) = r.engine.wait_load(3);
     assert_eq!(payload, "a");
 }
+
+impl Rig {
+    /// Events emitted before a barrier.
+    fn drain(&self) -> Vec<Event> {
+        self.send(Command::SetVolume(100));
+        let mut evs = Vec::new();
+        loop {
+            match self.wait_event(|_| true) {
+                Event::Volume(_) => return evs,
+                ev => evs.push(ev),
+            }
+        }
+    }
+
+    /// Waits for the nth (1-based) load; returns its generation and whether it was paused.
+    fn nth_load(&self, n: usize) -> (u64, bool) {
+        self.engine.wait_load(n);
+        self.engine
+            .calls()
+            .into_iter()
+            .filter_map(|c| match c {
+                EngineCall::Load { r#gen, paused, .. } => Some((r#gen, paused)),
+                _ => None,
+            })
+            .nth(n - 1)
+            .unwrap()
+    }
+}
+
+fn no_state(evs: &[Event]) -> bool {
+    !evs.iter().any(|e| matches!(e, Event::State(_)))
+}
+
+#[test]
+fn pause_while_loading_holds_through_start() {
+    let r = rig(config());
+    let gate = Gate::new();
+    r.provider
+        .script_resolve("a", vec![Step::ok(()).gated(&gate)]);
+    r.enqueue(&["a", "b"]);
+    r.send(Command::PlayIndex(0));
+    r.wait_event(|e| *e == Event::State(PlayState::Buffering));
+    r.send(Command::Pause);
+    r.wait_event(|e| *e == Event::State(PlayState::Paused));
+    gate.release();
+
+    let (r#gen, paused) = r.nth_load(1);
+    assert!(paused, "{:?}", r.engine.calls());
+    r.engine.emit(EngineEvent::Started {
+        r#gen,
+        duration: Some(SECS(100)),
+    });
+    r.wait_event(|e| {
+        *e == Event::NowPlaying {
+            track: track("a"),
+            duration: Some(SECS(100)),
+        }
+    });
+    let evs = r.drain();
+    assert!(no_state(&evs), "{evs:?}");
+    r.provider.wait_resolve_calls("b", 1);
+
+    r.send(Command::Seek(SeekTarget::Absolute(SECS(30))));
+    r.wait_event(|e| *e == Event::Position(SECS(30)));
+    r.send(Command::Resume);
+    r.wait_event(|e| *e == Event::State(PlayState::Playing));
+    let calls = r.engine.calls();
+    assert_eq!(
+        calls[calls.len() - 2..],
+        [EngineCall::Seek(SECS(30)), EngineCall::Resume]
+    );
+}
+
+#[test]
+fn pause_while_skipping_holds_through_start() {
+    let r = rig(config());
+    let gate = Gate::new();
+    r.provider
+        .script_resolve("b", vec![Step::ok(()).gated(&gate)]);
+    r.play_started(&["a", "b"]);
+    r.provider.wait_resolve_calls("b", 1);
+    r.send(Command::Next);
+    r.send(Command::Pause);
+    r.wait_event(|e| *e == Event::State(PlayState::Paused));
+    gate.release();
+
+    let (r#gen, paused) = r.nth_load(2);
+    assert!(paused, "{:?}", r.engine.calls());
+    r.engine.emit(EngineEvent::Started {
+        r#gen,
+        duration: None,
+    });
+    r.wait_event(|e| matches!(e, Event::NowPlaying { track, .. } if track.id.id == "b"));
+    let evs = r.drain();
+    assert!(no_state(&evs), "{evs:?}");
+    r.send(Command::TogglePause);
+    r.wait_event(|e| *e == Event::State(PlayState::Playing));
+}
+
+#[test]
+fn resume_while_loading_buffers_until_started() {
+    let r = rig(config());
+    let gate_a = Gate::new();
+    let gate_b = Gate::new();
+    r.provider
+        .script_resolve("a", vec![Step::ok(()).gated(&gate_a)]);
+    r.provider
+        .script_resolve("b", vec![Step::ok(()).gated(&gate_b)]);
+
+    // Resumed before the load: the engine still holds nothing of this track.
+    r.enqueue(&["a", "b"]);
+    r.send(Command::PlayIndex(0));
+    r.send(Command::Pause);
+    r.wait_event(|e| *e == Event::State(PlayState::Paused));
+    r.send(Command::Resume);
+    r.wait_event(|e| *e == Event::State(PlayState::Buffering));
+    gate_a.release();
+    let (gen_a, paused) = r.nth_load(1);
+    assert!(!paused);
+    assert!(!r.engine.calls().contains(&EngineCall::Resume));
+    r.start(gen_a, None);
+
+    // Resumed after a paused load, before the engine reports it started.
+    r.provider.wait_resolve_calls("b", 1);
+    r.send(Command::Next);
+    r.send(Command::Pause);
+    r.wait_event(|e| *e == Event::State(PlayState::Paused));
+    gate_b.release();
+    let (gen_b, paused) = r.nth_load(2);
+    assert!(paused);
+    r.send(Command::Resume);
+    r.wait_event(|e| *e == Event::State(PlayState::Buffering));
+    assert_eq!(r.engine.calls().last(), Some(&EngineCall::Resume));
+    r.start(gen_b, None);
+}
+
+#[test]
+fn pause_while_loading_holds_through_a_failed_track() {
+    let r = rig(config());
+    let gate = Gate::new();
+    r.provider.script_resolve(
+        "a",
+        vec![Step::err(ProviderError::Unplayable("gone".into())).gated(&gate)],
+    );
+    r.enqueue(&["a", "b"]);
+    r.send(Command::PlayIndex(0));
+    r.send(Command::Pause);
+    r.wait_event(|e| *e == Event::State(PlayState::Paused));
+    gate.release();
+    r.wait_event(is_failed("a"));
+    let (r#gen, paused) = r.nth_load(1);
+    assert_eq!(r.loads(), ["b"]);
+    assert!(paused);
+    r.engine.emit(EngineEvent::Started {
+        r#gen,
+        duration: None,
+    });
+    r.wait_event(|e| matches!(e, Event::NowPlaying { .. }));
+    let evs = r.drain();
+    assert!(no_state(&evs), "{evs:?}");
+}
+
+#[test]
+fn playing_a_track_ends_a_pause() {
+    let r = rig(config());
+    r.play_started(&["a", "b"]);
+    r.send(Command::Pause);
+    r.wait_event(|e| *e == Event::State(PlayState::Paused));
+    r.send(Command::PlayIndex(1));
+    r.wait_event(|e| *e == Event::State(PlayState::Buffering));
+    let (r#gen, paused) = r.nth_load(2);
+    assert!(!paused);
+    r.start(r#gen, None);
+}

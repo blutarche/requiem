@@ -231,6 +231,7 @@ pub enum EngineCall {
     Load {
         r#gen: u64,
         payload: Vec<u8>,
+        paused: bool,
     },
     Pause,
     Resume,
@@ -300,7 +301,7 @@ impl FakeEngineHandle {
             .filter(|c| c.load_payload().is_some())
             .nth(n - 1)
         {
-            Some(EngineCall::Load { r#gen, payload }) => {
+            Some(EngineCall::Load { r#gen, payload, .. }) => {
                 (*r#gen, String::from_utf8_lossy(payload).into_owned())
             }
             _ => unreachable!(),
@@ -336,11 +337,15 @@ impl FakeEngine {
 }
 
 impl Engine for FakeEngine {
-    fn load(&mut self, r#gen: u64, src: AudioSource) {
+    fn load(&mut self, r#gen: u64, src: AudioSource, paused: bool) {
         let AudioSource::Encoded { mut bytes, .. } = src;
         let mut payload = Vec::new();
         bytes.read_to_end(&mut payload).expect("read fake source");
-        self.record(EngineCall::Load { r#gen, payload });
+        self.record(EngineCall::Load {
+            r#gen,
+            payload,
+            paused,
+        });
     }
 
     fn pause(&mut self) {
