@@ -622,6 +622,10 @@ impl Vm {
                 self.toast(format!("Couldn’t play “{}”: {error}", track.title), true);
                 self.failed_toast = Some(self.last_toast);
             }
+            Event::BrowseResults { .. }
+            | Event::BrowseFailed { .. }
+            | Event::Account { .. }
+            | Event::SignInFailed { .. } => {}
             // The detail is for stderr, which the backend writes it to.
             Event::ProviderBroken { provider, .. } => {
                 self.toast(

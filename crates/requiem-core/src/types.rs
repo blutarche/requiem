@@ -24,6 +24,65 @@ pub struct Track {
     pub artwork_url: Option<String>,
 }
 
+/// The id format is private to the provider that issued it.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct CollectionId {
+    pub provider: ProviderId,
+    pub id: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum CollectionKind {
+    Playlist,
+    Album,
+}
+
+/// A playlist or album that browses to its tracks.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Collection {
+    pub id: CollectionId,
+    pub kind: CollectionKind,
+    pub title: String,
+    pub subtitle: Option<String>,
+    pub artwork_url: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum Item {
+    Track(Track),
+    Collection(Collection),
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Shelf {
+    pub title: String,
+    pub items: Vec<Item>,
+}
+
+/// `Home` and `Library` go to the first provider; a collection to the provider that issued it.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum Page {
+    Home,
+    Library,
+    Collection(CollectionId),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum AccountState {
+    /// Sign-in can't start; the text says what to set up.
+    Unavailable(String),
+    SignedOut,
+    /// A device-code sign-in is waiting for the user to enter `user_code` at `verification_url`.
+    Pending {
+        verification_url: String,
+        user_code: String,
+        expires_at_unix: u64,
+    },
+    SignedIn {
+        name: Option<String>,
+    },
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum FormatHint {
     WebmOpus,
@@ -54,6 +113,8 @@ pub enum ProviderError {
     ClientBroken(String),
     /// Response shape changed.
     Parse(String),
+    /// The request needs a signed-in account: clients offer sign-in instead of an error.
+    SignInRequired(String),
 }
 
 impl fmt::Display for ProviderError {
@@ -63,6 +124,7 @@ impl fmt::Display for ProviderError {
             Self::Unplayable(m) => ("unplayable", m),
             Self::ClientBroken(m) => ("client broken", m),
             Self::Parse(m) => ("parse error", m),
+            Self::SignInRequired(m) => ("sign-in required", m),
         };
         write!(f, "{kind}: {msg}")
     }
@@ -74,6 +136,27 @@ pub trait Provider: Send + Sync {
     fn id(&self) -> ProviderId;
     fn search(&self, query: &str, limit: usize) -> Result<Vec<Track>, ProviderError>;
     fn resolve(&self, track: &TrackId) -> Result<AudioSource, ProviderError>;
+
+    /// Blocking; called on a worker thread.
+    fn browse(&self, _page: &Page) -> Result<Vec<Shelf>, ProviderError> {
+        Ok(Vec::new())
+    }
+
+    /// Called on the session thread: must not block.
+    fn account(&self) -> AccountState {
+        AccountState::Unavailable("this provider has no accounts".into())
+    }
+
+    /// Blocks until the sign-in ends, reporting `Pending` and then `SignedIn` through
+    /// `on_state`. Called on a worker thread.
+    fn sign_in(&self, _on_state: &dyn Fn(AccountState)) -> Result<(), ProviderError> {
+        Err(ProviderError::Unplayable(
+            "this provider has no accounts".into(),
+        ))
+    }
+
+    /// Ends a pending sign-in too. Blocking; called on a worker thread.
+    fn sign_out(&self) {}
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -174,6 +257,18 @@ pub enum Command {
     Seek(SeekTarget),
     SetVolume(u8),
     Shutdown,
+    /// Answered with `BrowseResults` or `BrowseFailed` under the same `req`.
+    Browse {
+        req: u64,
+        page: Page,
+    },
+    /// While a sign-in is pending, re-announces it rather than starting another.
+    SignIn {
+        provider: ProviderId,
+    },
+    SignOut {
+        provider: ProviderId,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -204,5 +299,26 @@ pub enum Event {
     ProviderBroken {
         provider: ProviderId,
         detail: String,
+    },
+    BrowseResults {
+        req: u64,
+        page: Page,
+        shelves: Vec<Shelf>,
+    },
+    BrowseFailed {
+        req: u64,
+        error: String,
+        /// Signing in would let the request succeed.
+        sign_in_required: bool,
+    },
+    /// Sent on every change, and to each new subscriber for every provider.
+    Account {
+        provider: ProviderId,
+        state: AccountState,
+    },
+    /// Why a sign-in ended without `SignedIn`. The `Account` that follows has the new state.
+    SignInFailed {
+        provider: ProviderId,
+        error: String,
     },
 }

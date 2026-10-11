@@ -1,0 +1,517 @@
+{
+ "responseContext": {
+  "visitorData": "VISITOR"
+ },
+ "contents": {
+  "twoColumnBrowseResultsRenderer": {
+   "secondaryContents": {
+    "sectionListRenderer": {
+     "contents": [
+      {
+       "musicShelfRenderer": {
+        "contents": [
+         {
+          "musicResponsiveListItemRenderer": {
+           "flexColumns": [
+            {
+             "musicResponsiveListItemFlexColumnRenderer": {
+              "text": {
+               "runs": [
+                {
+                 "text": "Daftendirekt",
+                 "navigationEndpoint": {
+                  "watchEndpoint": {
+                   "videoId": "yuoghR-5-Xs",
+                   "playlistId": "OLAK5uy_lAbfrCq-BVAU2Z2yAIjsEN0jwghzcAFSY",
+                   "watchEndpointMusicSupportedConfigs": {
+                    "watchEndpointMusicConfig": {
+                     "musicVideoType": "MUSIC_VIDEO_TYPE_OMV"
+                    }
+                   }
+                  }
+                 }
+                }
+               ]
+              },
+              "displayPriority": "MUSIC_RESPONSIVE_LIST_ITEM_COLUMN_DISPLAY_PRIORITY_HIGH"
+             }
+            },
+            {
+             "musicResponsiveListItemFlexColumnRenderer": {
+              "text": {},
+              "displayPriority": "MUSIC_RESPONSIVE_LIST_ITEM_COLUMN_DISPLAY_PRIORITY_HIGH"
+             }
+            },
+            {
+             "musicResponsiveListItemFlexColumnRenderer": {
+              "text": {
+               "runs": [
+                {
+                 "text": "4.6M plays"
+                }
+               ]
+              },
+              "displayPriority": "MUSIC_RESPONSIVE_LIST_ITEM_COLUMN_DISPLAY_PRIORITY_HIGH"
+             }
+            }
+           ],
+           "fixedColumns": [
+            {
+             "musicResponsiveListItemFixedColumnRenderer": {
+              "text": {
+               "runs": [
+                {
+                 "text": "2:45"
+                }
+               ]
+              },
+              "displayPriority": "MUSIC_RESPONSIVE_LIST_ITEM_COLUMN_DISPLAY_PRIORITY_HIGH",
+              "size": "MUSIC_RESPONSIVE_LIST_ITEM_FIXED_COLUMN_SIZE_SMALL"
+             }
+            }
+           ],
+           "playlistItemData": {
+            "playlistSetVideoId": "EE75172B9B671B74",
+            "videoId": "yuoghR-5-Xs"
+           },
+           "itemHeight": "MUSIC_RESPONSIVE_LIST_ITEM_HEIGHT_MEDIUM",
+           "index": {
+            "runs": [
+             {
+              "text": "1"
+             }
+            ]
+           }
+          }
+         },
+         {
+          "musicResponsiveListItemRenderer": {
+           "flexColumns": [
+            {
+             "musicResponsiveListItemFlexColumnRenderer": {
+              "text": {
+               "runs": [
+                {
+                 "text": "WDPK 83.7 FM",
+                 "navigationEndpoint": {
+                  "watchEndpoint": {
+                   "videoId": "OzZAHvq_UqI",
+                   "playlistId": "OLAK5uy_lAbfrCq-BVAU2Z2yAIjsEN0jwghzcAFSY",
+                   "watchEndpointMusicSupportedConfigs": {
+                    "watchEndpointMusicConfig": {
+                     "musicVideoType": "MUSIC_VIDEO_TYPE_OMV"
+                    }
+                   }
+                  }
+                 }
+                }
+               ]
+              },
+              "displayPriority": "MUSIC_RESPONSIVE_LIST_ITEM_COLUMN_DISPLAY_PRIORITY_HIGH"
+             }
+            },
+            {
+             "musicResponsiveListItemFlexColumnRenderer": {
+              "text": {},
+              "displayPriority": "MUSIC_RESPONSIVE_LIST_ITEM_COLUMN_DISPLAY_PRIORITY_HIGH"
+             }
+            },
+            {
+             "musicResponsiveListItemFlexColumnRenderer": {
+              "text": {
+               "runs": [
+                {
+                 "text": "2.4M plays"
+                }
+               ]
+              },
+              "displayPriority": "MUSIC_RESPONSIVE_LIST_ITEM_COLUMN_DISPLAY_PRIORITY_HIGH"
+             }
+            }
+           ],
+           "fixedColumns": [
+            {
+             "musicResponsiveListItemFixedColumnRenderer": {
+              "text": {
+               "runs": [
+                {
+                 "text": "0:29"
+                }
+               ]
+              },
+              "displayPriority": "MUSIC_RESPONSIVE_LIST_ITEM_COLUMN_DISPLAY_PRIORITY_HIGH",
+              "size": "MUSIC_RESPONSIVE_LIST_ITEM_FIXED_COLUMN_SIZE_SMALL"
+             }
+            }
+           ],
+           "playlistItemData": {
+            "playlistSetVideoId": "5D9E79BB19772A61",
+            "videoId": "OzZAHvq_UqI"
+           },
+           "itemHeight": "MUSIC_RESPONSIVE_LIST_ITEM_HEIGHT_MEDIUM",
+           "index": {
+            "runs": [
+             {
+              "text": "2"
+             }
+            ]
+           }
+          }
+         },
+         {
+          "musicResponsiveListItemRenderer": {
+           "flexColumns": [
+            {
+             "musicResponsiveListItemFlexColumnRenderer": {
+              "text": {
+               "runs": [
+                {
+                 "text": "Revolution 909",
+                 "navigationEndpoint": {
+                  "watchEndpoint": {
+                   "videoId": "uURB-vo9rZ4",
+                   "playlistId": "OLAK5uy_lAbfrCq-BVAU2Z2yAIjsEN0jwghzcAFSY",
+                   "watchEndpointMusicSupportedConfigs": {
+                    "watchEndpointMusicConfig": {
+                     "musicVideoType": "MUSIC_VIDEO_TYPE_OMV"
+                    }
+                   }
+                  }
+                 }
+                }
+               ]
+              },
+              "displayPriority": "MUSIC_RESPONSIVE_LIST_ITEM_COLUMN_DISPLAY_PRIORITY_HIGH"
+             }
+            },
+            {
+             "musicResponsiveListItemFlexColumnRenderer": {
+              "text": {},
+              "displayPriority": "MUSIC_RESPONSIVE_LIST_ITEM_COLUMN_DISPLAY_PRIORITY_HIGH"
+             }
+            },
+            {
+             "musicResponsiveListItemFlexColumnRenderer": {
+              "text": {
+               "runs": [
+                {
+                 "text": "20M plays"
+                }
+               ]
+              },
+              "displayPriority": "MUSIC_RESPONSIVE_LIST_ITEM_COLUMN_DISPLAY_PRIORITY_HIGH"
+             }
+            }
+           ],
+           "fixedColumns": [
+            {
+             "musicResponsiveListItemFixedColumnRenderer": {
+              "text": {
+               "runs": [
+                {
+                 "text": "5:36"
+                }
+               ]
+              },
+              "displayPriority": "MUSIC_RESPONSIVE_LIST_ITEM_COLUMN_DISPLAY_PRIORITY_HIGH",
+              "size": "MUSIC_RESPONSIVE_LIST_ITEM_FIXED_COLUMN_SIZE_SMALL"
+             }
+            }
+           ],
+           "playlistItemData": {
+            "playlistSetVideoId": "21D5A192EA217EE8",
+            "videoId": "uURB-vo9rZ4"
+           },
+           "itemHeight": "MUSIC_RESPONSIVE_LIST_ITEM_HEIGHT_MEDIUM",
+           "index": {
+            "runs": [
+             {
+              "text": "3"
+             }
+            ]
+           }
+          }
+         }
+        ]
+       }
+      },
+      {
+       "musicCarouselShelfRenderer": {
+        "header": {
+         "musicCarouselShelfBasicHeaderRenderer": {
+          "title": {
+           "runs": [
+            {
+             "text": "Other versions"
+            }
+           ]
+          },
+          "headerStyle": "MUSIC_CAROUSEL_SHELF_BASIC_HEADER_STYLE_DEFAULT"
+         }
+        },
+        "contents": [
+         {
+          "musicTwoRowItemRenderer": {
+           "thumbnailRenderer": {
+            "musicThumbnailRenderer": {
+             "thumbnail": {
+              "thumbnails": [
+               {
+                "url": "https://yt3.googleusercontent.com/lLzvUfGK8pyp2a-lvc56yEETq5OajUCeFGO2N0XQ4Qo0pKw34-mMn0NplkjPXg62rTLKNw6TB7aepE7oxg=w226-h226-l90-rj",
+                "width": 226,
+                "height": 226
+               },
+               {
+                "url": "https://yt3.googleusercontent.com/lLzvUfGK8pyp2a-lvc56yEETq5OajUCeFGO2N0XQ4Qo0pKw34-mMn0NplkjPXg62rTLKNw6TB7aepE7oxg=w544-h544-l90-rj",
+                "width": 544,
+                "height": 544
+               }
+              ]
+             },
+             "thumbnailCrop": "MUSIC_THUMBNAIL_CROP_UNSPECIFIED",
+             "thumbnailScale": "MUSIC_THUMBNAIL_SCALE_ASPECT_FILL"
+            }
+           },
+           "aspectRatio": "MUSIC_TWO_ROW_ITEM_THUMBNAIL_ASPECT_RATIO_SQUARE",
+           "title": {
+            "runs": [
+             {
+              "text": "Homework (25th Anniversary Edition)",
+              "navigationEndpoint": {
+               "browseEndpoint": {
+                "browseId": "MPREb_DysYPhLwfgT",
+                "browseEndpointContextSupportedConfigs": {
+                 "browseEndpointContextMusicConfig": {
+                  "pageType": "MUSIC_PAGE_TYPE_ALBUM"
+                 }
+                }
+               }
+              }
+             }
+            ]
+           },
+           "subtitle": {
+            "runs": [
+             {
+              "text": "Album"
+             },
+             {
+              "text": " • "
+             },
+             {
+              "text": "Daft Punk",
+              "navigationEndpoint": {
+               "browseEndpoint": {
+                "browseId": "UCRr1xG_2WIDs18a6cIiCxeA",
+                "browseEndpointContextSupportedConfigs": {
+                 "browseEndpointContextMusicConfig": {
+                  "pageType": "MUSIC_PAGE_TYPE_ARTIST"
+                 }
+                }
+               }
+              }
+             }
+            ]
+           },
+           "navigationEndpoint": {
+            "browseEndpoint": {
+             "browseId": "MPREb_DysYPhLwfgT",
+             "browseEndpointContextSupportedConfigs": {
+              "browseEndpointContextMusicConfig": {
+               "pageType": "MUSIC_PAGE_TYPE_ALBUM"
+              }
+             }
+            }
+           }
+          }
+         }
+        ],
+        "itemSize": "COLLECTION_STYLE_ITEM_SIZE_MEDIUM"
+       }
+      },
+      {
+       "musicCarouselShelfRenderer": {
+        "header": {
+         "musicCarouselShelfBasicHeaderRenderer": {
+          "title": {
+           "runs": [
+            {
+             "text": "Releases for you"
+            }
+           ]
+          },
+          "headerStyle": "MUSIC_CAROUSEL_SHELF_BASIC_HEADER_STYLE_DEFAULT"
+         }
+        },
+        "contents": [
+         {
+          "musicTwoRowItemRenderer": {
+           "thumbnailRenderer": {
+            "musicThumbnailRenderer": {
+             "thumbnail": {
+              "thumbnails": [
+               {
+                "url": "https://yt3.googleusercontent.com/znYnEYwK3AWBiW5bZdSekf0K0SkanbOfTWm8L5gDXBYn0N3DNhNoWSmR-H72dgV_zwf-4jaJeiP8pL8=w226-h226-l90-rj",
+                "width": 226,
+                "height": 226
+               },
+               {
+                "url": "https://yt3.googleusercontent.com/znYnEYwK3AWBiW5bZdSekf0K0SkanbOfTWm8L5gDXBYn0N3DNhNoWSmR-H72dgV_zwf-4jaJeiP8pL8=w544-h544-l90-rj",
+                "width": 544,
+                "height": 544
+               }
+              ]
+             },
+             "thumbnailCrop": "MUSIC_THUMBNAIL_CROP_UNSPECIFIED",
+             "thumbnailScale": "MUSIC_THUMBNAIL_SCALE_ASPECT_FILL"
+            }
+           },
+           "aspectRatio": "MUSIC_TWO_ROW_ITEM_THUMBNAIL_ASPECT_RATIO_SQUARE",
+           "title": {
+            "runs": [
+             {
+              "text": "Climax (Original Motion Picture Soundtrack)",
+              "navigationEndpoint": {
+               "browseEndpoint": {
+                "browseId": "MPREb_aBiDtYV0YM9",
+                "browseEndpointContextSupportedConfigs": {
+                 "browseEndpointContextMusicConfig": {
+                  "pageType": "MUSIC_PAGE_TYPE_ALBUM"
+                 }
+                }
+               }
+              }
+             }
+            ]
+           },
+           "subtitle": {
+            "runs": [
+             {
+              "text": "Album"
+             },
+             {
+              "text": " • "
+             },
+             {
+              "text": "Various Artists"
+             }
+            ]
+           },
+           "navigationEndpoint": {
+            "browseEndpoint": {
+             "browseId": "MPREb_aBiDtYV0YM9",
+             "browseEndpointContextSupportedConfigs": {
+              "browseEndpointContextMusicConfig": {
+               "pageType": "MUSIC_PAGE_TYPE_ALBUM"
+              }
+             }
+            }
+           }
+          }
+         }
+        ],
+        "itemSize": "COLLECTION_STYLE_ITEM_SIZE_SMALL"
+       }
+      }
+     ]
+    }
+   },
+   "tabs": [
+    {
+     "tabRenderer": {
+      "content": {
+       "sectionListRenderer": {
+        "contents": [
+         {
+          "musicResponsiveHeaderRenderer": {
+           "thumbnail": {
+            "musicThumbnailRenderer": {
+             "thumbnail": {
+              "thumbnails": [
+               {
+                "url": "https://yt3.googleusercontent.com/1gXa4i8m_NecS7xNqLqzxy6rdOWBh_L6U91YYv5ULNdmvvYT1Pr6ld7_SyUs5L52pEQheVyfU9SnXUm9=w60-h60-l90-rj",
+                "width": 60,
+                "height": 60
+               },
+               {
+                "url": "https://yt3.googleusercontent.com/1gXa4i8m_NecS7xNqLqzxy6rdOWBh_L6U91YYv5ULNdmvvYT1Pr6ld7_SyUs5L52pEQheVyfU9SnXUm9=w120-h120-l90-rj",
+                "width": 120,
+                "height": 120
+               },
+               {
+                "url": "https://yt3.googleusercontent.com/1gXa4i8m_NecS7xNqLqzxy6rdOWBh_L6U91YYv5ULNdmvvYT1Pr6ld7_SyUs5L52pEQheVyfU9SnXUm9=w226-h226-l90-rj",
+                "width": 226,
+                "height": 226
+               },
+               {
+                "url": "https://yt3.googleusercontent.com/1gXa4i8m_NecS7xNqLqzxy6rdOWBh_L6U91YYv5ULNdmvvYT1Pr6ld7_SyUs5L52pEQheVyfU9SnXUm9=w544-h544-l90-rj",
+                "width": 544,
+                "height": 544
+               }
+              ]
+             },
+             "thumbnailCrop": "MUSIC_THUMBNAIL_CROP_UNSPECIFIED",
+             "thumbnailScale": "MUSIC_THUMBNAIL_SCALE_UNSPECIFIED"
+            }
+           },
+           "title": {
+            "runs": [
+             {
+              "text": "Homework"
+             }
+            ]
+           },
+           "subtitle": {
+            "runs": [
+             {
+              "text": "Album"
+             },
+             {
+              "text": " • "
+             },
+             {
+              "text": "1996"
+             }
+            ]
+           },
+           "straplineTextOne": {
+            "runs": [
+             {
+              "text": "Daft Punk",
+              "navigationEndpoint": {
+               "browseEndpoint": {
+                "browseId": "UCRr1xG_2WIDs18a6cIiCxeA",
+                "browseEndpointContextSupportedConfigs": {
+                 "browseEndpointContextMusicConfig": {
+                  "pageType": "MUSIC_PAGE_TYPE_ARTIST"
+                 }
+                }
+               }
+              }
+             }
+            ]
+           },
+           "secondSubtitle": {
+            "runs": [
+             {
+              "text": "16 songs"
+             },
+             {
+              "text": " • "
+             },
+             {
+              "text": "1 hour, 14 minutes"
+             }
+            ]
+           }
+          }
+         }
+        ]
+       }
+      }
+     }
+    }
+   ]
+  }
+ }
+}

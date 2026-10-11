@@ -1,6 +1,9 @@
-//! YouTube Music provider: Innertube client, parsers and ranged byte source.
+//! YouTube Music provider: Innertube client, parsers and ranged byte source, and the
+//! signed-in library through Google sign-in and the YouTube Data API.
 
 mod clients;
+mod dataapi;
+mod google;
 mod innertube;
 mod log;
 mod parse;
@@ -9,15 +12,23 @@ mod transport;
 
 #[cfg(test)]
 mod live_tests;
+#[cfg(test)]
+mod testing;
 
 use std::sync::Arc;
 
-use requiem_core::{AudioSource, Provider, ProviderError, ProviderId, Track, TrackId};
+use requiem_core::{
+    AccountState, AudioSource, Page, Provider, ProviderError, ProviderId, Shelf, Track, TrackId,
+};
 
+use dataapi::DATA_PREFIX;
+use google::{Google, GoogleFiles, SystemClock};
 use innertube::{ClientRefresher, InnertubeClient};
-use parse::{PROVIDER, StreamFormat};
+use parse::{BROWSE_PREFIX, PROVIDER, StreamFormat};
 use range::{HttpRangeSource, RangeConfig};
 use transport::UreqTransport;
+
+const HOME: &str = "FEmusic_home";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum IpFamily {
@@ -36,16 +47,18 @@ pub struct YtMusicOptions {
 
 pub struct YtMusicProvider {
     client: Arc<InnertubeClient>,
+    google: Google,
     prefer_aac: bool,
 }
 
 impl YtMusicProvider {
+    /// Reads the Google client and sign-in files named by `REQUIEM_GOOGLE_CLIENT_FILE` and
+    /// `REQUIEM_GOOGLE_TOKEN_FILE`, or their defaults; makes no network calls.
     pub fn new(opts: YtMusicOptions) -> YtMusicProvider {
+        let transport = Arc::new(UreqTransport::new());
         Self {
-            client: Arc::new(InnertubeClient::new(
-                Arc::new(UreqTransport::new()),
-                opts.ip_family,
-            )),
+            client: Arc::new(InnertubeClient::new(transport.clone(), opts.ip_family)),
+            google: Google::new(transport, Arc::new(SystemClock), GoogleFiles::from_env()),
             prefer_aac: opts.prefer_aac,
         }
     }
@@ -87,5 +100,44 @@ impl Provider for YtMusicProvider {
             bytes: Box::new(source),
             hint: format.hint,
         })
+    }
+
+    fn browse(&self, page: &Page) -> Result<Vec<Shelf>, ProviderError> {
+        match page {
+            Page::Home => parse::parse_home(&self.client.browse(HOME)?),
+            Page::Library => dataapi::library(&self.google),
+            Page::Collection(c) if c.provider.0 == PROVIDER => {
+                if let Some(id) = c.id.strip_prefix(DATA_PREFIX) {
+                    dataapi::playlist(&self.google, id)
+                } else if let Some(id) = c.id.strip_prefix(BROWSE_PREFIX) {
+                    let body = self.client.browse(id)?;
+                    Ok(vec![parse::parse_collection(
+                        &body,
+                        parse::collection_kind(id),
+                    )?])
+                } else {
+                    Err(ProviderError::Unplayable(format!(
+                        "unknown collection {}",
+                        c.id
+                    )))
+                }
+            }
+            Page::Collection(c) => Err(ProviderError::Unplayable(format!(
+                "collection {} belongs to {}",
+                c.id, c.provider.0
+            ))),
+        }
+    }
+
+    fn account(&self) -> AccountState {
+        self.google.account()
+    }
+
+    fn sign_in(&self, on_state: &dyn Fn(AccountState)) -> Result<(), ProviderError> {
+        self.google.sign_in(on_state)
+    }
+
+    fn sign_out(&self) {
+        self.google.sign_out();
     }
 }

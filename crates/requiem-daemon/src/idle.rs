@@ -1,4 +1,40 @@
+use std::collections::HashSet;
 use std::time::{Duration, Instant};
+
+use requiem_core::{AccountState, Event, PlayState, ProviderId};
+
+/// What keeps the daemon up without clients: playback, and sign-ins waiting for the user
+/// to enter their code on another device.
+#[derive(Debug, Default)]
+pub struct Activity {
+    playing: bool,
+    signing_in: HashSet<ProviderId>,
+}
+
+impl Activity {
+    /// The daemon starts `Stopped`.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn observe(&mut self, ev: &Event) {
+        match ev {
+            Event::State(s) => self.playing = *s != PlayState::Stopped,
+            Event::Account { provider, state } => {
+                if matches!(state, AccountState::Pending { .. }) {
+                    self.signing_in.insert(provider.clone());
+                } else {
+                    self.signing_in.remove(provider);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    pub fn idle(&self) -> bool {
+        !self.playing && self.signing_in.is_empty()
+    }
+}
 
 /// Tracks how long the daemon has been idle. The clock is the caller's `now`.
 pub struct IdleTimer {
@@ -64,6 +100,50 @@ mod tests {
         for s in (0..2000).step_by(5) {
             assert!(!t.expired(at(t0, s), false));
         }
+    }
+
+    fn account(state: AccountState) -> Event {
+        Event::Account {
+            provider: ProviderId("ytmusic".into()),
+            state,
+        }
+    }
+
+    fn pending() -> AccountState {
+        AccountState::Pending {
+            verification_url: "https://www.google.com/device".into(),
+            user_code: "GQVQ-JKEC".into(),
+            expires_at_unix: 1_800_000_000,
+        }
+    }
+
+    #[test]
+    fn a_pending_sign_in_holds_off_the_idle_exit() {
+        let t0 = Instant::now();
+        let mut a = Activity::new();
+        let mut t = IdleTimer::new(LIMIT);
+        a.observe(&account(AccountState::SignedOut));
+        assert!(a.idle());
+        a.observe(&account(pending()));
+        for s in (0..2000).step_by(5) {
+            assert!(!t.expired(at(t0, s), a.idle()), "expired at {s}s");
+        }
+        a.observe(&account(AccountState::SignedIn { name: None }));
+        assert!(!t.expired(at(t0, 2000), a.idle()));
+        assert!(t.expired(at(t0, 2300), a.idle()));
+    }
+
+    #[test]
+    fn playback_and_sign_in_each_keep_it_busy() {
+        let mut a = Activity::new();
+        a.observe(&Event::State(PlayState::Playing));
+        a.observe(&account(pending()));
+        a.observe(&Event::State(PlayState::Stopped));
+        assert!(!a.idle());
+        a.observe(&account(AccountState::SignedOut));
+        assert!(a.idle());
+        a.observe(&Event::State(PlayState::Paused));
+        assert!(!a.idle());
     }
 
     #[test]

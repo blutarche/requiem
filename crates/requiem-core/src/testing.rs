@@ -7,8 +7,8 @@ use std::thread;
 use std::time::Duration;
 
 use crate::{
-    AudioSource, ByteSource, Engine, EngineEvent, EngineEventSink, FormatHint, Provider,
-    ProviderError, ProviderId, Track, TrackId,
+    AccountState, AudioSource, ByteSource, Engine, EngineEvent, EngineEventSink, FormatHint, Page,
+    Provider, ProviderError, ProviderId, Shelf, Track, TrackId,
 };
 
 const WAIT: Duration = Duration::from_secs(5);
@@ -106,15 +106,46 @@ impl<T> Step<T> {
     }
 }
 
-#[derive(Default)]
+/// One scripted sign-in: report `pending` if any, wait for `gate` if any, then end with
+/// `outcome`. A failed sign-in leaves the account `SignedOut`.
+pub struct SignInScript {
+    pub pending: Option<AccountState>,
+    pub gate: Option<Gate>,
+    pub outcome: Result<AccountState, ProviderError>,
+}
+
 struct ProviderState {
     resolve_scripts: HashMap<String, VecDeque<Step<()>>>,
     search_scripts: HashMap<String, VecDeque<Step<Vec<Track>>>>,
+    browse_scripts: HashMap<Page, VecDeque<Step<Vec<Shelf>>>>,
+    sign_in_scripts: VecDeque<SignInScript>,
     resolve_calls: HashMap<String, usize>,
     search_calls: usize,
+    browse_calls: Vec<Page>,
+    sign_in_calls: usize,
+    sign_out_calls: usize,
+    account: AccountState,
 }
 
-/// Unscripted resolves succeed with a source whose bytes are the track id.
+impl Default for ProviderState {
+    fn default() -> Self {
+        Self {
+            resolve_scripts: HashMap::new(),
+            search_scripts: HashMap::new(),
+            browse_scripts: HashMap::new(),
+            sign_in_scripts: VecDeque::new(),
+            resolve_calls: HashMap::new(),
+            search_calls: 0,
+            browse_calls: Vec::new(),
+            sign_in_calls: 0,
+            sign_out_calls: 0,
+            account: AccountState::SignedOut,
+        }
+    }
+}
+
+/// Unscripted resolves succeed with a source whose bytes are the track id; unscripted browses
+/// return no shelves; the account starts `SignedOut`.
 pub struct FakeProvider {
     id: ProviderId,
     state: Mutex<ProviderState>,
@@ -145,6 +176,35 @@ impl FakeProvider {
             .unwrap()
             .search_scripts
             .insert(query.into(), steps.into());
+    }
+
+    pub fn script_browse(&self, page: Page, steps: Vec<Step<Vec<Shelf>>>) {
+        self.state
+            .lock()
+            .unwrap()
+            .browse_scripts
+            .insert(page, steps.into());
+    }
+
+    /// Scripts are consumed one per `sign_in`; unscripted sign-ins fail.
+    pub fn script_sign_in(&self, script: SignInScript) {
+        self.state.lock().unwrap().sign_in_scripts.push_back(script);
+    }
+
+    pub fn set_account(&self, state: AccountState) {
+        self.state.lock().unwrap().account = state;
+    }
+
+    pub fn browse_calls(&self) -> Vec<Page> {
+        self.state.lock().unwrap().browse_calls.clone()
+    }
+
+    pub fn sign_in_calls(&self) -> usize {
+        self.state.lock().unwrap().sign_in_calls
+    }
+
+    pub fn sign_out_calls(&self) -> usize {
+        self.state.lock().unwrap().sign_out_calls
     }
 
     pub fn resolve_calls(&self, track_id: &str) -> usize {
@@ -204,6 +264,66 @@ impl Provider for FakeProvider {
             Some(s) => s.run(),
             None => Ok(Vec::new()),
         }
+    }
+
+    fn browse(&self, page: &Page) -> Result<Vec<Shelf>, ProviderError> {
+        let step = {
+            let mut st = self.state.lock().unwrap();
+            st.browse_calls.push(page.clone());
+            self.called.notify_all();
+            st.browse_scripts
+                .get_mut(page)
+                .and_then(VecDeque::pop_front)
+        };
+        match step {
+            Some(s) => s.run(),
+            None => Ok(Vec::new()),
+        }
+    }
+
+    fn account(&self) -> AccountState {
+        self.state.lock().unwrap().account.clone()
+    }
+
+    fn sign_in(&self, on_state: &dyn Fn(AccountState)) -> Result<(), ProviderError> {
+        let script = {
+            let mut st = self.state.lock().unwrap();
+            st.sign_in_calls += 1;
+            self.called.notify_all();
+            st.sign_in_scripts.pop_front()
+        };
+        let Some(script) = script else {
+            return Err(ProviderError::Unplayable("no sign-in scripted".into()));
+        };
+        if let Some(pending) = script.pending {
+            self.set_account(pending.clone());
+            on_state(pending);
+        }
+        if let Some(g) = &script.gate {
+            g.wait();
+        }
+        match script.outcome {
+            Ok(state) => {
+                self.set_account(state.clone());
+                on_state(state);
+                Ok(())
+            }
+            // Like a real provider, a failure ends a pending sign-in and leaves any other
+            // state as it was.
+            Err(e) => {
+                let mut st = self.state.lock().unwrap();
+                if matches!(st.account, AccountState::Pending { .. }) {
+                    st.account = AccountState::SignedOut;
+                }
+                Err(e)
+            }
+        }
+    }
+
+    fn sign_out(&self) {
+        let mut st = self.state.lock().unwrap();
+        st.sign_out_calls += 1;
+        st.account = AccountState::SignedOut;
     }
 
     fn resolve(&self, track: &TrackId) -> Result<AudioSource, ProviderError> {

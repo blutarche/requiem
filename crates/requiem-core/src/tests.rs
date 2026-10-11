@@ -3,7 +3,7 @@ use std::time::{Duration, Instant};
 
 use crossbeam_channel::Receiver;
 
-use crate::testing::{EngineCall, FakeEngineHandle, FakeProvider, Gate, Step};
+use crate::testing::{EngineCall, FakeEngineHandle, FakeProvider, Gate, SignInScript, Step};
 use crate::*;
 
 const SECS: fn(u64) -> Duration = Duration::from_secs;
@@ -1104,4 +1104,226 @@ fn persist_resume_for_an_empty_queue() {
     r.send(Command::Clear);
     let s = wait_persist(&log, |s| s.tracks.is_empty());
     assert_eq!((s.resume, s.volume), (None, 100));
+}
+
+fn fake_id() -> ProviderId {
+    ProviderId("fake".into())
+}
+
+fn is_account(state: AccountState) -> impl Fn(&Event) -> bool {
+    move |e| matches!(e, Event::Account { provider, state: s } if *provider == fake_id() && *s == state)
+}
+
+fn pending() -> AccountState {
+    AccountState::Pending {
+        verification_url: "https://example.test/device".into(),
+        user_code: "ABCD-EFGH".into(),
+        expires_at_unix: 1_900_000_000,
+    }
+}
+
+fn signed_in() -> AccountState {
+    AccountState::SignedIn {
+        name: Some("Me".into()),
+    }
+}
+
+#[test]
+fn a_new_subscriber_first_hears_every_account() {
+    let r = rig(config());
+    r.provider.set_account(signed_in());
+    // The session read the account when it started.
+    let rx = r.session.subscribe();
+    assert_eq!(
+        rx.try_recv().unwrap(),
+        Event::Account {
+            provider: fake_id(),
+            state: AccountState::SignedOut,
+        }
+    );
+}
+
+#[test]
+fn browse_answers_under_the_request_id() {
+    let r = rig(config());
+    let shelf = Shelf {
+        title: "Shelf".into(),
+        items: vec![Item::Track(track("a"))],
+    };
+    r.provider
+        .script_browse(Page::Home, vec![Step::ok(vec![shelf.clone()])]);
+    r.provider.script_browse(
+        Page::Library,
+        vec![Step::err(ProviderError::SignInRequired("sign in".into()))],
+    );
+    r.send(Command::Browse {
+        req: 7,
+        page: Page::Home,
+    });
+    let ev = r.wait_event(|e| matches!(e, Event::BrowseResults { .. }));
+    assert_eq!(
+        ev,
+        Event::BrowseResults {
+            req: 7,
+            page: Page::Home,
+            shelves: vec![shelf],
+        }
+    );
+    r.send(Command::Browse {
+        req: 8,
+        page: Page::Library,
+    });
+    let ev = r.wait_event(|e| matches!(e, Event::BrowseFailed { .. }));
+    assert_eq!(
+        ev,
+        Event::BrowseFailed {
+            req: 8,
+            error: "sign-in required: sign in".into(),
+            sign_in_required: true,
+        }
+    );
+}
+
+#[test]
+fn browse_of_another_providers_collection_fails() {
+    let r = rig(config());
+    r.send(Command::Browse {
+        req: 1,
+        page: Page::Collection(CollectionId {
+            provider: ProviderId("other".into()),
+            id: "x".into(),
+        }),
+    });
+    let ev = r.wait_event(|e| matches!(e, Event::BrowseFailed { .. }));
+    assert!(
+        matches!(
+            ev,
+            Event::BrowseFailed {
+                req: 1,
+                sign_in_required: false,
+                ..
+            }
+        ),
+        "{ev:?}"
+    );
+    assert!(r.provider.browse_calls().is_empty());
+}
+
+#[test]
+fn a_browse_that_signs_the_provider_out_announces_it() {
+    let r = rig(config());
+    let gate = Gate::new();
+    r.provider.script_browse(
+        Page::Library,
+        vec![Step::err(ProviderError::SignInRequired("expired".into())).gated(&gate)],
+    );
+    r.send(Command::Browse {
+        req: 1,
+        page: Page::Library,
+    });
+    r.provider.set_account(signed_in());
+    gate.release();
+    r.wait_event(|e| matches!(e, Event::BrowseFailed { .. }));
+    r.wait_event(is_account(signed_in()));
+}
+
+#[test]
+fn sign_in_reports_pending_then_signed_in() {
+    let r = rig(config());
+    let gate = Gate::new();
+    r.provider.script_sign_in(SignInScript {
+        pending: Some(pending()),
+        gate: Some(gate.clone()),
+        outcome: Ok(signed_in()),
+    });
+    r.send(Command::SignIn {
+        provider: fake_id(),
+    });
+    r.wait_event(is_account(pending()));
+    // A second request repeats the code instead of starting another flow.
+    r.send(Command::SignIn {
+        provider: fake_id(),
+    });
+    r.wait_event(is_account(pending()));
+    assert_eq!(r.provider.sign_in_calls(), 1);
+    gate.release();
+    r.wait_event(is_account(signed_in()));
+    assert_eq!(r.provider.sign_in_calls(), 1);
+    // Announced once: the next event is the volume sent after it.
+    r.send(Command::SetVolume(55));
+    let next = r.wait_event(|e| matches!(e, Event::Account { .. } | Event::Volume(_)));
+    assert_eq!(next, Event::Volume(55));
+}
+
+#[test]
+fn failed_sign_in_says_why_then_reports_the_state() {
+    let r = rig(config());
+    r.provider.script_sign_in(SignInScript {
+        pending: Some(pending()),
+        gate: None,
+        outcome: Err(ProviderError::SignInRequired("access was denied".into())),
+    });
+    r.send(Command::SignIn {
+        provider: fake_id(),
+    });
+    r.wait_event(is_account(pending()));
+    let ev = r.wait_event(|e| matches!(e, Event::SignInFailed { .. }));
+    assert_eq!(
+        ev,
+        Event::SignInFailed {
+            provider: fake_id(),
+            error: "access was denied".into(),
+        }
+    );
+    r.wait_event(is_account(AccountState::SignedOut));
+}
+
+#[test]
+fn an_unchanged_state_after_a_failed_sign_in_is_still_announced() {
+    let r = rig(config());
+    r.send(Command::SignIn {
+        provider: fake_id(),
+    });
+    r.wait_event(|e| matches!(e, Event::SignInFailed { .. }));
+    r.wait_event(is_account(AccountState::SignedOut));
+}
+
+#[test]
+fn sign_in_while_signed_in_only_repeats_the_state() {
+    let r = rig(config());
+    r.provider.set_account(signed_in());
+    r.provider.script_sign_in(SignInScript {
+        pending: None,
+        gate: None,
+        outcome: Ok(signed_in()),
+    });
+    r.send(Command::SignIn {
+        provider: fake_id(),
+    });
+    r.wait_event(is_account(signed_in()));
+    r.send(Command::SignIn {
+        provider: fake_id(),
+    });
+    r.wait_event(is_account(signed_in()));
+    assert_eq!(r.provider.sign_in_calls(), 1);
+}
+
+#[test]
+fn sign_out_reports_signed_out() {
+    let r = rig(config());
+    r.provider.set_account(signed_in());
+    r.provider.script_sign_in(SignInScript {
+        pending: None,
+        gate: None,
+        outcome: Ok(signed_in()),
+    });
+    r.send(Command::SignIn {
+        provider: fake_id(),
+    });
+    r.wait_event(is_account(signed_in()));
+    r.send(Command::SignOut {
+        provider: fake_id(),
+    });
+    r.wait_event(is_account(AccountState::SignedOut));
+    assert_eq!(r.provider.sign_out_calls(), 1);
 }

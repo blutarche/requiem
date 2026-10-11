@@ -8,7 +8,7 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 use crossbeam_channel::{Receiver, Sender, never, select, unbounded};
-use requiem_core::{Command, Event, PlayState, Session, Track};
+use requiem_core::{AccountState, Command, Event, PlayState, ProviderId, Session, Track};
 
 use crate::frame;
 use crate::proto::{PROTOCOL, Role, ServerMsg, VERSION};
@@ -79,11 +79,14 @@ struct Mirror {
     state: PlayState,
     volume: u8,
     position: Duration,
+    /// In the order the providers were first announced.
+    accounts: Vec<(ProviderId, AccountState)>,
 }
 
 impl Mirror {
-    /// A `Session` emits nothing until something changes, so this must match its initial
-    /// state, and the hub must subscribe before any command reaches the Session.
+    /// Apart from the `Account`s it sends a new subscriber, a `Session` emits nothing until
+    /// something changes, so this must match its initial state, and the hub must subscribe
+    /// before any command reaches the Session.
     fn new() -> Self {
         Self {
             tracks: Vec::new(),
@@ -92,6 +95,7 @@ impl Mirror {
             state: PlayState::Stopped,
             volume: 100,
             position: Duration::ZERO,
+            accounts: Vec::new(),
         }
     }
 
@@ -113,8 +117,17 @@ impl Mirror {
                 }
             }
             Event::Volume(v) => self.volume = *v,
+            Event::Account { provider, state } => {
+                match self.accounts.iter_mut().find(|(p, _)| p == provider) {
+                    Some((_, known)) => known.clone_from(state),
+                    None => self.accounts.push((provider.clone(), state.clone())),
+                }
+            }
             Event::SearchResults { .. }
             | Event::SearchFailed { .. }
+            | Event::BrowseResults { .. }
+            | Event::BrowseFailed { .. }
+            | Event::SignInFailed { .. }
             | Event::TrackFailed { .. }
             | Event::ProviderBroken { .. } => {}
         }
@@ -136,6 +149,14 @@ impl Mirror {
         if self.now.is_some() {
             evs.push(Event::Position(self.position));
         }
+        evs.extend(
+            self.accounts
+                .iter()
+                .map(|(provider, state)| Event::Account {
+                    provider: provider.clone(),
+                    state: state.clone(),
+                }),
+        );
         evs.push(Event::Volume(self.volume));
         evs
     }
@@ -147,9 +168,9 @@ struct Hub {
     mirror: Mirror,
     peers: Vec<Peer>,
     subs: Vec<Sender<Event>>,
-    /// Global search id sent to the Session -> (requester, the requester's own id).
-    searches: HashMap<u64, (Option<ClientId>, u64)>,
-    next_search: u64,
+    /// Global search or browse id sent to the Session -> (requester, the requester's own id).
+    requests: HashMap<u64, (Option<ClientId>, u64)>,
+    next_request: u64,
 }
 
 pub(crate) fn spawn(
@@ -158,7 +179,12 @@ pub(crate) fn spawn(
 ) -> io::Result<(Sender<HubMsg>, JoinHandle<()>)> {
     let events = session.subscribe();
     let (tx, rx) = unbounded();
-    let hub = Hub::new(session, hooks);
+    let mut hub = Hub::new(session, hooks);
+    // The Session queued its `Account`s before `subscribe` returned. Applying them here, before
+    // any client can join, puts them in every snapshot.
+    for ev in events.try_iter() {
+        hub.mirror.apply(&ev);
+    }
     let handle = thread::Builder::new()
         .name("requiem-ipc-hub".into())
         .spawn(move || hub.run(&rx, events))?;
@@ -177,8 +203,8 @@ impl Hub {
             mirror: Mirror::new(),
             peers: Vec::new(),
             subs: Vec::new(),
-            searches: HashMap::new(),
-            next_search: 0,
+            requests: HashMap::new(),
+            next_request: 0,
         }
     }
 
@@ -234,6 +260,20 @@ impl Hub {
             Event::SearchFailed { req, error } => {
                 self.route(req, |req| Event::SearchFailed { req, error });
             }
+            Event::BrowseResults { req, page, shelves } => {
+                self.route(req, |req| Event::BrowseResults { req, page, shelves });
+            }
+            Event::BrowseFailed {
+                req,
+                error,
+                sign_in_required,
+            } => {
+                self.route(req, |req| Event::BrowseFailed {
+                    req,
+                    error,
+                    sign_in_required,
+                });
+            }
             ev => {
                 self.mirror.apply(&ev);
                 self.broadcast(ev);
@@ -253,10 +293,10 @@ impl Hub {
         self.peers.retain(|p| p.offer(&frame, position));
     }
 
-    /// Search results go only to the requester, under its own id. In-daemon searches
-    /// report to subscribers.
+    /// Search and browse results go only to the requester, under its own id. In-daemon
+    /// requests report to subscribers.
     fn route(&mut self, global: u64, make: impl FnOnce(u64) -> Event) {
-        let Some((from, req)) = self.searches.remove(&global) else {
+        let Some((from, req)) = self.requests.remove(&global) else {
             return;
         };
         let ev = make(req);
@@ -294,7 +334,7 @@ impl Hub {
             // Every connection ends with a Leave, including peers the hub cut off.
             HubMsg::Leave(id) => {
                 self.peers.retain(|p| p.id != id);
-                self.searches.retain(|_, (from, _)| *from != Some(id));
+                self.requests.retain(|_, (from, _)| *from != Some(id));
             }
             HubMsg::Command { from, cmd } => self.on_command(from, cmd),
             HubMsg::Ping { id, n } => self.offer_to(id, &ServerMsg::Pong(n)),
@@ -354,15 +394,22 @@ impl Hub {
             // the Session.
             Command::Shutdown => (self.hooks.on_shutdown)(),
             Command::Search { req, query } => {
-                self.next_search += 1;
-                self.searches.insert(self.next_search, (from, req));
-                self.session.send(Command::Search {
-                    req: self.next_search,
-                    query,
-                });
+                let req = self.track_request(from, req);
+                self.session.send(Command::Search { req, query });
+            }
+            Command::Browse { req, page } => {
+                let req = self.track_request(from, req);
+                self.session.send(Command::Browse { req, page });
             }
             cmd => self.session.send(cmd),
         }
+    }
+
+    /// Returns the global id to send to the Session in place of the requester's `req`.
+    fn track_request(&mut self, from: Option<ClientId>, req: u64) -> u64 {
+        self.next_request += 1;
+        self.requests.insert(self.next_request, (from, req));
+        self.next_request
     }
 }
 
@@ -402,7 +449,71 @@ mod tests {
     }
 
     #[test]
-    fn leaving_client_forgets_its_searches() {
+    fn snapshot_carries_the_latest_account_before_volume() {
+        let mut mirror = Mirror::new();
+        let fake = || ProviderId("fake".into());
+        mirror.apply(&Event::Account {
+            provider: fake(),
+            state: AccountState::SignedOut,
+        });
+        mirror.apply(&Event::Account {
+            provider: ProviderId("other".into()),
+            state: AccountState::Unavailable("no client".into()),
+        });
+        let signed_in = AccountState::SignedIn {
+            name: Some("Me".into()),
+        };
+        mirror.apply(&Event::Account {
+            provider: fake(),
+            state: signed_in.clone(),
+        });
+        let snap = mirror.snapshot();
+        let n = snap.len();
+        assert_eq!(
+            snap[n - 3..],
+            [
+                Event::Account {
+                    provider: fake(),
+                    state: signed_in,
+                },
+                Event::Account {
+                    provider: ProviderId("other".into()),
+                    state: AccountState::Unavailable("no client".into()),
+                },
+                Event::Volume(100),
+            ]
+        );
+    }
+
+    #[test]
+    fn hub_starts_with_the_sessions_accounts() {
+        let provider = FakeProvider::new("fake");
+        provider.set_account(AccountState::Unavailable("set up a client".into()));
+        let session = Session::spawn(
+            vec![provider],
+            FakeEngineHandle::new().factory(),
+            SessionConfig::default(),
+        );
+        let hooks = ServerHooks {
+            on_shutdown: Box::new(|| {}),
+        };
+        let (tx, handle) = spawn(session, hooks).unwrap();
+        let (sub_tx, sub) = unbounded();
+        tx.send(HubMsg::Subscribe(sub_tx)).unwrap();
+        let snap: Vec<Event> = sub
+            .iter()
+            .take_while(|e| !matches!(e, Event::Volume(_)))
+            .collect();
+        assert!(snap.contains(&Event::Account {
+            provider: ProviderId("fake".into()),
+            state: AccountState::Unavailable("set up a client".into()),
+        }));
+        tx.send(HubMsg::Stop).unwrap();
+        handle.join().unwrap();
+    }
+
+    #[test]
+    fn leaving_client_forgets_its_requests() {
         let session = Session::spawn(
             vec![FakeProvider::new("fake")],
             FakeEngineHandle::new().factory(),
@@ -420,10 +531,17 @@ mod tests {
                     query: "q".into(),
                 },
             );
+            hub.on_command(
+                from,
+                Command::Browse {
+                    req: 6,
+                    page: requiem_core::Page::Home,
+                },
+            );
         }
         hub.on_msg(HubMsg::Leave(1));
-        let mut left: Vec<_> = hub.searches.values().copied().collect();
+        let mut left: Vec<_> = hub.requests.values().copied().collect();
         left.sort();
-        assert_eq!(left, [(None, 5), (Some(2), 5)]);
+        assert_eq!(left, [(None, 5), (None, 6), (Some(2), 5), (Some(2), 6)]);
     }
 }
