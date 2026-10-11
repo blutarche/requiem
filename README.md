@@ -9,7 +9,7 @@ Native desktop client for **YouTube Music**, built to stay open all day without 
 ## How it fits together
 
 - **`requiemd`** — the player. Plays audio, owns the queue, and keeps running when the window is closed. On macOS it shows a menu-bar icon (playing / paused, with controls), publishes Now Playing, and answers the media keys. It exits after 5 minutes stopped with no window or CLI connected and no sign-in waiting for its code. It remembers the queue, the track Play resumes, and the volume across restarts, in `~/Library/Application Support/requiem/state.json` (`$XDG_STATE_HOME/requiem/state.json` on Linux).
-- **`requiem-gui`** — the window: search, queue, player bar, and a Cmd+K command palette. It starts the player if needed and quits when its window closes; playback continues. macOS only in v1.
+- **`requiem-gui`** — the window: Home, search, your YouTube Library, queue, player bar, and a Cmd+K command palette. It starts the player if needed and quits when its window closes; playback continues. macOS only in v1.
 - **`requiem`** — the CLI. `requiem --connect` drives the running player (starting it if needed); plain `requiem` plays in-process.
 
 They talk over a per-user Unix socket. "Quit and Stop Music" in the menu bar stops the player and closes the window.
@@ -30,7 +30,8 @@ The bundle embeds Homebrew's libopus. Its minimum macOS version is whatever that
 
 ## Use
 
-- **Window:** type a query and press Enter; Return or a double-click plays a result, Cmd+Return (or the row's +) adds it to the queue. In the queue, Delete removes the selected track and Option+Cmd+Up / Option+Cmd+Down move it; right-click a queue row for Remove from Queue, Move Up, Move Down or Clear Queue (its toast offers Undo). Cmd+Z undoes a replaced or cleared queue until the queue changes again. Space toggles play/pause, Left / Right seek 5 s, Cmd+Left / Cmd+Right skip, Cmd+Up / Cmd+Down change the volume, Cmd+F focuses search, Cmd+1 / Cmd+2 switch between Search and Queue, Cmd+K opens the palette. Cmd+Q closes the window and the music keeps playing; Option+Cmd+Q ("Quit and Stop Music") stops the player too.
+- **Window:** type a query and press Enter; Return or a double-click plays a result, Cmd+Return (or the row's +) adds it to the queue. In the queue, Delete removes the selected track and Option+Cmd+Up / Option+Cmd+Down move it; right-click a queue row for Remove from Queue, Move Up, Move Down or Clear Queue (its toast offers Undo). Cmd+Z undoes a replaced or cleared queue until the queue changes again. Space toggles play/pause, Left / Right seek 5 s, Cmd+Left / Cmd+Right skip, Cmd+Up / Cmd+Down change the volume, Cmd+F focuses search, Cmd+1 to Cmd+4 switch between Home, Search, Library and Queue, Cmd+R refreshes the page, Cmd+K opens the palette. Cmd+Q closes the window and the music keeps playing; Option+Cmd+Q ("Quit and Stop Music") stops the player too.
+- **Home and Library:** the window opens on Home, YouTube Music's public shelves. A track card plays its shelf from that track and offers Undo like a search result; a playlist or album card opens its tracks (Play, Add to Queue, and Cmd+[ or the back control to return where you were). Library lists your playlists once you sign in: the Library page shows the device code with Copy Code, Open and Cancel while a sign-in waits, and "Sign Out" asks first. The palette has Sign in to Google and Sign out of Google while they apply.
 - **CLI:** `requiem --connect`, then `help`. Commands: `search <query>`, `home`, `library`, `open <n>`, `play <n>`, `add <n>`, `play-track <json>`, `add-track <json>`, `queue`, `jump <n>`, `remove <n>`, `move <from> <to>`, `clear`, `next`, `prev`, `pause`, `resume`, `toggle`, `seek <secs|+secs|-secs>`, `vol <0-100>`, `status`, `signin`, `signout`, `account`, `shutdown-daemon`, `quit`. `home` and `library` print numbered items under each shelf, numbered across shelves; `open <n>` lists the tracks of playlist or album n. `play <n>`, `add <n>` and `open <n>` take n from whichever listing printed last: search results, a browse page or an opened playlist. `--script <file>` runs commands from a file; `--script -` reads them from stdin.
 
 ### JSON output
@@ -83,12 +84,18 @@ What a sign-in gets you:
 
 Playback stays anonymous whether or not you are signed in.
 
+## Snapshots
+
+`requiem-gui --demo --snapshot out.png --view <view>` renders a view from fixed fake data without showing a window: `home`, `search`, `library`, `queue`, `palette`, `collection`, `library-signed-out`, `library-unavailable`, `signin`, `empty`, `disconnected`, `toast` or `out-of-date`. For `home` and `library`, `--snapshot` also works without `--demo`: it asks the running player (starting one if needed), waits up to 20 s for the page and its covers, then writes the PNG, exiting 1 if the page fails to load.
+
 ## Footprint
 
 Measured on an Apple Silicon Mac while playing (physical footprint):
 
 - player (`requiemd`, with the menu-bar icon): 20–24 MiB, 0.7–0.8% CPU — mostly Opus decoding; under 0.01% paused or stopped;
 - window (`requiem-gui`) while open and visible: 18–20 MiB, about 0.3% CPU.
+
+Home loaded, a window that is never shown (`requiem-gui --snapshot out.png --view home`) peaked at about 20 MiB. Home keeps only the cards near the visible area, and artwork stays within its 8 MiB cache.
 
 `scripts/perf-check.sh [--daemon]` re-runs the gate (it plays audio at 5% volume).
 
