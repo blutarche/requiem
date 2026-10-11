@@ -110,7 +110,8 @@ pub enum EngineEvent {
 
 pub type EngineEventSink = Arc<dyn Fn(EngineEvent) + Send + Sync>;
 
-/// Every method only enqueues; none may block.
+/// Every method only enqueues and none may block, except that `stop` may wait, bounded, for the
+/// output to adopt the silent feed.
 pub trait Engine: Send {
     /// With `paused`, the track is decoded and reported `Started` but plays only on `resume`.
     fn load(&mut self, r#gen: u64, src: AudioSource, paused: bool);
