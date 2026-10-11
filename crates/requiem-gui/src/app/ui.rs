@@ -506,21 +506,28 @@ impl Ui {
     }
 
     pub fn show(&self, view: AppView) {
-        self.view.set(view);
-        self.search_page.setHidden(view != AppView::Search);
-        self.queue_page.setHidden(view != AppView::Queue);
-        self.nav_search.set_active(view == AppView::Search);
-        self.nav_queue.set_active(view == AppView::Queue);
+        self.switch_to(view);
         if view == AppView::Search && self.vm.borrow().ui().results.is_empty() {
             self.window.makeFirstResponder(Some(&self.search.text));
             return;
         }
         let table = match view {
-            AppView::Search => &self.results.table,
-            AppView::Queue => &self.queue.table,
+            AppView::Search => &self.results,
+            AppView::Queue => &self.queue,
         };
         // Keeps Space and the arrow keys from landing in a hidden text field.
-        self.window.makeFirstResponder(Some(table));
+        self.window.makeFirstResponder(Some(&table.table));
+        // Focus rests on a row; the ring around the whole table is for when there is none.
+        table.select_current();
+    }
+
+    /// Shows `view`'s page and marks its nav item, leaving focus where it is.
+    fn switch_to(&self, view: AppView) {
+        self.view.set(view);
+        self.search_page.setHidden(view != AppView::Search);
+        self.queue_page.setHidden(view != AppView::Queue);
+        self.nav_search.set_active(view == AppView::Search);
+        self.nav_queue.set_active(view == AppView::Queue);
     }
 
     /// The results table has focus with its first row selected.
@@ -579,7 +586,9 @@ impl Ui {
     }
 
     pub fn focus_search(&self) {
-        self.show(AppView::Search);
+        // Not `show`, which would select a result for a table that focus passes straight
+        // through.
+        self.switch_to(AppView::Search);
         self.window.makeFirstResponder(Some(&self.search.text));
     }
 

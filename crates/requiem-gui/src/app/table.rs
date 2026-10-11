@@ -1214,6 +1214,13 @@ impl Table {
         }
     }
 
+    /// Selects the current row, else the first, unless a row is already selected.
+    pub fn select_current(&self) {
+        if self.table.selectedRow() < 0 {
+            self.select(self.controller.ivars().current.get().unwrap_or(0));
+        }
+    }
+
     pub fn deselect(&self) {
         // SAFETY: a nil sender is allowed.
         unsafe { self.table.deselectAll(None) };
