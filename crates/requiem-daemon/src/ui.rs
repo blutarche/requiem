@@ -4,15 +4,15 @@ use std::process::{Child, Command as Process, Stdio};
 use std::thread;
 
 use crossbeam_channel::{Receiver, Sender, bounded, select, unbounded};
-use requiem_core::{Command, SeekTarget};
+use requiem_core::{Command, Event, SeekTarget};
 use requiem_ipc::Server;
-use requiem_macos::{UiAction, ViewTracker};
+use requiem_macos::{UiAction, UiUpdate, ViewTracker};
 
 /// Runs the platform UI on the main thread until `stop` fires. On macOS that is the status
 /// item and media keys; elsewhere it only waits. `stop_tx` is how the UI asks to quit.
 pub fn run_platform(stop_tx: &Sender<()>, stop: Receiver<()>, server: &Server) {
     thread::scope(|scope| {
-        let (views_tx, views) = unbounded();
+        let (updates_tx, updates) = unbounded();
         let (actions_tx, actions) = unbounded();
         // Closing `done` ends the view thread, which would otherwise wait on the server.
         let (done_tx, done) = bounded::<()>(0);
@@ -25,10 +25,22 @@ pub fn run_platform(stop_tx: &Sender<()>, stop: Receiver<()>, server: &Server) {
                     select! {
                         recv(events) -> ev => match ev {
                             Ok(ev) => {
-                                if let Some(view) = tracker.apply(&ev) {
-                                    if views_tx.send(view).is_err() {
+                                let view = tracker.apply(&ev).map(UiUpdate::View);
+                                let extra = match ev {
+                                    Event::Position(at) if requiem_macos::wants_positions() => {
+                                        Some(UiUpdate::Position(at))
+                                    }
+                                    Event::Volume(v) => Some(UiUpdate::Volume(v)),
+                                    _ => None,
+                                };
+                                let mut sent = false;
+                                for update in view.into_iter().chain(extra) {
+                                    if updates_tx.send(update).is_err() {
                                         return;
                                     }
+                                    sent = true;
+                                }
+                                if sent {
                                     requiem_macos::wake();
                                 }
                             }
@@ -48,6 +60,7 @@ pub fn run_platform(stop_tx: &Sender<()>, stop: Receiver<()>, server: &Server) {
                         UiAction::Next => server.send(Command::Next),
                         UiAction::Prev => server.send(Command::Prev),
                         UiAction::Seek(to) => server.send(Command::Seek(SeekTarget::Absolute(to))),
+                        UiAction::SetVolume(v) => server.send(Command::SetVolume(v)),
                         UiAction::OpenGui => {
                             if !server.raise_gui() {
                                 launch_gui();
@@ -57,7 +70,7 @@ pub fn run_platform(stop_tx: &Sender<()>, stop: Receiver<()>, server: &Server) {
                     }
                 }
             });
-        requiem_macos::run(views, actions_tx, stop);
+        requiem_macos::run(updates, actions_tx, stop);
         drop(done_tx);
     });
 }

@@ -29,6 +29,7 @@ use objc2_foundation::{
 use objc2_quartz_core::{
     CAMediaTiming, CAMediaTimingFunction, CATransaction, CATransition, kCATransitionFade,
 };
+use requiem_macos::artwork::{Cover, Placeholder};
 
 use super::theme::{self, Icon, Weight};
 use super::ui::{self, AppView};
@@ -420,6 +421,22 @@ pub fn icon_view(
     v.setImageScaling(NSImageScaling::ScaleNone);
     v.setContentTintColor(Some(tint));
     v
+}
+
+/// Artwork in `frame` with the theme's placeholder: a `glyph`-point music note on the surface
+/// colour.
+pub fn cover(
+    mtm: MainThreadMarker,
+    frame: NSRect,
+    radius: CGFloat,
+    glyph: CGFloat,
+) -> Retained<Cover> {
+    let placeholder = Placeholder {
+        fill: theme::bg_3(),
+        glyph: Icon::Music.image(glyph),
+        tint: theme::muted_2(),
+    };
+    Cover::new(mtm, frame, radius, &placeholder)
 }
 
 /// The tooltip, and the accessibility label (`label`, or the tooltip when `None`).

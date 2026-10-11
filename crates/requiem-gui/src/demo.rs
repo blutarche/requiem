@@ -173,6 +173,11 @@ const VOLUME: u8 = 70;
 /// The result whose playback fails in the toast demo.
 const FAILED: usize = 5;
 
+/// Made-up artwork for result `i`; every fourth has none, to show the placeholder.
+pub fn artwork_url(i: usize) -> Option<String> {
+    (i % 4 != 3).then(|| format!("demo:{i:02}"))
+}
+
 pub fn results() -> Vec<Track> {
     RESULTS
         .iter()
@@ -186,7 +191,7 @@ pub fn results() -> Vec<Track> {
             artists: artists.iter().map(|a| (*a).to_owned()).collect(),
             album: album.map(str::to_owned),
             duration: Some(Duration::from_secs(*secs)),
-            artwork_url: None,
+            artwork_url: artwork_url(i),
         })
         .collect()
 }

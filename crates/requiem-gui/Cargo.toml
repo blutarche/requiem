@@ -15,6 +15,7 @@ requiem-core.workspace = true
 
 [target.'cfg(target_os = "macos")'.dependencies]
 requiem-ipc.workspace = true
+requiem-macos.workspace = true
 crossbeam-channel.workspace = true
 objc2 = "0.6.5"
 block2 = "0.6.2"

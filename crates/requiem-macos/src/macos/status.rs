@@ -1,14 +1,15 @@
 use objc2::rc::Retained;
-use objc2::runtime::{AnyObject, Sel};
+use objc2::runtime::{AnyObject, ProtocolObject, Sel};
 use objc2::{MainThreadMarker, MainThreadOnly};
 use objc2_app_kit::{
-    NSImage, NSMenu, NSMenuItem, NSStatusBar, NSStatusItem, NSVariableStatusItemLength,
+    NSCellImagePosition, NSEventMask, NSFont, NSImage, NSMenu, NSMenuDelegate, NSMenuItem,
+    NSStatusBar, NSStatusBarButton, NSStatusItem, NSVariableStatusItemLength,
 };
 use objc2_foundation::{NSString, ns_string};
 use requiem_core::PlayState;
 
 use super::is_active;
-use crate::view::menu_title;
+use crate::view::{menu_title, status_title};
 use crate::{PlayerView, UiAction};
 
 /// Menu item tags index this.
@@ -20,7 +21,7 @@ const MENU_ACTIONS: [UiAction; 5] = [
     UiAction::Quit,
 ];
 
-fn menu_tag(action: UiAction) -> isize {
+pub(super) fn menu_tag(action: UiAction) -> isize {
     let index = MENU_ACTIONS.iter().position(|a| *a == action);
     index.expect("action is in MENU_ACTIONS") as isize
 }
@@ -45,7 +46,9 @@ fn symbol(name: &NSString, description: &NSString) -> Option<Retained<NSImage>> 
     Some(image)
 }
 
-/// The status item, its menu and the items that change with the view.
+/// The status item, its menu and the items that change with the view. A click sends the
+/// button's action; the menu is the item's only while it is open, since an item with a menu
+/// opens it on every click.
 pub(super) struct StatusMenu {
     mtm: MainThreadMarker,
     item: Retained<NSStatusItem>,
@@ -58,8 +61,9 @@ pub(super) struct StatusMenu {
 }
 
 impl StatusMenu {
-    /// Builds the menu with every action item sending `action`, tagged per `MENU_ACTIONS`.
-    pub(super) fn new(mtm: MainThreadMarker, action: Sel) -> Self {
+    /// Builds the menu with every action item sending `action`, tagged per `MENU_ACTIONS`;
+    /// the button sends `click`.
+    pub(super) fn new(mtm: MainThreadMarker, action: Sel, click: Sel) -> Self {
         let action_item = |title: &NSString, ui: UiAction| {
             // SAFETY: `action` is a selector the controller set by `set_target` implements.
             let item = unsafe {
@@ -100,7 +104,12 @@ impl StatusMenu {
         }
 
         let item = NSStatusBar::systemStatusBar().statusItemWithLength(NSVariableStatusItemLength);
-        item.setMenu(Some(&menu));
+        if let Some(button) = item.button(mtm) {
+            button.setFont(Some(&NSFont::menuBarFontOfSize(0.0)));
+            // SAFETY: `click` is a selector the controller set by `set_target` implements.
+            unsafe { button.setAction(Some(click)) };
+            button.sendActionOn(NSEventMask::LeftMouseUp | NSEventMask::RightMouseUp);
+        }
 
         let status = Self {
             mtm,
@@ -120,12 +129,39 @@ impl StatusMenu {
         status
     }
 
-    /// Menu items hold their target weakly; the caller keeps `target` alive.
-    pub(super) fn set_target(&self, target: &AnyObject) {
+    /// Menu items, the button and the menu hold these weakly; the caller keeps them alive.
+    pub(super) fn set_target(
+        &self,
+        target: &AnyObject,
+        delegate: &ProtocolObject<dyn NSMenuDelegate>,
+    ) {
         for item in &self.targeted {
             // SAFETY: `target` implements the action selector these items were built with.
             unsafe { item.setTarget(Some(target)) };
         }
+        if let Some(button) = self.button() {
+            // SAFETY: `target` implements the button's selector.
+            unsafe { button.setTarget(Some(target)) };
+        }
+        self.menu.setDelegate(Some(delegate));
+    }
+
+    pub(super) fn button(&self) -> Option<Retained<NSStatusBarButton>> {
+        self.item.button(self.mtm)
+    }
+
+    /// Opens the menu as a click on an item with one would; [`menu_closed`](Self::menu_closed)
+    /// takes it back.
+    pub(super) fn open_menu(&self) {
+        self.item.setMenu(Some(&self.menu));
+        if let Some(button) = self.button() {
+            // SAFETY: `performClick:` takes any sender, or none.
+            unsafe { button.performClick(None) };
+        }
+    }
+
+    pub(super) fn menu_closed(&self) {
+        self.item.setMenu(None);
     }
 
     pub(super) fn show(&self, view: Option<&PlayerView>) {
@@ -135,11 +171,19 @@ impl StatusMenu {
             PlayState::Paused => &self.icons.paused,
             PlayState::Stopped => &self.icons.idle,
         };
-        if let Some(button) = self.item.button(self.mtm) {
+        if let Some(button) = self.button() {
             button.setImage(icon.as_deref());
-            if icon.is_none() {
-                button.setTitle(ns_string!("requiem"));
-            }
+            let title = match view {
+                Some(view) if state != PlayState::Stopped => status_title(view),
+                _ if icon.is_none() => "requiem".to_owned(),
+                _ => String::new(),
+            };
+            button.setImagePosition(if title.is_empty() {
+                NSCellImagePosition::ImageOnly
+            } else {
+                NSCellImagePosition::ImageLeading
+            });
+            button.setTitle(&NSString::from_str(&title));
         }
 
         match view {

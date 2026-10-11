@@ -820,6 +820,7 @@ dependencies = [
  "objc2-quartz-core",
  "requiem-core",
  "requiem-ipc",
+ "requiem-macos",
 ]
 
 [[package]]
@@ -842,9 +843,13 @@ dependencies = [
  "dispatch2",
  "objc2",
  "objc2-app-kit",
+ "objc2-core-foundation",
+ "objc2-core-graphics",
  "objc2-foundation",
  "objc2-media-player",
+ "objc2-quartz-core",
  "requiem-core",
+ "ureq",
 ]
 
 [[package]]

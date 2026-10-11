@@ -9,6 +9,8 @@ const SEEK_TOLERANCE: Duration = Duration::from_secs(2);
 
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 const MENU_TITLE_CHARS: usize = 40;
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+const STATUS_TITLE_CHARS: usize = 24;
 
 /// Folds core `Event`s into the current [`PlayerView`].
 ///
@@ -99,6 +101,7 @@ impl ViewTracker {
             duration: self.duration,
             position: self.position_at(now),
             state: self.state,
+            artwork_url: track.artwork_url.clone(),
         })
     }
 }
@@ -126,7 +129,43 @@ pub(crate) fn changed(
         || shown.album != next.album
         || shown.duration != next.duration
         || shown.state != next.state
+        || shown.artwork_url != next.artwork_url
         || expected.abs_diff(next.position) > tolerance
+}
+
+/// Where `view`, applied at `at`, has played to by `now`.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+pub(crate) fn position_now(view: &PlayerView, at: Instant, now: Instant) -> Duration {
+    let pos = if view.state == PlayState::Playing {
+        view.position + now.saturating_duration_since(at)
+    } else {
+        view.position
+    };
+    view.duration.map_or(pos, |d| pos.min(d))
+}
+
+/// "Artists · Album", or whichever of the two there is.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+pub(crate) fn subtitle(view: &PlayerView) -> String {
+    match (view.artists.as_str(), view.album.as_deref()) {
+        (artists, Some(album)) if !artists.is_empty() && !album.is_empty() => {
+            format!("{artists} · {album}")
+        }
+        ("", Some(album)) => album.to_owned(),
+        (artists, _) => artists.to_owned(),
+    }
+}
+
+/// "m:ss", or "h:mm:ss" from an hour.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+pub(crate) fn clock(d: Duration) -> String {
+    let s = d.as_secs();
+    let (h, m, s) = (s / 3600, s / 60 % 60, s % 60);
+    if h > 0 {
+        format!("{h}:{m:02}:{s:02}")
+    } else {
+        format!("{m}:{s:02}")
+    }
 }
 
 /// "Title — Artists", cut to 40 chars with an ellipsis.
@@ -137,10 +176,21 @@ pub(crate) fn menu_title(view: &PlayerView) -> String {
     } else {
         format!("{} — {}", view.title, view.artists)
     };
-    if full.chars().count() <= MENU_TITLE_CHARS {
-        return full;
+    truncate(&full, MENU_TITLE_CHARS)
+}
+
+/// The title beside the status item's icon, cut to 24 chars with an ellipsis.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+pub(crate) fn status_title(view: &PlayerView) -> String {
+    truncate(&view.title, STATUS_TITLE_CHARS)
+}
+
+/// `text` in at most `max` chars, the last an ellipsis if it was cut.
+fn truncate(text: &str, max: usize) -> String {
+    if text.chars().count() <= max {
+        return text.to_owned();
     }
-    let cut: String = full.chars().take(MENU_TITLE_CHARS - 1).collect();
+    let cut: String = text.chars().take(max - 1).collect();
     format!("{}…", cut.trim_end())
 }
 
@@ -274,7 +324,23 @@ mod tests {
                 duration: Some(secs(180)),
                 position: Duration::ZERO,
                 state: PlayState::Playing,
+                artwork_url: None,
             }
+        );
+    }
+
+    #[test]
+    fn new_artwork_is_a_change() {
+        let mut h = Harness::playing();
+        let mut with_art = track("A");
+        with_art.artwork_url = Some("https://lh3.googleusercontent.com/a=w120-h120".into());
+        let view = Harness::shown(h.apply(Event::NowPlaying {
+            track: with_art,
+            duration: Some(secs(200)),
+        }));
+        assert_eq!(
+            view.artwork_url.as_deref(),
+            Some("https://lh3.googleusercontent.com/a=w120-h120")
         );
     }
 
@@ -481,7 +547,42 @@ mod tests {
             duration: None,
             position: Duration::ZERO,
             state: PlayState::Playing,
+            artwork_url: None,
         }
+    }
+
+    #[test]
+    fn position_now_runs_only_while_playing_and_stops_at_the_end() {
+        let at = Instant::now();
+        let mut v = view("A", "");
+        v.position = secs(10);
+        v.duration = Some(secs(12));
+        assert_eq!(position_now(&v, at, at + secs(1)), secs(11));
+        assert_eq!(position_now(&v, at, at + secs(5)), secs(12));
+        v.state = PlayState::Paused;
+        assert_eq!(position_now(&v, at, at + secs(1)), secs(10));
+        v.state = PlayState::Buffering;
+        assert_eq!(position_now(&v, at, at + secs(1)), secs(10));
+    }
+
+    #[test]
+    fn subtitle_joins_artists_and_album() {
+        let mut v = view("A", "Ann, Bo");
+        assert_eq!(subtitle(&v), "Ann, Bo");
+        v.album = Some("LP".into());
+        assert_eq!(subtitle(&v), "Ann, Bo · LP");
+        v.artists.clear();
+        assert_eq!(subtitle(&v), "LP");
+        v.album = Some(String::new());
+        assert_eq!(subtitle(&v), "");
+    }
+
+    #[test]
+    fn clock_shows_minutes_then_hours() {
+        assert_eq!(clock(Duration::ZERO), "0:00");
+        assert_eq!(clock(ms(59_999)), "0:59");
+        assert_eq!(clock(secs(225)), "3:45");
+        assert_eq!(clock(secs(3725)), "1:02:05");
     }
 
     #[test]
@@ -504,6 +605,34 @@ mod tests {
 
         let shown = menu_title(&view("Requiem in D minor, K. 626: Lacrimosa", "Mozart"));
         assert_eq!(shown, "Requiem in D minor, K. 626: Lacrimosa —…");
+    }
+
+    #[test]
+    fn status_title_keeps_twenty_four_chars() {
+        let title = "x".repeat(24);
+        assert_eq!(status_title(&view(&title, "Ann")), title);
+        assert_eq!(status_title(&view("Song", "Ann")), "Song");
+    }
+
+    #[test]
+    fn status_title_truncates_with_an_ellipsis() {
+        let shown = status_title(&view(&"x".repeat(25), ""));
+        assert_eq!(shown, format!("{}…", "x".repeat(23)));
+        assert_eq!(shown.chars().count(), 24);
+
+        let shown = status_title(&view("Requiem in D minor, K. 626: Lacrimosa", "Mozart"));
+        assert_eq!(shown, "Requiem in D minor, K.…");
+    }
+
+    #[test]
+    fn status_title_counts_chars_not_bytes() {
+        let title = "音".repeat(24);
+        assert_eq!(status_title(&view(&title, "")), title);
+        let shown = status_title(&view(&"音".repeat(25), ""));
+        assert_eq!(shown, format!("{}…", "音".repeat(23)));
+        let shown = status_title(&view("Café Ñandú — Señorita 🎶🎶 Überlänge", ""));
+        assert_eq!(shown, "Café Ñandú — Señorita 🎶…");
+        assert_eq!(shown.chars().count(), 24);
     }
 
     #[test]

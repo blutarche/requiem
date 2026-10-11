@@ -6,7 +6,7 @@ use std::time::{Duration, Instant};
 
 use crossbeam_channel::unbounded;
 use requiem_core::PlayState;
-use requiem_macos::{PlayerView, run};
+use requiem_macos::{PlayerView, UiUpdate, run};
 
 const PAUSE_AFTER: Duration = Duration::from_secs(5);
 
@@ -17,7 +17,7 @@ fn main() {
         .unwrap_or(20);
     let total = Duration::from_secs(secs);
 
-    let (views_tx, views) = unbounded();
+    let (updates_tx, updates) = unbounded();
     let (actions, actions_rx) = unbounded();
     let (stop_tx, stop) = unbounded();
 
@@ -36,18 +36,21 @@ fn main() {
             duration: Some(Duration::from_secs(190)),
             position: Duration::ZERO,
             state: PlayState::Playing,
+            artwork_url: None,
         };
-        let _ = views_tx.send(Some(view.clone()));
+        let _ = updates_tx.send(UiUpdate::View(Some(view.clone())));
         if total > PAUSE_AFTER {
             thread::sleep(PAUSE_AFTER);
             view.position = PAUSE_AFTER;
             view.state = PlayState::Paused;
-            let _ = views_tx.send(Some(view));
+            let _ = updates_tx.send(UiUpdate::View(Some(view)));
+            requiem_macos::wake();
         }
         thread::sleep(total.saturating_sub(start.elapsed()));
         let _ = stop_tx.send(());
+        requiem_macos::wake();
     });
 
-    run(views, actions, stop);
+    run(updates, actions, stop);
     println!("run returned");
 }

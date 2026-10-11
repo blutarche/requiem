@@ -979,7 +979,8 @@ impl Ui {
         }
         if let Some(now) = p.now_playing {
             let track = now.track.as_ref().map(|(t, a)| (t.as_str(), a.as_str()));
-            self.bar.set_track(track, &now.total);
+            self.bar
+                .set_track(track, &now.total, now.artwork.as_deref());
         }
         if let Some(e) = p.elapsed {
             self.bar.set_elapsed(&e);
@@ -1342,6 +1343,7 @@ fn spoken(toast: &Toast) -> String {
 struct NowPlaying {
     track: Option<(String, String)>,
     total: String,
+    artwork: Option<String>,
 }
 
 /// Owned copies of the dirty regions, taken so the view-model borrow ends before AppKit
@@ -1377,6 +1379,7 @@ impl Patch {
                     .as_ref()
                     .map(|t| (t.title.clone(), vm::artists(t))),
                 total: s.total_text(),
+                artwork: s.now_playing.as_ref().and_then(|t| t.artwork_url.clone()),
             }),
             elapsed: (any(Dirty::ELAPSED) || any(Dirty::STATE) || any(Dirty::NOW_PLAYING))
                 .then(|| s.elapsed_text()),
@@ -1430,6 +1433,7 @@ mod tests {
             Some(("Night Drive Home".into(), "Hollow Coast".into()))
         );
         assert_eq!(now.total, "3:45");
+        assert_eq!(now.artwork, demo::artwork_url(0));
         assert_eq!(p.elapsed.as_deref(), Some("1:23"));
         assert!((p.progress.unwrap() - 83.0 / 225.0).abs() < 1e-9);
         assert_eq!(p.playing, Some(true));
