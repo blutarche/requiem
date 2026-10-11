@@ -29,15 +29,15 @@ The bundle embeds Homebrew's libopus. Its minimum macOS version is whatever that
 ## Use
 
 - **Window:** type a query and press Enter; Return or a double-click plays a result, Cmd+Return (or the row's +) adds it to the queue. In the queue, Delete removes the selected track and Option+Cmd+Up / Option+Cmd+Down move it; right-click a queue row for Remove from Queue, Move Up, Move Down or Clear Queue (its toast offers Undo). Cmd+Z undoes a replaced or cleared queue until the queue changes again. Space toggles play/pause, Left / Right seek 5 s, Cmd+Left / Cmd+Right skip, Cmd+Up / Cmd+Down change the volume, Cmd+F focuses search, Cmd+1 / Cmd+2 switch between Search and Queue, Cmd+K opens the palette. Cmd+Q closes the window and the music keeps playing; Option+Cmd+Q ("Quit and Stop Music") stops the player too.
-- **CLI:** `requiem --connect`, then `help`. Commands: `search <query>`, `play <n>`, `add <n>`, `queue`, `jump <n>`, `remove <n>`, `move <from> <to>`, `clear`, `next`, `prev`, `pause`, `resume`, `toggle`, `seek <secs|+secs|-secs>`, `vol <0-100>`, `status`, `shutdown-daemon`, `quit`. `--script <file>` runs commands from a file; `--script -` reads them from stdin.
+- **CLI:** `requiem --connect`, then `help`. Commands: `search <query>`, `play <n>`, `add <n>`, `play-track <json>`, `add-track <json>`, `queue`, `jump <n>`, `remove <n>`, `move <from> <to>`, `clear`, `next`, `prev`, `pause`, `resume`, `toggle`, `seek <secs|+secs|-secs>`, `vol <0-100>`, `status`, `shutdown-daemon`, `quit`. `--script <file>` runs commands from a file; `--script -` reads them from stdin.
 
 ### JSON output
 
-`requiem --connect --json` takes the same commands but prints one JSON object per line on stdout, each with a `"type"` field. Arguments that fail to parse still go to stderr as text; a failure to reach the daemon is a `error` object with exit code 1. Positions (`index`, `current`) are 1-based, as the commands take them. Search results arrive asynchronously, so a script that needs them uses `await results`.
+`requiem --connect --json` takes the same commands but prints one JSON object per line on stdout, each with a `"type"` field. Arguments that fail to parse still go to stderr as text; a failure to reach the daemon is a `error` object with exit code 1. Positions (`index`, `current`) are 1-based, as the commands take them. `play-track` and `add-track` take one track object on one line, as a `result` line prints it (`id`, `title` and `artists` are required), and act like `play` and `add` for that exact track. Search results arrive asynchronously, so a script that needs them uses `await results`.
 
 | `type` | Fields |
 | --- | --- |
-| `result` | `index`, `title`, `artists`, `album`, `duration_ms`, `artwork_url` (the last three may be `null`) |
+| `result` | `index`, `id` (`provider`, `id`), `title`, `artists`, `album`, `duration_ms`, `artwork_url` (the last three may be `null`) |
 | `no_results`, `queue_empty` | none |
 | `search_failed` | `error` |
 | `queue_item` | `index`, `current` (bool), plus the track fields above |
@@ -48,7 +48,7 @@ The bundle embeds Homebrew's libopus. Its minimum macOS version is whatever that
 | `volume` | `volume` |
 | `track_failed` | `title`, `error` |
 | `provider_broken` | `detail` |
-| `ack` | `command`: a command was sent (search, play, add, jump, remove, move, clear, next, prev, pause, resume, toggle, seek, vol, shutdown-daemon) |
+| `ack` | `command`: a command was sent (search, play, add, play-track, add-track, jump, remove, move, clear, next, prev, pause, resume, toggle, seek, vol, shutdown-daemon) |
 | `mark` | `name`, `unix_millis` |
 | `help` | `text` |
 | `error` | `message` |

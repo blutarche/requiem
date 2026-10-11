@@ -23,10 +23,9 @@ export default function Command() {
     { abortable, onError: reportFailure },
   );
 
-  // `play` and `add` pick from the CLI session's own results, so the search is repeated in the same script.
   async function pick(command: "play" | "add", item: SearchResult) {
     try {
-      await run([`search ${text}`, `await results ${RESULT_TIMEOUT_SECS}`, `${command} ${item.index}`]);
+      await run([`${command}-track ${JSON.stringify(item)}`]);
       await showHUD(command === "play" ? `Playing: ${item.title}` : `Added to queue: ${item.title}`);
     } catch (error) {
       await reportFailure(error);

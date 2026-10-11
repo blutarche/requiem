@@ -443,6 +443,7 @@ fn json_search_results_are_one_object_each() {
         serde_json::json!({
             "type": "result",
             "index": 1,
+            "id": {"provider": "fake", "id": "t1"},
             "title": "Title t1",
             "artists": ["A", "B"],
             "album": "Album",
@@ -508,4 +509,65 @@ fn json_queue_marks_the_current_track() {
     assert_eq!(items[0]["current"], true);
     assert_eq!(items[0]["title"], "Title t1");
     assert_eq!(of_type(&lines, "ack")[1]["command"], "play");
+}
+
+#[test]
+fn play_track_enqueues_exactly_the_given_track() {
+    let r = rig();
+    let app = r.json_app();
+    let json = r#"{"type":"result","index":7,"id":{"provider":"fake","id":"zz"},"title":"Picked","artists":["X"],"album":null,"duration_ms":1500,"artwork_url":"https://a/b.jpg"}"#;
+    exec_all(&app, &format!("play-track {json}"));
+    assert_eq!(r.engine.wait_load(1).1, "zz");
+    r.engine.emit(EngineEvent::Started {
+        r#gen: gen_of_first_load(&r),
+        duration: None,
+    });
+    exec_all(&app, "await nowplaying 5\nqueue");
+    let lines = r.json_lines();
+    let items = of_type(&lines, "queue_item");
+    assert_eq!(items.len(), 1);
+    assert_eq!(
+        items[0]["id"],
+        serde_json::json!({"provider": "fake", "id": "zz"})
+    );
+    assert_eq!(items[0]["title"], "Picked");
+    assert_eq!(items[0]["duration_ms"], 1500);
+    assert_eq!(items[0]["artwork_url"], "https://a/b.jpg");
+    assert_eq!(of_type(&lines, "ack")[0]["command"], "play-track");
+}
+
+#[test]
+fn add_track_appends_without_playing_in_text_mode() {
+    let r = rig();
+    let app = r.app(true);
+    let json = r#"{"id":{"provider":"fake","id":"aa"},"title":"Added","artists":["X","Y"]}"#;
+    exec_all(&app, &format!("add-track {json}\nadd-track {json}"));
+    wait_out(&r, "queue: 2 tracks, current none", 1);
+    exec_all(&app, "queue");
+    assert!(
+        r.out.text().contains("  2. X, Y — Added\n"),
+        "{}",
+        r.out.text()
+    );
+    assert!(r.engine.calls().is_empty());
+}
+
+#[test]
+fn malformed_track_json_errors_and_leaves_the_queue_alone() {
+    let r = rig();
+    let app = r.json_app();
+    for l in [
+        "play-track",
+        "play-track {not json",
+        r#"add-track {"title":"no id","artists":[]}"#,
+        r#"add-track {"id":{"provider":"fake","id":"a"},"title":"t","artists":[1]}"#,
+    ] {
+        assert!(matches!(app.exec(l), Flow::Continue), "{l}");
+    }
+    exec_all(&app, "queue");
+    let lines = r.json_lines();
+    assert_eq!(of_type(&lines, "error").len(), 4);
+    assert_eq!(of_type(&lines, "queue_empty").len(), 1);
+    assert!(of_type(&lines, "ack").is_empty());
+    assert!(r.engine.calls().is_empty());
 }

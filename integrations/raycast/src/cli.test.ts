@@ -16,7 +16,7 @@ import {
 
 const sample = [
   '{"type":"queue_changed","count":0,"current":null}',
-  '{"type":"result","index":1,"title":"Aruarian Dance","artists":["Nujabes"],"album":"Samurai Champloo","duration_ms":175000,"artwork_url":"https://x/a.jpg"}',
+  '{"type":"result","index":1,"id":{"provider":"yt","id":"abc"},"title":"Aruarian Dance","artists":["Nujabes"],"album":"Samurai Champloo","duration_ms":175000,"artwork_url":"https://x/a.jpg"}',
   "not json",
   '{"type":"status","state":"playing","track":{"title":"T","artists":["A"],"album":null,"duration_ms":null,"artwork_url":null},"position_ms":0,"duration_ms":null,"volume":100}',
   "",
@@ -31,6 +31,7 @@ test("parseLines keeps JSON objects with a type and drops the rest", () => {
   const [result] = ofType<SearchResult>(messages, "result");
   assert.equal(result.title, "Aruarian Dance");
   assert.equal(result.index, 1);
+  assert.deepEqual(result.id, { provider: "yt", id: "abc" });
 });
 
 test("hud text follows the reported state", () => {
@@ -51,6 +52,13 @@ test("a daemon that cannot start is a fixable error", () => {
     () => throwOnError(messages, "/x/requiem"),
     (e: unknown) => e instanceof CliError && e.fixable && e.message.includes("/x/requiem"),
   );
+});
+
+test("a result serializes to one script line the CLI can take back", () => {
+  const [result] = ofType<SearchResult>(parseLines(sample), "result");
+  const line = oneLine(`play-track ${JSON.stringify(result)}`);
+  assert.ok(line.startsWith("play-track {") && !line.includes("\n"));
+  assert.deepEqual(JSON.parse(line.slice("play-track ".length)), result);
 });
 
 test("user text stays on one script line", () => {

@@ -3,6 +3,7 @@ import { spawn } from "node:child_process";
 export const DEFAULT_CLI_PATH = "/Applications/requiem.app/Contents/MacOS/requiem";
 
 export interface TrackInfo {
+  id: { provider: string; id: string };
   title: string;
   artists: string[];
   album: string | null;
@@ -128,7 +129,7 @@ export function runCli(cliPath: string, commands: string[], options: RunOptions 
       if (code !== 0) return reject(new CliError(stderr.trim() || `The requiem CLI exited with code ${code}.`));
       resolve(messages);
     });
-    child.stdin.end(commands.map(oneLine).join("\n") + "\n");
+    child.stdin.end(commands.map((c) => c.replace(/[\r\n]+/g, " ")).join("\n") + "\n");
   });
 }
 

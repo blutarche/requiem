@@ -3,7 +3,9 @@ use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use crossbeam_channel::Receiver;
-use requiem_core::{Command, EnqueueMode, Event, PlayState, SeekTarget, Session, Track};
+use requiem_core::{
+    Command, EnqueueMode, Event, PlayState, ProviderId, SeekTarget, Session, Track, TrackId,
+};
 use serde_json::{Value, json};
 
 const DEFAULT_AWAIT_SECS: f64 = 30.0;
@@ -17,6 +19,8 @@ commands:
   search <query>        search; prints numbered results
   play <n>              replace the queue with result n and play it
   add <n>               append result n to the queue
+  play-track <json>     like play, with the track object a --json result line prints
+  add-track <json>      like add, with that track object
   queue                 show the queue (> marks the current track)
   jump <n>              play queue position n
   remove <n>            remove queue position n
@@ -247,6 +251,7 @@ fn state_name(s: PlayState) -> &'static str {
 fn track_json<const N: usize>(kind: &str, t: &Track, extra: [(&str, Value); N]) -> Value {
     let mut o = json!({
         "type": kind,
+        "id": { "provider": t.id.provider.0, "id": t.id.id },
         "title": t.title,
         "artists": t.artists,
         "album": t.album,
@@ -257,6 +262,44 @@ fn track_json<const N: usize>(kind: &str, t: &Track, extra: [(&str, Value); N]) 
         o[k] = v;
     }
     o
+}
+
+/// The inverse of `track_json`: a track from a `--json` result line. `type` and `index` are ignored.
+fn parse_track(text: &str) -> Result<Track, String> {
+    let v: Value = serde_json::from_str(text).map_err(|e| format!("bad JSON: {e}"))?;
+    let str_at = |v: &Value, key: &str| {
+        v.get(key)
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+            .ok_or_else(|| format!("missing string field {key}"))
+    };
+    let opt_str = |key: &str| v.get(key).and_then(Value::as_str).map(str::to_owned);
+    let id = v.get("id").ok_or("missing field id")?;
+    let artists = v
+        .get("artists")
+        .and_then(Value::as_array)
+        .ok_or("missing array field artists")?
+        .iter()
+        .map(|a| {
+            a.as_str()
+                .map(str::to_owned)
+                .ok_or("artists must be strings")
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(Track {
+        id: TrackId {
+            provider: ProviderId(str_at(id, "provider")?),
+            id: str_at(id, "id")?,
+        },
+        title: str_at(&v, "title")?,
+        artists,
+        album: opt_str("album"),
+        duration: v
+            .get("duration_ms")
+            .and_then(Value::as_u64)
+            .map(Duration::from_millis),
+        artwork_url: opt_str("artwork_url"),
+    })
 }
 
 fn track_label(t: &Track) -> String {
@@ -416,11 +459,22 @@ impl<'a> App<'a> {
                 });
                 self.hub.ack(cmd);
             }
-            "play" | "add" => {
-                let Some(track) = self.pick(arg) else {
-                    return Flow::Continue;
+            "play" | "add" | "play-track" | "add-track" => {
+                let track = if cmd.ends_with("-track") {
+                    match parse_track(arg) {
+                        Ok(t) => t,
+                        Err(e) => {
+                            self.hub.error(&format!("{cmd}: {e}"));
+                            return Flow::Continue;
+                        }
+                    }
+                } else {
+                    let Some(t) = self.pick(arg) else {
+                        return Flow::Continue;
+                    };
+                    t
                 };
-                if cmd == "play" {
+                if cmd.starts_with("play") {
                     self.clear_playback_seen();
                     self.player.send(Command::Enqueue {
                         tracks: vec![track],
