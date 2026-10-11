@@ -270,10 +270,27 @@ impl Palette {
             .filter(|(_, r)| matches.contains(&r.action))
             .map(|(i, _)| i)
             .collect();
+        let was = self.selected_row();
         *self.shown.borrow_mut() = shown;
         self.layout();
         self.selected.set(step(&self.shown_enabled(), None, 1));
         self.repaint();
+        if self.selected_row() != was {
+            self.announce_selected();
+        }
+    }
+
+    /// The highlighted row's index in `rows`.
+    fn selected_row(&self) -> Option<usize> {
+        let shown = self.shown.borrow();
+        self.selected.get().and_then(|s| shown.get(s).copied())
+    }
+
+    /// Focus stays in the field, so VoiceOver hears the highlighted row only from this.
+    fn announce_selected(&self) {
+        if let Some(i) = self.selected_row() {
+            widgets::announce(self.panel.mtm(), self.rows[i].action.label());
+        }
     }
 
     /// Places the panel and its shown rows for the window's current size.
@@ -341,6 +358,7 @@ impl Palette {
             r.label.setTextColor(Some(&ink));
             r.keys.setTextColor(Some(&keys));
             r.view.setAccessibilityEnabled(r.enabled.get());
+            r.view.setAccessibilitySelected(Some(i) == sel);
         }
     }
 
@@ -349,6 +367,7 @@ impl Palette {
         let next = step(&self.shown_enabled(), self.selected.get(), delta);
         if next.is_some() && self.selected.replace(next) != next {
             self.repaint();
+            self.announce_selected();
         }
     }
 
