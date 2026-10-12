@@ -439,9 +439,7 @@ impl Shelves {
     pub fn new(mtm: MainThreadMarker, frame: NSRect) -> Shelves {
         let view = NSScrollView::initWithFrame(NSScrollView::alloc(mtm), frame);
         view.setAutoresizingMask(widgets::FLEX_W | widgets::FLEX_H);
-        // No vertical scroller: with one, AppKit draws nothing at all into an off-screen
-        // snapshot of the window (cause not isolated). The wheel and trackpad still scroll the page.
-        view.setHasVerticalScroller(false);
+        view.setHasVerticalScroller(true);
         view.setDrawsBackground(false);
         view.setBorderType(NSBorderType::NoBorder);
         view.contentView().setDrawsBackground(false);
@@ -561,6 +559,16 @@ impl Shelves {
                 row.clear();
             }
         }
+    }
+
+    /// Scrolls the page down to its last shelf.
+    pub fn scroll_to_end(&self) {
+        let clip = self.view.contentView();
+        let size = clip.bounds().size;
+        let bottom = self.doc.frame().size.height;
+        let end = clip.constrainBoundsRect(rect(0.0, bottom, size.width, size.height));
+        clip.scrollToPoint(end.origin);
+        self.view.reflectScrolledClipView(&clip);
     }
 
     /// Item `index` of the page's shelf `shelf`.

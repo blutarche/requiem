@@ -446,7 +446,11 @@ impl Ui {
 
         // Home page.
         let home_page = widgets::view(mtm, rect(0.0, 0.0, mw, mh), FLEX_W | FLEX_H);
-        let shelves = Shelves::new(mtm, rect(0.0, 0.0, mw, mh - TOP));
+        // Below the titlebar, not TOP: a scroll view with a vertical scroller that reaches under
+        // the titlebar gets macOS 26's scroll pocket, whose backdrop layers make an off-screen
+        // snapshot of the whole window come out blank.
+        let titlebar_h = WIN_H - window.contentLayoutRect().size.height;
+        let shelves = Shelves::new(mtm, rect(0.0, 0.0, mw, mh - titlebar_h));
         let home_state = EmptyState::new(
             mtm,
             rect(0.0, 0.0, mw, mh),

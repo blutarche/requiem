@@ -792,6 +792,10 @@ pub fn run(args: Args) {
     ui.render_now();
     match args.view {
         View::Home => ui.show(AppView::Home),
+        View::HomeScrolled => {
+            ui.show(AppView::Home);
+            ui.shelves.scroll_to_end();
+        }
         View::Library | View::LibrarySignedOut | View::LibraryUnavailable | View::SignIn => {
             ui.show(AppView::Library)
         }
