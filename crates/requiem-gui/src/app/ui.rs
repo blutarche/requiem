@@ -74,6 +74,15 @@ impl AppView {
     }
 }
 
+/// Where Back leaves Now Playing for: the view it was opened `from`, or Home for a collection
+/// that is no longer open.
+fn back_from_now_playing(from: AppView, collection_open: bool) -> AppView {
+    match from {
+        AppView::Collection if !collection_open => AppView::Home,
+        view => view,
+    }
+}
+
 /// Whether a snapshot of a connected window has what it waits for.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SnapshotState {
@@ -1120,7 +1129,10 @@ impl Ui {
                     .map_or(Place::Home, |c| c.from);
                 self.show(AppView::of(from));
             }
-            AppView::NowPlaying => self.show(self.now_playing_from.get()),
+            AppView::NowPlaying => {
+                let open = self.vm.borrow().ui().collection.is_some();
+                self.show(back_from_now_playing(self.now_playing_from.get(), open));
+            }
             _ => {}
         }
     }
@@ -2218,6 +2230,27 @@ mod tests {
 
     use super::*;
     use crate::demo;
+
+    #[test]
+    fn back_from_now_playing_skips_a_collection_that_closed() {
+        assert_eq!(
+            back_from_now_playing(AppView::Collection, true),
+            AppView::Collection
+        );
+        assert_eq!(
+            back_from_now_playing(AppView::Collection, false),
+            AppView::Home
+        );
+        for view in [
+            AppView::Home,
+            AppView::Search,
+            AppView::Library,
+            AppView::Queue,
+        ] {
+            assert_eq!(back_from_now_playing(view, false), view);
+            assert_eq!(back_from_now_playing(view, true), view);
+        }
+    }
 
     #[test]
     fn patch_copies_only_dirty_regions() {
