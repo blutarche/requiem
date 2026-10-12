@@ -33,6 +33,8 @@ const UP_NEXT_TITLE_GAP: CGFloat = 10.0;
 const ROW_H: CGFloat = 56.0;
 const ROW_COVER: CGFloat = 44.0;
 const ROW_PAD: CGFloat = (ROW_H - ROW_COVER) / 2.0;
+/// "Show queue", below the last row.
+const BUTTON_GAP: CGFloat = 12.0;
 const BUTTON_H: CGFloat = 32.0;
 /// Larger artwork looks no sharper.
 const MAX_PX: u32 = 1080;
@@ -48,6 +50,13 @@ fn cover_side(w: CGFloat, h: CGFloat) -> CGFloat {
 /// The pixels of artwork a cover `side` points square needs at `scale`.
 fn pixels(side: CGFloat, scale: CGFloat) -> u32 {
     ((side * scale).ceil() as u32).min(MAX_PX)
+}
+
+/// How many of `wanted` up-next rows starting at `top` fit on a page `height` tall with
+/// "Show queue" whole below them.
+fn rows_that_fit(top: CGFloat, height: CGFloat, wanted: usize) -> usize {
+    let room = height - top - BUTTON_GAP - BUTTON_H;
+    ((room / ROW_H).floor().max(0.0) as usize).min(wanted)
 }
 
 /// Whether the cover's image must load again: for another URL, or a side that drifted from
@@ -217,8 +226,6 @@ impl NowPlayingPage {
             unsafe { msg_send![NowPlayingView::alloc(mtm), initWithFrame: frame] };
         view.setAutoresizingMask(FLEX_W | FLEX_H);
         view.setWantsLayer(true);
-        // A short window cuts the up-next list off rather than draw it over the player bar.
-        view.setClipsToBounds(true);
         let bounds = rect(0.0, 0.0, frame.size.width, frame.size.height);
         // SAFETY: `initWithFrame:` is NSView's designated initializer.
         let content: Retained<FlippedView> =
@@ -315,14 +322,8 @@ impl NowPlayingPage {
             self.album.setHidden(album.is_empty());
         }
         let next = &next[..next.len().min(self.rows.len())];
-        for (i, row) in self.rows.iter().enumerate() {
-            match next.get(i) {
-                Some(t) => {
-                    row.set(t);
-                    row.view.setHidden(false);
-                }
-                None => row.view.setHidden(true),
-            }
+        for (row, t) in self.rows.iter().zip(next) {
+            row.set(t);
         }
         self.nothing_next.setHidden(!next.is_empty());
         self.next_count.set(next.len());
@@ -363,15 +364,19 @@ impl NowPlayingPage {
             self.nothing_next.setFrame(rect(x, y, w, h));
             y += h;
         }
+        let shown = rows_that_fit(y, b.size.height, n);
+        for (i, row) in self.rows.iter().enumerate() {
+            row.view.setHidden(i >= shown);
+        }
         // Covers and titles line up with the details above them.
-        for row in &self.rows[..n] {
+        for row in &self.rows[..shown] {
             row.view.setFrame(rect(x - ROW_PAD, y, w + ROW_PAD, ROW_H));
             y += ROW_H;
         }
         // Its title lines up with the labels' text, inset 2 pt; its hover fill reaches past.
         let bw = self.show_queue.frame().size.width;
         self.show_queue
-            .setFrame(rect(x - 10.0, y + 12.0, bw, BUTTON_H));
+            .setFrame(rect(x - 10.0, y + BUTTON_GAP, bw, BUTTON_H));
         self.load_art(side);
     }
 
@@ -442,6 +447,19 @@ mod tests {
         assert_eq!(pixels(387.0, 2.0), 774);
         assert_eq!(pixels(200.5, 1.0), 201);
         assert_eq!(pixels(420.0, 3.0), 1080);
+    }
+
+    #[test]
+    fn as_many_up_next_rows_show_as_leave_show_queue_whole() {
+        // Room for all 5, and no more than there are.
+        assert_eq!(rows_that_fit(166.0, 648.0, 5), 5);
+        assert_eq!(rows_that_fit(166.0, 648.0, 3), 3);
+        // 166 + 2 rows + 12 + 32 = 322; a third row needs 378.
+        assert_eq!(rows_that_fit(166.0, 322.0, 5), 2);
+        assert_eq!(rows_that_fit(166.0, 377.0, 5), 2);
+        // No room for a row, or for the button alone.
+        assert_eq!(rows_that_fit(166.0, 265.0, 5), 0);
+        assert_eq!(rows_that_fit(166.0, 180.0, 5), 0);
     }
 
     #[test]
