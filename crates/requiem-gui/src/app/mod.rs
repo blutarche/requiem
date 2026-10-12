@@ -3,6 +3,7 @@
 
 mod backend;
 mod bar;
+mod now_playing;
 mod palette;
 mod shelves;
 mod snapshot;
@@ -206,6 +207,14 @@ define_class!(
             ui::with(|ui| {
                 ui.close_palette();
                 ui.show(AppView::Queue);
+            });
+        }
+
+        #[unsafe(method(showNowPlaying:))]
+        fn show_now_playing(&self, _sender: Option<&AnyObject>) {
+            ui::with(|ui| {
+                ui.close_palette();
+                ui.show_now_playing();
             });
         }
 
@@ -416,6 +425,7 @@ fn palette_action(action: Sel) -> Option<PaletteAction> {
         (sel!(showSearch:), PaletteAction::ShowSearch),
         (sel!(showLibrary:), PaletteAction::ShowLibrary),
         (sel!(showQueue:), PaletteAction::ShowQueue),
+        (sel!(showNowPlaying:), PaletteAction::ShowNowPlaying),
         (sel!(refresh:), PaletteAction::Refresh),
         (sel!(signIn:), PaletteAction::SignIn),
         (sel!(signOut:), PaletteAction::SignOut),
@@ -518,6 +528,7 @@ fn key_down(ui: &Ui, event: &NSEvent) -> bool {
             | NSEventModifierFlags::Option,
     );
     match code {
+        KEY_ESCAPE if plain && ui.current_view() == AppView::NowPlaying => ui.go_back(),
         KEY_SPACE if plain && !on_button => ui.intent(Intent::Toggle),
         KEY_LEFT if plain => ui.intent(Intent::SeekBy(-SEEK_STEP_SECS)),
         KEY_RIGHT if plain => ui.intent(Intent::SeekBy(SEEK_STEP_SECS)),
@@ -648,6 +659,7 @@ fn menu_bar(mtm: MainThreadMarker, target: &Delegate) -> (Retained<NSMenu>, Reta
             item("Search", Some(sel!(showSearch:)), "2", true),
             item("Library", Some(sel!(showLibrary:)), "3", true),
             item("Queue", Some(sel!(showQueue:)), "4", true),
+            item("Now Playing", Some(sel!(showNowPlaying:)), "l", true),
             sep(),
             item("Refresh", Some(sel!(refresh:)), "r", true),
             item("Back", Some(sel!(goBack:)), "[", true),
@@ -807,6 +819,7 @@ pub fn run(args: Args) {
         }
         View::Collection => ui.show(AppView::Collection),
         View::Queue => ui.show(AppView::Queue),
+        View::NowPlaying | View::NowPlayingEmpty => ui.show_now_playing(),
         View::Palette => ui.open_palette(),
         View::Search | View::Empty | View::Disconnected | View::Toast | View::OutOfDate => {
             ui.show(AppView::Search)

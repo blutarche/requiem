@@ -645,6 +645,13 @@ impl HoverButton {
         this
     }
 
+    /// A borderless text button, filled only on hover. `set_label` sizes its width.
+    pub fn plain(mtm: MainThreadMarker, frame: NSRect) -> Retained<Self> {
+        let this = Self::filled(mtm, frame, None, &theme::bg_3(), theme::RADIUS);
+        this.setImagePosition(NSCellImagePosition::NoImage);
+        this
+    }
+
     fn filled(
         mtm: MainThreadMarker,
         frame: NSRect,

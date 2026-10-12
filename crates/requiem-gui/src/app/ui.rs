@@ -18,11 +18,12 @@ use objc2_app_kit::{
 };
 use objc2_core_foundation::CGFloat;
 use objc2_foundation::{MainThreadMarker, NSPoint, NSRect, NSSize, NSString, NSURL};
-use requiem_core::{Collection, Item, Shelf};
+use requiem_core::{Collection, Item, Shelf, Track};
 use requiem_macos::artwork::Cover;
 
 use super::backend::{Backend, Msg};
 use super::bar::PlayerBar;
+use super::now_playing::NowPlayingPage;
 use super::palette::Palette;
 use super::shelves::Shelves;
 use super::table::{self, Kind, Table};
@@ -45,6 +46,8 @@ pub enum AppView {
     Queue,
     /// A playlist or album opened from Home or the Library; not in the sidebar.
     Collection,
+    /// The playing track's page; not in the sidebar.
+    NowPlaying,
 }
 
 impl AppView {
@@ -55,6 +58,7 @@ impl AppView {
             AppView::Library => Place::Library,
             AppView::Queue => Place::Queue,
             AppView::Collection => Place::Collection,
+            AppView::NowPlaying => Place::NowPlaying,
         }
     }
 
@@ -65,6 +69,7 @@ impl AppView {
             Place::Library => AppView::Library,
             Place::Queue => AppView::Queue,
             Place::Collection => AppView::Collection,
+            Place::NowPlaying => AppView::NowPlaying,
         }
     }
 }
@@ -271,6 +276,9 @@ pub struct Ui {
     queue_count: Retained<NSTextField>,
     pub queue: Table,
     queue_empty: EmptyState,
+    pub now_playing: NowPlayingPage,
+    /// Where Back and Esc leave Now Playing for: the view it was opened from.
+    now_playing_from: Cell<AppView>,
     bar: PlayerBar,
     toast: ToastView,
     pub palette: Palette,
@@ -542,6 +550,10 @@ impl Ui {
         collection_page.addSubview(&collection_state.view);
         main.addSubview(&collection_page);
 
+        let now_playing =
+            NowPlayingPage::new(mtm, rect(0.0, 0.0, mw, mh), target, sel!(showQueue:));
+        main.addSubview(&now_playing.view);
+
         let banner = widgets::panel(
             mtm,
             rect(0.0, mh - BANNER_H, mw, BANNER_H),
@@ -617,6 +629,8 @@ impl Ui {
             queue_count,
             queue,
             queue_empty,
+            now_playing,
+            now_playing_from: Cell::new(AppView::Home),
             bar,
             toast,
             palette,
@@ -863,7 +877,7 @@ impl Ui {
             AppView::Queue => &self.queue,
             AppView::Library => &self.library_table,
             AppView::Collection => &self.collection_table,
-            AppView::Home => {
+            AppView::Home | AppView::NowPlaying => {
                 // Keeps Space and the arrow keys from landing in a hidden text field.
                 self.window.makeFirstResponder(None);
                 return;
@@ -890,7 +904,9 @@ impl Ui {
         self.library_page.setHidden(view != AppView::Library);
         self.queue_page.setHidden(view != AppView::Queue);
         self.collection_page.setHidden(view != AppView::Collection);
-        // An open collection keeps the nav item of the page it was opened from lit.
+        self.now_playing.view.setHidden(view != AppView::NowPlaying);
+        // An open collection keeps the nav item of the page it was opened from lit; Now
+        // Playing lights none.
         let lit = match view {
             AppView::Collection => self
                 .vm
@@ -935,7 +951,7 @@ impl Ui {
                 row: self.queue.selected_row().is_some(),
                 result: false,
             },
-            AppView::Home => Selection::default(),
+            AppView::Home | AppView::NowPlaying => Selection::default(),
         }
     }
 
@@ -1020,6 +1036,7 @@ impl Ui {
             PaletteAction::ShowSearch => self.show(AppView::Search),
             PaletteAction::ShowLibrary => self.show(AppView::Library),
             PaletteAction::ShowQueue => self.show(AppView::Queue),
+            PaletteAction::ShowNowPlaying => self.show_now_playing(),
             PaletteAction::Refresh => self.intent(Intent::Refresh),
             PaletteAction::SignIn => self.intent(Intent::SignIn),
             PaletteAction::SignOut => self.confirm_sign_out(),
@@ -1080,23 +1097,36 @@ impl Ui {
         self.show(AppView::Collection);
     }
 
-    /// Back from an open collection to the page it was opened from; that page kept its scroll.
-    pub fn go_back(&self) {
-        if self.view.get() != AppView::Collection {
-            return;
+    /// Shows Now Playing, which Back leaves for the view showing now.
+    pub fn show_now_playing(&self) {
+        let from = self.view.get();
+        if from != AppView::NowPlaying {
+            self.now_playing_from.set(from);
         }
-        let from = self
-            .vm
-            .borrow()
-            .ui()
-            .collection
-            .as_ref()
-            .map_or(Place::Home, |c| c.from);
-        self.show(AppView::of(from));
+        self.show(AppView::NowPlaying);
+    }
+
+    /// Back from an open collection to the page it was opened from, which kept its scroll, or
+    /// from Now Playing to the view it was opened from.
+    pub fn go_back(&self) {
+        match self.view.get() {
+            AppView::Collection => {
+                let from = self
+                    .vm
+                    .borrow()
+                    .ui()
+                    .collection
+                    .as_ref()
+                    .map_or(Place::Home, |c| c.from);
+                self.show(AppView::of(from));
+            }
+            AppView::NowPlaying => self.show(self.now_playing_from.get()),
+            _ => {}
+        }
     }
 
     pub fn can_go_back(&self) -> bool {
-        self.view.get() == AppView::Collection
+        matches!(self.view.get(), AppView::Collection | AppView::NowPlaying)
     }
 
     pub fn refresh(&self) {
@@ -1224,7 +1254,7 @@ impl Ui {
                     self.open_library_row(i);
                 }
             }
-            AppView::Home => {}
+            AppView::Home | AppView::NowPlaying => {}
             AppView::Queue => {
                 if let Some(i) = self.queue.selected_row().filter(|_| !append) {
                     self.play_queue(i);
@@ -1524,6 +1554,9 @@ impl Ui {
             self.bar
                 .set_track(track, &now.total, now.artwork.as_deref());
         }
+        if let Some((track, next)) = p.now_page {
+            self.now_playing.set(track, &next);
+        }
         if let Some(e) = p.elapsed {
             self.bar.set_elapsed(&e);
         }
@@ -1556,13 +1589,14 @@ impl Ui {
         }
     }
 
-    fn pages(&self) -> [&Retained<NSView>; 5] {
+    fn pages(&self) -> [&NSView; 6] {
         [
             &self.home_page,
             &self.search_page,
             &self.library_page,
             &self.queue_page,
             &self.collection_page,
+            &self.now_playing.view,
         ]
     }
 
@@ -2113,6 +2147,8 @@ struct Patch {
     library: Option<(LibraryView, Vec<table::RowText>)>,
     collection: Option<Option<CollectionPatch>>,
     now_playing: Option<NowPlaying>,
+    /// Now Playing's track and the tracks after it.
+    now_page: Option<(Option<Track>, Vec<Track>)>,
     elapsed: Option<String>,
     seek_spoken: Option<String>,
     progress: Option<f64>,
@@ -2154,6 +2190,12 @@ impl Patch {
                 total: s.total_text(),
                 artwork: s.now_playing.as_ref().and_then(|t| t.artwork_url.clone()),
             }),
+            now_page: d.intersects(Dirty::NOW_PLAYING | Dirty::QUEUE).then(|| {
+                (
+                    s.now_playing.clone(),
+                    vm::up_next(&s.queue, s.current).to_vec(),
+                )
+            }),
             elapsed: (any(Dirty::ELAPSED) || any(Dirty::STATE) || any(Dirty::NOW_PLAYING))
                 .then(|| s.elapsed_text()),
             seek_spoken: (any(Dirty::ELAPSED) || any(Dirty::NOW_PLAYING)).then(|| s.seek_spoken()),
@@ -2187,7 +2229,7 @@ mod tests {
         assert!(p.home.is_none() && p.library.is_none() && p.collection.is_none());
         assert!(p.now_playing.is_none() && p.elapsed.is_none() && p.progress.is_none());
         assert!(p.playing.is_none() && p.toast.is_none() && p.banner.is_none());
-        assert!(p.controls.is_none());
+        assert!(p.controls.is_none() && p.now_page.is_none());
     }
 
     #[test]
@@ -2208,6 +2250,9 @@ mod tests {
         );
         assert_eq!(now.total, "3:45");
         assert_eq!(now.artwork, demo::artwork_url(0));
+        let (track, next) = p.now_page.unwrap();
+        assert_eq!(track.unwrap().title, "Night Drive Home");
+        assert_eq!(next, vm.ui().queue[3..8]);
         assert_eq!(p.elapsed.as_deref(), Some("1:23"));
         assert!((p.progress.unwrap() - 83.0 / 225.0).abs() < 1e-9);
         assert_eq!(p.playing, Some(true));

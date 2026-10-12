@@ -657,8 +657,8 @@ fn run_intent(vm: &mut Vm, daemon: &mut Daemon, intent: Intent) {
 }
 
 /// `start`, staged for a demo-only `view`: `Empty` skips the search; `Disconnected`,
-/// `OutOfDate` and `Toast` add their banner or toast; the Library views set the account.
-/// Other views get the plain start.
+/// `OutOfDate` and `Toast` add their banner or toast; the Library views set the account;
+/// `NowPlayingEmpty` stops playback. Other views get the plain start.
 pub fn start_in(view: View) -> (Vm, Daemon) {
     let t0 = Instant::now();
     let mut vm = Vm::new_at(t0);
@@ -705,7 +705,13 @@ pub fn start_in(view: View) -> (Vm, Daemon) {
             };
             run_intent(&mut vm, &mut daemon, open);
         }
-        View::Search | View::Queue | View::Palette | View::Empty => {}
+        View::NowPlayingEmpty => {
+            // Skipping past the last track stops playback.
+            let last = daemon.queue.len() - 1;
+            run_intent(&mut vm, &mut daemon, Intent::PlayQueue(last));
+            run_intent(&mut vm, &mut daemon, Intent::Next);
+        }
+        View::Search | View::Queue | View::Palette | View::Empty | View::NowPlaying => {}
     }
     (vm, daemon)
 }

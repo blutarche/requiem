@@ -208,6 +208,8 @@ pub enum Place {
     Queue,
     /// A playlist or album opened from Home or Library.
     Collection,
+    /// The playing track's page; not in the sidebar.
+    NowPlaying,
 }
 
 /// A list of items an intent plays or appends from.
@@ -475,7 +477,8 @@ impl UiState {
             | PaletteAction::ShowHome
             | PaletteAction::ShowSearch
             | PaletteAction::ShowLibrary
-            | PaletteAction::ShowQueue => true,
+            | PaletteAction::ShowQueue
+            | PaletteAction::ShowNowPlaying => true,
             PaletteAction::Refresh => can.player && self.refreshable(),
             PaletteAction::SignIn => can.player && self.library_view() == LibraryView::SignedOut,
             PaletteAction::SignOut => {
@@ -495,7 +498,7 @@ impl UiState {
             Place::Home => true,
             Place::Library => matches!(self.account_state(), Some(AccountState::SignedIn { .. })),
             Place::Collection => self.collection.is_some(),
-            Place::Search | Place::Queue => false,
+            Place::Search | Place::Queue | Place::NowPlaying => false,
         }
     }
 
@@ -1073,7 +1076,7 @@ impl Vm {
                     Place::Home => Slot::Home,
                     Place::Library => Slot::Library,
                     Place::Collection => Slot::Collection,
-                    Place::Search | Place::Queue => return Vec::new(),
+                    Place::Search | Place::Queue | Place::NowPlaying => return Vec::new(),
                 };
                 self.fetch(slot).into_iter().collect()
             }
@@ -1226,7 +1229,7 @@ impl Vm {
                 Some(page) => (Slot::Collection, &page.browse.load),
                 None => return Vec::new(),
             },
-            Place::Search | Place::Queue => return Vec::new(),
+            Place::Search | Place::Queue | Place::NowPlaying => return Vec::new(),
         };
         if *load != Load::Idle {
             return Vec::new();
@@ -1508,6 +1511,16 @@ pub fn played(row: usize, current: Option<usize>) -> bool {
     current.is_some_and(|c| row < c)
 }
 
+/// How many upcoming tracks Now Playing lists.
+pub const UP_NEXT: usize = 5;
+
+/// The tracks after the current one that Now Playing lists; none without a current track.
+pub fn up_next(queue: &[Track], current: Option<usize>) -> &[Track] {
+    let Some(c) = current else { return &[] };
+    let start = (c + 1).min(queue.len());
+    &queue[start..(start + UP_NEXT).min(queue.len())]
+}
+
 fn provider_name(id: &str) -> &str {
     match id {
         "ytmusic" => "YouTube Music",
@@ -1527,6 +1540,7 @@ pub enum PaletteAction {
     ShowSearch,
     ShowLibrary,
     ShowQueue,
+    ShowNowPlaying,
     Refresh,
     SignIn,
     SignOut,
@@ -1536,7 +1550,7 @@ pub enum PaletteAction {
 }
 
 impl PaletteAction {
-    pub const ALL: [PaletteAction; 16] = [
+    pub const ALL: [PaletteAction; 17] = [
         PaletteAction::PlayPause,
         PaletteAction::Next,
         PaletteAction::Previous,
@@ -1547,6 +1561,7 @@ impl PaletteAction {
         PaletteAction::ShowSearch,
         PaletteAction::ShowLibrary,
         PaletteAction::ShowQueue,
+        PaletteAction::ShowNowPlaying,
         PaletteAction::Refresh,
         PaletteAction::SignIn,
         PaletteAction::SignOut,
@@ -1567,6 +1582,7 @@ impl PaletteAction {
             PaletteAction::ShowSearch => "Show search",
             PaletteAction::ShowLibrary => "Show library",
             PaletteAction::ShowQueue => "Show queue",
+            PaletteAction::ShowNowPlaying => "Show now playing",
             PaletteAction::Refresh => "Refresh",
             PaletteAction::SignIn => "Sign in to Google",
             PaletteAction::SignOut => "Sign out of Google",
@@ -1589,6 +1605,7 @@ impl PaletteAction {
             PaletteAction::ShowSearch => "⌘2",
             PaletteAction::ShowLibrary => "⌘3",
             PaletteAction::ShowQueue => "⌘4",
+            PaletteAction::ShowNowPlaying => "⌘L",
             PaletteAction::Refresh => "⌘R",
             PaletteAction::SignIn | PaletteAction::SignOut => "",
             PaletteAction::VolumeUp => "⌘↑",
@@ -1656,6 +1673,7 @@ mod tests {
             PaletteAction::ShowSearch,
             PaletteAction::ShowLibrary,
             PaletteAction::ShowQueue,
+            PaletteAction::ShowNowPlaying,
         ];
         assert_eq!(
             runnable(
@@ -2639,6 +2657,17 @@ mod tests {
     }
 
     #[test]
+    fn up_next_lists_five_tracks_after_the_current_one() {
+        let queue = tracks(8);
+        let ids = |s: &[Track]| s.iter().map(|t| t.id.clone()).collect::<Vec<_>>();
+        assert_eq!(ids(up_next(&queue, Some(1))), ids(&queue[2..7]));
+        assert_eq!(ids(up_next(&queue, Some(5))), ids(&queue[6..8]));
+        assert!(up_next(&queue, Some(7)).is_empty());
+        assert!(up_next(&queue, None).is_empty());
+        assert!(up_next(&[], Some(0)).is_empty());
+    }
+
+    #[test]
     fn only_rows_before_the_current_one_have_played() {
         assert!(played(1, Some(2)));
         assert!(!played(2, Some(2)));
@@ -2659,7 +2688,8 @@ mod tests {
                 PaletteAction::ShowHome,
                 PaletteAction::ShowSearch,
                 PaletteAction::ShowLibrary,
-                PaletteAction::ShowQueue
+                PaletteAction::ShowQueue,
+                PaletteAction::ShowNowPlaying
             ]
         );
         assert_eq!(
@@ -2668,7 +2698,11 @@ mod tests {
         );
         assert_eq!(
             PaletteAction::filter("play"),
-            vec![PaletteAction::PlayPause, PaletteAction::PlaySelected]
+            vec![
+                PaletteAction::PlayPause,
+                PaletteAction::PlaySelected,
+                PaletteAction::ShowNowPlaying
+            ]
         );
         assert!(PaletteAction::filter("xyz").is_empty());
     }
@@ -2679,8 +2713,8 @@ mod tests {
         assert_eq!(
             keys,
             [
-                "Space", "⌘→", "⌘←", "↩", "⌘↩", "⌘F", "⌘1", "⌘2", "⌘3", "⌘4", "⌘R", "", "", "⌘↑",
-                "⌘↓", ""
+                "Space", "⌘→", "⌘←", "↩", "⌘↩", "⌘F", "⌘1", "⌘2", "⌘3", "⌘4", "⌘L", "⌘R", "", "",
+                "⌘↑", "⌘↓", ""
             ]
         );
     }
