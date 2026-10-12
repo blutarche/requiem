@@ -819,7 +819,7 @@ pub fn run(args: Args) {
         }
         View::Collection => ui.show(AppView::Collection),
         View::Queue => ui.show(AppView::Queue),
-        View::NowPlaying | View::NowPlayingEmpty => ui.show_now_playing(),
+        View::NowPlaying | View::NowPlayingEmpty | View::NowPlayingLast => ui.show_now_playing(),
         View::Palette => ui.open_palette(),
         View::Search | View::Empty | View::Disconnected | View::Toast | View::OutOfDate => {
             ui.show(AppView::Search)

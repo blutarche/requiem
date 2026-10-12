@@ -12,8 +12,8 @@ usage: requiem-gui [--demo] [--smoke] [--snapshot <png>] [--view <view>]
                      and its covers have loaded (20 s at most); exits 1 if the page fails
   --view <view>      the view shown at start: home (default), search, library, queue or
                      palette; with --demo also home-scrolled, home-shelf-paged, collection,
-                     now-playing, now-playing-empty, library-signed-out, library-unavailable,
-                     signin, empty, disconnected, toast or out-of-date";
+                     now-playing, now-playing-empty, now-playing-last, library-signed-out,
+                     library-unavailable, signin, empty, disconnected, toast or out-of-date";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum View {
@@ -34,6 +34,8 @@ pub enum View {
     NowPlaying,
     /// Demo only: the playing track's page with nothing playing.
     NowPlayingEmpty,
+    /// Demo only: the playing track's page with the queue's last track playing.
+    NowPlayingLast,
     /// Demo only: the Library with the account signed out.
     LibrarySignedOut,
     /// Demo only: the Library with no Google client set up.
@@ -51,7 +53,7 @@ pub enum View {
 }
 
 impl View {
-    const NAMES: [(&str, View); 17] = [
+    const NAMES: [(&str, View); 18] = [
         ("home", View::Home),
         ("search", View::Search),
         ("library", View::Library),
@@ -62,6 +64,7 @@ impl View {
         ("collection", View::Collection),
         ("now-playing", View::NowPlaying),
         ("now-playing-empty", View::NowPlayingEmpty),
+        ("now-playing-last", View::NowPlayingLast),
         ("library-signed-out", View::LibrarySignedOut),
         ("library-unavailable", View::LibraryUnavailable),
         ("signin", View::SignIn),
@@ -228,6 +231,7 @@ mod tests {
             ("collection", View::Collection),
             ("now-playing", View::NowPlaying),
             ("now-playing-empty", View::NowPlayingEmpty),
+            ("now-playing-last", View::NowPlayingLast),
             ("library-signed-out", View::LibrarySignedOut),
             ("library-unavailable", View::LibraryUnavailable),
             ("signin", View::SignIn),
