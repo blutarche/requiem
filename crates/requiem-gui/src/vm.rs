@@ -1503,6 +1503,11 @@ pub fn artists(track: &Track) -> String {
     track.artists.join(", ")
 }
 
+/// Whether the queue's row `row` has played: it comes before the current one.
+pub fn played(row: usize, current: Option<usize>) -> bool {
+    current.is_some_and(|c| row < c)
+}
+
 fn provider_name(id: &str) -> &str {
     match id {
         "ytmusic" => "YouTube Music",
@@ -2631,6 +2636,14 @@ mod tests {
     #[test]
     fn artists_joins_with_commas() {
         assert_eq!(artists(&track("a", 1)), "Artist a, Guest");
+    }
+
+    #[test]
+    fn only_rows_before_the_current_one_have_played() {
+        assert!(played(1, Some(2)));
+        assert!(!played(2, Some(2)));
+        assert!(!played(3, Some(2)));
+        assert!(!played(0, None));
     }
 
     #[test]
