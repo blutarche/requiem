@@ -37,6 +37,8 @@ const LIBRARY_ROW_H: CGFloat = 52.0;
 const THUMB: CGFloat = 32.0;
 const LIBRARY_THUMB: CGFloat = 40.0;
 const THUMB_GAP: CGFloat = 10.0;
+/// A played queue row's cover opacity.
+const PLAYED_COVER: CGFloat = 0.6;
 const FOCUS_RING: CGFloat = 2.0;
 /// How far the table's focus ring sits outside its rows.
 const RING_OUTSET: CGFloat = 4.0;
@@ -440,11 +442,15 @@ impl Controller {
             Col::Add => unreachable!(),
         };
         let current = self.ivars().current.get() == Some(row);
+        let played =
+            self.ivars().kind == Kind::Queue && vm::played(row, self.ivars().current.get());
+        cell.set_played(played);
         let iv = cell.ivars();
         if let Some(l) = iv.label.get() {
             widgets::set_text(l, text);
             if col == Col::Title {
-                cell.setAccessibilityLabel(Some(&NSString::from_str(&spoken_title(text, current))));
+                let spoken = spoken_title(text, current, played);
+                cell.setAccessibilityLabel(Some(&NSString::from_str(&spoken)));
             }
         }
         if let Some(bar) = iv.bar.get() {
@@ -457,10 +463,13 @@ impl Controller {
     }
 }
 
-/// What VoiceOver reads for a title cell. The current row is otherwise marked only in paint.
-fn spoken_title(title: &str, current: bool) -> String {
+/// What VoiceOver reads for a title cell. The current and played rows are otherwise marked
+/// only in paint.
+fn spoken_title(title: &str, current: bool, played: bool) -> String {
     if current {
         format!("Now playing, {title}")
+    } else if played {
+        format!("{title}, played")
     } else {
         title.to_owned()
     }
@@ -691,6 +700,8 @@ pub struct TextCellIvars {
     /// Muted text, raised to ink-2 on a selected row.
     secondary: bool,
     row_selected: Cell<bool>,
+    /// A queue row before the current one: dimmer text and cover.
+    played: Cell<bool>,
 }
 
 define_class!(
@@ -712,6 +723,7 @@ impl TextCell {
             cover: OnceCell::new(),
             secondary: col != Col::Title,
             row_selected: Cell::new(false),
+            played: Cell::new(false),
         });
         let w = 200.0;
         // SAFETY: `initWithFrame:` is NSView's designated initializer.
@@ -790,17 +802,31 @@ impl TextCell {
             };
             widgets::fill(bar, Some(&c));
         }
-        if !iv.secondary {
-            return;
+        self.paint_text();
+    }
+
+    /// Dims a played queue row, or undims a reused cell that showed one.
+    fn set_played(&self, played: bool) {
+        let iv = self.ivars();
+        iv.played.set(played);
+        self.paint_text();
+        if let Some(cover) = iv.cover.get() {
+            cover.setAlphaValue(if played { PLAYED_COVER } else { 1.0 });
         }
-        if let Some(l) = iv.label.get() {
-            let c = if selected {
-                theme::ink_2()
-            } else {
-                theme::muted()
-            };
-            l.setTextColor(Some(&c));
-        }
+    }
+
+    /// A selected row raises its text for contrast against the selection, played or not.
+    fn paint_text(&self) {
+        let iv = self.ivars();
+        let Some(l) = iv.label.get() else { return };
+        let c = match (iv.secondary, iv.row_selected.get(), iv.played.get()) {
+            (false, false, true) => theme::muted(),
+            (false, _, _) => theme::ink(),
+            (true, true, _) => theme::ink_2(),
+            (true, false, true) => theme::muted_2(),
+            (true, false, false) => theme::muted(),
+        };
+        l.setTextColor(Some(&c));
     }
 }
 
@@ -1487,8 +1513,9 @@ mod tests {
 
     #[test]
     fn only_the_current_title_reads_as_now_playing() {
-        assert_eq!(spoken_title("One", true), "Now playing, One");
-        assert_eq!(spoken_title("One", false), "One");
+        assert_eq!(spoken_title("One", true, false), "Now playing, One");
+        assert_eq!(spoken_title("One", false, false), "One");
+        assert_eq!(spoken_title("One", false, true), "One, played");
     }
 
     #[test]

@@ -645,6 +645,13 @@ impl HoverButton {
         this
     }
 
+    /// A borderless text button, filled only on hover. `set_label` sizes its width.
+    pub fn plain(mtm: MainThreadMarker, frame: NSRect) -> Retained<Self> {
+        let this = Self::filled(mtm, frame, None, &theme::bg_3(), theme::RADIUS);
+        this.setImagePosition(NSCellImagePosition::NoImage);
+        this
+    }
+
     fn filled(
         mtm: MainThreadMarker,
         frame: NSRect,
@@ -731,8 +738,8 @@ impl HoverButton {
     pub fn set_action(&self, target: &AnyObject, action: Sel) {
         // SAFETY: the target implements `action` and outlives the button: it is either the
         // app delegate, which `app::run` holds until `app.run()`, which never returns, or a
-        // table controller, which its `Table` holds for as long as the installed `Ui` lives:
-        // until exit.
+        // table controller or Home's scroll watcher, which its `Table` or `Shelves` holds for
+        // as long as the installed `Ui` lives: until exit.
         unsafe {
             self.setTarget(Some(target));
             self.setAction(Some(action));

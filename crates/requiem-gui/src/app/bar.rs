@@ -2,10 +2,11 @@
 
 use std::cell::Cell;
 
+use objc2::MainThreadOnly;
 use objc2::rc::Retained;
 use objc2::runtime::AnyObject;
 use objc2::sel;
-use objc2_app_kit::{NSTextAlignment, NSTextField, NSView};
+use objc2_app_kit::{NSButton, NSTextAlignment, NSTextField, NSView};
 use objc2_core_foundation::CGFloat;
 use objc2_foundation::{MainThreadMarker, NSPoint};
 use requiem_macos::artwork::Cover;
@@ -106,6 +107,25 @@ impl PlayerBar {
         );
         view.addSubview(&title);
         view.addSubview(&artists);
+        let open = NSButton::initWithFrame(
+            NSButton::alloc(mtm),
+            rect(
+                Self::COVER_X,
+                (h - Self::COVER) / 2.0,
+                text_x + left_w - Self::COVER_X,
+                Self::COVER,
+            ),
+        );
+        open.setTransparent(true);
+        open.setAutoresizingMask(FLEX_W | PIN_LEFT);
+        // SAFETY: the target is the app delegate, which implements the action and which
+        // `app::run` holds until `app.run()`, which never returns.
+        unsafe {
+            open.setTarget(Some(target));
+            open.setAction(Some(sel!(showNowPlaying:)));
+        }
+        widgets::accessibility_label(&open, "Show now playing");
+        view.addSubview(&open);
 
         let cw = Self::CENTER_W;
         let center = widgets::view(
