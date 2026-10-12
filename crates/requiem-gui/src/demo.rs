@@ -691,7 +691,7 @@ pub fn start_in(view: View) -> (Vm, Daemon) {
             });
             vm.apply(daemon.queue_changed());
         }
-        View::Home | View::HomeScrolled => {
+        View::Home | View::HomeScrolled | View::HomeShelfPaged => {
             run_intent(&mut vm, &mut daemon, Intent::Visit(Place::Home))
         }
         View::Library | View::LibrarySignedOut | View::LibraryUnavailable | View::SignIn => {

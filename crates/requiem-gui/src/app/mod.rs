@@ -796,6 +796,12 @@ pub fn run(args: Args) {
             ui.show(AppView::Home);
             ui.shelves.scroll_to_end();
         }
+        View::HomeShelfPaged => {
+            ui.show(AppView::Home);
+            if let Some(row) = ui.shelves.first_card_row() {
+                ui.shelves.page(row, true);
+            }
+        }
         View::Library | View::LibrarySignedOut | View::LibraryUnavailable | View::SignIn => {
             ui.show(AppView::Library)
         }

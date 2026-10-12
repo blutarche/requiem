@@ -5,13 +5,15 @@
 
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
+use std::time::Duration;
 
 use objc2::rc::Retained;
-use objc2::runtime::{AnyObject, NSObject};
+use objc2::runtime::{AnyObject, NSObject, Sel};
 use objc2::{DefinedClass, MainThreadOnly, define_class, msg_send, sel};
 use objc2_app_kit::{
-    NSBorderType, NSEvent, NSFocusRingType, NSLineBreakMode, NSMenu, NSMenuItem, NSResponder,
-    NSScrollView, NSTextField, NSTrackingAreaOptions, NSView, NSViewBoundsDidChangeNotification,
+    NSAnimatablePropertyContainer, NSBorderType, NSControl, NSEvent, NSFocusRingType,
+    NSLineBreakMode, NSMenu, NSMenuItem, NSResponder, NSScrollView, NSTextField,
+    NSTrackingAreaOptions, NSView, NSViewBoundsDidChangeNotification,
 };
 use objc2_core_foundation::CGFloat;
 use objc2_foundation::{
@@ -21,9 +23,9 @@ use objc2_foundation::{
 use requiem_core::{Item, Shelf};
 use requiem_macos::artwork::Cover;
 
-use super::theme::{self, Weight};
+use super::theme::{self, Icon, Weight};
 use super::ui;
-use super::widgets::{self, FLEX_W, rect};
+use super::widgets::{self, FLEX_W, HoverButton, PIN_RIGHT, rect};
 use crate::vm;
 
 const PAD: CGFloat = 24.0;
@@ -44,6 +46,10 @@ const GRID_COVER: CGFloat = 44.0;
 /// card to each side.
 const VIEW_MARGIN: CGFloat = 120.0;
 const SIDE_MARGIN: CGFloat = 72.0;
+/// A paging button's side, its chevron's size, and the space between the two buttons.
+const PAGE_BUTTON: CGFloat = 28.0;
+const PAGE_GLYPH: CGFloat = 16.0;
+const PAGE_GAP: CGFloat = 4.0;
 
 define_class!(
     /// A view with its origin at the top left, so rows and cards lay out downwards.
@@ -61,7 +67,8 @@ define_class!(
 );
 
 define_class!(
-    /// Hears the scroll views scroll, so cards come and go with the visible area.
+    /// Hears the scroll views scroll, so cards come and go with the visible area, and the
+    /// paging buttons, whose tag is their row's place in `Shelves::rows`.
     // SAFETY: NSObject has no subclassing requirements; no ivars; no Drop impl.
     #[unsafe(super(NSObject))]
     #[thread_kind = MainThreadOnly]
@@ -71,6 +78,20 @@ define_class!(
         #[unsafe(method(scrolled:))]
         fn scrolled(&self, _notification: &NSNotification) {
             ui::with(|ui| ui.shelves.sync());
+        }
+
+        #[unsafe(method(pageBack:))]
+        fn page_back(&self, sender: Option<&NSControl>) {
+            if let Some(b) = sender {
+                ui::with(|ui| ui.shelves.page(b.tag() as usize, false));
+            }
+        }
+
+        #[unsafe(method(pageForward:))]
+        fn page_forward(&self, sender: Option<&NSControl>) {
+            if let Some(b) = sender {
+                ui::with(|ui| ui.shelves.page(b.tag() as usize, true));
+            }
         }
     }
 );
@@ -358,12 +379,40 @@ fn visible_items(n: usize, grid: bool, lo: CGFloat, hi: CGFloat) -> std::ops::Ra
     (first_col * per).min(n)..(last_col * per).min(n)
 }
 
+/// Whether a row's back and forward buttons can act at scroll offset `offset`; `None`, which
+/// hides them, when the row's `content` fits its `visible` width.
+fn page_buttons(content: CGFloat, visible: CGFloat, offset: CGFloat) -> Option<(bool, bool)> {
+    let max = content - visible;
+    // Half a point of slack: a trackpad leaves fractional offsets.
+    (max > 0.5).then_some((offset > 0.5, offset < max - 0.5))
+}
+
+/// The offset a page back or forward from `offset`: the visible width rounded down to whole
+/// columns of `pitch`, at least one, kept within the row.
+fn page_offset(
+    content: CGFloat,
+    visible: CGFloat,
+    pitch: CGFloat,
+    offset: CGFloat,
+    forward: bool,
+) -> CGFloat {
+    let step = (visible / pitch).floor().max(1.0) * pitch;
+    let to = if forward {
+        offset + step
+    } else {
+        offset - step
+    };
+    to.clamp(0.0, (content - visible).max(0.0))
+}
+
 struct ShelfRow {
     /// The shelf's index in the page's list, which `Intent`s name.
     shelf: usize,
     title: Retained<NSTextField>,
     scroll: Retained<NSScrollView>,
     doc: Retained<FlippedView>,
+    back: Retained<HoverButton>,
+    forward: Retained<HoverButton>,
     items: Vec<Item>,
     grid: bool,
     /// Top and bottom of the row, title included, in the page's document.
@@ -376,6 +425,25 @@ impl ShelfRow {
     fn clear(&self) {
         for (_, card) in self.cards.borrow_mut().drain() {
             card.removeFromSuperview();
+        }
+    }
+
+    /// One column: a card, or a grid column, and the gap after it.
+    fn pitch(&self) -> CGFloat {
+        if self.grid {
+            GRID_COL_W + CARD_GAP
+        } else {
+            CARD_W + CARD_GAP
+        }
+    }
+
+    fn update_paging(&self) {
+        let clip = self.scroll.contentView().bounds();
+        let state = page_buttons(self.doc.frame().size.width, clip.size.width, clip.origin.x);
+        let (back, forward) = state.unwrap_or_default();
+        for (button, enabled) in [(&self.back, back), (&self.forward, forward)] {
+            button.set_shown(state.is_some());
+            button.set_enabled(enabled);
         }
     }
 
@@ -473,6 +541,8 @@ impl Shelves {
         for row in self.rows.borrow_mut().drain(..) {
             row.clear();
             row.title.removeFromSuperview();
+            row.back.removeFromSuperview();
+            row.forward.removeFromSuperview();
             row.scroll.removeFromSuperview();
         }
         let width = self.view.contentSize().width;
@@ -486,9 +556,35 @@ impl Shelves {
             let grid = is_grid(shelf);
             let top = y;
             let title = widgets::label(self.mtm, &shelf.title, &title_font, &theme::ink());
-            title.setFrame(rect(PAD, y, width - 2.0 * PAD, SHELF_TITLE_H));
+            let buttons_w = 2.0 * PAGE_BUTTON + PAGE_GAP;
+            title.setFrame(rect(
+                PAD,
+                y,
+                width - 2.0 * PAD - buttons_w - PAGE_GAP,
+                SHELF_TITLE_H,
+            ));
             title.setAutoresizingMask(FLEX_W);
             self.doc.addSubview(&title);
+            let button_y = y + (SHELF_TITLE_H - PAGE_BUTTON) / 2.0;
+            let back = self.page_button(
+                Icon::ChevronLeft,
+                rect(width - PAD - buttons_w, button_y, PAGE_BUTTON, PAGE_BUTTON),
+                rows.len(),
+                sel!(pageBack:),
+                &format!("Show previous in {}", shelf.title),
+            );
+            let forward = self.page_button(
+                Icon::ChevronRight,
+                rect(
+                    width - PAD - PAGE_BUTTON,
+                    button_y,
+                    PAGE_BUTTON,
+                    PAGE_BUTTON,
+                ),
+                rows.len(),
+                sel!(pageForward:),
+                &format!("Show more in {}", shelf.title),
+            );
             y += SHELF_TITLE_H + SHELF_TITLE_GAP;
             let (row_h, content_w) = if grid {
                 let cols = shelf.items.len().div_ceil(GRID_ROWS) as CGFloat;
@@ -527,6 +623,8 @@ impl Shelves {
                 title,
                 scroll,
                 doc,
+                back,
+                forward,
                 items: shelf.items.clone(),
                 grid,
                 top,
@@ -558,7 +656,76 @@ impl Shelves {
             } else {
                 row.clear();
             }
+            row.update_paging();
         }
+    }
+
+    /// Updates the paging buttons for the rows' widths, after the window resized.
+    pub fn update_paging(&self) {
+        for row in self.rows.borrow().iter() {
+            row.update_paging();
+        }
+    }
+
+    /// The place in the page of the first row of cards, not a grid.
+    pub fn first_card_row(&self) -> Option<usize> {
+        self.rows.borrow().iter().position(|r| !r.grid)
+    }
+
+    /// Scrolls row `row` a page back or forward.
+    pub fn page(&self, row: usize, forward: bool) {
+        let rows = self.rows.borrow();
+        let Some(row) = rows.get(row) else { return };
+        let clip = row.scroll.contentView();
+        let b = clip.bounds();
+        let x = page_offset(
+            row.doc.frame().size.width,
+            b.size.width,
+            row.pitch(),
+            b.origin.x,
+            forward,
+        );
+        let to = NSPoint::new(x, b.origin.y);
+        let duration = if widgets::reduce_motion() {
+            Duration::ZERO
+        } else {
+            widgets::STANDARD
+        };
+        let scroll = row.scroll.clone();
+        widgets::animate(
+            &clip,
+            duration,
+            widgets::EASE_OUT,
+            || clip.animator().setBoundsOrigin(to),
+            move || scroll.reflectScrolledClipView(&scroll.contentView()),
+        );
+    }
+
+    fn page_button(
+        &self,
+        icon: Icon,
+        frame: NSRect,
+        row: usize,
+        action: Sel,
+        label: &str,
+    ) -> Retained<HoverButton> {
+        let b = HoverButton::new(
+            self.mtm,
+            frame,
+            icon,
+            PAGE_GLYPH,
+            &theme::muted(),
+            None,
+            &theme::bg_3(),
+            theme::RADIUS,
+        );
+        b.setAutoresizingMask(PIN_RIGHT);
+        b.setTag(row as isize);
+        b.set_action(self.watcher.as_ref(), action);
+        widgets::accessibility_label(&b, label);
+        b.set_shown(false);
+        self.doc.addSubview(&b);
+        b
     }
 
     /// Scrolls the page down to its last shelf.
@@ -642,6 +809,36 @@ mod tests {
         assert_eq!(r.end % GRID_ROWS, 0);
         assert!(r.end >= 12 && r.end <= 16, "{r:?}");
         assert_eq!(visible_items(6, true, 0.0, 860.0), 0..6);
+    }
+
+    #[test]
+    fn paging_buttons_show_only_for_a_row_wider_than_it_shows() {
+        assert_eq!(page_buttons(800.0, 860.0, 0.0), None);
+        assert_eq!(page_buttons(860.0, 860.0, 0.0), None);
+        // 8 cards: 1184 pt of content, 324 pt past an 860 pt view.
+        assert_eq!(page_buttons(1184.0, 860.0, 0.0), Some((false, true)));
+        assert_eq!(page_buttons(1184.0, 860.0, 144.0), Some((true, true)));
+        assert_eq!(page_buttons(1184.0, 860.0, 324.0), Some((true, false)));
+        assert_eq!(page_buttons(1184.0, 860.0, 323.8), Some((true, false)));
+    }
+
+    #[test]
+    fn a_page_is_the_visible_width_in_whole_columns_within_the_row() {
+        let pitch = CARD_W + CARD_GAP;
+        // At the start, back stays put; forward moves five 144 pt columns.
+        assert_eq!(page_offset(2000.0, 860.0, pitch, 0.0, false), 0.0);
+        assert_eq!(page_offset(2000.0, 860.0, pitch, 0.0, true), 720.0);
+        // The last page is partial: it stops at the row's end, 1140 pt in.
+        assert_eq!(page_offset(2000.0, 860.0, pitch, 720.0, true), 1140.0);
+        assert_eq!(page_offset(2000.0, 860.0, pitch, 1140.0, true), 1140.0);
+        assert_eq!(page_offset(2000.0, 860.0, pitch, 1140.0, false), 420.0);
+        assert_eq!(page_offset(1184.0, 860.0, pitch, 0.0, true), 324.0);
+        // Narrower than a column, a page is still one column.
+        assert_eq!(page_offset(2000.0, 100.0, pitch, 0.0, true), 144.0);
+        assert_eq!(page_offset(2000.0, 100.0, pitch, 144.0, false), 0.0);
+        // A grid steps by its own columns: two of 316 pt fit in 860.
+        let grid = GRID_COL_W + CARD_GAP;
+        assert_eq!(page_offset(2000.0, 860.0, grid, 0.0, true), 632.0);
     }
 
     #[test]

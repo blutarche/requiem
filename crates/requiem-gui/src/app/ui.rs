@@ -1790,6 +1790,7 @@ impl Ui {
         if self.palette.is_open() {
             self.palette.layout();
         }
+        self.shelves.update_paging();
         if !self.banner_shown.get() {
             return;
         }

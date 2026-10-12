@@ -731,8 +731,8 @@ impl HoverButton {
     pub fn set_action(&self, target: &AnyObject, action: Sel) {
         // SAFETY: the target implements `action` and outlives the button: it is either the
         // app delegate, which `app::run` holds until `app.run()`, which never returns, or a
-        // table controller, which its `Table` holds for as long as the installed `Ui` lives:
-        // until exit.
+        // table controller or Home's scroll watcher, which its `Table` or `Shelves` holds for
+        // as long as the installed `Ui` lives: until exit.
         unsafe {
             self.setTarget(Some(target));
             self.setAction(Some(action));
