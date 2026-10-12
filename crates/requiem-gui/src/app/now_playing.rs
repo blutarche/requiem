@@ -331,6 +331,21 @@ impl NowPlayingPage {
         self.layout();
     }
 
+    /// Shows or hides the page. Only a shown page loads its cover's image.
+    pub fn set_shown(&self, shown: bool) {
+        let hidden = !shown;
+        if self.view.isHidden() == hidden {
+            return;
+        }
+        self.view.setHidden(hidden);
+        if shown {
+            self.layout();
+        } else {
+            // Drops a load in flight; the page loads its cover afresh when it shows again.
+            self.forget_art();
+        }
+    }
+
     /// Places the cover for the page's size, and the details beside it.
     pub fn layout(&self) {
         let b = self.view.bounds();
@@ -377,7 +392,16 @@ impl NowPlayingPage {
         let bw = self.show_queue.frame().size.width;
         self.show_queue
             .setFrame(rect(x - 10.0, y + BUTTON_GAP, bw, BUTTON_H));
-        self.load_art(side);
+        if !self.view.isHidden() {
+            self.load_art(side);
+        }
+    }
+
+    /// Ignores any image still on its way, and loads the next one whatever its size.
+    fn forget_art(&self) {
+        let iv = self.art.ivars();
+        iv.generation.set(iv.generation.get().wrapping_add(1));
+        self.loaded.replace(None);
     }
 
     fn load_art(&self, side: CGFloat) {
@@ -388,9 +412,8 @@ impl NowPlayingPage {
             .and_then(|t| t.artwork_url.clone());
         let iv = self.art.ivars();
         let Some(url) = url else {
-            iv.generation.set(iv.generation.get().wrapping_add(1));
+            self.forget_art();
             self.art.set_image(None);
-            self.loaded.replace(None);
             return;
         };
         if !needs_load(self.loaded.borrow().as_ref(), &url, side) {

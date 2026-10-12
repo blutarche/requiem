@@ -904,7 +904,7 @@ impl Ui {
         self.library_page.setHidden(view != AppView::Library);
         self.queue_page.setHidden(view != AppView::Queue);
         self.collection_page.setHidden(view != AppView::Collection);
-        self.now_playing.view.setHidden(view != AppView::NowPlaying);
+        self.now_playing.set_shown(view == AppView::NowPlaying);
         // An open collection keeps the nav item of the page it was opened from lit; Now
         // Playing lights none.
         let lit = match view {
