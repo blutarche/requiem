@@ -273,10 +273,10 @@ mod tests {
     fn daemon_is_the_helper_app_inside_a_bundle() {
         assert_eq!(
             beside(Path::new(
-                "/Applications/requiem.app/Contents/MacOS/requiem-gui"
+                "/Applications/Requiem.app/Contents/MacOS/requiem-gui"
             )),
             Some(PathBuf::from(
-                "/Applications/requiem.app/Contents/Helpers/requiemd.app/Contents/MacOS/requiemd"
+                "/Applications/Requiem.app/Contents/Helpers/requiemd.app/Contents/MacOS/requiemd"
             ))
         );
     }

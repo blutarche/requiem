@@ -1,4 +1,4 @@
-# requiem
+# Requiem
 
 A lightweight music app that uses about as many resources as a dead person 💀
 
@@ -22,8 +22,8 @@ Needs Rust (see `rust-toolchain.toml`) and libopus: `brew install opus` on macOS
 
 ```sh
 cargo build --release          # target/release/{requiemd,requiem-gui,requiem}
-scripts/bundle-macos.sh        # macOS: target/requiem.app (ad-hoc signed), CLI at Contents/MacOS/requiem
-open target/requiem.app
+scripts/bundle-macos.sh        # macOS: target/Requiem.app (ad-hoc signed), CLI at Contents/MacOS/requiem
+open target/Requiem.app
 ```
 
 The bundle embeds Homebrew's libopus. Its minimum macOS version is whatever that libopus was built for (the script prints it), so a bundle built on macOS 26 needs macOS 26.
@@ -101,15 +101,15 @@ Home loaded, a window that is never shown (`requiem-gui --snapshot out.png --vie
 
 ## Notes
 
-- requiem is an unofficial client. It is not affiliated with or endorsed by Spotify, YouTube, or Google.
+- Requiem is an unofficial client. It is not affiliated with or endorsed by Spotify, YouTube, or Google.
 - YouTube Music playback is anonymous and ad-free. That breaks YouTube's Terms of Service; you use it at your own risk, and YouTube may break it at any time.
 
 ## License
 
-requiem is MIT OR Apache-2.0. The app bundle also ships:
+Requiem is MIT OR Apache-2.0. The app bundle also ships:
 
 - [Inter](https://rsms.me/inter/) — SIL Open Font License 1.1;
 - [Lucide](https://lucide.dev) icons — ISC;
 - [libopus](https://opus-codec.org) — BSD-3-Clause.
 
-Their license texts are in `requiem.app/Contents/Resources/licenses/`.
+Their license texts are in `Requiem.app/Contents/Resources/licenses/`.

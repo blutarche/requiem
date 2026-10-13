@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Assembles target/requiem.app from the release requiemd, requiem-gui and requiem (CLI) binaries.
+# Assembles target/Requiem.app from the release requiemd, requiem-gui and requiem (CLI) binaries.
 # Usage: scripts/bundle-macos.sh [--no-build]
 set -euo pipefail
 
@@ -43,7 +43,7 @@ if [ -z "$version" ]; then
 fi
 [ -n "$version" ] || { echo "bundle-macos.sh: cannot determine the version" >&2; exit 1; }
 
-app="target/requiem.app"
+app="target/Requiem.app"
 rm -rf "$app"
 # requiemd is a helper app with its own bundle id: inside the main app, LaunchServices
 # would take the running daemon for the app itself and never start the GUI.
@@ -129,8 +129,8 @@ cat >"$app/Contents/Info.plist" <<PLIST
 <plist version="1.0">
 <dict>
   <key>CFBundleIdentifier</key><string>dev.blutarche.requiem</string>
-  <key>CFBundleName</key><string>requiem</string>
-  <key>CFBundleDisplayName</key><string>requiem</string>
+  <key>CFBundleName</key><string>Requiem</string>
+  <key>CFBundleDisplayName</key><string>Requiem</string>
   <key>CFBundleExecutable</key><string>requiem-gui</string>
   <key>CFBundlePackageType</key><string>APPL</string>
   <key>CFBundleShortVersionString</key><string>$version</string>
@@ -147,7 +147,7 @@ cat >"$helper/Contents/Info.plist" <<PLIST
 <plist version="1.0">
 <dict>
   <key>CFBundleIdentifier</key><string>dev.blutarche.requiem.player</string>
-  <key>CFBundleName</key><string>requiem</string>
+  <key>CFBundleName</key><string>Requiem</string>
   <key>CFBundleExecutable</key><string>requiemd</string>
   <key>CFBundlePackageType</key><string>APPL</string>
   <key>CFBundleShortVersionString</key><string>$version</string>

@@ -84,7 +84,7 @@ impl StatusMenu {
         let toggle = action_item(ns_string!("Play"), UiAction::Toggle);
         let next = action_item(ns_string!("Next"), UiAction::Next);
         let prev = action_item(ns_string!("Previous"), UiAction::Prev);
-        let open = action_item(ns_string!("Open requiem"), UiAction::OpenGui);
+        let open = action_item(ns_string!("Open Requiem"), UiAction::OpenGui);
         let quit = action_item(ns_string!("Quit and Stop Music"), UiAction::Quit);
 
         let menu = NSMenu::new(mtm);
@@ -120,9 +120,9 @@ impl StatusMenu {
             targeted: vec![toggle.clone(), next, prev, open, quit],
             toggle,
             icons: Icons {
-                playing: symbol(ns_string!("waveform"), ns_string!("requiem: playing")),
-                paused: symbol(ns_string!("pause.fill"), ns_string!("requiem: paused")),
-                idle: symbol(ns_string!("music.note"), ns_string!("requiem")),
+                playing: symbol(ns_string!("waveform"), ns_string!("Requiem: playing")),
+                paused: symbol(ns_string!("pause.fill"), ns_string!("Requiem: paused")),
+                idle: symbol(ns_string!("music.note"), ns_string!("Requiem")),
             },
         };
         status.show(None);
@@ -175,7 +175,7 @@ impl StatusMenu {
             button.setImage(icon.as_deref());
             let title = match view {
                 Some(view) if state != PlayState::Stopped => status_title(view),
-                _ if icon.is_none() => "requiem".to_owned(),
+                _ if icon.is_none() => "Requiem".to_owned(),
                 _ => String::new(),
             };
             button.setImagePosition(if title.is_empty() {

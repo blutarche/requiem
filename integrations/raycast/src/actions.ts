@@ -12,7 +12,7 @@ export function run(commands: string[], signal?: AbortSignal): Promise<Message[]
 
 export async function reportFailure(error: unknown): Promise<void> {
   await showFailureToast(error, {
-    title: "requiem",
+    title: "Requiem",
     primaryAction:
       error instanceof CliError && error.fixable
         ? { title: "Open Extension Preferences", onAction: () => openExtensionPreferences() }

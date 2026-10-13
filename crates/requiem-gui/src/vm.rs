@@ -26,10 +26,10 @@ pub const BANNER_GRACE: Duration = Duration::from_millis(800);
 pub const STUCK_AFTER: Duration = Duration::from_secs(30);
 
 // The old player's menu item may still be named "Quit requiem", so this names none.
-const OUT_OF_DATE: &str = "An older requiem player is still running. Quit it from its \
+const OUT_OF_DATE: &str = "An older Requiem player is still running. Quit it from its \
                            menu-bar icon; this window reconnects on its own.";
-const STUCK_HINT: &str = "If this persists, choose Quit and Stop Music from the requiem \
-                          menu-bar icon, then reopen requiem.";
+const STUCK_HINT: &str = "If this persists, choose Quit and Stop Music from the Requiem \
+                          menu-bar icon, then reopen Requiem.";
 
 /// Regions of the window that need refreshing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -911,7 +911,7 @@ impl Vm {
             Event::ProviderBroken { provider, .. } => {
                 self.toast(
                     format!(
-                        "{} stopped working; requiem may need an update",
+                        "{} stopped working; Requiem may need an update",
                         provider_name(&provider.0)
                     ),
                     true,
@@ -2009,7 +2009,7 @@ mod tests {
         assert!(t.error);
         assert_eq!(
             t.text,
-            "YouTube Music stopped working; requiem may need an update"
+            "YouTube Music stopped working; Requiem may need an update"
         );
     }
 
@@ -2355,8 +2355,8 @@ mod tests {
             vm.ui().banner,
             Some(Banner {
                 text: "Player disconnected — reconnecting… The player isn’t running. If \
-                       this persists, choose Quit and Stop Music from the requiem menu-bar \
-                       icon, then reopen requiem."
+                       this persists, choose Quit and Stop Music from the Requiem menu-bar \
+                       icon, then reopen Requiem."
                     .into(),
                 error: false
             })
@@ -2389,7 +2389,7 @@ mod tests {
             vm.ui().banner.as_ref().map(|b| b.text.as_str()),
             Some(
                 "Connecting to player… The player isn’t running. If this persists, choose \
-                 Quit and Stop Music from the requiem menu-bar icon, then reopen requiem."
+                 Quit and Stop Music from the Requiem menu-bar icon, then reopen Requiem."
             )
         );
         assert!(vm.ui().toast.is_none());
@@ -2559,7 +2559,7 @@ mod tests {
         assert_eq!(
             vm.ui().banner,
             Some(Banner {
-                text: "An older requiem player is still running. Quit it from its menu-bar \
+                text: "An older Requiem player is still running. Quit it from its menu-bar \
                        icon; this window reconnects on its own."
                     .into(),
                 error: true

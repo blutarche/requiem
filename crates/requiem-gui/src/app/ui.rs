@@ -308,7 +308,7 @@ impl Ui {
         let window = MainWindow::create(mtm, rect(0.0, 0.0, WIN_W, WIN_H), style);
         // SAFETY: `Ui` owns the window for the life of the process.
         unsafe { window.setReleasedWhenClosed(false) };
-        window.setTitle(&NSString::from_str("requiem"));
+        window.setTitle(&NSString::from_str("Requiem"));
         window.setTitleVisibility(NSWindowTitleVisibility::Hidden);
         window.setTitlebarAppearsTransparent(true);
         window.setContentMinSize(NSSize::new(MIN_W, MIN_H));
@@ -345,7 +345,7 @@ impl Ui {
         sidebar.addSubview(&edge);
         let brand = widgets::placed_label(
             mtm,
-            "requiem",
+            "Requiem",
             &theme::font(16.0, Weight::SemiBold),
             &theme::chrome_ink(),
             24.0,

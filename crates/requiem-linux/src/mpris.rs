@@ -57,7 +57,7 @@ impl Root {
 
     #[zbus(property)]
     fn identity(&self) -> &str {
-        "requiem"
+        "Requiem"
     }
 
     #[zbus(property)]
