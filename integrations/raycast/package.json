@@ -56,7 +56,7 @@
       "description": "Path to the requiem command-line binary.",
       "type": "textfield",
       "required": false,
-      "default": "/Applications/requiem.app/Contents/MacOS/requiem"
+      "default": "/Applications/Requiem.app/Contents/MacOS/requiem"
     }
   ],
   "dependencies": {

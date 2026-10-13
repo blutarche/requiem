@@ -62,7 +62,7 @@ fn mpris_object_serves_state_and_routes_actions() {
     let root = proxy(&conn, BUS, PATH, "org.mpris.MediaPlayer2");
     let player = proxy(&conn, BUS, PATH, PLAYER);
 
-    assert_eq!(root.get_property::<String>("Identity").unwrap(), "requiem");
+    assert_eq!(root.get_property::<String>("Identity").unwrap(), "Requiem");
     assert!(root.get_property::<bool>("CanQuit").unwrap());
     assert!(!root.get_property::<bool>("CanRaise").unwrap());
     assert!(!root.get_property::<bool>("HasTrackList").unwrap());

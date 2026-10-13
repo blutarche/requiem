@@ -169,7 +169,7 @@ fn tray_registers_and_serves_icon_tooltip_and_menu() {
         "/StatusNotifierItem",
         "org.kde.StatusNotifierItem",
     );
-    assert_eq!(item.get_property::<String>("Title").unwrap(), "requiem");
+    assert_eq!(item.get_property::<String>("Title").unwrap(), "Requiem");
     assert_eq!(item.get_property::<String>("Id").unwrap(), "requiem");
     assert_eq!(
         item.get_property::<String>("IconName").unwrap(),

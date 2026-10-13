@@ -12,7 +12,7 @@ Each action runs `requiem --connect --json --script -` and sends the commands on
 
 ## Load it locally
 
-You need Raycast, Node 22 or later, and a requiem build that includes the CLI in the app bundle (`scripts/bundle-macos.sh`, then copy `target/requiem.app` to `/Applications`).
+You need Raycast, Node 22 or later, and a requiem build that includes the CLI in the app bundle (`scripts/bundle-macos.sh`, then copy `target/Requiem.app` to `/Applications`).
 
 ```sh
 cd integrations/raycast
@@ -22,7 +22,7 @@ npm run dev
 
 `npm run dev` imports the extension into Raycast and rebuilds it as you edit; stop it with Ctrl+C and the commands stay installed. Use `npm run build` for a one-off build.
 
-If requiem isn't at `/Applications/requiem.app`, set **Requiem CLI Path** in the extension's preferences (Raycast Settings, Extensions, Requiem), for example to `target/release/requiem` in a checkout, which finds `requiemd` next to itself.
+If Requiem isn't at `/Applications/Requiem.app`, set **Requiem CLI Path** in the extension's preferences (Raycast Settings, Extensions, Requiem), for example to `target/release/requiem` in a checkout, which finds `requiemd` next to itself.
 
 ## Develop
 

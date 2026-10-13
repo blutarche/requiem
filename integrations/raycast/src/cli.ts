@@ -1,6 +1,6 @@
 import { spawn } from "node:child_process";
 
-export const DEFAULT_CLI_PATH = "/Applications/requiem.app/Contents/MacOS/requiem";
+export const DEFAULT_CLI_PATH = "/Applications/Requiem.app/Contents/MacOS/requiem";
 
 export interface TrackInfo {
   id: { provider: string; id: string };
