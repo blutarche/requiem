@@ -22,7 +22,7 @@ npm run dev
 
 `npm run dev` imports the extension into Raycast and rebuilds it as you edit; stop it with Ctrl+C and the commands stay installed. Use `npm run build` for a one-off build.
 
-If requiem isn't at `/Applications/requiem.app`, set **requiem CLI Path** in the extension's preferences (Raycast Settings, Extensions, Requiem), for example to `target/release/requiem` in a checkout, which finds `requiemd` next to itself.
+If requiem isn't at `/Applications/requiem.app`, set **Requiem CLI Path** in the extension's preferences (Raycast Settings, Extensions, Requiem), for example to `target/release/requiem` in a checkout, which finds `requiemd` next to itself.
 
 ## Develop
 

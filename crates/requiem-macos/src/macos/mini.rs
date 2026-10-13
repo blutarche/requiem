@@ -133,7 +133,7 @@ fn transport(
     b
 }
 
-/// The "Open requiem" button, centred at `y`.
+/// The "Open Requiem" button, centred at `y`.
 fn open_button(
     mtm: MainThreadMarker,
     target: Option<&AnyObject>,
@@ -143,7 +143,7 @@ fn open_button(
     // SAFETY: `target`, when set, implements `action`.
     let b = unsafe {
         NSButton::buttonWithTitle_target_action(
-            ns_string!("Open requiem"),
+            ns_string!("Open Requiem"),
             target,
             Some(action),
             mtm,
@@ -153,7 +153,7 @@ fn open_button(
     b.sizeToFit();
     let size = b.frame().size;
     b.setFrameOrigin(NSPoint::new(((W - size.width) / 2.0).round(), y));
-    name(&b, ns_string!("Open requiem"));
+    name(&b, ns_string!("Open Requiem"));
     b
 }
 

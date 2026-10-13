@@ -39,7 +39,7 @@ impl ksni::Tray for Tray {
     }
 
     fn title(&self) -> String {
-        ID.into()
+        "Requiem".into()
     }
 
     fn icon_name(&self) -> String {

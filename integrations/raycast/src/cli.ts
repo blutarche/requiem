@@ -74,7 +74,7 @@ export function throwOnError(messages: Message[], cliPath: string): void {
   const text = String(error.message ?? "unknown error");
   if (text.startsWith("cannot reach the daemon")) {
     throw new CliError(
-      `requiem's player could not be started (${text}). Open requiem.app once, or check the CLI path (${cliPath}).`,
+      `Requiem's player could not be started (${text}). Open Requiem.app once, or check the CLI path (${cliPath}).`,
       true,
     );
   }
@@ -111,7 +111,7 @@ export function runCli(cliPath: string, commands: string[], options: RunOptions 
       if (err.code === "ENOENT" || err.code === "EACCES") {
         return reject(
           new CliError(
-            `The requiem CLI was not found at ${path}. Install requiem.app, or set "requiem CLI Path" in the extension preferences.`,
+            `The Requiem CLI was not found at ${path}. Install Requiem.app, or set "Requiem CLI Path" in the extension preferences.`,
             true,
           ),
         );
@@ -125,8 +125,8 @@ export function runCli(cliPath: string, commands: string[], options: RunOptions 
       } catch (err) {
         return reject(err);
       }
-      if (signal) return reject(new CliError(`The requiem CLI timed out (${signal}).`));
-      if (code !== 0) return reject(new CliError(stderr.trim() || `The requiem CLI exited with code ${code}.`));
+      if (signal) return reject(new CliError(`The Requiem CLI timed out (${signal}).`));
+      if (code !== 0) return reject(new CliError(stderr.trim() || `The Requiem CLI exited with code ${code}.`));
       resolve(messages);
     });
     child.stdin.end(commands.map((c) => c.replace(/[\r\n]+/g, " ")).join("\n") + "\n");
@@ -144,7 +144,7 @@ export function formatDuration(ms: number | null): string {
 }
 
 export function playPauseHud(status: Status | undefined): string {
-  if (!status) return "requiem did not report its state";
+  if (!status) return "Requiem did not report its state";
   const title = status.track ? status.track.title : "";
   switch (status.state) {
     case "playing":

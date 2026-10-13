@@ -609,16 +609,16 @@ fn menu_bar(mtm: MainThreadMarker, target: &Delegate) -> (Retained<NSMenu>, Reta
         m
     };
     submenu(
-        "requiem",
+        "Requiem",
         vec![
             item(
-                "About requiem",
+                "About Requiem",
                 Some(sel!(orderFrontStandardAboutPanel:)),
                 "",
                 false,
             ),
             sep(),
-            item("Hide requiem", Some(sel!(hide:)), "h", false),
+            item("Hide Requiem", Some(sel!(hide:)), "h", false),
             with_mods(
                 item(
                     "Hide Others",
@@ -635,7 +635,7 @@ fn menu_bar(mtm: MainThreadMarker, target: &Delegate) -> (Retained<NSMenu>, Reta
                 item("Quit and Stop Music", Some(sel!(quitAndStop:)), "q", true),
                 cmd_opt,
             ),
-            item("Quit requiem", Some(sel!(terminate:)), "q", false),
+            item("Quit Requiem", Some(sel!(terminate:)), "q", false),
         ],
     );
     submenu(

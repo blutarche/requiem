@@ -355,7 +355,7 @@ fn pending() -> AccountState {
 fn unavailable() -> AccountState {
     AccountState::Unavailable(
         "Save your Google OAuth client as ~/Library/Application Support/requiem/google-client.json, \
-         then reopen requiem."
+         then reopen Requiem."
             .into(),
     )
 }
@@ -773,7 +773,7 @@ mod tests {
 
         let (vm, _) = start_in(View::OutOfDate);
         let b = vm.ui().banner.clone().unwrap();
-        assert!(b.text.starts_with("An older requiem player") && b.error);
+        assert!(b.text.starts_with("An older Requiem player") && b.error);
 
         let (vm, _) = start_in(View::Toast);
         let t = vm.ui().toast.clone().unwrap();
