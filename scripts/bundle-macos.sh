@@ -52,6 +52,7 @@ mkdir -p "$app/Contents/MacOS" "$app/Contents/Frameworks" "$app/Contents/Resourc
   "$helper/Contents/MacOS"
 cp target/release/requiem-gui target/release/requiem "$app/Contents/MacOS/"
 cp target/release/requiemd "$helper/Contents/MacOS/"
+cp crates/requiem-gui/assets/AppIcon.icns "$app/Contents/Resources/"
 frameworks="$app/Contents/Frameworks"
 licenses="$app/Contents/Resources/licenses"
 
@@ -132,6 +133,7 @@ cat >"$app/Contents/Info.plist" <<PLIST
   <key>CFBundleName</key><string>Requiem</string>
   <key>CFBundleDisplayName</key><string>Requiem</string>
   <key>CFBundleExecutable</key><string>requiem-gui</string>
+  <key>CFBundleIconFile</key><string>AppIcon</string>
   <key>CFBundlePackageType</key><string>APPL</string>
   <key>CFBundleShortVersionString</key><string>$version</string>
   <key>CFBundleVersion</key><string>$version</string>

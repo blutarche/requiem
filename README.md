@@ -16,15 +16,23 @@ They talk over a per-user Unix socket. "Quit and Stop Music" in the menu bar sto
 
 On Linux, `requiemd` shows a StatusNotifierItem tray icon (play/pause state, a menu with Play/Pause, Next, Previous and Quit, click to toggle) and publishes MPRIS2 as `org.mpris.MediaPlayer2.requiem`, so media keys, desktop widgets and `playerctl` control it. Both use the session D-Bus through pure-Rust crates: no GTK, appindicator or libdbus, so no new system libraries. GNOME shows tray icons only with the AppIndicator extension; without it the tray is skipped and MPRIS still works, and with no session bus the player runs headless. Either way it logs one line. Check with `playerctl -l` and `playerctl -p requiem status`.
 
-## Build
+## Install
+
+On macOS, download `Requiem-<version>.dmg` from the [latest release](https://github.com/blutarche/requiem/releases/latest), open it and drag Requiem onto Applications. Then open Requiem from Applications.
+
+The first time you open Requiem, macOS blocks it because it isn't notarized: click **Done**, then in **System Settings → Privacy & Security** click **Open Anyway**.
+
+## Build from source
 
 Needs Rust (see `rust-toolchain.toml`) and libopus: `brew install opus` on macOS, `libopus-dev libasound2-dev pkg-config` on Debian/Ubuntu.
 
 ```sh
 cargo build --release          # target/release/{requiemd,requiem-gui,requiem}
 scripts/bundle-macos.sh        # macOS: target/Requiem.app (ad-hoc signed), CLI at Contents/MacOS/requiem
-open target/Requiem.app
+scripts/make-dmg.sh            # macOS: bundles, then target/Requiem-<version>.dmg, the installer
 ```
+
+`make-dmg.sh` installs [dmgbuild](https://github.com/dmgbuild/dmgbuild) from PyPI into `target/dmgbuild-venv` on its first run.
 
 The bundle embeds Homebrew's libopus. Its minimum macOS version is whatever that libopus was built for (the script prints it), so a bundle built on macOS 26 needs macOS 26.
 
