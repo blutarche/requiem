@@ -4144,6 +4144,9 @@ mod tests {
             UpdateState::Downloading {
                 version: "0.2.1".into(),
             },
+            UpdateState::Error {
+                reason: "the update check failed: offline".into(),
+            },
             UpdateState::Unsupported,
         ] {
             vm.update(status(quiet.clone()));

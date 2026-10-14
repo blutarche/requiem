@@ -358,16 +358,39 @@ fn update_check_reports_a_failed_check() {
     let (code, text) = run_update(daemon(), "update check\n", |d| {
         expect_request(&d, UpdateRequest::Check);
         d.server.set_update(status(UpdateState::Checking));
-        d.server.set_update(status(UpdateState::Idle));
+        d.server.set_update(status(UpdateState::Error {
+            reason: "the update check failed: offline".into(),
+        }));
         thread::sleep(Duration::from_millis(300));
         d.server.shutdown();
     });
     assert_eq!(code, 1);
     assert!(
-        text.contains("error: the update check failed; see "),
+        text.contains("Requiem 0.1.0: the update check failed: offline\n"),
         "{text}"
     );
-    assert!(text.contains("daemon.log"), "{text}");
+}
+
+#[test]
+fn update_json_names_an_error_and_its_reason() {
+    let _g = serial();
+    let d = daemon();
+    d.server.set_update(status(UpdateState::Error {
+        reason: "the update check failed: offline".into(),
+    }));
+    let player = connect();
+    let out = Buf::default();
+    let code = app::run_update(&player, "update", out.clone(), Format::Json);
+    d.server.shutdown();
+    assert_eq!(code, 0);
+    let json: serde_json::Value = serde_json::from_str(out.text().trim()).unwrap();
+    assert_eq!(
+        (&json["state"], &json["reason"]),
+        (
+            &serde_json::json!("error"),
+            &serde_json::json!("the update check failed: offline")
+        )
+    );
 }
 
 #[test]

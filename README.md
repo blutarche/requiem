@@ -57,7 +57,7 @@ The bundle embeds Homebrew's libopus. Its minimum macOS version is whatever that
 | `volume` | `volume` |
 | `track_failed` | `title`, `error` |
 | `provider_broken` | `detail` |
-| `update` | `current`, `auto` (bool), `state`: `idle`, `checking`, `up_to_date`, `downloading` (with `version`), `ready` (with `version`), `failed` (with `version`, `reason`), `not_updatable` (with `reason`) or `unsupported` |
+| `update` | `current`, `auto` (bool), `state`: `idle`, `checking`, `up_to_date`, `downloading` (with `version`), `ready` (with `version`), `failed` (with `version`, `reason`), `error` (with `reason`: a failed check, or a failed install that is tried again), `not_updatable` (with `reason`) or `unsupported` |
 | `update_downloading`, `update_restarting` | `version` |
 | `ack` | `command`: a command was sent (search, home, library, open, play, add, play-track, add-track, jump, remove, move, clear, next, prev, pause, resume, toggle, seek, vol, signin, signout, update check, update install, shutdown-daemon) |
 | `mark` | `name`, `unix_millis` |

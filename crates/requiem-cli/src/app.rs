@@ -552,6 +552,7 @@ fn update_state_name(state: &UpdateState) -> &'static str {
         UpdateState::Downloading { .. } => "downloading",
         UpdateState::Ready { .. } => "ready",
         UpdateState::Failed { .. } => "failed",
+        UpdateState::Error { .. } => "error",
         UpdateState::NotUpdatable { .. } => "not_updatable",
         UpdateState::Unsupported => "unsupported",
     }
@@ -573,6 +574,7 @@ fn update_text(status: &UpdateStatus) -> String {
         UpdateState::Failed { reason, .. } => {
             format!("Requiem couldn't update: {reason}. It keeps running {current}.")
         }
+        UpdateState::Error { reason } => format!("Requiem {current}: {reason}"),
         UpdateState::NotUpdatable { reason } => format!(
             "Requiem {current} can't update itself: {reason}. Move Requiem to Applications to get updates."
         ),
@@ -1143,7 +1145,9 @@ impl<'a> App<'a> {
                 json["version"] = json!(version);
                 json["reason"] = json!(reason);
             }
-            UpdateState::NotUpdatable { reason } => json["reason"] = json!(reason),
+            UpdateState::Error { reason } | UpdateState::NotUpdatable { reason } => {
+                json["reason"] = json!(reason);
+            }
             _ => {}
         }
         self.hub.emit(&update_text(status), json);
@@ -1167,8 +1171,7 @@ impl<'a> App<'a> {
     }
 
     /// The daemon answers a check it starts with `Checking`, then maybe `Downloading`, then a
-    /// settled state; one it ignores, with its status unchanged. Back to `Idle` from either
-    /// is a failure, which only the daemon's log explains.
+    /// settled state; one it ignores, with its status unchanged.
     fn update_check(&self, mut seen: usize) -> Flow {
         self.player.request_update(UpdateRequest::Check);
         self.hub.ack("update check");
@@ -1196,20 +1199,7 @@ impl<'a> App<'a> {
                     }
                     working = Some(status.state.clone());
                 }
-                UpdateState::Idle if working.is_some() => {
-                    let log = requiem_ipc::log_path().map_or_else(
-                        |_| "the daemon's log".to_owned(),
-                        |p| p.display().to_string(),
-                    );
-                    let what = match working {
-                        Some(UpdateState::Downloading { version }) => format!(
-                            "Requiem {version} failed to download or check out; it is tried again at the next check"
-                        ),
-                        _ => "the update check failed".to_owned(),
-                    };
-                    return self.update_failed(&format!("{what}; see {log}"));
-                }
-                UpdateState::Failed { .. } => {
+                UpdateState::Failed { .. } | UpdateState::Error { .. } => {
                     self.print_update(&status);
                     return if self.script {
                         Flow::Exit(1)

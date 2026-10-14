@@ -71,6 +71,10 @@ pub enum UpdateState {
         version: String,
         reason: String,
     },
+    /// A failed check, or a failed install that is tried again; no banner.
+    Error {
+        reason: String,
+    },
     NotUpdatable {
         reason: String,
     },

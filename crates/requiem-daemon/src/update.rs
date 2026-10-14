@@ -88,20 +88,51 @@ impl Inner {
         }
     }
 
+    /// The state after a failed check: a staged update stays ready.
+    fn failed_check(&self, e: &str) -> UpdateState {
+        match &self.ready {
+            Some(_) => self.settled(),
+            None => UpdateState::Error {
+                reason: format!("the update check failed: {e}"),
+            },
+        }
+    }
+
     /// Counts a failed try of `version` and forgets the staging folder.
     fn record_failure(&mut self, version: &str, sha256: &str, f: &Failure) -> UpdateState {
         self.stored.staging = None;
         let bad = self.stored.record_failure(version, sha256, f);
         self.save();
-        if bad {
-            UpdateState::Failed {
-                version: version.to_owned(),
-                reason: f.reason.text().to_owned(),
-            }
-        } else {
-            UpdateState::Idle
+        failure_state(version, f.reason.text(), bad)
+    }
+}
+
+fn failure_state(version: &str, reason: &str, bad: bool) -> UpdateState {
+    if bad {
+        UpdateState::Failed {
+            version: version.to_owned(),
+            reason: reason.to_owned(),
+        }
+    } else {
+        UpdateState::Error {
+            reason: format!(
+                "{version} did not install: {reason}; it is tried again at the next check"
+            ),
         }
     }
+}
+
+/// Where a player starts: an install that failed in an earlier player, which has since
+/// exited, still shows. The newest failed version speaks for all.
+fn stored_state(stored: &State) -> UpdateState {
+    stored
+        .failures
+        .iter()
+        .filter_map(|f| Version::parse(&f.version).ok().map(|v| (v, f)))
+        .max_by(|a, b| a.0.cmp(&b.0))
+        .map_or(UpdateState::Idle, |(_, f)| {
+            failure_state(&f.version, &f.reason, f.bad)
+        })
 }
 
 impl Updater {
@@ -135,7 +166,7 @@ impl Updater {
             ),
             Some(app) => match macos::not_updatable(&app) {
                 Some(reason) => (None, UpdateState::NotUpdatable { reason }),
-                None => (Some(app), UpdateState::Idle),
+                None => (Some(app), stored_state(&stored)),
             },
         };
         let (statuses, statuses_rx) = unbounded();
@@ -292,7 +323,7 @@ impl Updater {
             Ok(f) => f,
             Err(e) => {
                 eprintln!("requiemd: update check failed: {e}");
-                let state = inner.settled();
+                let state = inner.failed_check(&e);
                 self.set(&mut inner, state);
                 return;
             }
@@ -533,5 +564,87 @@ fn terminate(pid: i32) {
             return;
         }
         thread::sleep(Duration::from_millis(100));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use requiem_update::state::FailureRecord;
+
+    use super::*;
+
+    fn inner() -> Inner {
+        Inner {
+            installed: None,
+            state: UpdateState::Idle,
+            path: None,
+            stored: State::default(),
+            ready: None,
+            restart: false,
+            closing: false,
+        }
+    }
+
+    fn record(version: &str, bad: bool) -> FailureRecord {
+        FailureRecord {
+            version: version.into(),
+            sha256: "aa".into(),
+            tries: 1,
+            bad,
+            reason: "the new version did not start in time".into(),
+        }
+    }
+
+    #[test]
+    fn a_failed_check_is_an_error() {
+        assert_eq!(
+            inner().failed_check("offline"),
+            UpdateState::Error {
+                reason: "the update check failed: offline".into()
+            }
+        );
+    }
+
+    #[test]
+    fn a_retried_install_is_an_error_and_the_third_try_failed() {
+        let mut inner = inner();
+        let f = Failure::new(Reason::DownloadMismatch, "connection reset");
+        let retried = UpdateState::Error {
+            reason: "0.2.0 did not install: the download did not match the release; it is \
+                     tried again at the next check"
+                .into(),
+        };
+        assert_eq!(inner.record_failure("0.2.0", "aa", &f), retried);
+        assert_eq!(inner.record_failure("0.2.0", "aa", &f), retried);
+        assert_eq!(
+            inner.record_failure("0.2.0", "aa", &f),
+            UpdateState::Failed {
+                version: "0.2.0".into(),
+                reason: "the download did not match the release".into()
+            }
+        );
+    }
+
+    #[test]
+    fn a_player_starts_from_the_newest_stored_failure() {
+        let mut stored = State::default();
+        assert_eq!(stored_state(&stored), UpdateState::Idle);
+        stored.failures = vec![record("0.2.0", true), record("0.10.0", false)];
+        assert_eq!(
+            stored_state(&stored),
+            UpdateState::Error {
+                reason: "0.10.0 did not install: the new version did not start in time; it is \
+                         tried again at the next check"
+                    .into()
+            }
+        );
+        stored.failures = vec![record("0.2.0", true)];
+        assert_eq!(
+            stored_state(&stored),
+            UpdateState::Failed {
+                version: "0.2.0".into(),
+                reason: "the new version did not start in time".into()
+            }
+        );
     }
 }
