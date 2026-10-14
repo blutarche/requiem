@@ -70,40 +70,37 @@ fn default_path(home: Option<PathBuf>, xdg_state: Option<PathBuf>, macos: bool) 
 /// A missing file is a quiet fresh start; any other failure is a logged one. The file is left
 /// alone either way: the next save replaces it.
 pub fn load(path: &Path) -> Option<PersistState> {
+    read(path).unwrap_or_else(|e| {
+        debug!("{e}");
+        None
+    })
+}
+
+/// `Ok(None)` when the file is missing.
+pub fn read(path: &Path) -> Result<Option<PersistState>, String> {
     let file = match fs::File::open(path) {
         Ok(f) => f,
-        Err(e) if e.kind() == io::ErrorKind::NotFound => return None,
-        Err(e) => {
-            debug!("state file unreadable: {e}");
-            return None;
-        }
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(format!("state file unreadable: {e}")),
     };
     let mut bytes = Vec::new();
-    if let Err(e) = file.take(MAX_FILE_BYTES + 1).read_to_end(&mut bytes) {
-        debug!("state file unreadable: {e}");
-        return None;
-    }
+    file.take(MAX_FILE_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|e| format!("state file unreadable: {e}"))?;
     if bytes.len() as u64 > MAX_FILE_BYTES {
-        debug!("state file over {MAX_FILE_BYTES} bytes, ignoring");
-        return None;
+        return Err(format!("state file over {MAX_FILE_BYTES} bytes, ignoring"));
     }
-    let parsed: FileIn = match serde_json::from_slice(&bytes) {
-        Ok(p) => p,
-        Err(e) => {
-            debug!("state file unparsable: {e}");
-            return None;
-        }
-    };
+    let parsed: FileIn =
+        serde_json::from_slice(&bytes).map_err(|e| format!("state file unparsable: {e}"))?;
     if parsed.version != VERSION {
-        debug!("state file version {} unsupported", parsed.version);
-        return None;
+        return Err(format!("state file version {} unsupported", parsed.version));
     }
     let resume = parsed.resume.filter(|r| *r < parsed.queue.len());
-    Some(PersistState {
+    Ok(Some(PersistState {
         tracks: parsed.queue,
         resume,
         volume: parsed.volume.min(100),
-    })
+    }))
 }
 
 fn save(path: &Path, state: &PersistState) -> io::Result<()> {
@@ -293,6 +290,7 @@ mod tests {
     fn missing_file_is_a_fresh_start() {
         let dir = TempDir::new();
         assert_eq!(load(&dir.file()), None);
+        assert_eq!(read(&dir.file()), Ok(None));
     }
 
     #[test]
@@ -300,6 +298,7 @@ mod tests {
         let dir = TempDir::new();
         fs::write(dir.file(), b"{not json").unwrap();
         assert_eq!(load(&dir.file()), None);
+        assert!(read(&dir.file()).unwrap_err().contains("unparsable"));
         assert_eq!(fs::read(dir.file()).unwrap(), b"{not json");
     }
 
@@ -311,6 +310,7 @@ mod tests {
         });
         fs::write(dir.file(), json.to_string()).unwrap();
         assert_eq!(load(&dir.file()), None);
+        assert!(read(&dir.file()).unwrap_err().contains("version 2"));
     }
 
     #[test]

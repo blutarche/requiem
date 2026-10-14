@@ -156,15 +156,15 @@ impl Controller {
         unsafe { msg_send![super(this), init] }
     }
 
-    /// Checks `stop`, then applies the latest pending view, then any later position, then
-    /// the latest volume.
+    /// Checks `stop`, then applies the latest update offer, the latest pending view, any
+    /// later position, then the latest volume.
     fn drain(&self) {
         let ivars = self.ivars();
         if !matches!(ivars.stop.try_recv(), Err(TryRecvError::Empty)) {
             self.stop_app();
             return;
         }
-        let (mut view, mut position, mut volume) = (None, None, None);
+        let (mut view, mut position, mut volume, mut updates) = (None, None, None, None);
         for update in ivars.updates.try_iter() {
             match update {
                 UiUpdate::View(v) => {
@@ -173,7 +173,11 @@ impl Controller {
                 }
                 UiUpdate::Position(at) => position = Some(at),
                 UiUpdate::Volume(v) => volume = Some(v),
+                UiUpdate::Updates { check, ready } => updates = Some((check, ready)),
             }
+        }
+        if let Some((check, ready)) = updates {
+            ivars.status.show_updates(check, ready.as_deref());
         }
         if let Some(view) = view {
             self.show(view);

@@ -225,6 +225,20 @@ fn load_token(path: &Path) -> Option<TokenFile> {
     }
 }
 
+/// Parses the token file as `load_token` does, without changing it. A missing file passes.
+/// Errors never quote the file, which holds a secret.
+pub(crate) fn check_token(path: &Path) -> Result<(), String> {
+    let bytes = match read_capped(path) {
+        Ok(b) => b,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(format!("{}: {e}", path.display())),
+    };
+    match serde_json::from_slice::<TokenFile>(&bytes) {
+        Ok(t) if !t.refresh_token.is_empty() => Ok(()),
+        _ => Err(format!("{}: not a Google sign-in file", path.display())),
+    }
+}
+
 /// Plain files rather than the Keychain: the app is ad-hoc signed and rebuilt often, and
 /// Keychain ACLs bind to the code signature, so every rebuild would prompt on a Mac nobody
 /// watches (Secret Service unlock prompts are as hostile to a headless Linux daemon).
@@ -1119,6 +1133,28 @@ mod tests {
         fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
         assert_eq!(load_token(&path).unwrap().refresh_token, "RT1");
         assert_eq!(mode(&path), 0o600);
+    }
+
+    #[test]
+    fn check_token_reads_without_changing_or_quoting_the_file() {
+        let rig = Rig::new();
+        let path = rig.token_path();
+        assert_eq!(check_token(&path), Ok(()));
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(&path, r#"{"refresh_token":"RT-SECRET"}"#).unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
+        assert_eq!(check_token(&path), Ok(()));
+        let mode = fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o644);
+        for bad in [
+            r#"{"refresh_token":""}"#,
+            r#"{"refresh_token":7,"x":"RT-SECRET"}"#,
+        ] {
+            fs::write(&path, bad).unwrap();
+            let e = check_token(&path).unwrap_err();
+            assert!(e.contains("not a Google sign-in file"), "{e}");
+            assert!(!e.contains("RT-SECRET"), "{e}");
+        }
     }
 
     #[test]

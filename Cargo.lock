@@ -1172,6 +1172,8 @@ dependencies = [
  "requiem-linux",
  "requiem-macos",
  "requiem-provider-ytmusic",
+ "requiem-update",
+ "semver",
  "serde",
  "serde_json",
 ]

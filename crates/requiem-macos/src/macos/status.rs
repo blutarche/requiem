@@ -13,11 +13,13 @@ use crate::view::{menu_title, status_title};
 use crate::{PlayerView, UiAction};
 
 /// Menu item tags index this.
-const MENU_ACTIONS: [UiAction; 5] = [
+const MENU_ACTIONS: [UiAction; 7] = [
     UiAction::Toggle,
     UiAction::Next,
     UiAction::Prev,
     UiAction::OpenGui,
+    UiAction::CheckForUpdates,
+    UiAction::RestartToUpdate,
     UiAction::Quit,
 ];
 
@@ -56,6 +58,8 @@ pub(super) struct StatusMenu {
     title: Retained<NSMenuItem>,
     title_separator: Retained<NSMenuItem>,
     toggle: Retained<NSMenuItem>,
+    check: Retained<NSMenuItem>,
+    restart: Retained<NSMenuItem>,
     targeted: Vec<Retained<NSMenuItem>>,
     icons: Icons,
 }
@@ -85,6 +89,8 @@ impl StatusMenu {
         let next = action_item(ns_string!("Next"), UiAction::Next);
         let prev = action_item(ns_string!("Previous"), UiAction::Prev);
         let open = action_item(ns_string!("Open Requiem"), UiAction::OpenGui);
+        let check = action_item(ns_string!("Check for Updates…"), UiAction::CheckForUpdates);
+        let restart = action_item(ns_string!("Restart to Update"), UiAction::RestartToUpdate);
         let quit = action_item(ns_string!("Quit and Stop Music"), UiAction::Quit);
 
         let menu = NSMenu::new(mtm);
@@ -98,6 +104,8 @@ impl StatusMenu {
             &prev,
             &NSMenuItem::separatorItem(mtm),
             &open,
+            &check,
+            &restart,
             &quit,
         ] {
             menu.addItem(item);
@@ -117,8 +125,18 @@ impl StatusMenu {
             menu,
             title,
             title_separator,
-            targeted: vec![toggle.clone(), next, prev, open, quit],
+            targeted: vec![
+                toggle.clone(),
+                next,
+                prev,
+                open,
+                check.clone(),
+                restart.clone(),
+                quit,
+            ],
             toggle,
+            check,
+            restart,
             icons: Icons {
                 playing: symbol(ns_string!("waveform"), ns_string!("Requiem: playing")),
                 paused: symbol(ns_string!("pause.fill"), ns_string!("Requiem: paused")),
@@ -126,6 +144,7 @@ impl StatusMenu {
             },
         };
         status.show(None);
+        status.show_updates(false, None);
         status
     }
 
@@ -197,6 +216,16 @@ impl StatusMenu {
         } else {
             ns_string!("Play")
         });
+    }
+
+    pub(super) fn show_updates(&self, check: bool, ready: Option<&str>) {
+        self.check.setHidden(!check);
+        if let Some(version) = ready {
+            self.restart.setTitle(&NSString::from_str(&format!(
+                "Restart to Update ({version})"
+            )));
+        }
+        self.restart.setHidden(ready.is_none());
     }
 
     pub(super) fn cancel_tracking(&self) {
