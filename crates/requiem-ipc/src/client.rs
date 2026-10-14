@@ -124,6 +124,48 @@ impl Client {
         }
     }
 
+    /// Connects to the daemon `child` was started as by [`spawn_daemon`] in `dir`, retrying
+    /// until `timeout`. A child that exits 0 found another daemon holding the lock, which may
+    /// still come to listen; one that exits otherwise fails the connect. The child stays the
+    /// caller's.
+    pub fn connect_spawned(
+        child: &mut Child,
+        dir: &Path,
+        role: Role,
+        timeout: Duration,
+    ) -> io::Result<(Client, Receiver<Incoming>)> {
+        let path = socket_path_in(dir)?;
+        let log = dir.join(LOG_NAME);
+        let deadline = Instant::now() + timeout;
+        let mut exited = None;
+        loop {
+            match Self::connect(&path, role) {
+                Err(e) if nobody_listening(&e) => {}
+                done => return done,
+            }
+            let now = Instant::now();
+            if exited.is_none() {
+                exited = child.try_wait()?.map(|status| (status, now));
+            }
+            if let Some((status, at)) = exited
+                && !status.success()
+                && now.duration_since(at) >= EXIT_GRACE
+            {
+                return Err(io::Error::other(format!(
+                    "exited with {status}; see {}",
+                    log.display()
+                )));
+            }
+            if now >= deadline {
+                return Err(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    format!("not listening after {timeout:?}; see {}", log.display()),
+                ));
+            }
+            thread::sleep(SPAWN_POLL);
+        }
+    }
+
     /// A failed or timed-out write closes the connection; the receiver then gets
     /// `Disconnected`.
     pub fn send(&self, cmd: Command) -> io::Result<()> {
@@ -276,7 +318,9 @@ fn open_log(dir: &Path) -> io::Result<File> {
         .open(path)
 }
 
-fn spawn_daemon(exe: &Path, dir: &Path) -> io::Result<Child> {
+/// Starts the daemon at `exe` detached, in a session of its own, listening in `dir` and
+/// writing to the log there.
+pub fn spawn_daemon(exe: &Path, dir: &Path) -> io::Result<Child> {
     let log = open_log(dir)?;
     let mut cmd = process::Command::new(exe);
     // The daemon must listen where this client polls, whatever it would resolve itself.

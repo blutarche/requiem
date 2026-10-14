@@ -15,6 +15,7 @@ use requiem_core::testing::{FakeEngineHandle, FakeProvider};
 use requiem_core::{Command, Event, Session, SessionConfig};
 use requiem_ipc::{
     Client, Incoming, Role, ServeError, Server, ServerHooks, UpdateState, UpdateStatus, socket_dir,
+    spawn_daemon,
 };
 
 const FAKE_DAEMON: &str = "REQUIEM_IPC_TEST_FAKE_DAEMON";
@@ -99,6 +100,7 @@ fn run() {
     expect_snapshot(&again_rx);
     assert_eq!(fs::read_to_string(&log).unwrap(), text);
 
+    let first = client.peer_pid().unwrap();
     client.send(Command::Shutdown).unwrap();
     for rx in [&rx, &again_rx] {
         loop {
@@ -110,6 +112,15 @@ fn run() {
         }
     }
     drop(again);
+    gone(first);
+
+    // A daemon started apart from connecting stays the caller's child.
+    let mut child = spawn_daemon(&exe, &dir).unwrap();
+    let (client, rx) = Client::connect_spawned(&mut child, &dir, Role::Cli, WAIT).unwrap();
+    assert_eq!(client.peer_pid().unwrap(), child.id() as i32);
+    expect_snapshot(&rx);
+    client.send(Command::Shutdown).unwrap();
+    assert!(child.wait().unwrap().success());
 
     // A daemon that fails is reported, pointing at the log.
     let fails = ["/usr/bin/false", "/bin/false"]
@@ -123,6 +134,21 @@ fn run() {
     let msg = err.to_string();
     assert!(msg.contains("exited with"), "{msg}");
     assert!(msg.contains(&*log.to_string_lossy()), "{msg}");
+    let mut child = spawn_daemon(fails, &dir).unwrap();
+    let Err(err) = Client::connect_spawned(&mut child, &dir, Role::Cli, WAIT) else {
+        panic!("connected through {}", fails.display());
+    };
+    assert!(err.to_string().contains("exited with"), "{err}");
+}
+
+/// Waits for the daemon with this pid to exit, so the next one can take the lock.
+fn gone(pid: i32) {
+    let deadline = Instant::now() + WAIT;
+    // SAFETY: signal 0 only checks that the process exists.
+    while unsafe { libc::kill(pid, 0) } == 0 {
+        assert!(Instant::now() < deadline, "daemon {pid} never exited");
+        thread::sleep(Duration::from_millis(10));
+    }
 }
 
 fn idle_update() -> UpdateStatus {

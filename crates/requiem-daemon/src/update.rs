@@ -1,8 +1,11 @@
 //! Self-update, as `docs/self-update-design.md` describes: the check schedule, the
 //! background download and staging, and both ways of installing.
 
-use std::fs::File;
+use std::ffi::OsString;
+use std::fs::{self, File};
+use std::os::unix::ffi::OsStringExt;
 use std::path::{Path, PathBuf};
+use std::process::Child;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -493,19 +496,17 @@ impl Updater {
         }
         drop(instance);
 
-        let started =
-            Client::connect_or_spawn(&stage::daemon_exe(&installed), Role::Cli, HANDOFF_TIMEOUT);
-        let peer = started.as_ref().ok().and_then(|(c, _)| c.peer_pid().ok());
-        let failure = match &started {
-            Err(e) => Some(format!("the new player: {e}")),
-            Ok((c, _)) if c.server_version() == version => None,
-            Ok((c, _)) => Some(format!(
-                "the player that answered is {}, not {version}",
-                c.server_version()
-            )),
-        };
-        drop(started);
-        let Some(detail) = failure else {
+        let handed = requiem_ipc::socket_dir()
+            .map_err(|e| format!("the new player: {e}"))
+            .and_then(|dir| {
+                hand_off(
+                    &stage::daemon_exe(&installed),
+                    &dir,
+                    &version,
+                    HANDOFF_TIMEOUT,
+                )
+            });
+        let Err(detail) = handed else {
             eprintln!("requiemd: restarted to {version}");
             if gui {
                 ui::open_app(&installed);
@@ -518,9 +519,6 @@ impl Updater {
 
         let f = Failure::new(Reason::NotInTime, detail);
         eprintln!("requiemd: restarting to {version}: {f}; going back");
-        if let Some(pid) = peer {
-            terminate(pid);
-        }
         if let Err(e) = macos::swap_back(&ready.app, &installed) {
             eprintln!("requiemd: {e}");
         }
@@ -559,6 +557,74 @@ fn start_player(app: &Path, gui: bool) {
     }
 }
 
+/// Section 3.4 steps 5 and 6: starts the new player from `exe`, listening in `dir`, and waits
+/// up to `timeout` for a `Welcome` from `version`. On failure it stops that player, and the
+/// one that answered if it runs from `exe`, while `exe` is still the new version's.
+fn hand_off(exe: &Path, dir: &Path, version: &str, timeout: Duration) -> Result<(), String> {
+    let mut child = requiem_ipc::spawn_daemon(exe, dir)
+        .map_err(|e| format!("the new player: {}: {e}", exe.display()))?;
+    let connected = Client::connect_spawned(&mut child, dir, Role::Cli, timeout);
+    let peer = connected.as_ref().ok().and_then(|(c, _)| c.peer_pid().ok());
+    let failure = match &connected {
+        Err(e) => format!("the new player: {e}"),
+        Ok((c, _)) if c.server_version() == version => return Ok(()),
+        Ok((c, _)) => format!(
+            "the player that answered is {}, not {version}",
+            c.server_version()
+        ),
+    };
+    drop(connected);
+    let child_pid = child.id() as i32;
+    stop(&mut child);
+    // Once reaped, the child's pid may belong to anyone.
+    if let Some(pid) = peer
+        && pid != child_pid
+        && runs(pid, exe)
+    {
+        terminate(pid);
+    }
+    Err(failure)
+}
+
+/// Whether `pid` is another process running the executable at `exe`.
+fn runs(pid: i32, exe: &Path) -> bool {
+    // SAFETY: getpid has no preconditions.
+    if pid <= 1 || pid == unsafe { libc::getpid() } {
+        return false;
+    }
+    let mut buf = vec![0u8; libc::PROC_PIDPATHINFO_MAXSIZE as usize];
+    // SAFETY: `buf` is writable for the length passed.
+    let n = unsafe { libc::proc_pidpath(pid, buf.as_mut_ptr().cast(), buf.len() as u32) };
+    let Ok(n) = usize::try_from(n) else {
+        return false;
+    };
+    if n == 0 {
+        return false;
+    }
+    buf.truncate(n);
+    // proc_pidpath gives the resolved path, so /var/... shows as /private/var/....
+    let running = PathBuf::from(OsString::from_vec(buf));
+    fs::canonicalize(exe).is_ok_and(|exe| exe == running)
+}
+
+/// SIGTERM, then SIGKILL after [`TERM_GRACE`]; reaped either way.
+fn stop(child: &mut Child) {
+    if let Ok(None) = child.try_wait() {
+        // SAFETY: kill has no memory-safety preconditions; the child is not reaped yet, so
+        // the pid is still its own.
+        unsafe { libc::kill(child.id() as i32, libc::SIGTERM) };
+        let deadline = Instant::now() + TERM_GRACE;
+        while let Ok(None) = child.try_wait() {
+            if Instant::now() >= deadline {
+                let _ = child.kill();
+                break;
+            }
+            thread::sleep(Duration::from_millis(100));
+        }
+    }
+    let _ = child.wait();
+}
+
 /// SIGTERM, then SIGKILL if `pid` is still running after [`TERM_GRACE`].
 fn terminate(pid: i32) {
     // SAFETY: kill has no memory-safety preconditions.
@@ -577,9 +643,17 @@ fn terminate(pid: i32) {
 
 #[cfg(test)]
 mod tests {
+    use std::os::unix::fs::PermissionsExt;
+    use std::process::{Command, Stdio};
+
     use requiem_update::state::FailureRecord;
 
     use super::*;
+
+    fn alive(pid: i32) -> bool {
+        // SAFETY: signal 0 only checks that the process exists.
+        unsafe { libc::kill(pid, 0) == 0 }
+    }
 
     fn inner() -> Inner {
         Inner {
@@ -675,5 +749,57 @@ mod tests {
                 reason: "the new version did not start in time".into()
             }
         );
+    }
+
+    #[test]
+    fn only_another_process_running_the_player_counts_as_one() {
+        let mut sleep = Command::new("/bin/sleep")
+            .arg("30")
+            .stdout(Stdio::null())
+            .spawn()
+            .unwrap();
+        let pid = sleep.id() as i32;
+        let found = (
+            runs(pid, Path::new("/bin/sleep")),
+            runs(pid, Path::new("/bin/cat")),
+        );
+        let _ = sleep.kill();
+        let _ = sleep.wait();
+        assert_eq!(found, (true, false));
+        let me = std::env::current_exe().unwrap();
+        assert!(!runs(std::process::id() as i32, &me));
+        assert!(!runs(1, Path::new("/sbin/launchd")));
+        assert!(!runs(0, &me));
+    }
+
+    #[test]
+    fn a_new_player_that_never_listens_is_stopped() {
+        let dir = std::env::temp_dir().join(format!("rqd{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let exe = dir.join("requiemd");
+        let pid_file = dir.join("pid");
+        fs::write(
+            &exe,
+            format!(
+                "#!/bin/sh\necho $$ > '{}'\nexec /bin/sleep 60\n",
+                pid_file.display()
+            ),
+        )
+        .unwrap();
+        fs::set_permissions(&exe, fs::Permissions::from_mode(0o755)).unwrap();
+        let handed = hand_off(&exe, &dir, "9.9.9", Duration::from_secs(1));
+        let pid: i32 = fs::read_to_string(&pid_file)
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap();
+        let left = alive(pid);
+        if left {
+            // SAFETY: kill has no memory-safety preconditions.
+            unsafe { libc::kill(pid, libc::SIGKILL) };
+        }
+        let _ = fs::remove_dir_all(&dir);
+        assert!(handed.unwrap_err().contains("not listening"));
+        assert!(!left, "the new player {pid} still runs");
     }
 }
