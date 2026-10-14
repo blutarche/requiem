@@ -30,6 +30,7 @@ Needs Rust (see `rust-toolchain.toml`) and libopus: `brew install opus` on macOS
 cargo build --release          # target/release/{requiemd,requiem-gui,requiem}
 scripts/bundle-macos.sh        # macOS: target/Requiem.app (ad-hoc signed), CLI at Contents/MacOS/requiem
 scripts/make-dmg.sh            # macOS: bundles, then target/Requiem-<version>.dmg, the installer
+scripts/release-macos.sh 0.1.0 # macOS: signed release files in target/release-files/v0.1.0/ (--publish tags and uploads)
 ```
 
 `make-dmg.sh` installs [dmgbuild](https://github.com/dmgbuild/dmgbuild) from PyPI into `target/dmgbuild-venv` on its first run.
