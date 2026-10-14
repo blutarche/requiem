@@ -11,6 +11,8 @@ pub enum Reason {
     DownloadMismatch,
     /// A self-test timed out, or the swap or the restart handoff failed.
     NotInTime,
+    /// The lock on the app's folder stayed held, which any local user can do.
+    FolderLocked,
 }
 
 impl Reason {
@@ -20,6 +22,7 @@ impl Reason {
             Reason::DidNotStart => "the new version did not start",
             Reason::DownloadMismatch => "the download did not match the release",
             Reason::NotInTime => "the new version did not start in time",
+            Reason::FolderLocked => "the app's folder stayed locked",
         }
     }
 
@@ -27,6 +30,7 @@ impl Reason {
         match self {
             Reason::NotBuiltLikeThis | Reason::DidNotStart => Kind::Bad,
             Reason::DownloadMismatch | Reason::NotInTime => Kind::Transient,
+            Reason::FolderLocked => Kind::NotCounted,
         }
     }
 }
@@ -37,6 +41,8 @@ pub enum Kind {
     Bad,
     /// May pass on another try, up to three.
     Transient,
+    /// Not the release's fault: tried again at the next start, and never counted.
+    NotCounted,
 }
 
 /// A failed install. `detail` is for the log.

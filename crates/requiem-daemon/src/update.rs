@@ -13,7 +13,7 @@ use requiem_update::fetch::{self, Config, Found};
 use requiem_update::macos::{self, Staging, Swapped};
 use requiem_update::stage::{self, Saved};
 use requiem_update::state::{self, State};
-use requiem_update::{Failure, Reason};
+use requiem_update::{Failure, Kind, Reason};
 use semver::Version;
 
 use crate::{persist, ui};
@@ -103,6 +103,14 @@ impl Inner {
         self.stored.staging = None;
         let bad = self.stored.record_failure(version, sha256, f);
         self.save();
+        if f.kind() == Kind::NotCounted {
+            return UpdateState::Error {
+                reason: format!(
+                    "{version} did not install: {}; it is tried again at the next start",
+                    f.reason.text()
+                ),
+            };
+        }
         failure_state(version, f.reason.text(), bad)
     }
 }
@@ -622,6 +630,27 @@ mod tests {
                 version: "0.2.0".into(),
                 reason: "the download did not match the release".into()
             }
+        );
+    }
+
+    #[test]
+    fn a_locked_folder_is_retried_at_the_next_start() {
+        let mut inner = inner();
+        inner.stored.last_check = Some(1_000);
+        let f = Failure::new(Reason::FolderLocked, "stayed locked for 30 s");
+        for _ in 0..3 {
+            assert_eq!(
+                inner.record_failure("0.2.0", "aa", &f),
+                UpdateState::Error {
+                    reason: "0.2.0 did not install: the app's folder stayed locked; it is tried \
+                             again at the next start"
+                        .into()
+                }
+            );
+        }
+        assert_eq!(
+            (inner.stored.failures.len(), inner.stored.last_check),
+            (0, None)
         );
     }
 

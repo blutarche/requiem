@@ -256,9 +256,18 @@ pub enum Swapped {
 
 /// Section 3.4's swap of the staged app for the installed one.
 pub fn swap(staged: &Path, installed: &Path, version: &str) -> Result<Swapped, Failure> {
+    swap_waiting(staged, installed, version, SWAP_LOCK_WAIT)
+}
+
+fn swap_waiting(
+    staged: &Path,
+    installed: &Path,
+    version: &str,
+    wait: Duration,
+) -> Result<Swapped, Failure> {
     let fail = |detail: String| Failure::new(Reason::NotInTime, detail);
     let staged_version = Version::parse(version).map_err(|e| fail(e.to_string()))?;
-    let lock = lock_folder(installed).map_err(fail)?;
+    let lock = lock_folder(installed, wait)?;
     let current = installed_version(installed).map_err(fail)?;
     if staged_version <= current {
         return Ok(Swapped::AlreadyCurrent(current));
@@ -284,17 +293,27 @@ pub fn swap_back(staged: &Path, installed: &Path) -> Result<(), String> {
 }
 
 fn swap_back_unregistered(staged: &Path, installed: &Path) -> Result<(), String> {
-    let _lock = lock_folder(installed)?;
+    let _lock = lock_folder(installed, SWAP_LOCK_WAIT).map_err(|f| f.detail)?;
     rename_swap(staged, installed)
 }
 
 /// Every player on the machine, for any user, locks the folder holding the app around a
-/// swap, so two swaps never interleave.
-fn lock_folder(installed: &Path) -> Result<DirLock, String> {
-    let folder = installed
-        .parent()
-        .ok_or_else(|| format!("{} has no folder", installed.display()))?;
-    DirLock::wait(folder, SWAP_LOCK_WAIT).map_err(|e| format!("{}: {e}", folder.display()))
+/// swap, so two swaps never interleave. Any local user can hold that lock too, so a lock
+/// that stays held is not the release's fault.
+fn lock_folder(installed: &Path, wait: Duration) -> Result<DirLock, Failure> {
+    let folder = installed.parent().ok_or_else(|| {
+        Failure::new(
+            Reason::NotInTime,
+            format!("{} has no folder", installed.display()),
+        )
+    })?;
+    DirLock::wait(folder, wait).map_err(|e| {
+        let reason = match e.kind() {
+            io::ErrorKind::TimedOut => Reason::FolderLocked,
+            _ => Reason::NotInTime,
+        };
+        Failure::new(reason, format!("{}: {e}", folder.display()))
+    })
 }
 
 fn rename_swap(a: &Path, b: &Path) -> Result<(), String> {
@@ -456,6 +475,23 @@ mod tests {
                 Ok(Version::parse(staged_version).unwrap())
             );
         }
+    }
+
+    #[test]
+    fn a_folder_another_process_keeps_locked_is_not_counted() {
+        let apps = TempDir::new();
+        let staging = TempDir::new();
+        let installed = requiem(apps.path(), "0.1.0");
+        let staged = requiem(staging.path(), "0.2.0");
+        let held = DirLock::try_new(apps.path()).unwrap().unwrap();
+        let f = swap_waiting(&staged, &installed, "0.2.0", Duration::from_millis(200)).unwrap_err();
+        drop(held);
+        assert_eq!(
+            (f.reason, f.kind()),
+            (Reason::FolderLocked, crate::Kind::NotCounted)
+        );
+        assert_eq!(installed_version(&installed), Ok(Version::new(0, 1, 0)));
+        assert_eq!(installed_version(&staged), Ok(Version::new(0, 2, 0)));
     }
 
     #[test]

@@ -173,8 +173,13 @@ impl State {
     }
 
     /// Counts a failed try of `version` with that zip. True once the version is bad: a bad
-    /// release at once, a transient failure on its third try.
+    /// release at once, a transient failure on its third try. A failure that is not counted
+    /// makes the next start check again instead.
     pub fn record_failure(&mut self, version: &str, sha256: &str, failure: &Failure) -> bool {
+        if failure.kind() == Kind::NotCounted {
+            self.last_check = None;
+            return false;
+        }
         let i = match self
             .failures
             .iter()
@@ -242,6 +247,20 @@ mod tests {
             (rec.tries, rec.reason.as_str()),
             (3, "the download did not match the release")
         );
+    }
+
+    #[test]
+    fn a_locked_folder_is_never_counted_and_checks_at_the_next_start() {
+        let mut s = State {
+            last_check: Some(1_000),
+            ..State::default()
+        };
+        let locked = Failure::new(Reason::FolderLocked, "stayed locked for 30 s");
+        for _ in 0..MAX_TRIES + 1 {
+            assert!(!s.record_failure("0.2.0", "aa", &locked));
+        }
+        assert_eq!((s.failures.len(), s.last_check), (0, None));
+        assert!(s.due(2_000));
     }
 
     #[test]
