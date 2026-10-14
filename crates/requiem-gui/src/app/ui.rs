@@ -19,6 +19,7 @@ use objc2_app_kit::{
 use objc2_core_foundation::CGFloat;
 use objc2_foundation::{MainThreadMarker, NSPoint, NSRect, NSSize, NSString, NSURL};
 use requiem_core::{Collection, Item, Shelf, Track};
+use requiem_ipc::UpdateRequest;
 use requiem_macos::artwork::Cover;
 
 use super::backend::{Backend, Msg};
@@ -115,6 +116,11 @@ const MIN_H: CGFloat = 500.0;
 const SIDEBAR_W: CGFloat = 240.0;
 /// One line; a second adds a line's height.
 const BANNER_H: CGFloat = 32.0;
+/// Tall enough for a compact button.
+const BANNER_ACTION_H: CGFloat = 40.0;
+const BANNER_BUTTON_H: CGFloat = 28.0;
+/// Between the banner's text and its button.
+const BANNER_GAP: CGFloat = 12.0;
 const PAD: CGFloat = 24.0;
 /// The window has a transparent title bar over the content; the page headers start below
 /// it.
@@ -258,6 +264,8 @@ pub struct Ui {
     main: Retained<NSView>,
     banner: Retained<NSView>,
     banner_label: Retained<NSTextField>,
+    /// Restart to Update, beside the text.
+    banner_action: Retained<HoverButton>,
     /// False from the start of the fade-out; the view hides once it ends.
     banner_shown: Cell<bool>,
     /// How far the banner pushes the pages down.
@@ -588,8 +596,12 @@ impl Ui {
         if let Some(cell) = banner_label.cell() {
             cell.setTruncatesLastVisibleLine(true);
         }
+        let banner_action = HoverButton::secondary(mtm, rect(0.0, 0.0, 0.0, BANNER_BUTTON_H));
+        banner_action.set_action(target, sel!(restartToUpdate:));
+        banner_action.setHidden(true);
         banner.addSubview(&banner_rule);
         banner.addSubview(&banner_label);
+        banner.addSubview(&banner_action);
         banner.setHidden(true);
         main.addSubview(&banner);
 
@@ -613,6 +625,7 @@ impl Ui {
             main,
             banner,
             banner_label,
+            banner_action,
             banner_shown: Cell::new(false),
             banner_inset: Cell::new(0.0),
             home_page,
@@ -978,6 +991,33 @@ impl Ui {
     /// Whether "Quit and Stop Music" is available.
     pub fn can_stop_player(&self) -> bool {
         self.vm.borrow().ui().can_stop_player()
+    }
+
+    pub fn can_check_for_updates(&self) -> bool {
+        self.vm.borrow().ui().can_check_for_updates()
+    }
+
+    /// Check for Updates Automatically: `None` while the player can't update.
+    pub fn auto_update(&self) -> Option<bool> {
+        self.vm.borrow().ui().auto_update()
+    }
+
+    pub fn check_for_updates(&self) {
+        if self.vm.borrow_mut().check_for_updates() {
+            self.backend.request_update(UpdateRequest::Check);
+        }
+    }
+
+    pub fn toggle_auto_update(&self) {
+        if let Some(auto) = self.auto_update() {
+            self.backend.request_update(UpdateRequest::SetAuto(!auto));
+        }
+    }
+
+    /// The banner's Restart to Update: the player installs and restarts, and this window
+    /// quits on its goodbye.
+    pub fn restart_to_update(&self) {
+        self.backend.request_update(UpdateRequest::Install);
     }
 
     /// Stops the player, then the window closes on its goodbye. Does nothing without a
@@ -1411,6 +1451,7 @@ impl Ui {
                 match m {
                     Msg::Event(ev) => vm.apply(ev),
                     Msg::Link(l) => vm.link(l),
+                    Msg::Update(status) => vm.update(status),
                     Msg::Raise => raise = true,
                 }
             }
@@ -1805,12 +1846,18 @@ impl Ui {
         self.results_empty.view.setFrame(list);
     }
 
-    /// Fits the banner to its text at the current width: one line, or two when one is too
-    /// narrow. Returns its height.
+    /// Fits the banner to its text and button at the current width: one line, or two when
+    /// one is too narrow. Returns its height.
     fn layout_banner(&self) -> CGFloat {
         let b = self.main.bounds();
         let l = &self.banner_label;
-        let room = b.size.width - 2.0 * PAD;
+        let action = &self.banner_action;
+        let action_w = if action.isHidden() {
+            0.0
+        } else {
+            action.frame().size.width + BANNER_GAP
+        };
+        let room = b.size.width - 2.0 * PAD - action_w;
         let font = l
             .font()
             .unwrap_or_else(|| theme::font(12.0, Weight::Medium));
@@ -1823,11 +1870,31 @@ impl Ui {
             + 4.0;
         let lines: CGFloat = if text_w > room { 2.0 } else { 1.0 };
         let line_h = widgets::line_height(&font);
-        let h = BANNER_H + (lines - 1.0) * (line_h - 2.0);
+        let base = if action_w > 0.0 {
+            BANNER_ACTION_H
+        } else {
+            BANNER_H
+        };
+        let h = base + (lines - 1.0) * (line_h - 2.0);
         self.banner
             .setFrame(rect(0.0, b.size.height - h, b.size.width, h));
         let text_h = lines * line_h;
-        l.setFrame(rect(PAD, ((h - text_h) / 2.0).round(), room, text_h));
+        let text_y = ((h - text_h) / 2.0).round();
+        if action_w > 0.0 {
+            // The text and its button sit together in the middle. The text is right-aligned
+            // in all the room left of it: a label cut to the measured width wraps early.
+            let label_w = text_w.min(room);
+            let x = ((b.size.width - label_w - action_w) / 2.0).round();
+            l.setAlignment(NSTextAlignment::Right);
+            l.setFrame(rect(PAD, text_y, x + label_w - PAD, text_h));
+            let button_x = x + label_w + BANNER_GAP;
+            let button_y = ((h - BANNER_BUTTON_H) / 2.0).round();
+            let button_w = action.frame().size.width;
+            action.setFrame(rect(button_x, button_y, button_w, BANNER_BUTTON_H));
+        } else {
+            l.setAlignment(NSTextAlignment::Center);
+            l.setFrame(rect(PAD, text_y, room, text_h));
+        }
         h
     }
 
@@ -1869,6 +1936,13 @@ impl Ui {
                 theme::ink_2()
             };
             self.banner_label.setTextColor(Some(&c));
+            let action = &self.banner_action;
+            if let Some(label) = banner.action {
+                let w = action.set_label(label);
+                let f = action.frame();
+                action.setFrame(rect(f.origin.x, f.origin.y, w, BANNER_BUTTON_H));
+            }
+            action.set_shown(banner.action.is_some());
         }
         let inset = if shown { self.layout_banner() } else { 0.0 };
         let page = rect(0.0, 0.0, b.size.width, b.size.height - inset);

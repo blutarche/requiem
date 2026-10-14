@@ -13,7 +13,7 @@ use dispatch2::DispatchQueue;
 use objc2::MainThreadMarker;
 use objc2_app_kit::NSApplication;
 use requiem_core::{Command, Event};
-use requiem_ipc::{Client, Incoming, Role};
+use requiem_ipc::{Client, Incoming, Role, UpdateRequest, UpdateStatus};
 
 use super::ui;
 use crate::demo;
@@ -35,6 +35,7 @@ pub enum Msg {
     Event(Event),
     Raise,
     Link(Link),
+    Update(UpdateStatus),
 }
 
 pub enum Backend {
@@ -49,9 +50,16 @@ impl Backend {
         match self {
             Backend::Demo(d) => d.borrow_mut().apply(cmd),
             Backend::Live(l) => {
-                enqueue(&l.tx, cmd);
+                enqueue(&l.tx, Out::Command(cmd));
                 Vec::new()
             }
+        }
+    }
+
+    /// Asks the player to check for, or install, updates. The demo has no player to ask.
+    pub fn request_update(&self, req: UpdateRequest) {
+        if let Backend::Live(l) = self {
+            enqueue(&l.tx, Out::Update(req));
         }
     }
 
@@ -62,7 +70,7 @@ impl Backend {
             Backend::Demo(_) => false,
             Backend::Live(l) => {
                 STOPPING.store(true, Ordering::Relaxed);
-                enqueue(&l.tx, Command::Shutdown);
+                enqueue(&l.tx, Out::Command(Command::Shutdown));
                 true
             }
         }
@@ -74,8 +82,14 @@ static STOPPING: AtomicBool = AtomicBool::new(false);
 
 type Slot = Arc<Mutex<Option<Arc<Client>>>>;
 
+/// What the writer thread sends.
+enum Out {
+    Command(Command),
+    Update(UpdateRequest),
+}
+
 pub struct Live {
-    tx: Sender<Command>,
+    tx: Sender<Out>,
 }
 
 impl Live {
@@ -83,21 +97,26 @@ impl Live {
     /// the main thread, one dispatch per drained batch.
     pub fn start() -> Live {
         let slot: Slot = Arc::default();
-        let (tx, rx) = bounded::<Command>(COMMAND_QUEUE);
+        let (tx, rx) = bounded::<Out>(COMMAND_QUEUE);
         let writer = Arc::clone(&slot);
         thread::Builder::new()
             .name("requiem-gui-writer".into())
             .spawn(move || {
-                for cmd in rx {
+                for out in rx {
                     let client = writer
                         .lock()
                         .unwrap_or_else(PoisonError::into_inner)
                         .clone();
                     // Commands issued while disconnected are dropped; the snapshot sent on
                     // reconnect shows the player's real state.
-                    if let Some(client) = client
-                        && let Err(e) = client.send(cmd)
-                    {
+                    let Some(client) = client else { continue };
+                    let sent = match out {
+                        Out::Command(cmd) => client.send(cmd),
+                        Out::Update(UpdateRequest::Check) => client.check_for_updates(),
+                        Out::Update(UpdateRequest::Install) => client.install_update(),
+                        Out::Update(UpdateRequest::SetAuto(on)) => client.set_auto_update(on),
+                    };
+                    if let Err(e) = sent {
                         eprintln!("requiem-gui: send failed: {e}");
                     }
                 }
@@ -112,8 +131,8 @@ impl Live {
 }
 
 /// Never blocks the main thread: a full queue drops the command.
-fn enqueue(tx: &Sender<Command>, cmd: Command) {
-    match tx.try_send(cmd) {
+fn enqueue<T>(tx: &Sender<T>, item: T) {
+    match tx.try_send(item) {
         Ok(()) => {}
         Err(TrySendError::Full(_)) => debug(|| "command queue full; dropped a command".into()),
         // The writer outlives the UI; it is gone only at exit.
@@ -141,15 +160,29 @@ fn daemon_path() -> PathBuf {
 fn beside(exe: &Path) -> Option<PathBuf> {
     let dir = exe.parent()?;
     let contents = dir.parent()?;
-    let app = contents.parent()?;
-    let in_bundle = dir.file_name().is_some_and(|n| n == "MacOS")
-        && contents.file_name().is_some_and(|n| n == "Contents")
-        && app.extension().is_some_and(|e| e == "app");
-    Some(if in_bundle {
+    Some(if in_bundle(exe) {
         contents.join("Helpers/requiemd.app/Contents/MacOS/requiemd")
     } else {
         dir.join("requiemd")
     })
+}
+
+/// `exe` is an app's main executable, `<name>.app/Contents/MacOS/<exe>`.
+fn in_bundle(exe: &Path) -> bool {
+    let dir = exe.parent();
+    let contents = dir.and_then(Path::parent);
+    let app = contents.and_then(Path::parent);
+    dir.and_then(Path::file_name).is_some_and(|n| n == "MacOS")
+        && contents
+            .and_then(Path::file_name)
+            .is_some_and(|n| n == "Contents")
+        && app.and_then(Path::extension).is_some_and(|e| e == "app")
+}
+
+/// Whether this window runs from an app, and so shows self-update. Dev builds show nothing.
+pub fn shows_updates() -> bool {
+    static IN_APP: OnceLock<bool> = OnceLock::new();
+    *IN_APP.get_or_init(|| std::env::current_exe().is_ok_and(|exe| in_bundle(&exe)))
 }
 
 fn connection(daemon: PathBuf, slot: Slot) {
@@ -177,7 +210,11 @@ fn connection(daemon: PathBuf, slot: Slot) {
                                 batch.push(Msg::Event(ev));
                             }
                             Incoming::Raise => batch.push(Msg::Raise),
-                            Incoming::Update(_) => {}
+                            Incoming::Update(status) => {
+                                if shows_updates() {
+                                    batch.push(Msg::Update(status));
+                                }
+                            }
                             Incoming::Disconnected(r) => {
                                 reason = r;
                                 lost = true;
@@ -280,6 +317,15 @@ mod tests {
                 "/Applications/Requiem.app/Contents/Helpers/requiemd.app/Contents/MacOS/requiemd"
             ))
         );
+    }
+
+    #[test]
+    fn only_an_app_shows_updates() {
+        assert!(in_bundle(Path::new(
+            "/Applications/Requiem.app/Contents/MacOS/requiem-gui"
+        )));
+        assert!(!in_bundle(Path::new("/work/target/release/requiem-gui")));
+        assert!(!in_bundle(Path::new("/requiem-gui")));
     }
 
     #[test]

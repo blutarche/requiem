@@ -9,6 +9,7 @@ use requiem_core::{
     AccountState, Collection, Command, EnqueueMode, Event, Item, Page, PlayState, ProviderId,
     SeekTarget, Shelf, Track, TrackId,
 };
+use requiem_ipc::{UpdateState, UpdateStatus};
 
 pub const SEEK_STEP_SECS: i64 = 5;
 pub const VOLUME_STEP: i16 = 10;
@@ -30,6 +31,8 @@ const OUT_OF_DATE: &str = "An older Requiem player is still running. Quit it fro
                            menu-bar icon; this window reconnects on its own.";
 const STUCK_HINT: &str = "If this persists, choose Quit and Stop Music from the Requiem \
                           menu-bar icon, then reopen Requiem.";
+/// How long the answer to Check for Updates… stays when there is nothing new.
+pub const UP_TO_DATE_FOR: Duration = Duration::from_secs(4);
 
 /// Regions of the window that need refreshing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -370,6 +373,9 @@ pub struct UiState {
     pub collection: Option<CollectionPage>,
     /// The daemon's account states, by provider; the first provider's is the one shown.
     pub accounts: Vec<(ProviderId, AccountState)>,
+    /// The player's self-update status: `None` before it sends one, while disconnected, and
+    /// in dev builds, which show nothing.
+    pub update: Option<UpdateStatus>,
 }
 
 impl Default for UiState {
@@ -393,6 +399,7 @@ impl Default for UiState {
             library: Browse::default(),
             collection: None,
             accounts: Vec::new(),
+            update: None,
         }
     }
 }
@@ -585,6 +592,23 @@ impl UiState {
         self.connection == Connection::Connected
     }
 
+    /// Whether Check for Updates… and the automatic-check setting apply: the player can
+    /// update itself.
+    pub fn can_check_for_updates(&self) -> bool {
+        self.update.as_ref().is_some_and(|u| {
+            !matches!(
+                u.state,
+                UpdateState::NotUpdatable { .. } | UpdateState::Unsupported
+            )
+        })
+    }
+
+    /// Whether the player checks for updates on its own; `None` when it can't update.
+    pub fn auto_update(&self) -> Option<bool> {
+        let auto = self.update.as_ref()?.auto;
+        self.can_check_for_updates().then_some(auto)
+    }
+
     /// The command `edit` sends, or `None` when it does nothing: disconnected, a row out of
     /// range, a move past either end, or clearing an empty queue. The menus enable an edit
     /// exactly when this is `Some`, and the session ignores the rest without an answer.
@@ -644,6 +668,8 @@ impl UiState {
 pub struct Banner {
     pub text: String,
     pub error: bool,
+    /// The label of the banner's button, if it has one: only Restart to Update.
+    pub action: Option<&'static str>,
 }
 
 /// An empty state: heading, subtext and its primary action.
@@ -687,6 +713,10 @@ pub struct Vm {
     queue_selection: Option<usize>,
     /// The toast of a `TrackFailed` whose outcome the next event tells.
     failed_toast: Option<u64>,
+    /// Check for Updates… was chosen and its check has not ended.
+    checking_by_hand: bool,
+    /// Until when the answer to Check for Updates… says there is nothing new.
+    up_to_date_until: Option<Instant>,
 }
 
 #[derive(Debug)]
@@ -785,14 +815,16 @@ impl Vm {
 
     /// When the banner next changes on its own; call `tick` then.
     pub fn next_tick(&self) -> Option<Instant> {
-        let since = self.offline_since?;
-        if self.ui.banner.is_none() {
-            Some(since + BANNER_GRACE)
-        } else if !self.stuck {
-            Some(since + STUCK_AFTER)
-        } else {
-            None
-        }
+        let offline = self.offline_since.and_then(|since| {
+            if self.ui.banner.is_none() {
+                Some(since + BANNER_GRACE)
+            } else if !self.stuck {
+                Some(since + STUCK_AFTER)
+            } else {
+                None
+            }
+        });
+        offline.into_iter().chain(self.up_to_date_until).min()
     }
 
     pub fn tick(&mut self) {
@@ -920,6 +952,33 @@ impl Vm {
         }
     }
 
+    /// The player's self-update status changed.
+    pub fn update(&mut self, status: UpdateStatus) {
+        self.update_at(status, Instant::now());
+    }
+
+    /// `update` with the clock passed in. "Up to date" shows only as the answer to Check
+    /// for Updates…; a failed check shows nothing.
+    pub fn update_at(&mut self, status: UpdateStatus, now: Instant) {
+        match status.state {
+            UpdateState::Checking => {}
+            UpdateState::UpToDate if self.checking_by_hand => {
+                self.checking_by_hand = false;
+                self.up_to_date_until = Some(now + UP_TO_DATE_FOR);
+            }
+            _ => self.checking_by_hand = false,
+        }
+        self.ui.update = Some(status);
+        self.refresh_banner(now);
+    }
+
+    /// Check for Updates…: whether to ask the player, which can't when it can't update.
+    pub fn check_for_updates(&mut self) -> bool {
+        let can = self.ui.can_check_for_updates();
+        self.checking_by_hand |= can;
+        can
+    }
+
     pub fn link(&mut self, link: Link) {
         self.link_at(link, Instant::now());
     }
@@ -967,6 +1026,12 @@ impl Vm {
         };
         if self.ui.connection != was {
             self.dirty |= Dirty::CONNECTION;
+        }
+        if !connected {
+            // A new connection brings the player's current status.
+            self.ui.update = None;
+            self.checking_by_hand = false;
+            self.up_to_date_until = None;
         }
         if connected {
             self.reset_browse();
@@ -1391,6 +1456,7 @@ impl Vm {
             _ if self.ui.connection == Connection::OutOfDate => Some(Banner {
                 text: text.to_owned(),
                 error: true,
+                action: None,
             }),
             Some(w) if w < BANNER_GRACE => None,
             Some(_) if self.stuck => Some(Banner {
@@ -1399,17 +1465,54 @@ impl Vm {
                     None => format!("{text} {STUCK_HINT}"),
                 },
                 error: false,
+                action: None,
             }),
             Some(_) => Some(Banner {
                 text: text.to_owned(),
                 error: false,
+                action: None,
             }),
             None => None,
         };
+        if self.up_to_date_until.is_some_and(|t| now >= t) {
+            self.up_to_date_until = None;
+        }
+        let banner = banner.or_else(|| self.update_banner());
         if banner != self.ui.banner {
             self.ui.banner = banner;
             self.dirty |= Dirty::CONNECTION;
         }
+    }
+
+    /// The self-update banner, shown when the connection has none.
+    fn update_banner(&self) -> Option<Banner> {
+        let u = self.ui.update.as_ref()?;
+        let (text, action) = match &u.state {
+            UpdateState::Ready { version } => (
+                format!("Requiem {version} is ready."),
+                Some("Restart to Update"),
+            ),
+            UpdateState::Failed { reason, .. } => (
+                format!(
+                    "Requiem couldn’t update: {reason}. It keeps running {}.",
+                    u.current
+                ),
+                None,
+            ),
+            UpdateState::NotUpdatable { .. } => (
+                "Move Requiem to Applications to get updates.".to_owned(),
+                None,
+            ),
+            _ if self.up_to_date_until.is_some() => {
+                (format!("Requiem {} is up to date.", u.current), None)
+            }
+            _ => return None,
+        };
+        Some(Banner {
+            text,
+            error: false,
+            action,
+        })
     }
 
     fn set_position(&mut self, at: Duration) {
@@ -2330,7 +2433,8 @@ mod tests {
             vm.ui().banner,
             Some(Banner {
                 text: "Player disconnected — reconnecting…".into(),
-                error: false
+                error: false,
+                action: None
             })
         );
         assert_eq!(vm.take_dirty(), Dirty::CONNECTION);
@@ -2358,7 +2462,8 @@ mod tests {
                        this persists, choose Quit and Stop Music from the Requiem menu-bar \
                        icon, then reopen Requiem."
                     .into(),
-                error: false
+                error: false,
+                action: None
             })
         );
         assert_eq!(vm.next_tick(), None);
@@ -2375,7 +2480,8 @@ mod tests {
             vm.ui().banner,
             Some(Banner {
                 text: "Connecting to player…".into(),
-                error: false
+                error: false,
+                action: None
             })
         );
         // A failed first connect is still connecting: nothing was disconnected.
@@ -2562,7 +2668,8 @@ mod tests {
                 text: "An older Requiem player is still running. Quit it from its menu-bar \
                        icon; this window reconnects on its own."
                     .into(),
-                error: true
+                error: true,
+                action: None
             })
         );
         assert_eq!(vm.next_tick(), None);
@@ -3980,5 +4087,149 @@ mod tests {
         vm.apply(signed_in());
         assert!(!can(&vm, PaletteAction::SignIn) && can(&vm, PaletteAction::SignOut));
         assert!(PaletteAction::SignIn.is_account() && !PaletteAction::Refresh.is_account());
+    }
+
+    fn status(state: UpdateState) -> UpdateStatus {
+        UpdateStatus {
+            current: "0.2.0".into(),
+            auto: true,
+            state,
+        }
+    }
+
+    fn banner_text(vm: &Vm) -> Option<&str> {
+        vm.ui().banner.as_ref().map(|b| b.text.as_str())
+    }
+
+    #[test]
+    fn update_banners_follow_the_player() {
+        let mut vm = connected();
+        vm.update(status(UpdateState::Ready {
+            version: "0.2.1".into(),
+        }));
+        assert_eq!(
+            vm.ui().banner,
+            Some(Banner {
+                text: "Requiem 0.2.1 is ready.".into(),
+                error: false,
+                action: Some("Restart to Update")
+            })
+        );
+        assert_eq!(vm.take_dirty(), Dirty::CONNECTION);
+        vm.update(status(UpdateState::Failed {
+            version: "0.2.1".into(),
+            reason: "the new version did not start".into(),
+        }));
+        assert_eq!(
+            vm.ui().banner,
+            Some(Banner {
+                text: "Requiem couldn’t update: the new version did not start. It keeps \
+                       running 0.2.0."
+                    .into(),
+                error: false,
+                action: None
+            })
+        );
+        vm.update(status(UpdateState::NotUpdatable {
+            reason: "it runs from a disk image".into(),
+        }));
+        assert_eq!(
+            banner_text(&vm),
+            Some("Move Requiem to Applications to get updates.")
+        );
+        for quiet in [
+            UpdateState::Idle,
+            UpdateState::Checking,
+            UpdateState::UpToDate,
+            UpdateState::Downloading {
+                version: "0.2.1".into(),
+            },
+            UpdateState::Unsupported,
+        ] {
+            vm.update(status(quiet.clone()));
+            assert_eq!(vm.ui().banner, None, "{quiet:?}");
+        }
+    }
+
+    #[test]
+    fn up_to_date_answers_only_check_for_updates_and_clears_itself() {
+        let mut vm = connected();
+        let t0 = Instant::now();
+        vm.update_at(status(UpdateState::UpToDate), t0);
+        assert_eq!(vm.ui().banner, None, "a scheduled check says nothing");
+        assert!(vm.check_for_updates());
+        vm.update_at(status(UpdateState::Checking), t0);
+        assert_eq!(vm.ui().banner, None);
+        vm.update_at(status(UpdateState::UpToDate), t0);
+        assert_eq!(banner_text(&vm), Some("Requiem 0.2.0 is up to date."));
+        assert_eq!(vm.next_tick(), Some(t0 + UP_TO_DATE_FOR));
+        vm.take_dirty();
+        vm.tick_at(t0 + UP_TO_DATE_FOR);
+        assert_eq!(vm.ui().banner, None);
+        assert_eq!(vm.take_dirty(), Dirty::CONNECTION);
+        assert_eq!(vm.next_tick(), None);
+        // Answered once: the next scheduled check is quiet again.
+        vm.update_at(status(UpdateState::UpToDate), t0 + UP_TO_DATE_FOR);
+        assert_eq!(vm.ui().banner, None);
+    }
+
+    #[test]
+    fn a_failed_check_shows_nothing() {
+        let mut vm = connected();
+        vm.update(status(UpdateState::Idle));
+        assert!(vm.check_for_updates());
+        vm.update(status(UpdateState::Checking));
+        vm.update(status(UpdateState::Idle));
+        assert_eq!(vm.ui().banner, None);
+        vm.update(status(UpdateState::UpToDate));
+        assert_eq!(vm.ui().banner, None);
+    }
+
+    #[test]
+    fn a_lost_player_takes_its_update_status_along() {
+        let mut vm = connected();
+        let t0 = Instant::now();
+        vm.update_at(
+            status(UpdateState::Ready {
+                version: "0.2.1".into(),
+            }),
+            t0,
+        );
+        vm.link_at(Link::Lost(LinkError::NotResponding), t0);
+        assert_eq!(vm.ui().update, None);
+        assert_eq!(vm.ui().banner, None);
+        assert!(!vm.ui().can_check_for_updates());
+        vm.tick_at(t0 + BANNER_GRACE);
+        assert_eq!(
+            banner_text(&vm),
+            Some("Player disconnected — reconnecting…")
+        );
+        vm.link_at(Link::Connected, t0 + BANNER_GRACE);
+        assert_eq!(vm.ui().banner, None);
+    }
+
+    #[test]
+    fn update_menus_need_a_player_that_can_update() {
+        let mut vm = connected();
+        assert!(!vm.ui().can_check_for_updates());
+        assert!(!vm.check_for_updates());
+        assert_eq!(vm.ui().auto_update(), None);
+        for state in [
+            UpdateState::NotUpdatable {
+                reason: "it runs from a disk image".into(),
+            },
+            UpdateState::Unsupported,
+        ] {
+            vm.update(status(state));
+            assert!(!vm.ui().can_check_for_updates());
+            assert_eq!(vm.ui().auto_update(), None);
+        }
+        vm.update(UpdateStatus {
+            auto: false,
+            ..status(UpdateState::Idle)
+        });
+        assert!(vm.ui().can_check_for_updates());
+        assert_eq!(vm.ui().auto_update(), Some(false));
+        assert!(vm.check_for_updates());
     }
 }

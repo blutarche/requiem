@@ -7,11 +7,15 @@ use requiem_core::{
     AccountState, Collection, CollectionId, CollectionKind, Command, EnqueueMode, Event, Item,
     Page, PlayState, ProviderId, SeekTarget, Shelf, Track, TrackId,
 };
+use requiem_ipc::{UpdateState, UpdateStatus};
 
 use crate::args::View;
 use crate::vm::{BANNER_GRACE, Intent, Link, LinkError, Place, Vm};
 
 pub const QUERY: &str = "night drive";
+/// The demo player's version, and the one its update offers.
+const VERSION: &str = "0.2.0";
+const NEXT_VERSION: &str = "0.2.1";
 
 const RESULTS: [(&str, &[&str], Option<&str>, u64); 30] = [
     (
@@ -657,9 +661,9 @@ fn run_intent(vm: &mut Vm, daemon: &mut Daemon, intent: Intent) {
 }
 
 /// `start`, staged for a demo-only `view`: `Empty` skips the search; `Disconnected`,
-/// `OutOfDate` and `Toast` add their banner or toast; the Library views set the account;
-/// `NowPlayingEmpty` stops playback; `NowPlayingLast` plays the queue's last track. Other views
-/// get the plain start.
+/// `OutOfDate`, `Toast` and the update views add their banner or toast; the Library views set
+/// the account; `NowPlayingEmpty` stops playback; `NowPlayingLast` plays the queue's last
+/// track. Other views get the plain start.
 pub fn start_in(view: View) -> (Vm, Daemon) {
     let t0 = Instant::now();
     let mut vm = Vm::new_at(t0);
@@ -685,6 +689,21 @@ pub fn start_in(view: View) -> (Vm, Daemon) {
             vm.tick_at(t0 + BANNER_GRACE);
         }
         View::OutOfDate => vm.link(Link::OutOfDate),
+        View::UpdateReady => vm.update(update(UpdateState::Ready {
+            version: NEXT_VERSION.into(),
+        })),
+        View::UpdateFailed => vm.update(update(UpdateState::Failed {
+            version: NEXT_VERSION.into(),
+            reason: "the new version did not start".into(),
+        })),
+        View::NotUpdatable => vm.update(update(UpdateState::NotUpdatable {
+            reason: "Requiem's volume is read-only".into(),
+        })),
+        View::UpToDate => {
+            vm.update(update(UpdateState::Idle));
+            vm.check_for_updates();
+            vm.update(update(UpdateState::UpToDate));
+        }
         View::Toast => {
             vm.apply(Event::TrackFailed {
                 track: daemon.results[FAILED].clone(),
@@ -719,6 +738,14 @@ pub fn start_in(view: View) -> (Vm, Daemon) {
         View::Search | View::Queue | View::Palette | View::Empty | View::NowPlaying => {}
     }
     (vm, daemon)
+}
+
+fn update(state: UpdateState) -> UpdateStatus {
+    UpdateStatus {
+        current: VERSION.into(),
+        auto: true,
+        state,
+    }
 }
 
 #[cfg(test)]
@@ -784,6 +811,23 @@ mod tests {
         );
         assert!(vm.ui().banner.is_none());
         assert_eq!(vm.ui().results.len(), 30);
+    }
+
+    #[test]
+    fn staged_update_banners() {
+        let banner = |view| start_in(view).0.ui().banner.clone().unwrap();
+        let ready = banner(View::UpdateReady);
+        assert_eq!(ready.text, "Requiem 0.2.1 is ready.");
+        assert_eq!(ready.action, Some("Restart to Update"));
+        assert_eq!(
+            banner(View::UpdateFailed).text,
+            "Requiem couldn’t update: the new version did not start. It keeps running 0.2.0."
+        );
+        assert_eq!(
+            banner(View::NotUpdatable).text,
+            "Move Requiem to Applications to get updates."
+        );
+        assert_eq!(banner(View::UpToDate).text, "Requiem 0.2.0 is up to date.");
     }
 
     #[test]
