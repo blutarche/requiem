@@ -118,10 +118,14 @@ pub fn stage(staging: &Staging, zip: &Path, version: &str) -> Result<PathBuf, Fa
         .output()
         .map_err(|e| Failure::new(Reason::DownloadMismatch, format!("ditto: {e}")))?;
     if !out.status.success() {
-        return Err(Failure::new(
-            Reason::DownloadMismatch,
-            format!("ditto: {}", String::from_utf8_lossy(&out.stderr).trim()),
-        ));
+        // ditto's messages already start with "ditto:".
+        let stderr = String::from_utf8_lossy(&out.stderr).trim().to_owned();
+        let detail = if stderr.is_empty() {
+            format!("ditto: {}", out.status)
+        } else {
+            stderr
+        };
+        return Err(Failure::new(Reason::DownloadMismatch, detail));
     }
     let _ = fs::remove_file(zip);
     let app = stage::check_layout(&unzipped)?;
@@ -385,6 +389,19 @@ mod tests {
         drop(staging);
         assert_eq!(remove_stale(&path), Ok(()));
         assert!(!path.exists());
+    }
+
+    #[test]
+    fn a_zip_ditto_cannot_open_is_a_download_mismatch() {
+        let dir = TempDir::new();
+        let installed = requiem(dir.path(), "0.1.0");
+        let staging = Staging::create(&installed).unwrap();
+        let zip = staging.path().join("Requiem-0.2.0.zip");
+        fs::write(&zip, b"not a zip").unwrap();
+        let f = stage(&staging, &zip, "0.2.0").unwrap_err();
+        assert_eq!(f.reason, Reason::DownloadMismatch);
+        assert!(f.detail.starts_with("ditto: "), "{f}");
+        assert!(!f.detail.contains("ditto: ditto:"), "{f}");
     }
 
     #[test]
