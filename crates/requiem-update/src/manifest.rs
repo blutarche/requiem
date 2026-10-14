@@ -208,10 +208,11 @@ mod tests {
     }
 
     #[test]
-    fn the_placeholder_key_fails_every_verify() {
+    fn the_built_in_key_refuses_other_keys_and_an_empty_key_refuses_all() {
         let key = Key::new();
         let body = b"manifest";
-        let err = verify_signature(crate::key::PUBLIC_KEY, body, &key.sign(body));
+        assert!(verify_signature(crate::key::PUBLIC_KEY, body, &key.sign(body)).is_err());
+        let err = verify_signature("", body, &key.sign(body));
         assert_eq!(err, Err("no valid update key is built in".to_owned()));
     }
 

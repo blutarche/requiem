@@ -440,6 +440,9 @@ mod tests {
             ("http://127.0.0.1:9/r", "AAAA")
         );
         let cfg = Config::with_overrides("0.1.0", None, None).unwrap();
-        assert_eq!((cfg.base.as_str(), cfg.public_key.as_str()), (RELEASES, ""));
+        assert_eq!(
+            (cfg.base.as_str(), cfg.public_key.as_str()),
+            (RELEASES, crate::key::PUBLIC_KEY)
+        );
     }
 }
