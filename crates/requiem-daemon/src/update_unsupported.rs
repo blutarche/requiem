@@ -1,5 +1,6 @@
 //! Self-update is macOS only: the player says so and makes no request.
 
+use std::path::Path;
 use std::sync::Arc;
 
 use crossbeam_channel::{Receiver, Sender, unbounded};
@@ -11,6 +12,7 @@ pub struct Updater {
 
 impl Updater {
     pub fn start(
+        _exe: Option<&Path>,
         _stop: impl Fn() + Send + Sync + 'static,
     ) -> (Arc<Updater>, Receiver<UpdateStatus>) {
         let (statuses, rx) = unbounded();

@@ -75,6 +75,7 @@ fn main() -> ExitCode {
             }
         }
     }
+    let exe = ui::own_exe();
 
     // The engine must exist before `Session::spawn`, whose factory cannot fail, so events
     // reach the session through a slot the factory fills.
@@ -128,7 +129,7 @@ fn main() -> ExitCode {
     let (stop_tx, stop_rx) = bounded::<()>(1);
     let hook_tx = stop_tx.clone();
     let update_tx = stop_tx.clone();
-    let (updater, statuses) = Updater::start(move || request_stop(&update_tx));
+    let (updater, statuses) = Updater::start(exe.as_deref(), move || request_stop(&update_tx));
     let hook_updater = updater.clone();
     let hooks = ServerHooks {
         on_shutdown: Box::new(move || request_stop(&hook_tx)),
@@ -166,7 +167,14 @@ fn main() -> ExitCode {
     thread::scope(|scope| {
         scope.spawn(|| idle_exit(&server, &activity, idle_limit(), &stop_tx, &done_rx));
         let on_update = |req| updater.request(req);
-        ui::run_platform(&stop_tx, stop_rx, &server, statuses, &on_update);
+        ui::run_platform(
+            &stop_tx,
+            stop_rx,
+            &server,
+            statuses,
+            &on_update,
+            exe.as_deref(),
+        );
         drop(done_tx);
     });
     debug!("shutting down");

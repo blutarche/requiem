@@ -1,3 +1,4 @@
+use std::fs;
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command as Process, Stdio};
@@ -11,13 +12,15 @@ use requiem_macos::{UiAction, UiUpdate, ViewTracker};
 /// Runs the platform UI on the main thread until `stop` fires. On macOS that is the status
 /// item and media keys; on Linux the tray icon and MPRIS, which run on their own threads
 /// while this only waits. `stop_tx` is how the UI asks to quit. Each of `statuses` goes to
-/// clients and the menu; the menu's update items call `on_update`.
+/// clients and the menu; the menu's update items call `on_update`. `exe` is
+/// [`own_exe`]'s, which finds the GUI.
 pub fn run_platform(
     stop_tx: &Sender<()>,
     stop: Receiver<()>,
     server: &Server,
     statuses: Receiver<UpdateStatus>,
     on_update: &(dyn Fn(UpdateRequest) + Sync),
+    exe: Option<&Path>,
 ) {
     thread::scope(|scope| {
         let (updates_tx, updates) = unbounded();
@@ -98,7 +101,7 @@ pub fn run_platform(
                         UiAction::SetVolume(v) => server.send(Command::SetVolume(v)),
                         UiAction::OpenGui => {
                             if !server.raise_gui() {
-                                launch_gui();
+                                launch_gui(exe);
                             }
                         }
                         UiAction::CheckForUpdates => on_update(UpdateRequest::Check),
@@ -132,15 +135,29 @@ pub(crate) fn gui_app(exe: &Path) -> Option<&Path> {
     })
 }
 
-fn launch_gui() {
-    let exe = match std::env::current_exe() {
-        Ok(exe) => exe,
+/// This player's executable without `..` or symbolic links, so `gui_app` finds the app
+/// whatever path the player was started by. Called once at start-up: an update moves the
+/// files only later.
+pub(crate) fn own_exe() -> Option<PathBuf> {
+    match std::env::current_exe() {
+        Ok(exe) => Some(resolved(exe)),
         Err(e) => {
-            eprintln!("requiemd: cannot locate the GUI: {e}");
-            return;
+            eprintln!("requiemd: cannot locate this executable: {e}");
+            None
         }
+    }
+}
+
+fn resolved(exe: PathBuf) -> PathBuf {
+    fs::canonicalize(&exe).unwrap_or(exe)
+}
+
+fn launch_gui(exe: Option<&Path>) {
+    let Some(exe) = exe else {
+        eprintln!("requiemd: cannot locate the GUI");
+        return;
     };
-    match gui_app(&exe) {
+    match gui_app(exe) {
         Some(app) => open_app(app),
         None => {
             let gui: PathBuf = exe.with_file_name("requiem-gui");
@@ -216,5 +233,25 @@ mod tests {
             gui_app(Path::new("/x/requiem.app/Contents/Resources/requiemd")),
             None
         );
+    }
+
+    #[test]
+    fn a_player_started_through_dot_dot_finds_its_app_once_resolved() {
+        let dir = std::env::temp_dir().join(format!("rqui{}", std::process::id()));
+        let app = dir.join("Requiem.app");
+        let helper = app.join("Contents/Helpers/requiemd.app/Contents/MacOS");
+        fs::create_dir_all(app.join("Contents/MacOS")).unwrap();
+        fs::create_dir_all(&helper).unwrap();
+        fs::write(helper.join("requiemd"), b"").unwrap();
+        let started = app.join("Contents/MacOS/../Helpers/requiemd.app/Contents/MacOS/requiemd");
+        let raw = gui_app(&started).map(Path::to_owned);
+        let exe = resolved(started);
+        let found = gui_app(&exe).map(Path::to_owned);
+        let want = fs::canonicalize(&app).unwrap();
+        let _ = fs::remove_dir_all(&dir);
+        assert_eq!(raw, None);
+        assert_eq!(found, Some(want));
+        let missing = PathBuf::from("/nonexistent/requiemd");
+        assert_eq!(resolved(missing.clone()), missing);
     }
 }

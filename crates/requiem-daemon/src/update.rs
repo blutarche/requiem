@@ -150,10 +150,11 @@ fn stored_state(stored: &State) -> UpdateState {
 
 impl Updater {
     /// Loads the update state and, when the app can update itself, starts the worker that
-    /// checks on schedule. `stop` asks the player to quit, for **Restart to Update**. Every
-    /// status change after the one [`status`](Self::status) returns now arrives on the
-    /// receiver.
+    /// checks on schedule. `exe` is [`ui::own_exe`]'s, which finds the installed app. `stop`
+    /// asks the player to quit, for **Restart to Update**. Every status change after the one
+    /// [`status`](Self::status) returns now arrives on the receiver.
     pub fn start(
+        exe: Option<&Path>,
         stop: impl Fn() + Send + Sync + 'static,
     ) -> (Arc<Updater>, Receiver<UpdateStatus>) {
         let path = state::state_path();
@@ -167,9 +168,7 @@ impl Updater {
         };
         let current = Version::parse(CURRENT).expect("the package version is semver");
         stored.forget_older(&current);
-        let app = std::env::current_exe()
-            .ok()
-            .and_then(|exe| ui::gui_app(&exe).map(Path::to_owned));
+        let app = exe.and_then(ui::gui_app).map(Path::to_owned);
         let (installed, state) = match app {
             None => (
                 None,
