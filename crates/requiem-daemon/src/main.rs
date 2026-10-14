@@ -8,7 +8,7 @@ use requiem_audio::{AudioEngine, AudioOptions};
 use requiem_core::{
     Command, EngineEventSink, EnqueueMode, Event, PersistSink, Session, SessionConfig,
 };
-use requiem_ipc::{ServeError, Server, ServerHooks};
+use requiem_ipc::{ServeError, Server, ServerHooks, UpdateState, UpdateStatus};
 use requiem_provider_ytmusic::{YtMusicOptions, YtMusicProvider};
 
 use idle::{Activity, IdleTimer};
@@ -110,8 +110,14 @@ fn main() -> ExitCode {
     let hook_tx = stop_tx.clone();
     let hooks = ServerHooks {
         on_shutdown: Box::new(move || request_stop(&hook_tx)),
+        on_update: Box::new(|_| {}),
     };
-    let server = match Server::start(session, hooks) {
+    let update = UpdateStatus {
+        current: env!("CARGO_PKG_VERSION").into(),
+        auto: false,
+        state: UpdateState::Unsupported,
+    };
+    let server = match Server::start(session, hooks, update) {
         Ok(s) => s,
         Err(ServeError::AlreadyRunning) => {
             eprintln!("requiemd: already running");

@@ -13,7 +13,9 @@ use std::time::{Duration, Instant};
 use crossbeam_channel::{Receiver, bounded};
 use requiem_core::testing::{FakeEngineHandle, FakeProvider};
 use requiem_core::{Command, Event, Session, SessionConfig};
-use requiem_ipc::{Client, Incoming, Role, ServeError, Server, ServerHooks, socket_dir};
+use requiem_ipc::{
+    Client, Incoming, Role, ServeError, Server, ServerHooks, UpdateState, UpdateStatus, socket_dir,
+};
 
 const FAKE_DAEMON: &str = "REQUIEM_IPC_TEST_FAKE_DAEMON";
 const WAIT: Duration = Duration::from_secs(10);
@@ -123,7 +125,19 @@ fn run() {
     assert!(msg.contains(&*log.to_string_lossy()), "{msg}");
 }
 
+fn idle_update() -> UpdateStatus {
+    UpdateStatus {
+        current: "test".into(),
+        auto: true,
+        state: UpdateState::Idle,
+    }
+}
+
 fn expect_snapshot(rx: &Receiver<Incoming>) {
+    assert_eq!(
+        rx.recv_timeout(WAIT).unwrap(),
+        Incoming::Update(idle_update())
+    );
     let first = rx.recv_timeout(WAIT).unwrap();
     assert!(
         matches!(first, Incoming::Event(Event::QueueChanged { .. })),
@@ -154,8 +168,9 @@ fn fake_daemon() {
         on_shutdown: Box::new(move || {
             let _ = quit_tx.try_send(());
         }),
+        on_update: Box::new(|_| {}),
     };
-    let server = match Server::start(session, hooks) {
+    let server = match Server::start(session, hooks, idle_update()) {
         Ok(s) => s,
         Err(ServeError::AlreadyRunning) => {
             println!("already running");

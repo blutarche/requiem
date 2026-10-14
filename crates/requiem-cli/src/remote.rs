@@ -54,7 +54,7 @@ impl RemotePlayer {
                                 return;
                             }
                         }
-                        Incoming::Raise => {}
+                        Incoming::Raise | Incoming::Update(_) => {}
                         // Stored before `tx` drops, which closes the event channel.
                         Incoming::Goodbye => {
                             *slot.lock().unwrap_or_else(PoisonError::into_inner) =

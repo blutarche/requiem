@@ -177,6 +177,7 @@ fn connection(daemon: PathBuf, slot: Slot) {
                                 batch.push(Msg::Event(ev));
                             }
                             Incoming::Raise => batch.push(Msg::Raise),
+                            Incoming::Update(_) => {}
                             Incoming::Disconnected(r) => {
                                 reason = r;
                                 lost = true;

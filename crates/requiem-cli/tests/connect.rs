@@ -13,7 +13,7 @@ use requiem_cli::app::{self, App, Flow, Player};
 use requiem_cli::remote::RemotePlayer;
 use requiem_core::testing::{FakeEngineHandle, FakeProvider, Step};
 use requiem_core::{EngineEvent, ProviderId, Session, SessionConfig, Track, TrackId};
-use requiem_ipc::{Client, PROTOCOL, Role, Server, ServerHooks};
+use requiem_ipc::{Client, PROTOCOL, Role, Server, ServerHooks, UpdateState, UpdateStatus};
 
 static SERIAL: Mutex<()> = Mutex::new(());
 static DIR: Once = Once::new();
@@ -74,8 +74,14 @@ fn daemon() -> Daemon {
         on_shutdown: Box::new(move || {
             let _ = tx.try_send(());
         }),
+        on_update: Box::new(|_| {}),
     };
-    let server = Server::start(session, hooks).expect("start server");
+    let update = UpdateStatus {
+        current: "test".into(),
+        auto: true,
+        state: UpdateState::Idle,
+    };
+    let server = Server::start(session, hooks, update).expect("start server");
     Daemon {
         server,
         provider,
