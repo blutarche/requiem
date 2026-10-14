@@ -283,7 +283,7 @@ mod tests {
 
     use super::*;
     use crate::failure::Kind;
-    use crate::test_support::TempDir;
+    use crate::test_support::{TempDir, eventually};
 
     fn script(path: &Path, body: &str) {
         fs::create_dir_all(path.parent().unwrap()).unwrap();
@@ -508,6 +508,6 @@ mod tests {
         );
         assert!(path.exists());
         drop(held);
-        assert_eq!(remove_stale(&path, root.path()), Ok(()));
+        assert!(eventually(|| remove_stale(&path, root.path()).is_ok()));
     }
 }

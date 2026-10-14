@@ -48,7 +48,7 @@ impl DirLock {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_support::TempDir;
+    use crate::test_support::{TempDir, eventually};
 
     #[test]
     fn excludes_other_holders_until_dropped() {
@@ -58,6 +58,8 @@ mod tests {
         let err = DirLock::wait(dir.path(), Duration::from_millis(250)).unwrap_err();
         assert_eq!(err.kind(), io::ErrorKind::TimedOut);
         drop(held);
-        assert!(DirLock::try_new(dir.path()).unwrap().is_some());
+        assert!(eventually(|| DirLock::try_new(dir.path())
+            .unwrap()
+            .is_some()));
     }
 }

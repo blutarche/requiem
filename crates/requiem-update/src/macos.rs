@@ -340,7 +340,7 @@ fn register(app: &Path) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_support::TempDir;
+    use crate::test_support::{TempDir, eventually};
 
     fn fake_app(dir: &Path, version: &str, id: &str, player_id: &str) -> PathBuf {
         let app = dir.join(APP_NAME);
@@ -387,7 +387,7 @@ mod tests {
             "a folder in use is left alone"
         );
         drop(staging);
-        assert_eq!(remove_stale(&path), Ok(()));
+        assert!(eventually(|| remove_stale(&path).is_ok()));
         assert!(!path.exists());
     }
 
