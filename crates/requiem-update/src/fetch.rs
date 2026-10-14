@@ -9,6 +9,7 @@ use std::time::Duration;
 use ring::digest::{Context, SHA256};
 use semver::Version;
 use ureq::Agent;
+use ureq::http::Uri;
 
 use crate::failure::{Failure, Reason};
 use crate::manifest::{self, MAX_MANIFEST_BYTES, MAX_ZIP_BYTES, Manifest, Target};
@@ -22,8 +23,8 @@ const MANIFEST_NAME: &str = "requiem-update.json";
 const USER_AGENT: &str = "Requiem-Update/1";
 const CHECK_TIMEOUT: Duration = Duration::from_secs(30);
 const DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(10 * 60);
-/// Plain HTTP is allowed only for a debug build's fake release page on this machine.
-const LOOPBACK: &str = "http://127.0.0.1:";
+/// The only host a debug build's release page may have.
+const LOOPBACK: &str = "127.0.0.1";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Config {
@@ -57,9 +58,9 @@ impl Config {
         let base = match base {
             Some(base) => {
                 let base = base.trim_end_matches('/');
-                if !(base.starts_with("https://") || base.starts_with(LOOPBACK)) {
+                if !matches!(loopback_scheme(base).as_deref(), Some("http" | "https")) {
                     return Err(format!(
-                        "{BASE_ENV} must be https:// or {LOOPBACK}<port>, got {base:?}"
+                        "{BASE_ENV} must be http:// or https:// on {LOOPBACK}, got {base:?}"
                     ));
                 }
                 base.to_owned()
@@ -75,7 +76,8 @@ impl Config {
     }
 
     fn agent(&self, timeout: Duration) -> Agent {
-        let loopback = self.base.starts_with(LOOPBACK);
+        // Plain HTTP only for a debug build's fake release page on this machine.
+        let loopback = loopback_scheme(&self.base).as_deref() == Some("http");
         // ureq applies `https_only` to every redirect too. No cookie store is compiled in.
         let mut config = Agent::config_builder()
             .https_only(!loopback)
@@ -95,6 +97,17 @@ impl Config {
             manifest::zip_name(&m.version)
         )
     }
+}
+
+/// The scheme of `url` when its host is exactly 127.0.0.1 with no user info, read as ureq
+/// reads it, so a prefix like `http://127.0.0.1:80@example.com/` can't pass.
+fn loopback_scheme(url: &str) -> Option<String> {
+    let uri: Uri = url.parse().ok()?;
+    let authority = uri.authority()?;
+    if authority.as_str().contains('@') || authority.host() != LOOPBACK {
+        return None;
+    }
+    uri.scheme_str().map(str::to_owned)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -397,13 +410,24 @@ mod tests {
     }
 
     #[test]
-    fn overrides_are_https_or_loopback_only() {
+    fn overrides_are_127_0_0_1_only() {
         let with = |base: &str| Config::with_overrides("0.1.0", Some(base.into()), None);
-        assert!(with("http://example.com/releases").is_err());
-        assert!(with("http://127.0.0.1.example.com/releases").is_err());
+        for refused in [
+            "http://127.0.0.1:80@example.com/",
+            "http://example.com/releases",
+            "https://example.com/r",
+            "http://127.0.0.1.example.com/releases",
+            "http://127.0.0.1@example.com/",
+            "http://user@127.0.0.1:9/r",
+            "http://localhost:9/r",
+            "ftp://127.0.0.1:9/r",
+            "127.0.0.1:9/r",
+        ] {
+            assert!(with(refused).is_err(), "{refused}");
+        }
         assert_eq!(
-            with("https://example.com/r/").unwrap().base,
-            "https://example.com/r"
+            with("https://127.0.0.1:9/r/").unwrap().base,
+            "https://127.0.0.1:9/r"
         );
         let cfg = Config::with_overrides(
             "0.1.0",
