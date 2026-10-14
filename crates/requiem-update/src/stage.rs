@@ -169,34 +169,33 @@ pub fn run(exe: &Path, args: &[&str], timeout: Duration) -> io::Result<Ran> {
     }
 }
 
-/// Files copied into the staging folder before a restart, to put back if it fails.
+/// Files copied before a restart, to put back if it fails. Their folder stays locked while
+/// they are kept, so a player starting meanwhile leaves it alone.
 #[derive(Debug)]
 pub struct Saved {
+    dir: PathBuf,
     /// Each original path, with its copy or `None` when it did not exist.
     files: Vec<(PathBuf, Option<PathBuf>)>,
+    _lock: DirLock,
 }
 
 impl Saved {
-    /// Copies each existing file in `files` into `<staging>/saved`: `0600` files in a `0700`
-    /// folder.
-    pub fn new(staging: &Path, files: &[&Path]) -> io::Result<Saved> {
-        let dir = staging.join("saved");
-        fs::DirBuilder::new().mode(0o700).create(&dir)?;
-        let mut saved = Vec::new();
-        for (i, &path) in files.iter().enumerate() {
-            let bytes = match fs::read(path) {
-                Ok(bytes) => bytes,
-                Err(e) if e.kind() == io::ErrorKind::NotFound => {
-                    saved.push((path.to_owned(), None));
-                    continue;
-                }
-                Err(e) => return Err(io::Error::new(e.kind(), format!("{}: {e}", path.display()))),
-            };
-            let copy = dir.join(i.to_string());
-            write_private(&copy, &bytes)?;
-            saved.push((path.to_owned(), Some(copy)));
+    /// Copies each existing file in `files` into `dir`, a new `0700` folder, as `0600` files.
+    pub fn new(dir: &Path, files: &[&Path]) -> io::Result<Saved> {
+        fs::DirBuilder::new().mode(0o700).create(dir)?;
+        let copied = DirLock::try_new(dir).and_then(|lock| {
+            let lock =
+                lock.ok_or_else(|| io::Error::other(format!("{} is in use", dir.display())))?;
+            Ok(Saved {
+                dir: dir.to_owned(),
+                files: copy_private(dir, files)?,
+                _lock: lock,
+            })
+        });
+        if copied.is_err() {
+            let _ = fs::remove_dir_all(dir);
         }
-        Ok(Saved { files: saved })
+        copied
     }
 
     /// Puts every file back as it was, removing those that did not exist. Goes on past a
@@ -219,6 +218,29 @@ impl Saved {
         }
         result
     }
+
+    /// Deletes the copies and their folder.
+    pub fn remove(self) -> io::Result<()> {
+        fs::remove_dir_all(&self.dir)
+    }
+}
+
+fn copy_private(dir: &Path, files: &[&Path]) -> io::Result<Vec<(PathBuf, Option<PathBuf>)>> {
+    let mut saved = Vec::new();
+    for (i, &path) in files.iter().enumerate() {
+        let bytes = match fs::read(path) {
+            Ok(bytes) => bytes,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => {
+                saved.push((path.to_owned(), None));
+                continue;
+            }
+            Err(e) => return Err(io::Error::new(e.kind(), format!("{}: {e}", path.display()))),
+        };
+        let copy = dir.join(i.to_string());
+        write_private(&copy, &bytes)?;
+        saved.push((path.to_owned(), Some(copy)));
+    }
+    Ok(saved)
 }
 
 fn write_private(path: &Path, bytes: &[u8]) -> io::Result<()> {
@@ -421,16 +443,19 @@ mod tests {
     #[test]
     fn saved_files_come_back_and_new_ones_go() {
         let dir = TempDir::new();
-        let staging = dir.path().join("staging");
-        fs::DirBuilder::new().mode(0o700).create(&staging).unwrap();
+        let folder = dir.path().join("saved");
         let state = dir.path().join("state.json");
         let token = dir.path().join("google-token.json");
         fs::write(&state, b"old state").unwrap();
-        let saved = Saved::new(&staging, &[&state, &token]).unwrap();
-        let copy = staging.join("saved/0");
+        let saved = Saved::new(&folder, &[&state, &token]).unwrap();
+        let copy = folder.join("0");
         assert_eq!(fs::read(&copy).unwrap(), b"old state");
         let mode = |p: &Path| fs::metadata(p).unwrap().permissions().mode() & 0o777;
-        assert_eq!((mode(&copy), mode(&staging.join("saved"))), (0o600, 0o700));
+        assert_eq!((mode(&copy), mode(&folder)), (0o600, 0o700));
+        assert!(
+            DirLock::try_new(&folder).unwrap().is_none(),
+            "locked while kept"
+        );
 
         fs::write(&state, b"new state").unwrap();
         fs::write(&token, b"new token").unwrap();
@@ -438,6 +463,8 @@ mod tests {
         assert_eq!(fs::read(&state).unwrap(), b"old state");
         assert_eq!(mode(&state), 0o600);
         assert!(!token.exists());
+        saved.remove().unwrap();
+        assert!(!folder.exists());
     }
 
     fn stale(root: &Path) -> PathBuf {

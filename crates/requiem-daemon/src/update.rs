@@ -27,6 +27,8 @@ const HANDOFF_TIMEOUT: Duration = Duration::from_secs(30);
 const TERM_GRACE: Duration = Duration::from_secs(10);
 const CURRENT: &str = env!("CARGO_PKG_VERSION");
 const DEV_BUILD: &str = "not running from Requiem.app";
+/// Beside the update state: where a restart keeps the files it may have to put back.
+const SAVED_DIR: &str = "update-saved";
 
 /// A staged update waiting to be installed.
 pub struct Ready {
@@ -270,6 +272,12 @@ impl Updater {
 
     fn work(&self, checks: &Receiver<()>) {
         self.remove_stale_staging();
+        let saved = lock(&self.inner).path.as_deref().and_then(saved_dir);
+        if let Some(dir) = saved
+            && let Err(e) = remove_stale_saved(&dir)
+        {
+            eprintln!("requiemd: {e}");
+        }
         let mut next = Instant::now() + FIRST_CHECK;
         loop {
             select! {
@@ -462,7 +470,7 @@ impl Updater {
         .flatten()
         .collect();
         let files: Vec<&Path> = files.iter().map(PathBuf::as_path).collect();
-        let saved = match Saved::new(ready.staging.path(), &files) {
+        let saved = match save_files(inner.path.as_deref(), &files) {
             Ok(s) => s,
             Err(e) => {
                 let f = Failure::new(Reason::NotInTime, format!("saving files: {e}"));
@@ -478,6 +486,7 @@ impl Updater {
             Ok(Swapped::Installed) => {}
             Ok(Swapped::AlreadyCurrent(v)) => {
                 eprintln!("requiemd: {v} is already installed");
+                remove_saved(saved);
                 remove_staging(ready.staging);
                 inner.stored.staging = None;
                 inner.save();
@@ -487,6 +496,7 @@ impl Updater {
             }
             Err(f) => {
                 eprintln!("requiemd: restarting to {version}: {f}");
+                remove_saved(saved);
                 remove_staging(ready.staging);
                 inner.record_failure(&version, &ready.sha256, &f);
                 drop(instance);
@@ -513,6 +523,7 @@ impl Updater {
             }
             // The new player owns the state file now; it forgets the folder at its next
             // start.
+            remove_saved(saved);
             remove_staging(ready.staging);
             return;
         };
@@ -525,6 +536,7 @@ impl Updater {
         if let Err(e) = saved.restore() {
             eprintln!("requiemd: restoring saved files: {e}");
         }
+        remove_saved(saved);
         remove_staging(ready.staging);
         // The new version may have rewritten the update state too.
         if let Some(path) = &inner.path {
@@ -535,6 +547,39 @@ impl Updater {
         }
         inner.record_failure(&version, &ready.sha256, &f);
         start_player(&installed, gui);
+    }
+}
+
+fn saved_dir(state: &Path) -> Option<PathBuf> {
+    Some(state.parent()?.join(SAVED_DIR))
+}
+
+/// Section 3.4 step 3, into the private folder that holds the update state, not the staging
+/// folder on the app's volume. Copies left by a player that died go first.
+fn save_files(state: Option<&Path>, files: &[&Path]) -> Result<Saved, String> {
+    let dir = state
+        .and_then(saved_dir)
+        .ok_or("there is no folder for the update state")?;
+    remove_stale_saved(&dir)?;
+    Saved::new(&dir, files).map_err(|e| format!("{}: {e}", dir.display()))
+}
+
+/// Deletes copies a restarting player left behind, after the same checks as a stale staging
+/// folder; copies another player still holds are left alone.
+fn remove_stale_saved(dir: &Path) -> Result<(), String> {
+    let Some(parent) = dir.parent() else {
+        return Ok(());
+    };
+    match fs::canonicalize(parent) {
+        Ok(root) => stage::remove_stale(dir, &root),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(format!("{}: {e}", parent.display())),
+    }
+}
+
+fn remove_saved(saved: Saved) {
+    if let Err(e) = saved.remove() {
+        eprintln!("requiemd: removing saved files: {e}");
     }
 }
 
@@ -643,7 +688,7 @@ fn terminate(pid: i32) {
 
 #[cfg(test)]
 mod tests {
-    use std::os::unix::fs::PermissionsExt;
+    use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
     use std::process::{Command, Stdio};
 
     use requiem_update::state::FailureRecord;
@@ -801,5 +846,39 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
         assert!(handed.unwrap_err().contains("not listening"));
         assert!(!left, "the new player {pid} still runs");
+    }
+
+    #[test]
+    fn a_restart_saves_files_beside_the_update_state() {
+        let dir = std::env::temp_dir().join(format!("rqs{}", std::process::id()));
+        let state_dir = dir.join("requiem");
+        fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(&state_dir)
+            .unwrap();
+        let state_dir = fs::canonicalize(&state_dir).unwrap();
+        let player_state = state_dir.join("state.json");
+        fs::write(&player_state, b"queue").unwrap();
+        let folder = state_dir.join(SAVED_DIR);
+        // Left by a player that died mid-restart.
+        fs::DirBuilder::new().mode(0o700).create(&folder).unwrap();
+        fs::write(folder.join("0"), b"stale").unwrap();
+
+        let update_state = state_dir.join("update-state.json");
+        let saved = save_files(Some(&update_state), &[&player_state]).unwrap();
+        let copy = fs::read(folder.join("0"));
+        let again = save_files(Some(&update_state), &[&player_state]);
+        let mode = fs::metadata(&folder).unwrap().permissions().mode() & 0o777;
+        saved.remove().unwrap();
+        let left = folder.exists();
+        let _ = fs::remove_dir_all(&dir);
+        assert_eq!(copy.unwrap(), b"queue");
+        assert_eq!(mode, 0o700);
+        assert!(
+            again.unwrap_err().contains("using it"),
+            "kept copies are left alone"
+        );
+        assert!(!left);
     }
 }
