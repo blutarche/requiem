@@ -243,14 +243,14 @@ impl Updater {
         }
     }
 
-    /// A player that died before installing left its staging folder named in the state.
+    /// A player that died before installing left its staging folder named in the state. A
+    /// folder another player still holds stays named: right after Restart to Update the old
+    /// player holds it until it has deleted it or rolled back, and a later start clears it.
     fn remove_stale_staging(&self) {
         let Some(path) = lock(&self.inner).stored.staging.clone() else {
             return;
         };
-        // After Restart to Update, the player that started this one deletes the folder once
-        // this one has answered, or stops it within `HANDOFF_TIMEOUT`.
-        match macos::remove_stale(&path, HANDOFF_TIMEOUT) {
+        match macos::remove_stale(&path) {
             Ok(()) => {
                 let mut inner = lock(&self.inner);
                 if inner.stored.staging.as_ref() == Some(&path) {

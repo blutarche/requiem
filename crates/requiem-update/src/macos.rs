@@ -98,14 +98,13 @@ pub fn temporary_items_root(near: &Path) -> Result<PathBuf, String> {
         .ok_or_else(|| format!("{} has no parent", probe.display()))
 }
 
-/// Deletes a staging folder a player left behind, after the checks of section 3.3, waiting up
-/// to `wait` for a player still using it.
-pub fn remove_stale(path: &Path, wait: Duration) -> Result<(), String> {
+/// Deletes a staging folder a player left behind, after the checks of section 3.3.
+pub fn remove_stale(path: &Path) -> Result<(), String> {
     let near = path.parent().unwrap_or(path);
     if !near.exists() {
         return Ok(());
     }
-    stage::remove_stale(path, &temporary_items_root(near)?, wait)
+    stage::remove_stale(path, &temporary_items_root(near)?)
 }
 
 /// Section 3.3 steps 2 to 6 on a zip whose size and SHA-256 matched the signed manifest.
@@ -384,13 +383,11 @@ mod tests {
         let root = temporary_items_root(&installed).unwrap();
         assert_eq!(path.parent(), Some(root.as_path()));
         assert!(
-            remove_stale(&path, Duration::ZERO)
-                .unwrap_err()
-                .contains("using it"),
+            remove_stale(&path).unwrap_err().contains("using it"),
             "a folder in use is left alone"
         );
         drop(staging);
-        assert!(eventually(|| remove_stale(&path, Duration::ZERO).is_ok()));
+        assert!(eventually(|| remove_stale(&path).is_ok()));
         assert!(!path.exists());
     }
 

@@ -245,10 +245,9 @@ fn replace_private(path: &Path, bytes: &[u8]) -> io::Result<()> {
 
 /// Deletes a staging folder that a player left behind, only if it is still what a player
 /// made: after `realpath`, a real directory owned by this user with mode `0700`, directly
-/// inside `temp_root`, and not held by a player using it. A held folder is waited for up to
-/// `wait`: a player that just restarted to update holds it until it has deleted it.
-/// `temp_root` must be canonical. `Ok` when it is gone, whether deleted now or before.
-pub fn remove_stale(path: &Path, temp_root: &Path, wait: Duration) -> Result<(), String> {
+/// inside `temp_root`, and not held by a player using it. `temp_root` must be canonical.
+/// `Ok` when it is gone, whether deleted now or before.
+pub fn remove_stale(path: &Path, temp_root: &Path) -> Result<(), String> {
     let refuse = |why: &str| Err(format!("left {} in place: {why}", path.display()));
     match fs::symlink_metadata(path) {
         Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(()),
@@ -271,19 +270,11 @@ pub fn remove_stale(path: &Path, temp_root: &Path, wait: Duration) -> Result<(),
     if real.parent() != Some(temp_root) {
         return refuse("outside the volume's temporary-items folder");
     }
-    let gone = |e: &io::Error| e.kind() == io::ErrorKind::NotFound;
-    let _lock = match DirLock::wait(&real, wait) {
-        Ok(lock) => lock,
-        Err(e) if gone(&e) => return Ok(()),
-        Err(e) if e.kind() == io::ErrorKind::TimedOut => {
-            return refuse("another player is using it");
-        }
-        Err(e) => return Err(format!("{}: {e}", real.display())),
+    let Some(_lock) = DirLock::try_new(&real).map_err(|e| format!("{}: {e}", real.display()))?
+    else {
+        return refuse("another player is using it");
     };
-    match fs::remove_dir_all(&real) {
-        Err(e) if !gone(&e) => Err(format!("{}: {e}", real.display())),
-        _ => Ok(()),
-    }
+    fs::remove_dir_all(&real).map_err(|e| format!("{}: {e}", real.display()))
 }
 
 #[cfg(test)]
@@ -461,13 +452,9 @@ mod tests {
     fn removes_a_stale_staging_folder() {
         let root = TempDir::new();
         let path = stale(root.path());
-        assert_eq!(remove_stale(&path, root.path(), Duration::ZERO), Ok(()));
+        assert_eq!(remove_stale(&path, root.path()), Ok(()));
         assert!(!path.exists());
-        assert_eq!(
-            remove_stale(&path, root.path(), Duration::ZERO),
-            Ok(()),
-            "already gone"
-        );
+        assert_eq!(remove_stale(&path, root.path()), Ok(()), "already gone");
     }
 
     #[test]
@@ -477,7 +464,7 @@ mod tests {
         let link = root.path().join("NSIRD_link");
         symlink(&real, &link).unwrap();
         assert!(
-            remove_stale(&link, root.path(), Duration::ZERO)
+            remove_stale(&link, root.path())
                 .unwrap_err()
                 .contains("symbolic link")
         );
@@ -489,14 +476,14 @@ mod tests {
         let root = TempDir::new();
         let elsewhere = TempDir::new();
         let path = stale(elsewhere.path());
-        let err = remove_stale(&path, root.path(), Duration::ZERO).unwrap_err();
+        let err = remove_stale(&path, root.path()).unwrap_err();
         assert!(err.contains("outside"), "{err}");
         assert!(path.exists());
 
         let nested = stale(root.path()).join("inner");
         fs::DirBuilder::new().mode(0o700).create(&nested).unwrap();
         assert!(
-            remove_stale(&nested, root.path(), Duration::ZERO)
+            remove_stale(&nested, root.path())
                 .unwrap_err()
                 .contains("outside")
         );
@@ -508,45 +495,19 @@ mod tests {
         let path = stale(root.path());
         fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
         assert!(
-            remove_stale(&path, root.path(), Duration::ZERO)
+            remove_stale(&path, root.path())
                 .unwrap_err()
                 .contains("0700")
         );
         fs::set_permissions(&path, fs::Permissions::from_mode(0o700)).unwrap();
         let held = DirLock::try_new(&path).unwrap().unwrap();
         assert!(
-            remove_stale(&path, root.path(), Duration::ZERO)
+            remove_stale(&path, root.path())
                 .unwrap_err()
                 .contains("using it")
         );
         assert!(path.exists());
         drop(held);
-        assert!(eventually(|| remove_stale(
-            &path,
-            root.path(),
-            Duration::ZERO
-        )
-        .is_ok()));
-    }
-
-    #[test]
-    fn waits_for_the_player_holding_the_folder_to_delete_it() {
-        let root = TempDir::new();
-        let path = stale(root.path());
-        let held = DirLock::try_new(&path).unwrap().unwrap();
-        let holder = thread::spawn({
-            let path = path.clone();
-            move || {
-                thread::sleep(Duration::from_millis(300));
-                fs::remove_dir_all(&path).unwrap();
-                drop(held);
-            }
-        });
-        assert_eq!(
-            remove_stale(&path, root.path(), Duration::from_secs(10)),
-            Ok(())
-        );
-        holder.join().unwrap();
-        assert!(!path.exists());
+        assert!(eventually(|| remove_stale(&path, root.path()).is_ok()));
     }
 }
