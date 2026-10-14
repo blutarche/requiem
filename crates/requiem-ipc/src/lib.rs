@@ -12,6 +12,6 @@ mod sys;
 mod tests;
 
 pub use client::{Client, Incoming};
-pub use path::{socket_dir, socket_path};
+pub use path::{log_path, socket_dir, socket_path};
 pub use proto::{ClientMsg, PROTOCOL, Role, ServerMsg, UpdateState, UpdateStatus};
 pub use server::{ClientCounts, ServeError, Server, ServerHooks, UpdateRequest};

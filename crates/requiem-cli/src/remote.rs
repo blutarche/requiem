@@ -1,12 +1,12 @@
 use std::io;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::{Arc, Condvar, Mutex, PoisonError};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crossbeam_channel::{Receiver, unbounded};
 use requiem_core::{Command, Event};
-use requiem_ipc::{Client, Incoming, Role};
+use requiem_ipc::{Client, Incoming, Role, UpdateRequest, UpdateStatus};
 
 use crate::app::Player;
 
@@ -31,6 +31,16 @@ pub struct RemotePlayer {
     client: Client,
     events: Mutex<Option<Receiver<Event>>>,
     gone: Arc<Mutex<Option<String>>>,
+    updates: Arc<(Mutex<Updates>, Condvar)>,
+}
+
+/// Every self-update status the daemon sent, in order: a quick check's `Checking` and the
+/// state after it may arrive together, and `update check` needs both.
+#[derive(Default)]
+struct Updates {
+    all: Vec<UpdateStatus>,
+    /// The connection has ended.
+    ended: bool,
 }
 
 impl RemotePlayer {
@@ -44,6 +54,17 @@ impl RemotePlayer {
         let (tx, rx) = unbounded();
         let gone = Arc::new(Mutex::new(None));
         let slot = gone.clone();
+        let updates = Arc::new((Mutex::new(Updates::default()), Condvar::new()));
+        let statuses = updates.clone();
+        let note = move |status: Option<UpdateStatus>| {
+            let (lock, changed) = &*statuses;
+            let mut u = lock.lock().unwrap_or_else(PoisonError::into_inner);
+            match status {
+                Some(s) => u.all.push(s),
+                None => u.ended = true,
+            }
+            changed.notify_all();
+        };
         thread::Builder::new()
             .name("requiem-remote".into())
             .spawn(move || {
@@ -51,27 +72,30 @@ impl RemotePlayer {
                     match msg {
                         Incoming::Event(ev) => {
                             if tx.send(ev).is_err() {
-                                return;
+                                break;
                             }
                         }
-                        Incoming::Raise | Incoming::Update(_) => {}
+                        Incoming::Raise => {}
+                        Incoming::Update(status) => note(Some(status)),
                         // Stored before `tx` drops, which closes the event channel.
                         Incoming::Goodbye => {
                             *slot.lock().unwrap_or_else(PoisonError::into_inner) =
                                 Some("player quit".into());
-                            return;
+                            break;
                         }
                         Incoming::Disconnected(reason) => {
                             *slot.lock().unwrap_or_else(PoisonError::into_inner) = Some(reason);
-                            return;
+                            break;
                         }
                     }
                 }
+                note(None);
             })?;
         Ok(Self {
             client,
             events: Mutex::new(Some(rx)),
             gone,
+            updates,
         })
     }
 }
@@ -101,5 +125,37 @@ impl Player for RemotePlayer {
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .clone()
+    }
+
+    fn update_status(&self) -> Option<(UpdateStatus, usize)> {
+        let u = self
+            .updates
+            .0
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        u.all.last().map(|s| (s.clone(), u.all.len()))
+    }
+
+    fn next_update(&self, seen: usize, timeout: Duration) -> Option<UpdateStatus> {
+        let (lock, changed) = &*self.updates;
+        let deadline = Instant::now() + timeout;
+        let mut u = lock.lock().unwrap_or_else(PoisonError::into_inner);
+        while u.all.len() <= seen && !u.ended {
+            let left = deadline.checked_duration_since(Instant::now())?;
+            u = changed
+                .wait_timeout(u, left)
+                .unwrap_or_else(PoisonError::into_inner)
+                .0;
+        }
+        u.all.get(seen).cloned()
+    }
+
+    /// Send errors are dropped, as for `send`.
+    fn request_update(&self, req: UpdateRequest) {
+        let _ = match req {
+            UpdateRequest::Check => self.client.check_for_updates(),
+            UpdateRequest::Install => self.client.install_update(),
+            UpdateRequest::SetAuto(on) => self.client.set_auto_update(on),
+        };
     }
 }

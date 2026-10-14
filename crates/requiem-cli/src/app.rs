@@ -7,6 +7,7 @@ use requiem_core::{
     AccountState, Collection, CollectionKind, Command, EnqueueMode, Event, Item, Page, PlayState,
     ProviderId, SeekTarget, Session, Shelf, Track, TrackId,
 };
+use requiem_ipc::{UpdateRequest, UpdateState, UpdateStatus};
 use serde_json::{Value, json};
 
 const DEFAULT_AWAIT_SECS: f64 = 30.0;
@@ -19,6 +20,11 @@ const SYNC_TIMEOUT: Duration = Duration::from_secs(2);
 const SIGN_IN_START: Duration = Duration::from_secs(60);
 /// How long `signin` waits past the code's expiry for the provider to report it.
 const SIGN_IN_GRACE: Duration = Duration::from_secs(30);
+
+/// How long `update check` waits: a check, a 10 min download, then staging.
+const UPDATE_CHECK_WAIT: Duration = Duration::from_secs(12 * 60);
+/// How long `update install` waits for the daemon to stop or say no update is ready.
+const UPDATE_INSTALL_WAIT: Duration = Duration::from_secs(10);
 
 const HELP: &str = "\
 commands:
@@ -48,6 +54,9 @@ commands:
   signout [provider]    sign out and forget the saved sign-in
   account               show the sign-in state
   mark <name>           print MARK <name> <unix_millis>
+  update                with --connect: the self-update status
+  update check          check for an update now and wait until it is ready or not found
+  update install        restart the player on the ready update; music stops
   shutdown-daemon       with --connect: stop the daemon and exit
   help | quit           quit leaves a --connect daemon running";
 
@@ -76,6 +85,20 @@ pub trait Player {
     fn disconnected(&self) -> Option<String> {
         None
     }
+
+    /// The daemon's latest self-update status and how many it has sent. `None` for an
+    /// in-process session, which never updates.
+    fn update_status(&self) -> Option<(UpdateStatus, usize)> {
+        None
+    }
+
+    /// The status sent after the first `seen`, waiting for it until the connection ends or
+    /// `timeout` passes.
+    fn next_update(&self, _seen: usize, _timeout: Duration) -> Option<UpdateStatus> {
+        None
+    }
+
+    fn request_update(&self, _req: UpdateRequest) {}
 }
 
 impl Player for Session {
@@ -511,6 +534,42 @@ fn account_json(provider: &ProviderId, state: &AccountState) -> Value {
     o
 }
 
+fn update_state_name(state: &UpdateState) -> &'static str {
+    match state {
+        UpdateState::Idle => "idle",
+        UpdateState::Checking => "checking",
+        UpdateState::UpToDate => "up_to_date",
+        UpdateState::Downloading { .. } => "downloading",
+        UpdateState::Ready { .. } => "ready",
+        UpdateState::Failed { .. } => "failed",
+        UpdateState::NotUpdatable { .. } => "not_updatable",
+        UpdateState::Unsupported => "unsupported",
+    }
+}
+
+/// The window's banner lines where it has one.
+fn update_text(status: &UpdateStatus) -> String {
+    let current = &status.current;
+    match &status.state {
+        UpdateState::Idle => format!("Requiem {current}"),
+        UpdateState::Checking => format!("Requiem {current}, checking for updates"),
+        UpdateState::UpToDate => format!("Requiem {current} is up to date."),
+        UpdateState::Downloading { version } => {
+            format!("Requiem {current}, downloading {version}")
+        }
+        UpdateState::Ready { version } => format!(
+            "Requiem {version} is ready. requiem update install restarts to it; music stops."
+        ),
+        UpdateState::Failed { reason, .. } => {
+            format!("Requiem couldn't update: {reason}. It keeps running {current}.")
+        }
+        UpdateState::NotUpdatable { reason } => format!(
+            "Requiem {current} can't update itself: {reason}. Move Requiem to Applications to get updates."
+        ),
+        UpdateState::Unsupported => "Self-update is macOS only".to_owned(),
+    }
+}
+
 fn unix_now() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -835,6 +894,7 @@ impl<'a> App<'a> {
                 }
             }
             "help" => self.hub.emit(HELP, json!({ "type": "help", "text": HELP })),
+            "update" => return self.update(arg),
             "shutdown-daemon" => {
                 if !self.player.remote() {
                     self.hub.error("not connected to a daemon");
@@ -1026,6 +1086,145 @@ impl<'a> App<'a> {
                 "volume": ui.volume,
             }),
         );
+    }
+
+    fn update(&self, arg: &str) -> Flow {
+        let Some((status, seen)) = self.player.update_status() else {
+            self.hub.error("not connected to a daemon");
+            return Flow::Continue;
+        };
+        match arg {
+            "" => self.print_update(&status),
+            "check" => return self.update_check(seen),
+            "install" => return self.update_install(&status, seen),
+            _ => {
+                self.hub.error("usage: update [check|install]");
+                if self.script {
+                    return Flow::Exit(2);
+                }
+            }
+        }
+        Flow::Continue
+    }
+
+    fn print_update(&self, status: &UpdateStatus) {
+        let mut json = json!({
+            "type": "update",
+            "current": status.current,
+            "auto": status.auto,
+            "state": update_state_name(&status.state),
+        });
+        match &status.state {
+            UpdateState::Downloading { version } | UpdateState::Ready { version } => {
+                json["version"] = json!(version);
+            }
+            UpdateState::Failed { version, reason } => {
+                json["version"] = json!(version);
+                json["reason"] = json!(reason);
+            }
+            UpdateState::NotUpdatable { reason } => json["reason"] = json!(reason),
+            _ => {}
+        }
+        self.hub.emit(&update_text(status), json);
+        if self.hub.format == Format::Text && !matches!(status.state, UpdateState::Unsupported) {
+            self.hub.write_line(if status.auto {
+                "automatic checks: on"
+            } else {
+                "automatic checks: off"
+            });
+        }
+    }
+
+    /// A failed update command: the script stops with 1, the REPL goes on.
+    fn update_failed(&self, message: &str) -> Flow {
+        self.hub.error(message);
+        if self.script {
+            Flow::Exit(1)
+        } else {
+            Flow::Continue
+        }
+    }
+
+    /// The daemon answers a check it starts with `Checking`, then maybe `Downloading`, then a
+    /// settled state; one it ignores, with its status unchanged. Back to `Idle` from either
+    /// is a failure, which only the daemon's log explains.
+    fn update_check(&self, mut seen: usize) -> Flow {
+        self.player.request_update(UpdateRequest::Check);
+        self.hub.ack("update check");
+        let deadline = Instant::now() + UPDATE_CHECK_WAIT;
+        let mut working: Option<UpdateState> = None;
+        loop {
+            let Some(left) = deadline.checked_duration_since(Instant::now()) else {
+                return self.update_failed("timed out waiting for the update check");
+            };
+            let Some(status) = self.player.next_update(seen, left) else {
+                if let Some(flow) = self.lost(self.player.disconnected().is_some()) {
+                    return flow;
+                }
+                continue;
+            };
+            seen += 1;
+            match &status.state {
+                UpdateState::Checking => working = Some(status.state.clone()),
+                UpdateState::Downloading { version } => {
+                    if working != Some(status.state.clone()) {
+                        self.hub.emit(
+                            &format!("downloading Requiem {version}"),
+                            json!({ "type": "update_downloading", "version": version }),
+                        );
+                    }
+                    working = Some(status.state.clone());
+                }
+                UpdateState::Idle if working.is_some() => {
+                    let log = requiem_ipc::log_path().map_or_else(
+                        |_| "the daemon's log".to_owned(),
+                        |p| p.display().to_string(),
+                    );
+                    let what = match working {
+                        Some(UpdateState::Downloading { version }) => format!(
+                            "Requiem {version} failed to download or check out; it is tried again at the next check"
+                        ),
+                        _ => "the update check failed".to_owned(),
+                    };
+                    return self.update_failed(&format!("{what}; see {log}"));
+                }
+                UpdateState::Failed { .. } => {
+                    self.print_update(&status);
+                    return if self.script {
+                        Flow::Exit(1)
+                    } else {
+                        Flow::Continue
+                    };
+                }
+                _ => {
+                    self.print_update(&status);
+                    return Flow::Continue;
+                }
+            }
+        }
+    }
+
+    /// Accepted, the daemon stops serving to restart on the new version; refused, it
+    /// repeats its status.
+    fn update_install(&self, status: &UpdateStatus, seen: usize) -> Flow {
+        self.player.request_update(UpdateRequest::Install);
+        self.hub.ack("update install");
+        if let Some(status) = self.player.next_update(seen, UPDATE_INSTALL_WAIT) {
+            self.print_update(&status);
+            return self.update_failed("no update is ready to install");
+        }
+        if self.player.disconnected().is_none() {
+            return self.update_failed("timed out waiting for the player to restart");
+        }
+        let version = match &status.state {
+            UpdateState::Ready { version } => version.as_str(),
+            _ => "the new version",
+        };
+        self.hub.emit(
+            &format!("Requiem is restarting on {version}"),
+            json!({ "type": "update_restarting", "version": version }),
+        );
+        Flow::Quit
     }
 
     fn await_event(&self, arg: &str) -> Flow {

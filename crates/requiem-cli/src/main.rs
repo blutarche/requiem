@@ -1,5 +1,5 @@
 use std::fs::File;
-use std::io::{self, BufReader};
+use std::io::{self, BufReader, Cursor};
 use std::path::Path;
 use std::process::ExitCode;
 use std::sync::{Arc, OnceLock};
@@ -11,7 +11,7 @@ use requiem_cli::remote::{RemotePlayer, daemon_exe};
 use requiem_core::{EngineEventSink, Session, SessionConfig};
 use requiem_provider_ytmusic::{YtMusicOptions, YtMusicProvider};
 
-const USAGE: &str = "usage: requiem [--script <file|->] [--connect [--json]] [--prefer-aac] [--help]\n  --connect  drive the requiemd daemon (started if not running) instead of playing in-process\n  --script -  read the script from stdin\n  --json     with --connect: print one JSON object per line instead of text";
+const USAGE: &str = "usage: requiem [--script <file|->] [--connect [--json]] [--prefer-aac] [--help]\n       requiem [--json] update [check|install]\n       requiem --version\n  --connect  drive the requiemd daemon (started if not running) instead of playing in-process\n  --script -  read the script from stdin\n  --json     with --connect: print one JSON object per line instead of text\n  update     the daemon's self-update status; check checks now, install restarts to the ready update";
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(3);
 
@@ -20,6 +20,9 @@ struct Args {
     connect: bool,
     json: bool,
     prefer_aac: bool,
+    version: bool,
+    /// The script-mode `update` line to run against the daemon.
+    update: Option<String>,
 }
 
 fn parse_args() -> Result<Option<Args>, String> {
@@ -28,19 +31,35 @@ fn parse_args() -> Result<Option<Args>, String> {
         connect: false,
         json: false,
         prefer_aac: false,
+        version: false,
+        update: None,
     };
-    let mut it = std::env::args().skip(1);
+    let mut it = std::env::args().skip(1).peekable();
     while let Some(a) = it.next() {
         match a.as_str() {
             "--help" | "-h" => return Ok(None),
+            "--version" => args.version = true,
             "--prefer-aac" => args.prefer_aac = true,
             "--connect" => args.connect = true,
             "--json" => args.json = true,
             "--script" => {
                 args.script = Some(it.next().ok_or("--script needs a file")?);
             }
+            "update" if args.update.is_none() => {
+                let line = match it.next_if(|s| s == "check" || s == "install") {
+                    Some(sub) => format!("update {sub}"),
+                    None => "update".to_owned(),
+                };
+                args.update = Some(line);
+            }
             other => return Err(format!("unknown argument {other}")),
         }
+    }
+    if args.update.is_some() {
+        if args.script.is_some() || args.prefer_aac {
+            return Err("update takes only --json".into());
+        }
+        args.connect = true;
     }
     if args.connect && args.prefer_aac {
         return Err("--prefer-aac applies to the daemon; pass it to requiemd".into());
@@ -63,6 +82,10 @@ fn main() -> ExitCode {
             return ExitCode::from(2);
         }
     };
+    if args.version {
+        println!("requiem {}", env!("CARGO_PKG_VERSION"));
+        return ExitCode::SUCCESS;
+    }
 
     if args.connect {
         return connect(&args);
@@ -134,16 +157,24 @@ fn drive(player: &dyn Player, args: &Args) -> ExitCode {
     } else {
         Format::Text
     };
-    let result = match args.script.as_deref() {
-        Some("-") => app::run_with_format(player, io::stdin().lock(), io::stdout(), true, format),
-        Some(path) => match File::open(path) {
+    let result = match (&args.update, args.script.as_deref()) {
+        (Some(line), _) => {
+            let script = Cursor::new(format!("{line}\n"));
+            app::run_with_format(player, script, io::stdout(), true, format)
+        }
+        (None, Some("-")) => {
+            app::run_with_format(player, io::stdin().lock(), io::stdout(), true, format)
+        }
+        (None, Some(path)) => match File::open(path) {
             Ok(f) => app::run_with_format(player, BufReader::new(f), io::stdout(), true, format),
             Err(e) => {
                 fail(args, &format!("{path}: {e}"));
                 return ExitCode::from(1);
             }
         },
-        None => app::run_with_format(player, io::stdin().lock(), io::stdout(), false, format),
+        (None, None) => {
+            app::run_with_format(player, io::stdin().lock(), io::stdout(), false, format)
+        }
     };
     match result {
         Ok(code) => ExitCode::from(code),
