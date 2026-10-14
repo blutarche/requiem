@@ -14,4 +14,4 @@ mod tests;
 pub use client::{Client, Incoming, spawn_daemon};
 pub use path::{log_path, socket_dir, socket_path};
 pub use proto::{ClientMsg, PROTOCOL, Role, ServerMsg, UpdateState, UpdateStatus};
-pub use server::{ClientCounts, ServeError, Server, ServerHooks, UpdateRequest};
+pub use server::{ClientCounts, Instance, ServeError, Server, ServerHooks, UpdateRequest};

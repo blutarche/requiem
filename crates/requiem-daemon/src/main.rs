@@ -8,7 +8,7 @@ use requiem_audio::{AudioEngine, AudioOptions};
 use requiem_core::{
     Command, EngineEventSink, EnqueueMode, Event, PersistSink, Session, SessionConfig,
 };
-use requiem_ipc::{ServeError, Server, ServerHooks};
+use requiem_ipc::{Instance, ServeError, Server, ServerHooks};
 use requiem_provider_ytmusic::{YtMusicOptions, YtMusicProvider};
 
 use idle::{Activity, IdleTimer};
@@ -17,6 +17,9 @@ use update::Updater;
 const USAGE: &str = "usage: requiemd [--prefer-aac] [--help]";
 /// Run by an updating player on a staged copy; see `requiem_update::stage::self_test`.
 const SELF_TEST_ARG: &str = "--update-self-test";
+/// Set on a player started in place of an older image (`update::exec_newer_player`), which
+/// never does so again: a bundle whose Info.plist and binary disagree can't make it loop.
+const REEXECED_ENV: &str = "REQUIEM_REEXECED";
 const DEFAULT_IDLE_EXIT_SECS: u64 = 300;
 const IDLE_POLL: Duration = Duration::from_secs(5);
 
@@ -50,6 +53,9 @@ fn idle_limit() -> Duration {
 }
 
 fn main() -> ExitCode {
+    let reexeced = std::env::var_os(REEXECED_ENV).is_some();
+    // SAFETY: no other thread has started yet. Removed so players this one starts still check.
+    unsafe { std::env::remove_var(REEXECED_ENV) };
     if std::env::args().nth(1).as_deref() == Some(SELF_TEST_ARG) {
         return self_test();
     }
@@ -76,6 +82,25 @@ fn main() -> ExitCode {
         }
     }
     let exe = ui::own_exe();
+    let instance = match Instance::lock() {
+        Ok(i) => i,
+        Err(ServeError::AlreadyRunning) => {
+            eprintln!("requiemd: already running");
+            return ExitCode::SUCCESS;
+        }
+        Err(e) => {
+            eprintln!("requiemd: {e}");
+            return ExitCode::from(1);
+        }
+    };
+    // Restart to Update swaps under this lock, so any such swap has finished; nothing listens
+    // yet, so no client meets an image the installed app has replaced.
+    if let Some(exe) = &exe
+        && let Err(e) = update::exec_newer_player(exe, reexeced)
+    {
+        eprintln!("requiemd: {e}");
+        return ExitCode::from(1);
+    }
 
     // The engine must exist before `Session::spawn`, whose factory cannot fail, so events
     // reach the session through a slot the factory fills.
@@ -125,7 +150,7 @@ fn main() -> ExitCode {
     );
 
     // The hub's state mirror assumes a fresh Session: nothing may be sent to it before
-    // `Server::start`.
+    // `Instance::serve`.
     let (stop_tx, stop_rx) = bounded::<()>(1);
     let hook_tx = stop_tx.clone();
     let update_tx = stop_tx.clone();
@@ -135,12 +160,8 @@ fn main() -> ExitCode {
         on_shutdown: Box::new(move || request_stop(&hook_tx)),
         on_update: Box::new(move |req| hook_updater.request(req)),
     };
-    let server = match Server::start(session, hooks, updater.status()) {
+    let server = match instance.serve(session, hooks, updater.status()) {
         Ok(s) => s,
-        Err(ServeError::AlreadyRunning) => {
-            eprintln!("requiemd: already running");
-            return ExitCode::SUCCESS;
-        }
         Err(e) => {
             eprintln!("requiemd: {e}");
             return ExitCode::from(1);

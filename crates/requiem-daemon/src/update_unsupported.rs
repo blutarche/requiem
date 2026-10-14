@@ -6,6 +6,11 @@ use std::sync::Arc;
 use crossbeam_channel::{Receiver, Sender, unbounded};
 use requiem_ipc::{UpdateRequest, UpdateState, UpdateStatus};
 
+/// Only a macOS app has an installed player to start instead.
+pub fn exec_newer_player(_exe: &Path, _reexeced: bool) -> Result<(), String> {
+    Ok(())
+}
+
 pub struct Updater {
     statuses: Sender<UpdateStatus>,
 }

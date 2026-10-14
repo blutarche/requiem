@@ -85,25 +85,22 @@ pub struct Server {
     lock: Option<File>,
 }
 
-impl Server {
-    /// Takes the single-instance lock, binds the socket and starts the accept and hub threads.
-    /// Fails with `AlreadyRunning` if another daemon holds the lock. Every client gets
-    /// `update` after `Welcome` until `set_update` replaces it.
-    pub fn start(
-        session: Session,
-        hooks: ServerHooks,
-        update: UpdateStatus,
-    ) -> Result<Server, ServeError> {
-        Self::start_in(&socket_dir()?, session, hooks, update)
+/// The single-instance lock, held before listening so the daemon can decide whether to serve.
+/// Dropping it releases the lock. Its descriptor is closed on exec, so an image that replaces
+/// the daemon's with `exec` can take the lock again.
+pub struct Instance {
+    path: PathBuf,
+    lock: File,
+}
+
+impl Instance {
+    /// Fails with `AlreadyRunning` if another daemon holds the lock.
+    pub fn lock() -> Result<Instance, ServeError> {
+        Self::lock_in(&socket_dir()?)
     }
 
     /// `dir` must already be created and validated.
-    pub(crate) fn start_in(
-        dir: &Path,
-        session: Session,
-        hooks: ServerHooks,
-        update: UpdateStatus,
-    ) -> Result<Server, ServeError> {
+    pub(crate) fn lock_in(dir: &Path) -> Result<Instance, ServeError> {
         let path = socket_path_in(dir)?;
         let lock = OpenOptions::new()
             .read(true)
@@ -113,10 +110,21 @@ impl Server {
             .mode(0o600)
             .open(dir.join(LOCK_NAME))?;
         match lock.try_lock() {
-            Ok(()) => {}
-            Err(TryLockError::WouldBlock) => return Err(ServeError::AlreadyRunning),
-            Err(TryLockError::Error(e)) => return Err(e.into()),
+            Ok(()) => Ok(Instance { path, lock }),
+            Err(TryLockError::WouldBlock) => Err(ServeError::AlreadyRunning),
+            Err(TryLockError::Error(e)) => Err(e.into()),
         }
+    }
+
+    /// Binds the socket and starts the accept and hub threads. Every client gets `update`
+    /// after `Welcome` until `set_update` replaces it.
+    pub fn serve(
+        self,
+        session: Session,
+        hooks: ServerHooks,
+        update: UpdateStatus,
+    ) -> Result<Server, ServeError> {
+        let Instance { path, lock } = self;
         // Under the lock, a socket file here can only be left over from a dead daemon.
         match fs::remove_file(&path) {
             Ok(()) => {}
@@ -150,6 +158,17 @@ impl Server {
                 .spawn(move || accept_loop(&listener, &hub, &stopping))?,
         );
         Ok(server)
+    }
+}
+
+impl Server {
+    /// Takes the single-instance lock and serves at once; see [`Instance`].
+    pub fn start(
+        session: Session,
+        hooks: ServerHooks,
+        update: UpdateStatus,
+    ) -> Result<Server, ServeError> {
+        Instance::lock()?.serve(session, hooks, update)
     }
 
     /// In-daemon controls (menu bar, media keys); same path as client commands.

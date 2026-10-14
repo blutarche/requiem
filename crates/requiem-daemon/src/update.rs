@@ -4,8 +4,9 @@
 use std::ffi::OsString;
 use std::fs::{self, File};
 use std::os::unix::ffi::OsStringExt;
+use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
-use std::process::Child;
+use std::process::{Child, Command};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -549,6 +550,46 @@ impl Updater {
     }
 }
 
+/// A player started from the installed app just before **Restart to Update** swaps it runs the
+/// old version, and the restart takes its answer for a failed start. Called under the
+/// single-instance lock, before listening: when the player installed in the app that holds
+/// `exe` is newer than this one, this process becomes it, with the same pid and arguments.
+/// Returns `Ok` when this player carries on as it is.
+pub fn exec_newer_player(exe: &Path, reexeced: bool) -> Result<(), String> {
+    let Some(app) = ui::gui_app(exe) else {
+        return Ok(());
+    };
+    let current = Version::parse(CURRENT).expect("the package version is semver");
+    let Some(installed) = newer_player(app, &current, reexeced) else {
+        return Ok(());
+    };
+    let player = stage::daemon_exe(app);
+    eprintln!(
+        "requiemd: {} is {installed}, newer than this {CURRENT}; starting it instead",
+        player.display()
+    );
+    let e = Command::new(&player)
+        .args(std::env::args_os().skip(1))
+        .env(crate::REEXECED_ENV, "1")
+        .exec();
+    Err(format!("starting {}: {e}", player.display()))
+}
+
+/// The version of the player installed in `app` when it is newer than `current`, unless this
+/// process already replaced an older one.
+fn newer_player(app: &Path, current: &Version, reexeced: bool) -> Option<Version> {
+    if reexeced {
+        return None;
+    }
+    match macos::player_version(app) {
+        Ok(v) => (v > *current).then_some(v),
+        Err(e) => {
+            debug!("{e}");
+            None
+        }
+    }
+}
+
 fn saved_dir(state: &Path) -> Option<PathBuf> {
     Some(state.parent()?.join(SAVED_DIR))
 }
@@ -719,6 +760,67 @@ mod tests {
             bad,
             reason: "the new version did not start in time".into(),
         }
+    }
+
+    /// An app whose player's Info.plist holds `info`.
+    fn app_with_player_info(dir: &Path, info: &str) -> PathBuf {
+        let app = dir.join("Requiem.app");
+        let plist = stage::helper_app(&app).join("Contents/Info.plist");
+        fs::create_dir_all(plist.parent().unwrap()).unwrap();
+        fs::write(&plist, info).unwrap();
+        app
+    }
+
+    fn player_info(version: &str) -> String {
+        format!(
+            r#"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+<key>CFBundleShortVersionString</key><string>{version}</string>
+</dict></plist>
+"#
+        )
+    }
+
+    #[test]
+    fn only_a_newer_installed_player_replaces_this_one() {
+        let dir = std::env::temp_dir().join(format!("rqn{}", std::process::id()));
+        let current = Version::new(0, 2, 1);
+        let newer = |info: &str, reexeced| {
+            newer_player(&app_with_player_info(&dir, info), &current, reexeced)
+        };
+        let found = [
+            newer(&player_info("0.2.1"), false),
+            newer(&player_info("0.2.0"), false),
+            newer(&player_info("0.2.2"), false),
+            newer(&player_info("0.2.2"), true),
+            newer("not a plist", false),
+            newer(&player_info("next"), false),
+        ];
+        let missing = newer_player(&dir.join("Missing.app"), &current, false);
+        let _ = fs::remove_dir_all(&dir);
+        assert_eq!(
+            found,
+            [None, None, Some(Version::new(0, 2, 2)), None, None, None]
+        );
+        assert_eq!(missing, None);
+    }
+
+    #[test]
+    fn a_player_outside_an_app_or_as_new_as_its_app_carries_on() {
+        // An exec here would replace the test binary; returning at all means none happened.
+        let dev = Path::new("/x/target/debug/requiemd");
+        assert_eq!(exec_newer_player(dev, false), Ok(()));
+        let dir = std::env::temp_dir().join(format!("rqc{}", std::process::id()));
+        let app = app_with_player_info(&dir, &player_info(CURRENT));
+        let same = exec_newer_player(&stage::daemon_exe(&app), false);
+        let next = Version::parse(CURRENT).unwrap();
+        let next = Version::new(next.major, next.minor, next.patch + 1);
+        app_with_player_info(&dir, &player_info(&next.to_string()));
+        let guarded = exec_newer_player(&stage::daemon_exe(&app), true);
+        let _ = fs::remove_dir_all(&dir);
+        assert_eq!(same, Ok(()));
+        assert_eq!(guarded, Ok(()));
     }
 
     #[test]
