@@ -248,7 +248,9 @@ impl Updater {
         let Some(path) = lock(&self.inner).stored.staging.clone() else {
             return;
         };
-        match macos::remove_stale(&path) {
+        // After Restart to Update, the player that started this one deletes the folder once
+        // this one has answered, or stops it within `HANDOFF_TIMEOUT`.
+        match macos::remove_stale(&path, HANDOFF_TIMEOUT) {
             Ok(()) => {
                 let mut inner = lock(&self.inner);
                 if inner.stored.staging.as_ref() == Some(&path) {
