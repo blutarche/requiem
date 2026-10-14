@@ -154,6 +154,8 @@ struct Hub {
     changed: Condvar,
     out: Mutex<Box<dyn Write + Send>>,
     format: Format,
+    /// Print the daemon's events; off for `requiem update`, which prints its answer alone.
+    events: bool,
 }
 
 impl Hub {
@@ -193,6 +195,14 @@ impl Hub {
     /// event cannot print ahead of them.
     fn on_event(&self, ev: Event) {
         let mut ui = self.lock_ui();
+        if !self.events {
+            if let Event::Volume(_) = ev {
+                ui.synced = true;
+                drop(ui);
+                self.changed.notify_all();
+            }
+            return;
+        }
         match ev {
             Event::SearchResults { req, tracks } => {
                 if req != ui.latest_req {
@@ -635,6 +645,16 @@ impl<'a> App<'a> {
         script: bool,
         format: Format,
     ) -> Self {
+        Self::build(player, out, script, format, true)
+    }
+
+    fn build(
+        player: &'a dyn Player,
+        out: impl Write + Send + 'static,
+        script: bool,
+        format: Format,
+        events: bool,
+    ) -> Self {
         let hub = Arc::new(Hub {
             ui: Mutex::new(Ui {
                 latest_req: 0,
@@ -655,6 +675,7 @@ impl<'a> App<'a> {
             changed: Condvar::new(),
             out: Mutex::new(Box::new(out)),
             format,
+            events,
         });
         let rx = player.subscribe();
         let h = hub.clone();
@@ -1287,6 +1308,24 @@ pub fn run(
     script: bool,
 ) -> io::Result<u8> {
     run_with_format(player, input, out, script, Format::Text)
+}
+
+/// `requiem update [check|install]`: runs `line` as a script would, printing its answer
+/// without the daemon's events. Returns the exit code.
+pub fn run_update(
+    player: &dyn Player,
+    line: &str,
+    out: impl Write + Send + 'static,
+    format: Format,
+) -> u8 {
+    let app = App::build(player, out, true, format, false);
+    if player.remote() {
+        app.sync();
+    }
+    match app.exec(line) {
+        Flow::Continue | Flow::Quit => 0,
+        Flow::Exit(code) => code,
+    }
 }
 
 /// `run` with a choice of output format.

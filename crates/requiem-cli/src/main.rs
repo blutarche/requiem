@@ -1,5 +1,5 @@
 use std::fs::File;
-use std::io::{self, BufReader, Cursor};
+use std::io::{self, BufReader};
 use std::path::Path;
 use std::process::ExitCode;
 use std::sync::{Arc, OnceLock};
@@ -158,10 +158,7 @@ fn drive(player: &dyn Player, args: &Args) -> ExitCode {
         Format::Text
     };
     let result = match (&args.update, args.script.as_deref()) {
-        (Some(line), _) => {
-            let script = Cursor::new(format!("{line}\n"));
-            app::run_with_format(player, script, io::stdout(), true, format)
-        }
+        (Some(line), _) => Ok(app::run_update(player, line, io::stdout(), format)),
         (None, Some("-")) => {
             app::run_with_format(player, io::stdin().lock(), io::stdout(), true, format)
         }

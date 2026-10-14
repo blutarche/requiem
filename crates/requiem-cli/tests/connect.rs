@@ -9,7 +9,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use crossbeam_channel::{Receiver, bounded, unbounded};
-use requiem_cli::app::{self, App, Flow, Player};
+use requiem_cli::app::{self, App, Flow, Format, Player};
 use requiem_cli::remote::RemotePlayer;
 use requiem_core::testing::{FakeEngineHandle, FakeProvider, Step};
 use requiem_core::{EngineEvent, ProviderId, Session, SessionConfig, Track, TrackId};
@@ -304,6 +304,18 @@ fn update_prints_the_status() {
         text.contains("Requiem 0.1.0\nautomatic checks: on\n"),
         "{text}"
     );
+}
+
+#[test]
+fn requiem_update_prints_its_answer_alone() {
+    let _g = serial();
+    let d = daemon();
+    let player = connect();
+    let out = Buf::default();
+    let code = app::run_update(&player, "update", out.clone(), Format::Text);
+    d.server.shutdown();
+    assert_eq!(code, 0);
+    assert_eq!(out.text(), "Requiem 0.1.0\nautomatic checks: on\n");
 }
 
 #[test]
