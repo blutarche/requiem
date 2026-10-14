@@ -1,5 +1,6 @@
-//! `Client::connect_or_spawn` against a fake daemon: this test binary itself, re-run with
-//! `FAKE_DAEMON` set, serves a `Session` over fakes and writes what it saw to daemon.log.
+//! `Client::connect_or_spawn` and `Client::connect_spawned` against a fake daemon: this test
+//! binary itself, re-run with `FAKE_DAEMON` set, serves a `Session` over fakes and writes what
+//! it saw to daemon.log.
 
 use std::env;
 use std::fs::{self, File};
