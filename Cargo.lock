@@ -1245,6 +1245,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "requiem-update"
+version = "0.1.0"
+dependencies = [
+ "libc",
+ "objc2",
+ "objc2-foundation",
+ "ring",
+ "semver",
+ "serde",
+ "serde_json",
+ "ureq",
+]
+
+[[package]]
 name = "ring"
 version = "0.17.14"
 source = "registry+https://github.com/rust-lang/crates.io-index"
