@@ -213,6 +213,13 @@ pub fn installed_version(app: &Path) -> Result<Version, String> {
     Version::parse(&text).map_err(|e| format!("installed version {text:?}: {e}"))
 }
 
+/// The `CFBundleShortVersionString` of the player inside `app`.
+pub fn player_version(app: &Path) -> Result<Version, String> {
+    let plist = stage::helper_app(app).join("Contents/Info.plist");
+    let text = plist_value(&plist, "CFBundleShortVersionString")?;
+    Version::parse(&text).map_err(|e| format!("{}: version {text:?}: {e}", plist.display()))
+}
+
 /// Why the installed app can't replace itself, or `None` when it can.
 pub fn not_updatable(installed: &Path) -> Option<String> {
     if installed
@@ -475,6 +482,18 @@ mod tests {
                 Ok(Version::parse(staged_version).unwrap())
             );
         }
+    }
+
+    #[test]
+    fn reads_the_players_version_from_its_helper_app() {
+        let dir = TempDir::new();
+        let app = fake_app(dir.path(), "0.2.2", BUNDLE_ID, PLAYER_BUNDLE_ID);
+        assert_eq!(player_version(&app), Ok(Version::new(0, 2, 2)));
+        let helper_info = stage::helper_app(&app).join("Contents/Info.plist");
+        fs::write(&helper_info, b"not a plist").unwrap();
+        assert!(player_version(&app).is_err());
+        fs::remove_file(&helper_info).unwrap();
+        assert!(player_version(&app).is_err());
     }
 
     #[test]

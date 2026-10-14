@@ -17,8 +17,9 @@ pub fn daemon_exe(cli_exe: &Path, exists: impl Fn(&Path) -> bool) -> PathBuf {
     if exists(&sibling) {
         return sibling;
     }
-    if let Some(dir) = cli_exe.parent() {
-        let bundled = dir.join("../Helpers/requiemd.app/Contents/MacOS/requiemd");
+    // No `..`: the player finds the app it belongs to from the path it was started by.
+    if let Some(contents) = cli_exe.parent().and_then(Path::parent) {
+        let bundled = contents.join("Helpers/requiemd.app/Contents/MacOS/requiemd");
         if exists(&bundled) {
             return bundled;
         }

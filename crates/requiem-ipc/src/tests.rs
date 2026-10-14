@@ -2,6 +2,7 @@ use std::env;
 use std::fs::{self, Permissions};
 use std::io::{self, Cursor, Write};
 use std::iter;
+use std::os::fd::AsRawFd;
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
@@ -22,8 +23,8 @@ use crate::frame::{self, Deadline, MAX_FRAME};
 use crate::hub::{self, HubMsg};
 use crate::path::{SOCKET_NAME, SUN_PATH_LEN, check_sun_path, default_dir, prepare_dir};
 use crate::{
-    Client, ClientCounts, ClientMsg, Incoming, PROTOCOL, Role, ServeError, Server, ServerHooks,
-    ServerMsg, UpdateRequest, UpdateState, UpdateStatus,
+    Client, ClientCounts, ClientMsg, Incoming, Instance, PROTOCOL, Role, ServeError, Server,
+    ServerHooks, ServerMsg, UpdateRequest, UpdateState, UpdateStatus,
 };
 use crate::{server, sys};
 
@@ -99,7 +100,9 @@ fn start(
             let _ = req_tx.send(req);
         }),
     };
-    Server::start_in(dir, session, hooks, idle_update()).map(|s| (s, rx, req_rx))
+    Instance::lock_in(dir)?
+        .serve(session, hooks, idle_update())
+        .map(|s| (s, rx, req_rx))
 }
 
 fn rig() -> Rig {
@@ -1153,4 +1156,33 @@ fn shutdown_keeping_lock_holds_off_another_server_until_dropped() {
     drop(lock);
     let (server, ..) = again().unwrap();
     server.shutdown();
+}
+
+#[test]
+fn an_instance_holds_off_another_daemon_before_it_listens() {
+    let tmp = TempDir::new();
+    let dir = tmp.0.join("s");
+    prepare_dir(&dir).unwrap();
+    let instance = Instance::lock_in(&dir).unwrap();
+    assert!(!dir.join(SOCKET_NAME).exists());
+    assert!(matches!(
+        Instance::lock_in(&dir),
+        Err(ServeError::AlreadyRunning)
+    ));
+    drop(instance);
+    let (server, ..) = start(&dir, &FakeProvider::new("fake"), &FakeEngineHandle::new()).unwrap();
+    server.shutdown();
+}
+
+#[test]
+fn the_instance_lock_is_closed_on_exec() {
+    let rig = rig();
+    let lock = rig.server.shutdown_keeping_lock();
+    // SAFETY: F_GETFD only reads the flags of a descriptor `lock` owns.
+    let flags = unsafe { libc::fcntl(lock.as_raw_fd(), libc::F_GETFD) };
+    assert_ne!(
+        flags & libc::FD_CLOEXEC,
+        0,
+        "an exec'd daemon can't lock again"
+    );
 }

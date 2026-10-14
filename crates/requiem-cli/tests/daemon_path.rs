@@ -1,4 +1,4 @@
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 use requiem_cli::remote::daemon_exe;
 
@@ -12,7 +12,7 @@ fn prefers_the_daemon_next_to_the_cli() {
         Path::new("/opt/bin/requiem"),
         only(&[
             "/opt/bin/requiemd",
-            "/opt/bin/../Helpers/requiemd.app/Contents/MacOS/requiemd",
+            "/opt/Helpers/requiemd.app/Contents/MacOS/requiemd",
         ]),
     );
     assert_eq!(got, PathBuf::from("/opt/bin/requiemd"));
@@ -22,16 +22,15 @@ fn prefers_the_daemon_next_to_the_cli() {
 fn falls_back_to_the_bundle_helper() {
     let got = daemon_exe(
         Path::new("/Applications/requiem.app/Contents/MacOS/requiem"),
-        only(&[
-            "/Applications/requiem.app/Contents/MacOS/../Helpers/requiemd.app/Contents/MacOS/requiemd",
-        ]),
+        only(&["/Applications/requiem.app/Contents/Helpers/requiemd.app/Contents/MacOS/requiemd"]),
     );
     assert_eq!(
         got,
         PathBuf::from(
-            "/Applications/requiem.app/Contents/MacOS/../Helpers/requiemd.app/Contents/MacOS/requiemd"
+            "/Applications/requiem.app/Contents/Helpers/requiemd.app/Contents/MacOS/requiemd"
         )
     );
+    assert!(!got.components().any(|c| c == Component::ParentDir));
 }
 
 #[test]
