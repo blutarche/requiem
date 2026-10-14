@@ -19,6 +19,8 @@ cpal = "0.18.2"
 rubato = "5.0.1"
 rtrb = "0.4.0"
 ureq = "3.4.2"
+ring = "0.17.14"
+semver = "1.0.28"
 libc = "0.2.190"
 objc2 = "0.6.5"
 objc2-foundation = { version = "0.3.2", default-features = false }
@@ -35,6 +37,7 @@ requiem-cli = { path = "crates/requiem-cli" }
 requiem-ipc = { path = "crates/requiem-ipc" }
 requiem-macos = { path = "crates/requiem-macos" }
 requiem-linux = { path = "crates/requiem-linux" }
+requiem-update = { path = "crates/requiem-update" }
 
 [profile.release]
 lto = "thin"

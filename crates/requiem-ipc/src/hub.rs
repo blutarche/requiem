@@ -1,6 +1,5 @@
 use std::collections::HashMap;
 use std::io;
-use std::iter;
 use std::net::Shutdown;
 use std::os::unix::net::UnixStream;
 use std::sync::Arc;
@@ -11,8 +10,8 @@ use crossbeam_channel::{Receiver, Sender, never, select, unbounded};
 use requiem_core::{AccountState, Command, Event, PlayState, ProviderId, Session, Track};
 
 use crate::frame;
-use crate::proto::{PROTOCOL, Role, ServerMsg, VERSION};
-use crate::server::{ClientCounts, ServerHooks};
+use crate::proto::{PROTOCOL, Role, ServerMsg, UpdateStatus, VERSION};
+use crate::server::{ClientCounts, ServerHooks, UpdateRequest};
 
 pub(crate) const QUEUE_CAP: usize = 256;
 /// A client or subscriber with more queued messages than this stops receiving `Position`.
@@ -44,6 +43,8 @@ pub(crate) enum HubMsg {
     Subscribe(Sender<Event>),
     Counts(Sender<ClientCounts>),
     Raise(Sender<bool>),
+    Update(UpdateStatus),
+    UpdateRequest(UpdateRequest),
     Stop,
 }
 
@@ -166,6 +167,7 @@ struct Hub {
     session: Session,
     hooks: ServerHooks,
     mirror: Mirror,
+    update: UpdateStatus,
     peers: Vec<Peer>,
     subs: Vec<Sender<Event>>,
     /// Global search or browse id sent to the Session -> (requester, the requester's own id).
@@ -176,10 +178,11 @@ struct Hub {
 pub(crate) fn spawn(
     session: Session,
     hooks: ServerHooks,
+    update: UpdateStatus,
 ) -> io::Result<(Sender<HubMsg>, JoinHandle<()>)> {
     let events = session.subscribe();
     let (tx, rx) = unbounded();
-    let mut hub = Hub::new(session, hooks);
+    let mut hub = Hub::new(session, hooks, update);
     // The Session queued its `Account`s before `subscribe` returned. Applying them here, before
     // any client can join, puts them in every snapshot.
     for ev in events.try_iter() {
@@ -196,11 +199,12 @@ fn encode(msg: &ServerMsg) -> Option<Frame> {
 }
 
 impl Hub {
-    fn new(session: Session, hooks: ServerHooks) -> Self {
+    fn new(session: Session, hooks: ServerHooks, update: UpdateStatus) -> Self {
         Self {
             session,
             hooks,
             mirror: Mirror::new(),
+            update,
             peers: Vec::new(),
             subs: Vec::new(),
             requests: HashMap::new(),
@@ -365,19 +369,28 @@ impl Hub {
                 }
                 let _ = reply.send(raised);
             }
+            HubMsg::Update(status) => {
+                if let Some(frame) = encode(&ServerMsg::Update(status.clone())) {
+                    self.peers.retain(|p| p.offer(&frame, false));
+                }
+                self.update = status;
+            }
+            HubMsg::UpdateRequest(req) => (self.hooks.on_update)(req),
             HubMsg::Stop => unreachable!("handled in run"),
         }
     }
 
-    /// Welcome and the snapshot are queued before the peer joins the broadcast list, all on
-    /// this thread, so no live event can come between them or be missed.
+    /// Welcome, the update status and the snapshot are queued before the peer joins the
+    /// broadcast list, all on this thread, so no live event can come between them or be
+    /// missed.
     fn join(&mut self, peer: Peer) {
         let welcome = ServerMsg::Welcome {
             protocol: PROTOCOL,
             version: VERSION.into(),
         };
+        let update = ServerMsg::Update(self.update.clone());
         let snapshot = self.mirror.snapshot().into_iter().map(ServerMsg::Event);
-        for msg in iter::once(welcome).chain(snapshot) {
+        for msg in [welcome, update].into_iter().chain(snapshot) {
             // An oversize event is skipped here too; see `broadcast`.
             if let Some(frame) = encode(&msg)
                 && !peer.offer(&frame, false)
@@ -419,6 +432,22 @@ mod tests {
     use requiem_core::testing::{FakeEngineHandle, FakeProvider};
 
     use super::*;
+    use crate::proto::UpdateState;
+
+    fn hooks() -> ServerHooks {
+        ServerHooks {
+            on_shutdown: Box::new(|| {}),
+            on_update: Box::new(|_| {}),
+        }
+    }
+
+    fn idle() -> UpdateStatus {
+        UpdateStatus {
+            current: "test".into(),
+            auto: true,
+            state: UpdateState::Idle,
+        }
+    }
 
     #[test]
     fn snapshot_ends_with_volume() {
@@ -494,10 +523,7 @@ mod tests {
             FakeEngineHandle::new().factory(),
             SessionConfig::default(),
         );
-        let hooks = ServerHooks {
-            on_shutdown: Box::new(|| {}),
-        };
-        let (tx, handle) = spawn(session, hooks).unwrap();
+        let (tx, handle) = spawn(session, hooks(), idle()).unwrap();
         let (sub_tx, sub) = unbounded();
         tx.send(HubMsg::Subscribe(sub_tx)).unwrap();
         let snap: Vec<Event> = sub
@@ -519,10 +545,7 @@ mod tests {
             FakeEngineHandle::new().factory(),
             SessionConfig::default(),
         );
-        let hooks = ServerHooks {
-            on_shutdown: Box::new(|| {}),
-        };
-        let mut hub = Hub::new(session, hooks);
+        let mut hub = Hub::new(session, hooks(), idle());
         for from in [Some(1), Some(2), Some(1), None] {
             hub.on_command(
                 from,

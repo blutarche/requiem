@@ -17,7 +17,7 @@ use requiem_core::{Command, Event, Session};
 use crate::frame::{self, Deadline};
 use crate::hub::{self, ClientId, Frame, HubMsg, QUEUE_CAP};
 use crate::path::{LOCK_NAME, socket_dir, socket_path_in};
-use crate::proto::{ClientMsg, HelloProbe, PROTOCOL, Role, ServerMsg};
+use crate::proto::{ClientMsg, HelloProbe, PROTOCOL, Role, ServerMsg, UpdateStatus};
 use crate::sys;
 
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
@@ -27,6 +27,15 @@ pub struct ServerHooks {
     /// Called on the hub thread when a client sends `Command::Shutdown`. It must not call
     /// back into the `Server`; the daemon leaves its main loop and calls `Server::shutdown`.
     pub on_shutdown: Box<dyn Fn() + Send + Sync>,
+    /// Called on the hub thread for a client's update request, under the same rule.
+    pub on_update: Box<dyn Fn(UpdateRequest) + Send + Sync>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UpdateRequest {
+    Check,
+    Install,
+    SetAuto(bool),
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -72,15 +81,20 @@ pub struct Server {
     accept_thread: Option<JoinHandle<()>>,
     stopping: Arc<AtomicBool>,
     path: PathBuf,
-    /// Released only after the socket file is removed.
-    _lock: File,
+    /// Released only after the socket file is removed. `None` once handed to the caller.
+    lock: Option<File>,
 }
 
 impl Server {
     /// Takes the single-instance lock, binds the socket and starts the accept and hub threads.
-    /// Fails with `AlreadyRunning` if another daemon holds the lock.
-    pub fn start(session: Session, hooks: ServerHooks) -> Result<Server, ServeError> {
-        Self::start_in(&socket_dir()?, session, hooks)
+    /// Fails with `AlreadyRunning` if another daemon holds the lock. Every client gets
+    /// `update` after `Welcome` until `set_update` replaces it.
+    pub fn start(
+        session: Session,
+        hooks: ServerHooks,
+        update: UpdateStatus,
+    ) -> Result<Server, ServeError> {
+        Self::start_in(&socket_dir()?, session, hooks, update)
     }
 
     /// `dir` must already be created and validated.
@@ -88,6 +102,7 @@ impl Server {
         dir: &Path,
         session: Session,
         hooks: ServerHooks,
+        update: UpdateStatus,
     ) -> Result<Server, ServeError> {
         let path = socket_path_in(dir)?;
         let lock = OpenOptions::new()
@@ -110,7 +125,7 @@ impl Server {
         }
         let listener = UnixListener::bind(&path)?;
         let started = fs::set_permissions(&path, Permissions::from_mode(0o600))
-            .and_then(|()| hub::spawn(session, hooks));
+            .and_then(|()| hub::spawn(session, hooks, update));
         let (hub, hub_thread) = match started {
             Ok(h) => h,
             Err(e) => {
@@ -125,7 +140,7 @@ impl Server {
             accept_thread: None,
             stopping: Arc::new(AtomicBool::new(false)),
             path,
-            _lock: lock,
+            lock: Some(lock),
         };
         let stopping = server.stopping.clone();
         // On failure, dropping `server` removes the socket before releasing the lock.
@@ -159,8 +174,21 @@ impl Server {
         self.ask(HubMsg::Raise).unwrap_or(false)
     }
 
+    pub fn set_update(&self, status: UpdateStatus) {
+        let _ = self.hub.send(HubMsg::Update(status));
+    }
+
     pub fn shutdown(mut self) {
         self.stop();
+    }
+
+    /// Stops like `shutdown` but keeps the single-instance lock, which is released when the
+    /// returned file is dropped. Meanwhile a daemon that starts exits with `AlreadyRunning`.
+    pub fn shutdown_keeping_lock(mut self) -> File {
+        self.stop();
+        self.lock
+            .take()
+            .expect("only taken here, which consumes the server")
     }
 
     fn ask<T>(&self, msg: impl FnOnce(Sender<T>) -> HubMsg) -> Option<T> {
@@ -262,6 +290,11 @@ fn forward(id: ClientId, stream: &UnixStream, hub: &Sender<HubMsg>) {
                 cmd,
             },
             Ok(Some(ClientMsg::Ping(n))) => HubMsg::Ping { id, n },
+            Ok(Some(ClientMsg::CheckForUpdates)) => HubMsg::UpdateRequest(UpdateRequest::Check),
+            Ok(Some(ClientMsg::InstallUpdate)) => HubMsg::UpdateRequest(UpdateRequest::Install),
+            Ok(Some(ClientMsg::SetAutoUpdate(on))) => {
+                HubMsg::UpdateRequest(UpdateRequest::SetAuto(on))
+            }
             // A second Hello, a bad or oversize frame, or the end of the stream.
             Ok(Some(ClientMsg::Hello { .. }) | None) | Err(_) => return,
         };

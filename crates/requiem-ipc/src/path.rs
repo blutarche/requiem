@@ -43,6 +43,11 @@ pub fn socket_path() -> io::Result<PathBuf> {
     socket_path_in(&socket_dir()?)
 }
 
+/// Where a daemon a client started writes its output.
+pub fn log_path() -> io::Result<PathBuf> {
+    Ok(socket_dir()?.join(LOG_NAME))
+}
+
 pub(crate) fn socket_path_in(dir: &Path) -> io::Result<PathBuf> {
     let path = dir.join(SOCKET_NAME);
     check_sun_path(&path)?;

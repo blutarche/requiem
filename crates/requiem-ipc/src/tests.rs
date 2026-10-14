@@ -23,7 +23,7 @@ use crate::hub::{self, HubMsg};
 use crate::path::{SOCKET_NAME, SUN_PATH_LEN, check_sun_path, default_dir, prepare_dir};
 use crate::{
     Client, ClientCounts, ClientMsg, Incoming, PROTOCOL, Role, ServeError, Server, ServerHooks,
-    ServerMsg,
+    ServerMsg, UpdateRequest, UpdateState, UpdateStatus,
 };
 use crate::{server, sys};
 
@@ -31,6 +31,15 @@ const WAIT: Duration = Duration::from_secs(5);
 const SECS: fn(u64) -> Duration = Duration::from_secs;
 /// Events in the join snapshot of a stopped player with an empty queue.
 const IDLE_SNAPSHOT: usize = 4;
+
+/// The update status a test server starts with.
+fn idle_update() -> UpdateStatus {
+    UpdateStatus {
+        current: "test".into(),
+        auto: true,
+        state: UpdateState::Idle,
+    }
+}
 
 /// The fake provider's account as every snapshot carries it.
 fn account() -> Event {
@@ -64,6 +73,7 @@ struct Rig {
     provider: Arc<FakeProvider>,
     engine: FakeEngineHandle,
     shutdowns: Receiver<()>,
+    requests: Receiver<UpdateRequest>,
     dir: PathBuf,
     path: PathBuf,
     _tmp: TempDir,
@@ -73,19 +83,23 @@ fn start(
     dir: &Path,
     provider: &Arc<FakeProvider>,
     engine: &FakeEngineHandle,
-) -> Result<(Server, Receiver<()>), ServeError> {
+) -> Result<(Server, Receiver<()>, Receiver<UpdateRequest>), ServeError> {
     let session = Session::spawn(
         vec![provider.clone()],
         engine.factory(),
         SessionConfig::default(),
     );
     let (tx, rx) = unbounded();
+    let (req_tx, req_rx) = unbounded();
     let hooks = ServerHooks {
         on_shutdown: Box::new(move || {
             let _ = tx.send(());
         }),
+        on_update: Box::new(move |req| {
+            let _ = req_tx.send(req);
+        }),
     };
-    Server::start_in(dir, session, hooks).map(|s| (s, rx))
+    Server::start_in(dir, session, hooks, idle_update()).map(|s| (s, rx, req_rx))
 }
 
 fn rig() -> Rig {
@@ -94,12 +108,13 @@ fn rig() -> Rig {
     prepare_dir(&dir).unwrap();
     let provider = FakeProvider::new("fake");
     let engine = FakeEngineHandle::new();
-    let (server, shutdowns) = start(&dir, &provider, &engine).unwrap();
+    let (server, shutdowns, requests) = start(&dir, &provider, &engine).unwrap();
     Rig {
         server,
         provider,
         engine,
         shutdowns,
+        requests,
         path: dir.join(SOCKET_NAME),
         dir,
         _tmp: tmp,
@@ -107,8 +122,11 @@ fn rig() -> Rig {
 }
 
 impl Rig {
+    /// Past the update status that every client gets right after `Welcome`.
     fn client(&self, role: Role) -> (Client, Receiver<Incoming>) {
-        Client::connect(&self.path, role).unwrap()
+        let (client, rx) = Client::connect(&self.path, role).unwrap();
+        expect_update(&rx, &idle_update());
+        (client, rx)
     }
 
     /// A connection that has sent `Hello` and read nothing yet.
@@ -186,6 +204,13 @@ fn next_event(rx: &Receiver<Incoming>) -> Event {
     }
 }
 
+fn expect_update(rx: &Receiver<Incoming>, want: &UpdateStatus) {
+    let got = rx
+        .recv_timeout(WAIT)
+        .expect("timed out waiting for a message");
+    assert_eq!(got, Incoming::Update(want.clone()));
+}
+
 fn take(rx: &Receiver<Incoming>, n: usize) -> Vec<Event> {
     (0..n).map(|_| next_event(rx)).collect()
 }
@@ -259,6 +284,9 @@ fn frame_round_trip() {
             mode: EnqueueMode::Append,
         }),
         ClientMsg::Ping(u64::MAX),
+        ClientMsg::CheckForUpdates,
+        ClientMsg::InstallUpdate,
+        ClientMsg::SetAutoUpdate(false),
     ];
     let mut buf = Vec::new();
     for m in &client_msgs {
@@ -291,6 +319,14 @@ fn frame_round_trip() {
         ServerMsg::Event(Event::Position(Duration::from_millis(1500))),
         ServerMsg::Raise,
         ServerMsg::Pong(3),
+        ServerMsg::Update(UpdateStatus {
+            current: "0.1.0".into(),
+            auto: false,
+            state: UpdateState::Failed {
+                version: "0.2.0".into(),
+                reason: "the new version did not start".into(),
+            },
+        }),
     ];
     let mut buf = Vec::new();
     for m in &server_msgs {
@@ -353,6 +389,7 @@ fn handshake_welcome_then_snapshot() {
             version: env!("CARGO_PKG_VERSION").into(),
         }
     );
+    assert_eq!(read_msg(&s), ServerMsg::Update(idle_update()));
     let snapshot = [
         Event::QueueChanged {
             tracks: vec![],
@@ -772,7 +809,7 @@ fn second_server_reports_already_running() {
 
     // The lock goes with the first server.
     rig.server.shutdown();
-    let (again, _) = start(
+    let (again, ..) = start(
         &rig.dir,
         &FakeProvider::new("fake"),
         &FakeEngineHandle::new(),
@@ -793,8 +830,9 @@ fn stale_socket_is_replaced() {
         io::ErrorKind::ConnectionRefused
     );
 
-    let (server, _) = start(&dir, &FakeProvider::new("fake"), &FakeEngineHandle::new()).unwrap();
+    let (server, ..) = start(&dir, &FakeProvider::new("fake"), &FakeEngineHandle::new()).unwrap();
     let (_c, rx) = Client::connect(&path, Role::Cli).unwrap();
+    expect_update(&rx, &idle_update());
     assert!(matches!(next_event(&rx), Event::QueueChanged { .. }));
     let mode = fs::metadata(&path).unwrap().permissions().mode();
     assert_eq!(mode & 0o777, 0o600);
@@ -931,19 +969,22 @@ fn stop_says_goodbye_without_waiting_on_a_stuck_client() {
     );
     let hooks = ServerHooks {
         on_shutdown: Box::new(|| {}),
+        on_update: Box::new(|_| {}),
     };
-    let (hub, hub_thread) = hub::spawn(session, hooks).unwrap();
+    let (hub, hub_thread) = hub::spawn(session, hooks, idle_update()).unwrap();
     let (sub_tx, sub) = unbounded();
     hub.send(HubMsg::Subscribe(sub_tx)).unwrap();
 
     let (ours, theirs) = UnixStream::pair().unwrap();
     server::admit(1, theirs, &hub);
     let (_reader, rx) = Client::handshake(ours, Role::Gui).unwrap();
+    expect_update(&rx, &idle_update());
     let (stuck, theirs) = UnixStream::pair().unwrap();
     server::admit(2, theirs, &hub);
     stuck.set_read_timeout(Some(WAIT)).unwrap();
     hello(&stuck, PROTOCOL, Role::Cli);
-    for _ in 0..=IDLE_SNAPSHOT {
+    // Welcome, the update status and the snapshot.
+    for _ in 0..IDLE_SNAPSHOT + 2 {
         read_msg(&stuck);
     }
 
@@ -1039,4 +1080,77 @@ fn send_to_a_daemon_that_stopped_reading_times_out_and_disconnects() {
         "{err}"
     );
     wait_disconnected(&rx);
+}
+
+#[test]
+fn update_status_follows_welcome_and_every_change() {
+    let rig = rig();
+    let (_c, rx) = rig.client(Role::Gui);
+    take(&rx, IDLE_SNAPSHOT);
+    let ready = UpdateStatus {
+        state: UpdateState::Ready {
+            version: "0.2.0".into(),
+        },
+        ..idle_update()
+    };
+    rig.server.set_update(ready.clone());
+    expect_update(&rx, &ready);
+
+    let s = UnixStream::connect(&rig.path).unwrap();
+    s.set_read_timeout(Some(WAIT)).unwrap();
+    hello(&s, PROTOCOL, Role::Cli);
+    assert!(matches!(read_msg(&s), ServerMsg::Welcome { .. }));
+    assert_eq!(read_msg(&s), ServerMsg::Update(ready));
+    assert!(matches!(
+        read_msg(&s),
+        ServerMsg::Event(Event::QueueChanged { .. })
+    ));
+}
+
+#[test]
+fn update_requests_reach_the_hook() {
+    let rig = rig();
+    let (c, _rx) = rig.client(Role::Cli);
+    c.check_for_updates().unwrap();
+    c.set_auto_update(false).unwrap();
+    c.install_update().unwrap();
+    let got: Vec<_> = (0..3)
+        .map(|_| rig.requests.recv_timeout(WAIT).unwrap())
+        .collect();
+    assert_eq!(
+        got,
+        [
+            UpdateRequest::Check,
+            UpdateRequest::SetAuto(false),
+            UpdateRequest::Install
+        ]
+    );
+}
+
+#[test]
+fn client_knows_the_daemons_version_and_pid() {
+    let rig = rig();
+    let (c, _rx) = rig.client(Role::Cli);
+    assert_eq!(c.server_version(), env!("CARGO_PKG_VERSION"));
+    assert_eq!(c.peer_pid().unwrap(), process::id() as i32);
+}
+
+#[test]
+fn shutdown_keeping_lock_holds_off_another_server_until_dropped() {
+    let rig = rig();
+    let (_c, rx) = rig.client(Role::Cli);
+    let lock = rig.server.shutdown_keeping_lock();
+    wait_goodbye(&rx);
+    assert!(!rig.path.exists());
+    let again = || {
+        start(
+            &rig.dir,
+            &FakeProvider::new("fake"),
+            &FakeEngineHandle::new(),
+        )
+    };
+    assert!(matches!(again(), Err(ServeError::AlreadyRunning)));
+    drop(lock);
+    let (server, ..) = again().unwrap();
+    server.shutdown();
 }

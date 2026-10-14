@@ -15,7 +15,8 @@ use requiem_core::{Command, Event};
 
 use crate::frame::{self, Deadline};
 use crate::path::{DIR_ENV, LOG_NAME, OLD_LOG_NAME, check_sun_path, socket_dir, socket_path_in};
-use crate::proto::{ClientMsg, PROTOCOL, Role, ServerMsg, VERSION};
+use crate::proto::{ClientMsg, PROTOCOL, Role, ServerMsg, UpdateStatus, VERSION};
+use crate::sys;
 
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
 /// A daemon that stops reading must not block a sender forever.
@@ -30,6 +31,7 @@ const LOG_ROTATE_BYTES: u64 = 1024 * 1024;
 pub enum Incoming {
     Event(Event),
     Raise,
+    Update(UpdateStatus),
     /// The daemon quit on purpose, as opposed to the connection failing.
     Goodbye,
     /// The connection failed or was closed without a `Goodbye`; the reason is for display.
@@ -40,6 +42,8 @@ pub struct Client {
     stream: Arc<UnixStream>,
     /// Keeps frames from concurrent `send`s from interleaving.
     write: Mutex<()>,
+    /// The daemon's, from its `Welcome`.
+    version: String,
 }
 
 impl Client {
@@ -120,10 +124,79 @@ impl Client {
         }
     }
 
+    /// Connects to the daemon `child` was started as by [`spawn_daemon`] in `dir`, retrying
+    /// until `timeout`. A child that exits 0 found another daemon holding the lock, which may
+    /// still come to listen; one that exits otherwise fails the connect. The child stays the
+    /// caller's.
+    pub fn connect_spawned(
+        child: &mut Child,
+        dir: &Path,
+        role: Role,
+        timeout: Duration,
+    ) -> io::Result<(Client, Receiver<Incoming>)> {
+        let path = socket_path_in(dir)?;
+        let log = dir.join(LOG_NAME);
+        let deadline = Instant::now() + timeout;
+        let mut exited = None;
+        loop {
+            match Self::connect(&path, role) {
+                Err(e) if nobody_listening(&e) => {}
+                done => return done,
+            }
+            let now = Instant::now();
+            if exited.is_none() {
+                exited = child.try_wait()?.map(|status| (status, now));
+            }
+            if let Some((status, at)) = exited
+                && !status.success()
+                && now.duration_since(at) >= EXIT_GRACE
+            {
+                return Err(io::Error::other(format!(
+                    "exited with {status}; see {}",
+                    log.display()
+                )));
+            }
+            if now >= deadline {
+                return Err(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    format!("not listening after {timeout:?}; see {}", log.display()),
+                ));
+            }
+            thread::sleep(SPAWN_POLL);
+        }
+    }
+
     /// A failed or timed-out write closes the connection; the receiver then gets
     /// `Disconnected`.
     pub fn send(&self, cmd: Command) -> io::Result<()> {
-        let frame = frame::encode(&ClientMsg::Command(cmd))?;
+        self.send_msg(&ClientMsg::Command(cmd))
+    }
+
+    pub fn check_for_updates(&self) -> io::Result<()> {
+        self.send_msg(&ClientMsg::CheckForUpdates)
+    }
+
+    pub fn install_update(&self) -> io::Result<()> {
+        self.send_msg(&ClientMsg::InstallUpdate)
+    }
+
+    pub fn set_auto_update(&self, on: bool) -> io::Result<()> {
+        self.send_msg(&ClientMsg::SetAutoUpdate(on))
+    }
+
+    /// The version the daemon announced in its `Welcome`.
+    pub fn server_version(&self) -> &str {
+        &self.version
+    }
+
+    /// The pid of the process at the other end of the socket: the daemon that answered,
+    /// whoever started it.
+    pub fn peer_pid(&self) -> io::Result<i32> {
+        sys::peer_pid(&self.stream)
+    }
+
+    fn send_msg(&self, msg: &ClientMsg) -> io::Result<()> {
+        let frame = frame::encode(msg)?;
         let _guard = self.write.lock().unwrap_or_else(PoisonError::into_inner);
         let written = (&mut &*self.stream).write_all(&frame);
         if written.is_err() {
@@ -144,10 +217,11 @@ impl Client {
             version: VERSION.into(),
         };
         frame::write(&mut &stream, &hello)?;
-        match frame::read(&mut Deadline::new(&stream, HANDSHAKE_TIMEOUT))? {
+        let version = match frame::read(&mut Deadline::new(&stream, HANDSHAKE_TIMEOUT))? {
             Some(ServerMsg::Welcome {
-                protocol: PROTOCOL, ..
-            }) => {}
+                protocol: PROTOCOL,
+                version,
+            }) => version,
             Some(ServerMsg::Incompatible { supported }) => {
                 return Err(io::Error::new(
                     io::ErrorKind::Unsupported,
@@ -168,7 +242,7 @@ impl Client {
                     "daemon closed the connection during the handshake",
                 ));
             }
-        }
+        };
         // A daemon that is stopping may already have sent `Goodbye` and closed.
         frame::set_read_timeout(&stream, None)?;
         let stream = Arc::new(stream);
@@ -180,6 +254,7 @@ impl Client {
         let client = Client {
             stream,
             write: Mutex::new(()),
+            version,
         };
         Ok((client, rx))
     }
@@ -196,6 +271,7 @@ fn read_loop(stream: &UnixStream, tx: &Sender<Incoming>) {
         let incoming = match frame::read(&mut &*stream) {
             Ok(Some(ServerMsg::Event(ev))) => Incoming::Event(ev),
             Ok(Some(ServerMsg::Raise)) => Incoming::Raise,
+            Ok(Some(ServerMsg::Update(status))) => Incoming::Update(status),
             Ok(Some(ServerMsg::Pong(_))) => continue,
             Ok(Some(ServerMsg::Goodbye)) => break Some(Incoming::Goodbye),
             Ok(Some(other)) => {
@@ -242,7 +318,9 @@ fn open_log(dir: &Path) -> io::Result<File> {
         .open(path)
 }
 
-fn spawn_daemon(exe: &Path, dir: &Path) -> io::Result<Child> {
+/// Starts the daemon at `exe` detached, in a session of its own, listening in `dir` and
+/// writing to the log there.
+pub fn spawn_daemon(exe: &Path, dir: &Path) -> io::Result<Child> {
     let log = open_log(dir)?;
     let mut cmd = process::Command::new(exe);
     // The daemon must listen where this client polls, whatever it would resolve itself.

@@ -142,7 +142,7 @@ A staged update stays in memory as `Ready { version, staging }`. The staging pat
 The installed app is the `.app` that holds the running `requiemd` (the existing `gui_app` lookup). It is **not updatable** when there is no outer app (a dev build), its path contains `/AppTranslocation/`, its volume is read-only (`statfs` `MNT_RDONLY`, as when it runs from the disk image), or its parent folder is not writable by this user.
 
 **Swap** (both modes):
-1. Take an exclusive `flock` on the folder that holds the installed app, for example `/Applications`. Every Requiem player on the machine, for any user, takes the same lock, so two swaps never interleave.
+1. Take an exclusive `flock` on the folder that holds the installed app, for example `/Applications`. Every Requiem player on the machine, for any user, takes the same lock, so two swaps never interleave. If the lock stays held for 30 s, give up without counting a try, and check again at the next start: any local user can open that folder and hold its lock, so a held lock must never mark a version bad.
 2. Read the installed app's `CFBundleShortVersionString`. Swap only if the staged version is greater. Otherwise another user's player has already installed this version or a newer one: discard the staged copy and release the lock. This stops a stale download from downgrading the app.
 3. Swap the staged app and the installed app with `renamex_np(staged, installed, RENAME_SWAP)`. The swap is atomic, so there is never a moment with no app installed, and the installed path keeps its name even if the person renamed it. The old app now sits in the staging folder.
 4. Check the installed path again with section 3.3 steps 4 and 5. On any failure, swap back.
@@ -153,12 +153,12 @@ The installed app is the `.app` that holds the running `requiemd` (the existing 
 **Restart to Update.**
 1. Note whether any GUI client is connected.
 2. Stop serving the way **Quit and Stop Music** does: clients receive the goodbye, so the window quits. Close the listener but **keep the single-instance lock**. A client that tries to start a player meanwhile starts one that exits at once with `AlreadyRunning`, and the client keeps retrying as it already does. Wait for the state writer.
-3. Copy the state file and the Google token file into the staging folder: `0600` files in the `0700` folder.
+3. Copy the state file and the Google token file into `update-saved`, a `0700` folder beside the update state, as `0600` files. They stay on the home volume whatever volume the app is on. This player holds a lock on the folder while it uses it; a player that finds the folder locked at start leaves it for a later start.
 4. Swap.
-5. Release the single-instance lock. Start the new player from the installed path, detached, the way the GUI starts it.
-6. Within 30 s, connect as a CLI client. A `Welcome` must arrive whose `version` is the new version. Note the socket peer's pid (`LOCAL_PEERPID`): a client may have started the new player before this process did, so the peer pid, not the child pid, is the new player.
-7. On success: if a GUI was connected, open the app at its installed path (the existing `launch_gui`). Delete the staging folder. Exit.
-8. On failure: send the peer SIGTERM, then SIGKILL after 10 s if it is still running. Swap back, and copy the saved state and token files back in place, because the new version may have rewritten them. Record the failure (section 3.6), start the old player from the installed path, reopen the window if it was open, and exit.
+5. Release the single-instance lock. Start the new player from the installed path, detached, the way the GUI starts it, and keep its process handle.
+6. Within 30 s, connect as a CLI client. A `Welcome` must arrive whose `version` is the new version. A client may have started a player before this process did; then the child exits with `AlreadyRunning` and the socket peer (`LOCAL_PEERPID`) is the new player.
+7. On success: if a GUI was connected, open the app at its installed path (the existing `launch_gui`). Delete the staging folder and the saved copies. Exit. The new player clears the staging entry from the update state at a later start, because this player still holds the folder while the new one starts.
+8. On failure: stop the child if it still runs (SIGTERM, then SIGKILL after 10 s). Stop the peer the same way only if it is not the child, its pid is above 1 and not this process, and `proc_pidpath` names the installed `requiemd`. Swap back, and copy the saved state and token files back in place, because the new version may have rewritten them. Record the failure (section 3.6), start the old player from the installed path, reopen the window if it was open, and exit.
 
 Between the swap and its exit, the old process reads nothing from its bundle by path. Its code and libraries are already mapped, and the swap moves its files without deleting them. Sensorium's host runs the same way from a swapped bundle, through four real releases on macOS 26.6.2.
 
@@ -167,7 +167,9 @@ Between the swap and its exit, the old process reads nothing from its bundle by 
 The protocol goes from 3 to 4. Window, CLI and player always ship together, and a protocol mismatch already produces the *older player is still running* path.
 
 - `ClientMsg::CheckForUpdates`, `ClientMsg::InstallUpdate`, `ClientMsg::SetAutoUpdate(bool)`.
-- `ServerMsg::Update(UpdateStatus)`, sent after `Welcome` and on every change. `UpdateStatus { current, auto, state }`, where `state` is one of `Idle`, `Checking`, `UpToDate`, `Downloading { version }`, `Ready { version }`, `Failed { version, reason }`, `NotUpdatable { reason }` and `Unsupported`.
+- `ServerMsg::Update(UpdateStatus)`, sent after `Welcome` and on every change. `UpdateStatus { current, auto, state }`, where `state` is one of `Idle`, `Checking`, `UpToDate`, `Downloading { version }`, `Ready { version }`, `Error { reason }`, `Failed { version, reason }`, `NotUpdatable { reason }` and `Unsupported`.
+- `Error` is a failed check, or an install failure that will be tried again. It shows in `requiem update` and the log, never as a banner. `Failed` is the banner case. A check that fails while an update is `Ready` keeps `Ready`.
+- A player starts in `Failed` when the update state holds a newer version marked bad, and in `Error` when it holds one that will be tried again, so failures from a player that has since exited still show.
 
 ### 3.6 Failures
 
@@ -180,7 +182,7 @@ The *Failed* banner shows after a bad release or a third try. **Check for Update
 
 ### 3.7 State
 
-`~/Library/Application Support/requiem/update-state.json`: mode `0600` in a `0700` folder, written atomically. It holds `format`, `auto`, `highestSeen`, `lastCheck` (Unix seconds), `staging` (a path or null) and `failures` (`version`, `sha256`, `tries`, `bad`).
+`~/Library/Application Support/requiem/update-state.json`: mode `0600` in a `0700` folder, written atomically. It holds `format`, `auto`, `highestSeen`, `lastCheck` (Unix seconds), `staging` (a path or null) and `failures` (`version`, `sha256`, `tries`, `bad`, `reason`). A held swap lock clears `lastCheck`, so the next start checks again.
 
 ---
 

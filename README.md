@@ -40,7 +40,7 @@ The bundle embeds Homebrew's libopus. Its minimum macOS version is whatever that
 
 - **Window:** type a query and press Enter; Return or a double-click plays a result, Cmd+Return (or the row's +) adds it to the queue. In the queue, Delete removes the selected track and Option+Cmd+Up / Option+Cmd+Down move it; right-click a queue row for Remove from Queue, Move Up, Move Down or Clear Queue (its toast offers Undo). Cmd+Z undoes a replaced or cleared queue until the queue changes again. Space toggles play/pause, Left / Right seek 5 s, Cmd+Left / Cmd+Right skip, Cmd+Up / Cmd+Down change the volume, Cmd+F focuses search, Cmd+1 to Cmd+4 switch between Home, Search, Library and Queue, Cmd+R refreshes the page, Cmd+K opens the palette. Cmd+Q closes the window and the music keeps playing; Option+Cmd+Q ("Quit and Stop Music") stops the player too.
 - **Home and Library:** the window opens on Home, YouTube Music's public shelves. A track card plays its shelf from that track and offers Undo like a search result; a playlist or album card opens its tracks (Play, Add to Queue, and Cmd+[ or the back control to return where you were). Library lists your playlists once you sign in: the Library page shows the device code with Copy Code, Open and Cancel while a sign-in waits, and "Sign Out" asks first. The palette has Sign in to Google and Sign out of Google while they apply.
-- **CLI:** `requiem --connect`, then `help`. Commands: `search <query>`, `home`, `library`, `open <n>`, `play <n>`, `add <n>`, `play-track <json>`, `add-track <json>`, `queue`, `jump <n>`, `remove <n>`, `move <from> <to>`, `clear`, `next`, `prev`, `pause`, `resume`, `toggle`, `seek <secs|+secs|-secs>`, `vol <0-100>`, `status`, `signin`, `signout`, `account`, `shutdown-daemon`, `quit`. `home` and `library` print numbered items under each shelf, numbered across shelves; `open <n>` lists the tracks of playlist or album n. `play <n>`, `add <n>` and `open <n>` take n from whichever listing printed last: search results, a browse page or an opened playlist. `--script <file>` runs commands from a file; `--script -` reads them from stdin.
+- **CLI:** `requiem --connect`, then `help`. Commands: `search <query>`, `home`, `library`, `open <n>`, `play <n>`, `add <n>`, `play-track <json>`, `add-track <json>`, `queue`, `jump <n>`, `remove <n>`, `move <from> <to>`, `clear`, `next`, `prev`, `pause`, `resume`, `toggle`, `seek <secs|+secs|-secs>`, `vol <0-100>`, `status`, `signin`, `signout`, `account`, `update`, `update check`, `update install`, `shutdown-daemon`, `quit`. `home` and `library` print numbered items under each shelf, numbered across shelves; `open <n>` lists the tracks of playlist or album n. `play <n>`, `add <n>` and `open <n>` take n from whichever listing printed last: search results, a browse page or an opened playlist. `--script <file>` runs commands from a file; `--script -` reads them from stdin. `requiem update`, `requiem update check` and `requiem update install` run one update command against the player (see [Updates](#updates)).
 
 ### JSON output
 
@@ -65,7 +65,9 @@ The bundle embeds Homebrew's libopus. Its minimum macOS version is whatever that
 | `volume` | `volume` |
 | `track_failed` | `title`, `error` |
 | `provider_broken` | `detail` |
-| `ack` | `command`: a command was sent (search, home, library, open, play, add, play-track, add-track, jump, remove, move, clear, next, prev, pause, resume, toggle, seek, vol, signin, signout, shutdown-daemon) |
+| `update` | `current`, `auto` (bool), `state`: `idle`, `checking`, `up_to_date`, `downloading` (with `version`), `ready` (with `version`), `failed` (with `version`, `reason`), `error` (with `reason`: a failed check, or a failed install that is tried again), `not_updatable` (with `reason`) or `unsupported` |
+| `update_downloading`, `update_restarting` | `version` |
+| `ack` | `command`: a command was sent (search, home, library, open, play, add, play-track, add-track, jump, remove, move, clear, next, prev, pause, resume, toggle, seek, vol, signin, signout, update check, update install, shutdown-daemon) |
 | `mark` | `name`, `unix_millis` |
 | `help` | `text` |
 | `error` | `message` |
@@ -94,7 +96,7 @@ Playback stays anonymous whether or not you are signed in.
 
 ## Snapshots
 
-`requiem-gui --demo --snapshot out.png --view <view>` renders a view from fixed fake data without showing a window: `home`, `search`, `library`, `queue`, `palette`, `collection`, `library-signed-out`, `library-unavailable`, `signin`, `empty`, `disconnected`, `toast` or `out-of-date`. For `home` and `library`, `--snapshot` also works without `--demo`: it asks the running player (starting one if needed), waits up to 20 s for the page and its covers, then writes the PNG, exiting 1 if the page fails to load.
+`requiem-gui --demo --snapshot out.png --view <view>` renders a view from fixed fake data without showing a window: `home`, `search`, `library`, `queue`, `palette`, `collection`, `library-signed-out`, `library-unavailable`, `signin`, `empty`, `disconnected`, `toast`, `out-of-date`, `update-ready`, `update-failed`, `not-updatable` or `up-to-date`. For `home` and `library`, `--snapshot` also works without `--demo`: it asks the running player (starting one if needed), waits up to 20 s for the page and its covers, then writes the PNG, exiting 1 if the page fails to load.
 
 ## Footprint
 
@@ -106,6 +108,12 @@ Measured on an Apple Silicon Mac while playing (physical footprint):
 Home loaded, a window that is never shown (`requiem-gui --snapshot out.png --view home`) peaked at about 20 MiB. Home keeps only the cards near the visible area, and artwork stays within its 8 MiB cache.
 
 `scripts/perf-check.sh [--daemon]` re-runs the gate (it plays audio at 5% volume).
+
+## Updates
+
+On macOS, Requiem updates itself from signed GitHub releases when it runs from Applications, or another folder you can write to. A downloaded update installs when the player next quits, or at once through **Restart to Update** in the window or the menu-bar menu. **Check for Updates…** and **Check for Updates Automatically** are in the Requiem menu; `requiem update` shows the status. Design: [`docs/self-update-design.md`](docs/self-update-design.md).
+
+The player fetches two small files from github.com at most once every six hours, to learn whether a newer release exists, and downloads it from GitHub when there is one. GitHub sees your IP address, the time and the file fetched. Nothing else is sent. Turning off Check for Updates Automatically stops these requests.
 
 ## Notes
 

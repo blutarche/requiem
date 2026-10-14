@@ -23,9 +23,10 @@ use objc2::runtime::{AnyObject, NSObject, NSObjectProtocol, ProtocolObject, Sel}
 use objc2::{ClassType, MainThreadOnly, define_class, msg_send, sel};
 use objc2_app_kit::{
     NSAppearance, NSAppearanceNameDarkAqua, NSApplication, NSApplicationActivationPolicy,
-    NSApplicationDelegate, NSBackingStoreType, NSButton, NSControl, NSControlTextEditingDelegate,
-    NSEvent, NSEventMask, NSEventModifierFlags, NSMenu, NSMenuItem, NSResponder, NSText,
-    NSTextFieldDelegate, NSTextView, NSWindow, NSWindowDelegate, NSWindowStyleMask,
+    NSApplicationDelegate, NSBackingStoreType, NSButton, NSControl, NSControlStateValueOff,
+    NSControlStateValueOn, NSControlTextEditingDelegate, NSEvent, NSEventMask,
+    NSEventModifierFlags, NSMenu, NSMenuItem, NSResponder, NSText, NSTextFieldDelegate, NSTextView,
+    NSWindow, NSWindowDelegate, NSWindowStyleMask,
 };
 use objc2_foundation::{MainThreadMarker, NSNotification, NSRect, NSString};
 
@@ -282,6 +283,21 @@ define_class!(
             ui::with(|ui| ui.edit_queue(QueueEdit::Clear));
         }
 
+        #[unsafe(method(checkForUpdates:))]
+        fn check_for_updates(&self, _sender: Option<&AnyObject>) {
+            ui::with(|ui| ui.check_for_updates());
+        }
+
+        #[unsafe(method(toggleAutoUpdate:))]
+        fn toggle_auto_update(&self, _sender: Option<&AnyObject>) {
+            ui::with(|ui| ui.toggle_auto_update());
+        }
+
+        #[unsafe(method(restartToUpdate:))]
+        fn restart_to_update(&self, _sender: Option<&AnyObject>) {
+            ui::with(|ui| ui.restart_to_update());
+        }
+
         #[unsafe(method(validateMenuItem:))]
         fn validate_menu_item(&self, item: &NSMenuItem) -> bool {
             ui::with(|ui| validate(ui, item)).unwrap_or(true)
@@ -407,6 +423,16 @@ fn validate(ui: &Ui, item: &NSMenuItem) -> bool {
         ui.can_go_back()
     } else if action == sel!(quitAndStop:) {
         ui.can_stop_player()
+    } else if action == sel!(checkForUpdates:) {
+        ui.can_check_for_updates()
+    } else if action == sel!(toggleAutoUpdate:) {
+        let auto = ui.auto_update();
+        item.setState(if auto == Some(true) {
+            NSControlStateValueOn
+        } else {
+            NSControlStateValueOff
+        });
+        auto.is_some()
     } else {
         true
     }
@@ -608,36 +634,51 @@ fn menu_bar(mtm: MainThreadMarker, target: &Delegate) -> (Retained<NSMenu>, Reta
         bar.addItem(&top);
         m
     };
-    submenu(
-        "Requiem",
-        vec![
+    let mut app_items = vec![item(
+        "About Requiem",
+        Some(sel!(orderFrontStandardAboutPanel:)),
+        "",
+        false,
+    )];
+    if backend::shows_updates() {
+        app_items.extend([
             item(
-                "About Requiem",
-                Some(sel!(orderFrontStandardAboutPanel:)),
+                "Check for Updates\u{2026}",
+                Some(sel!(checkForUpdates:)),
                 "",
+                true,
+            ),
+            // Checked or not by `validate`.
+            item(
+                "Check for Updates Automatically",
+                Some(sel!(toggleAutoUpdate:)),
+                "",
+                true,
+            ),
+        ]);
+    }
+    app_items.extend([
+        sep(),
+        item("Hide Requiem", Some(sel!(hide:)), "h", false),
+        with_mods(
+            item(
+                "Hide Others",
+                Some(sel!(hideOtherApplications:)),
+                "h",
                 false,
             ),
-            sep(),
-            item("Hide Requiem", Some(sel!(hide:)), "h", false),
-            with_mods(
-                item(
-                    "Hide Others",
-                    Some(sel!(hideOtherApplications:)),
-                    "h",
-                    false,
-                ),
-                cmd_opt,
-            ),
-            item("Show All", Some(sel!(unhideAllApplications:)), "", false),
-            sep(),
-            // Quitting the window leaves the music playing; this one stops the player too.
-            with_mods(
-                item("Quit and Stop Music", Some(sel!(quitAndStop:)), "q", true),
-                cmd_opt,
-            ),
-            item("Quit Requiem", Some(sel!(terminate:)), "q", false),
-        ],
-    );
+            cmd_opt,
+        ),
+        item("Show All", Some(sel!(unhideAllApplications:)), "", false),
+        sep(),
+        // Quitting the window leaves the music playing; this one stops the player too.
+        with_mods(
+            item("Quit and Stop Music", Some(sel!(quitAndStop:)), "q", true),
+            cmd_opt,
+        ),
+        item("Quit Requiem", Some(sel!(terminate:)), "q", false),
+    ]);
+    submenu("Requiem", app_items);
     submenu(
         "Edit",
         vec![
@@ -821,9 +862,15 @@ pub fn run(args: Args) {
         View::Queue => ui.show(AppView::Queue),
         View::NowPlaying | View::NowPlayingEmpty | View::NowPlayingLast => ui.show_now_playing(),
         View::Palette => ui.open_palette(),
-        View::Search | View::Empty | View::Disconnected | View::Toast | View::OutOfDate => {
-            ui.show(AppView::Search)
-        }
+        View::Search
+        | View::Empty
+        | View::Disconnected
+        | View::Toast
+        | View::OutOfDate
+        | View::UpdateReady
+        | View::UpdateFailed
+        | View::NotUpdatable
+        | View::UpToDate => ui.show(AppView::Search),
     }
 
     app.setDelegate(Some(ProtocolObject::from_ref(&*delegate)));

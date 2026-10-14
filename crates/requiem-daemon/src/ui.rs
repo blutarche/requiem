@@ -5,13 +5,20 @@ use std::thread;
 
 use crossbeam_channel::{Receiver, Sender, bounded, select, unbounded};
 use requiem_core::{Command, Event, SeekTarget};
-use requiem_ipc::Server;
+use requiem_ipc::{Server, UpdateRequest, UpdateState, UpdateStatus};
 use requiem_macos::{UiAction, UiUpdate, ViewTracker};
 
 /// Runs the platform UI on the main thread until `stop` fires. On macOS that is the status
 /// item and media keys; on Linux the tray icon and MPRIS, which run on their own threads
-/// while this only waits. `stop_tx` is how the UI asks to quit.
-pub fn run_platform(stop_tx: &Sender<()>, stop: Receiver<()>, server: &Server) {
+/// while this only waits. `stop_tx` is how the UI asks to quit. Each of `statuses` goes to
+/// clients and the menu; the menu's update items call `on_update`.
+pub fn run_platform(
+    stop_tx: &Sender<()>,
+    stop: Receiver<()>,
+    server: &Server,
+    statuses: Receiver<UpdateStatus>,
+    on_update: &(dyn Fn(UpdateRequest) + Sync),
+) {
     thread::scope(|scope| {
         let (updates_tx, updates) = unbounded();
         let (actions_tx, actions) = unbounded();
@@ -56,6 +63,24 @@ pub fn run_platform(stop_tx: &Sender<()>, stop: Receiver<()>, server: &Server) {
                             }
                             Err(_) => return,
                         },
+                        recv(statuses) -> status => {
+                            let Ok(status) = status else { return };
+                            let update = UiUpdate::Updates {
+                                check: !matches!(
+                                    status.state,
+                                    UpdateState::NotUpdatable { .. } | UpdateState::Unsupported
+                                ),
+                                ready: match &status.state {
+                                    UpdateState::Ready { version } => Some(version.clone()),
+                                    _ => None,
+                                },
+                            };
+                            server.set_update(status);
+                            if updates_tx.send(update).is_err() {
+                                return;
+                            }
+                            requiem_macos::wake();
+                        }
                         recv(done) -> _ => return,
                     }
                 }
@@ -76,6 +101,8 @@ pub fn run_platform(stop_tx: &Sender<()>, stop: Receiver<()>, server: &Server) {
                                 launch_gui();
                             }
                         }
+                        UiAction::CheckForUpdates => on_update(UpdateRequest::Check),
+                        UiAction::RestartToUpdate => on_update(UpdateRequest::Install),
                         UiAction::Quit => crate::request_stop(stop_tx),
                     }
                 }
@@ -99,7 +126,7 @@ pub fn run_platform(stop_tx: &Sender<()>, stop: Receiver<()>, server: &Server) {
 
 /// The app that holds `exe` as a helper (`X.app/Contents/Helpers/requiemd.app/...`), which is
 /// the GUI app to `open`. `None` for dev builds, which have no outer app.
-fn gui_app(exe: &Path) -> Option<&Path> {
+pub(crate) fn gui_app(exe: &Path) -> Option<&Path> {
     exe.ancestors().find(|dir| {
         dir.extension().is_some_and(|e| e == "app") && exe.starts_with(dir.join("Contents/Helpers"))
     })
@@ -113,17 +140,25 @@ fn launch_gui() {
             return;
         }
     };
-    let child = match gui_app(&exe) {
-        Some(app) => Process::new("/usr/bin/open").arg(app).spawn(),
+    match gui_app(&exe) {
+        Some(app) => open_app(app),
         None => {
             let gui: PathBuf = exe.with_file_name("requiem-gui");
             if !gui.exists() {
                 eprintln!("requiemd: {} not found", gui.display());
                 return;
             }
-            spawn_detached(&gui)
+            launched(spawn_detached(&gui));
         }
-    };
+    }
+}
+
+/// Opens `app` by its exact path.
+pub(crate) fn open_app(app: &Path) {
+    launched(Process::new("/usr/bin/open").arg(app).spawn());
+}
+
+fn launched(child: std::io::Result<Child>) {
     match child {
         Ok(child) => reap(child),
         Err(e) => eprintln!("requiemd: cannot launch the GUI: {e}"),

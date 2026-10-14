@@ -13,7 +13,8 @@ usage: requiem-gui [--demo] [--smoke] [--snapshot <png>] [--view <view>]
   --view <view>      the view shown at start: home (default), search, library, queue or
                      palette; with --demo also home-scrolled, home-shelf-paged, collection,
                      now-playing, now-playing-empty, now-playing-last, library-signed-out,
-                     library-unavailable, signin, empty, disconnected, toast or out-of-date";
+                     library-unavailable, signin, empty, disconnected, toast, out-of-date,
+                     update-ready, update-failed, not-updatable or up-to-date";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum View {
@@ -50,10 +51,18 @@ pub enum View {
     Toast,
     /// Demo only: the stale-daemon banner.
     OutOfDate,
+    /// Demo only: the Restart to Update banner.
+    UpdateReady,
+    /// Demo only: the failed-update banner.
+    UpdateFailed,
+    /// Demo only: the banner of a copy that can't update itself.
+    NotUpdatable,
+    /// Demo only: the answer to Check for Updates… when there is nothing new.
+    UpToDate,
 }
 
 impl View {
-    const NAMES: [(&str, View); 18] = [
+    const NAMES: [(&str, View); 22] = [
         ("home", View::Home),
         ("search", View::Search),
         ("library", View::Library),
@@ -72,6 +81,10 @@ impl View {
         ("disconnected", View::Disconnected),
         ("toast", View::Toast),
         ("out-of-date", View::OutOfDate),
+        ("update-ready", View::UpdateReady),
+        ("update-failed", View::UpdateFailed),
+        ("not-updatable", View::NotUpdatable),
+        ("up-to-date", View::UpToDate),
     ];
 
     /// Whether the view is a staged demo state rather than a place in the app.
@@ -239,6 +252,10 @@ mod tests {
             ("disconnected", View::Disconnected),
             ("toast", View::Toast),
             ("out-of-date", View::OutOfDate),
+            ("update-ready", View::UpdateReady),
+            ("update-failed", View::UpdateFailed),
+            ("not-updatable", View::NotUpdatable),
+            ("up-to-date", View::UpToDate),
         ] {
             assert_eq!(p(&["--demo", "--view", name]).unwrap().view, view);
             assert_eq!(p(&["--smoke", "--view", name]).unwrap().view, view);

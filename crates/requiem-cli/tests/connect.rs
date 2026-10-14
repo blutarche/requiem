@@ -8,12 +8,14 @@ use std::sync::{Arc, Mutex, MutexGuard, Once, PoisonError};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use crossbeam_channel::{Receiver, bounded};
-use requiem_cli::app::{self, App, Flow, Player};
+use crossbeam_channel::{Receiver, bounded, unbounded};
+use requiem_cli::app::{self, App, Flow, Format, Player};
 use requiem_cli::remote::RemotePlayer;
 use requiem_core::testing::{FakeEngineHandle, FakeProvider, Step};
 use requiem_core::{EngineEvent, ProviderId, Session, SessionConfig, Track, TrackId};
-use requiem_ipc::{Client, PROTOCOL, Role, Server, ServerHooks};
+use requiem_ipc::{
+    Client, PROTOCOL, Role, Server, ServerHooks, UpdateRequest, UpdateState, UpdateStatus,
+};
 
 static SERIAL: Mutex<()> = Mutex::new(());
 static DIR: Once = Once::new();
@@ -59,6 +61,7 @@ struct Daemon {
     provider: Arc<FakeProvider>,
     engine: FakeEngineHandle,
     shutdowns: Receiver<()>,
+    updates: Receiver<UpdateRequest>,
 }
 
 fn daemon() -> Daemon {
@@ -70,18 +73,53 @@ fn daemon() -> Daemon {
         SessionConfig::default(),
     );
     let (tx, shutdowns) = bounded(1);
+    let (update_tx, updates) = unbounded();
     let hooks = ServerHooks {
         on_shutdown: Box::new(move || {
             let _ = tx.try_send(());
         }),
+        on_update: Box::new(move |req| {
+            let _ = update_tx.send(req);
+        }),
     };
-    let server = Server::start(session, hooks).expect("start server");
+    let server = Server::start(session, hooks, status(UpdateState::Idle)).expect("start server");
     Daemon {
         server,
         provider,
         engine,
         shutdowns,
+        updates,
     }
+}
+
+fn status(state: UpdateState) -> UpdateStatus {
+    UpdateStatus {
+        current: "0.1.0".into(),
+        auto: true,
+        state,
+    }
+}
+
+fn ready() -> UpdateState {
+    UpdateState::Ready {
+        version: "0.2.0".into(),
+    }
+}
+
+/// Runs `script` against the daemon while `answer` plays the daemon's updater.
+fn run_update(d: Daemon, script: &str, answer: impl FnOnce(Daemon) + Send) -> (u8, String) {
+    let player = connect();
+    let out = Buf::default();
+    let code = thread::scope(|scope| {
+        scope.spawn(move || answer(d));
+        app::run(&player, Cursor::new(script.to_owned()), out.clone(), true).unwrap()
+    });
+    (code, out.text())
+}
+
+fn expect_request(d: &Daemon, want: UpdateRequest) {
+    let got = d.updates.recv_timeout(Duration::from_secs(5)).unwrap();
+    assert_eq!(got, want);
 }
 
 fn connect() -> RemotePlayer {
@@ -254,5 +292,146 @@ fn disconnect_mid_script_exits_2() {
         text.contains("error: player disconnected: daemon closed the connection\n"),
         "{text}"
     );
+    assert!(!text.contains("status:"), "{text}");
+}
+
+#[test]
+fn update_prints_the_status() {
+    let _g = serial();
+    let (code, text) = run_update(daemon(), "update\n", |d| d.server.shutdown());
+    assert_eq!(code, 0);
+    assert!(
+        text.contains("Requiem 0.1.0\nautomatic checks: on\n"),
+        "{text}"
+    );
+}
+
+#[test]
+fn requiem_update_prints_its_answer_alone() {
+    let _g = serial();
+    let d = daemon();
+    let player = connect();
+    let out = Buf::default();
+    let code = app::run_update(&player, "update", out.clone(), Format::Text);
+    d.server.shutdown();
+    assert_eq!(code, 0);
+    assert_eq!(out.text(), "Requiem 0.1.0\nautomatic checks: on\n");
+}
+
+#[test]
+fn requiem_update_json_prints_its_answer_alone() {
+    let _g = serial();
+    let d = daemon();
+    let player = connect();
+    let out = Buf::default();
+    let code = app::run_update(&player, "update", out.clone(), Format::Json);
+    d.server.shutdown();
+    assert_eq!(code, 0);
+    let text = out.text();
+    let lines: Vec<&str> = text.lines().collect();
+    assert_eq!(lines.len(), 1, "{text}");
+    let json: serde_json::Value = serde_json::from_str(lines[0]).unwrap();
+    assert_eq!(json["type"], "update", "{text}");
+}
+
+#[test]
+fn update_check_waits_through_the_download_for_the_result() {
+    let _g = serial();
+    let (code, text) = run_update(daemon(), "update check\n", |d| {
+        expect_request(&d, UpdateRequest::Check);
+        d.server.set_update(status(UpdateState::Checking));
+        d.server.set_update(status(UpdateState::Downloading {
+            version: "0.2.0".into(),
+        }));
+        d.server.set_update(status(ready()));
+        thread::sleep(Duration::from_millis(300));
+        d.server.shutdown();
+    });
+    assert_eq!(code, 0);
+    assert!(text.contains("downloading Requiem 0.2.0\n"), "{text}");
+    assert!(text.contains("Requiem 0.2.0 is ready."), "{text}");
+}
+
+#[test]
+fn update_check_reports_a_failed_check() {
+    let _g = serial();
+    let (code, text) = run_update(daemon(), "update check\n", |d| {
+        expect_request(&d, UpdateRequest::Check);
+        d.server.set_update(status(UpdateState::Checking));
+        d.server.set_update(status(UpdateState::Error {
+            reason: "the update check failed: offline".into(),
+        }));
+        thread::sleep(Duration::from_millis(300));
+        d.server.shutdown();
+    });
+    assert_eq!(code, 1);
+    assert!(
+        text.contains("Requiem 0.1.0: the update check failed: offline\n"),
+        "{text}"
+    );
+}
+
+#[test]
+fn update_json_names_an_error_and_its_reason() {
+    let _g = serial();
+    let d = daemon();
+    d.server.set_update(status(UpdateState::Error {
+        reason: "the update check failed: offline".into(),
+    }));
+    let player = connect();
+    let out = Buf::default();
+    let code = app::run_update(&player, "update", out.clone(), Format::Json);
+    d.server.shutdown();
+    assert_eq!(code, 0);
+    let json: serde_json::Value = serde_json::from_str(out.text().trim()).unwrap();
+    assert_eq!(
+        (&json["state"], &json["reason"]),
+        (
+            &serde_json::json!("error"),
+            &serde_json::json!("the update check failed: offline")
+        )
+    );
+}
+
+#[test]
+fn update_check_prints_an_ignored_request_as_the_status() {
+    let _g = serial();
+    let (code, text) = run_update(daemon(), "update check\n", |d| {
+        expect_request(&d, UpdateRequest::Check);
+        d.server.set_update(status(UpdateState::UpToDate));
+        thread::sleep(Duration::from_millis(300));
+        d.server.shutdown();
+    });
+    assert_eq!(code, 0);
+    assert!(text.contains("Requiem 0.1.0 is up to date."), "{text}");
+}
+
+#[test]
+fn update_install_without_a_ready_update_fails() {
+    let _g = serial();
+    let (code, text) = run_update(daemon(), "update install\n", |d| {
+        expect_request(&d, UpdateRequest::Install);
+        d.server.set_update(status(UpdateState::Idle));
+        thread::sleep(Duration::from_millis(300));
+        d.server.shutdown();
+    });
+    assert_eq!(code, 1);
+    assert!(
+        text.contains("error: no update is ready to install"),
+        "{text}"
+    );
+}
+
+#[test]
+fn update_install_ends_when_the_player_stops_to_restart() {
+    let _g = serial();
+    let d = daemon();
+    d.server.set_update(status(ready()));
+    let (code, text) = run_update(d, "update install\nstatus\n", |d| {
+        expect_request(&d, UpdateRequest::Install);
+        d.server.shutdown();
+    });
+    assert_eq!(code, 0);
+    assert!(text.contains("Requiem is restarting on 0.2.0\n"), "{text}");
     assert!(!text.contains("status:"), "{text}");
 }

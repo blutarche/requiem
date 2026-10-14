@@ -1172,6 +1172,8 @@ dependencies = [
  "requiem-linux",
  "requiem-macos",
  "requiem-provider-ytmusic",
+ "requiem-update",
+ "semver",
  "serde",
  "serde_json",
 ]
@@ -1239,6 +1241,20 @@ name = "requiem-provider-ytmusic"
 version = "0.1.0"
 dependencies = [
  "requiem-core",
+ "serde",
+ "serde_json",
+ "ureq",
+]
+
+[[package]]
+name = "requiem-update"
+version = "0.1.0"
+dependencies = [
+ "libc",
+ "objc2",
+ "objc2-foundation",
+ "ring",
+ "semver",
  "serde",
  "serde_json",
  "ureq",

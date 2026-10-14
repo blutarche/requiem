@@ -15,6 +15,7 @@ mod live_tests;
 #[cfg(test)]
 mod testing;
 
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use requiem_core::{
@@ -49,6 +50,16 @@ pub struct YtMusicProvider {
     client: Arc<InnertubeClient>,
     google: Google,
     prefer_aac: bool,
+}
+
+/// The Google sign-in file [`YtMusicProvider::new`] reads, when there is a usable location.
+pub fn token_file() -> Option<PathBuf> {
+    GoogleFiles::from_env().token
+}
+
+/// Parses the Google sign-in file at `path` without changing it; a missing file passes.
+pub fn check_token_file(path: &Path) -> Result<(), String> {
+    google::check_token(path)
 }
 
 impl YtMusicProvider {

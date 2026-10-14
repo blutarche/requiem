@@ -3,7 +3,7 @@
 
 use std::env;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process;
 use std::thread;
 use std::time::{Duration, Instant};
@@ -14,7 +14,10 @@ use requiem_core::{
     AccountState, Command, EngineEvent, EnqueueMode, Event, PlayState, ProviderId, Session,
     SessionConfig, Track, TrackId,
 };
-use requiem_ipc::{Client, ClientCounts, Incoming, Role, Server, ServerHooks, socket_path};
+use requiem_ipc::{
+    Client, ClientCounts, Incoming, Role, Server, ServerHooks, UpdateState, UpdateStatus,
+    socket_path,
+};
 
 const WAIT: Duration = Duration::from_secs(5);
 const SECS: fn(u64) -> Duration = Duration::from_secs;
@@ -48,6 +51,22 @@ fn take(rx: &Receiver<Incoming>, n: usize) -> Vec<Event> {
             other => panic!("expected an event, got {other:?}"),
         })
         .collect()
+}
+
+fn idle_update() -> UpdateStatus {
+    UpdateStatus {
+        current: "test".into(),
+        auto: true,
+        state: UpdateState::Idle,
+    }
+}
+
+/// Every client gets the update status right after `Welcome`.
+fn connect(path: &Path, role: Role) -> (Client, Receiver<Incoming>) {
+    let (client, rx) = Client::connect(path, role).unwrap();
+    let first = rx.recv_timeout(WAIT).expect("timed out");
+    assert_eq!(first, Incoming::Update(idle_update()));
+    (client, rx)
 }
 
 fn wait_disconnected(rx: &Receiver<Incoming>) {
@@ -102,14 +121,15 @@ fn daemon_flow() {
         on_shutdown: Box::new(move || {
             let _ = quit_tx.send(());
         }),
+        on_update: Box::new(|_| {}),
     };
-    let server = Server::start(session, hooks).unwrap();
+    let server = Server::start(session, hooks, idle_update()).unwrap();
 
     let account = Event::Account {
         provider: ProviderId("fake".into()),
         state: AccountState::SignedOut,
     };
-    let (gui, gui_rx) = Client::connect(&path, Role::Gui).unwrap();
+    let (gui, gui_rx) = connect(&path, Role::Gui);
     assert_eq!(
         take(&gui_rx, 4),
         [
@@ -178,7 +198,7 @@ fn daemon_flow() {
     );
 
     // A client connecting later rebuilds the same state from the snapshot.
-    let (cli, cli_rx) = Client::connect(&path, Role::Cli).unwrap();
+    let (cli, cli_rx) = connect(&path, Role::Cli);
     let snapshot = |state| {
         vec![
             Event::QueueChanged {
@@ -204,7 +224,7 @@ fn daemon_flow() {
     drop(gui);
     wait_disconnected(&gui_rx);
     wait_clients(&server, ClientCounts { gui: 0, cli: 1 });
-    let (_gui, gui_rx) = Client::connect(&path, Role::Gui).unwrap();
+    let (_gui, gui_rx) = connect(&path, Role::Gui);
     assert_eq!(take(&gui_rx, 6), snapshot(PlayState::Paused));
 
     // The CLI's `shutdown-daemon`.

@@ -1,6 +1,6 @@
 use std::process::ExitCode;
 use std::sync::{Arc, Mutex, OnceLock, PoisonError};
-use std::thread;
+use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 use crossbeam_channel::{Receiver, RecvTimeoutError, Sender, bounded};
@@ -12,8 +12,11 @@ use requiem_ipc::{ServeError, Server, ServerHooks};
 use requiem_provider_ytmusic::{YtMusicOptions, YtMusicProvider};
 
 use idle::{Activity, IdleTimer};
+use update::Updater;
 
 const USAGE: &str = "usage: requiemd [--prefer-aac] [--help]";
+/// Run by an updating player on a staged copy; see `requiem_update::stage::self_test`.
+const SELF_TEST_ARG: &str = "--update-self-test";
 const DEFAULT_IDLE_EXIT_SECS: u64 = 300;
 const IDLE_POLL: Duration = Duration::from_secs(5);
 
@@ -32,6 +35,11 @@ macro_rules! debug {
 mod idle;
 mod persist;
 mod ui;
+#[cfg(target_os = "macos")]
+mod update;
+#[cfg(not(target_os = "macos"))]
+#[path = "update_unsupported.rs"]
+mod update;
 
 fn idle_limit() -> Duration {
     let secs = std::env::var("REQUIEM_IDLE_EXIT_SECS")
@@ -42,6 +50,17 @@ fn idle_limit() -> Duration {
 }
 
 fn main() -> ExitCode {
+    if std::env::args().nth(1).as_deref() == Some(SELF_TEST_ARG) {
+        return self_test();
+    }
+    // Lets the live update test make a new version fail to start after the swap.
+    #[cfg(debug_assertions)]
+    if std::env::var("REQUIEM_TEST_FAIL_START_VERSION")
+        .is_ok_and(|v| v == env!("CARGO_PKG_VERSION"))
+    {
+        eprintln!("requiemd: REQUIEM_TEST_FAIL_START_VERSION is this version; not starting");
+        return ExitCode::from(1);
+    }
     let mut prefer_aac = false;
     for a in std::env::args().skip(1) {
         match a.as_str() {
@@ -108,10 +127,14 @@ fn main() -> ExitCode {
     // `Server::start`.
     let (stop_tx, stop_rx) = bounded::<()>(1);
     let hook_tx = stop_tx.clone();
+    let update_tx = stop_tx.clone();
+    let (updater, statuses) = Updater::start(move || request_stop(&update_tx));
+    let hook_updater = updater.clone();
     let hooks = ServerHooks {
         on_shutdown: Box::new(move || request_stop(&hook_tx)),
+        on_update: Box::new(move |req| hook_updater.request(req)),
     };
-    let server = match Server::start(session, hooks) {
+    let server = match Server::start(session, hooks, updater.status()) {
         Ok(s) => s,
         Err(ServeError::AlreadyRunning) => {
             eprintln!("requiemd: already running");
@@ -142,16 +165,68 @@ fn main() -> ExitCode {
     let (done_tx, done_rx) = bounded::<()>(0);
     thread::scope(|scope| {
         scope.spawn(|| idle_exit(&server, &activity, idle_limit(), &stop_tx, &done_rx));
-        ui::run_platform(&stop_tx, stop_rx, &server);
+        let on_update = |req| updater.request(req);
+        ui::run_platform(&stop_tx, stop_rx, &server, statuses, &on_update);
         drop(done_tx);
     });
     debug!("shutting down");
-    server.shutdown();
-    // Shutting the Session down drops its sink and so closes the writer's channel.
-    if let Some(writer) = writer {
-        let _ = writer.join();
-    }
+    shut_down(server, writer, &updater);
     ExitCode::SUCCESS
+}
+
+/// `requiemd --update-self-test`: reads, without changing, the files a new version must
+/// read. Binds no socket, opens no audio device and writes nothing.
+fn self_test() -> ExitCode {
+    let mut ok = true;
+    if let Some(path) = persist::state_path()
+        && let Err(e) = persist::read(&path)
+    {
+        eprintln!("requiemd: {}: {e}", path.display());
+        ok = false;
+    }
+    if let Some(path) = requiem_provider_ytmusic::token_file()
+        && let Err(e) = requiem_provider_ytmusic::check_token_file(&path)
+    {
+        eprintln!("requiemd: {e}");
+        ok = false;
+    }
+    if ok {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::from(1)
+    }
+}
+
+/// Stops serving, waits for the state writer, then installs a ready update.
+fn shut_down(server: Server, writer: Option<JoinHandle<()>>, updater: &Updater) {
+    // Shutting the Session down drops its sink and so closes the writer's channel.
+    let join = |writer: Option<JoinHandle<()>>| {
+        if let Some(writer) = writer {
+            let _ = writer.join();
+        }
+    };
+    #[cfg(target_os = "macos")]
+    match updater.finish() {
+        Some(update::Install::Restart(ready)) => {
+            let gui = server.clients().gui > 0;
+            let instance = server.shutdown_keeping_lock();
+            join(writer);
+            updater.restart(ready, instance, gui);
+        }
+        finished => {
+            server.shutdown();
+            join(writer);
+            if let Some(update::Install::AtExit(ready)) = finished {
+                updater.install_at_exit(ready);
+            }
+        }
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = updater;
+        server.shutdown();
+        join(writer);
+    }
 }
 
 /// Asks the platform UI to return. The macOS loop sees `stop` only when woken.

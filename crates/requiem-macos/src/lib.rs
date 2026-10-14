@@ -44,6 +44,8 @@ pub enum UiAction {
     Seek(Duration),
     SetVolume(u8),
     OpenGui,
+    CheckForUpdates,
+    RestartToUpdate,
     Quit,
 }
 
@@ -55,6 +57,12 @@ pub enum UiUpdate {
     /// The engine's position; send it only while [`wants_positions`].
     Position(Duration),
     Volume(u8),
+    /// Whether the menu offers **Check for Updates…**, and the version **Restart to Update**
+    /// installs, if one is ready.
+    Updates {
+        check: bool,
+        ready: Option<String>,
+    },
 }
 
 /// Set while the mini player is open.

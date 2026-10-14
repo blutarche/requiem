@@ -11,7 +11,7 @@ mod sys;
 #[cfg(test)]
 mod tests;
 
-pub use client::{Client, Incoming};
-pub use path::{socket_dir, socket_path};
-pub use proto::{ClientMsg, PROTOCOL, Role, ServerMsg};
-pub use server::{ClientCounts, ServeError, Server, ServerHooks};
+pub use client::{Client, Incoming, spawn_daemon};
+pub use path::{log_path, socket_dir, socket_path};
+pub use proto::{ClientMsg, PROTOCOL, Role, ServerMsg, UpdateState, UpdateStatus};
+pub use server::{ClientCounts, ServeError, Server, ServerHooks, UpdateRequest};

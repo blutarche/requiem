@@ -12,9 +12,9 @@ path = "src/main.rs"
 
 [dependencies]
 requiem-core.workspace = true
+requiem-ipc.workspace = true
 
 [target.'cfg(target_os = "macos")'.dependencies]
-requiem-ipc.workspace = true
 requiem-macos.workspace = true
 crossbeam-channel.workspace = true
 objc2 = "0.6.5"

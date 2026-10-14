@@ -1,5 +1,6 @@
-//! `Client::connect_or_spawn` against a fake daemon: this test binary itself, re-run with
-//! `FAKE_DAEMON` set, serves a `Session` over fakes and writes what it saw to daemon.log.
+//! `Client::connect_or_spawn` and `Client::connect_spawned` against a fake daemon: this test
+//! binary itself, re-run with `FAKE_DAEMON` set, serves a `Session` over fakes and writes what
+//! it saw to daemon.log.
 
 use std::env;
 use std::fs::{self, File};
@@ -13,7 +14,10 @@ use std::time::{Duration, Instant};
 use crossbeam_channel::{Receiver, bounded};
 use requiem_core::testing::{FakeEngineHandle, FakeProvider};
 use requiem_core::{Command, Event, Session, SessionConfig};
-use requiem_ipc::{Client, Incoming, Role, ServeError, Server, ServerHooks, socket_dir};
+use requiem_ipc::{
+    Client, Incoming, Role, ServeError, Server, ServerHooks, UpdateState, UpdateStatus, socket_dir,
+    spawn_daemon,
+};
 
 const FAKE_DAEMON: &str = "REQUIEM_IPC_TEST_FAKE_DAEMON";
 const WAIT: Duration = Duration::from_secs(10);
@@ -97,6 +101,7 @@ fn run() {
     expect_snapshot(&again_rx);
     assert_eq!(fs::read_to_string(&log).unwrap(), text);
 
+    let first = client.peer_pid().unwrap();
     client.send(Command::Shutdown).unwrap();
     for rx in [&rx, &again_rx] {
         loop {
@@ -108,6 +113,15 @@ fn run() {
         }
     }
     drop(again);
+    gone(first);
+
+    // A daemon started apart from connecting stays the caller's child.
+    let mut child = spawn_daemon(&exe, &dir).unwrap();
+    let (client, rx) = Client::connect_spawned(&mut child, &dir, Role::Cli, WAIT).unwrap();
+    assert_eq!(client.peer_pid().unwrap(), child.id() as i32);
+    expect_snapshot(&rx);
+    client.send(Command::Shutdown).unwrap();
+    assert!(child.wait().unwrap().success());
 
     // A daemon that fails is reported, pointing at the log.
     let fails = ["/usr/bin/false", "/bin/false"]
@@ -121,9 +135,36 @@ fn run() {
     let msg = err.to_string();
     assert!(msg.contains("exited with"), "{msg}");
     assert!(msg.contains(&*log.to_string_lossy()), "{msg}");
+    let mut child = spawn_daemon(fails, &dir).unwrap();
+    let Err(err) = Client::connect_spawned(&mut child, &dir, Role::Cli, WAIT) else {
+        panic!("connected through {}", fails.display());
+    };
+    assert!(err.to_string().contains("exited with"), "{err}");
+}
+
+/// Waits for the daemon with this pid to exit, so the next one can take the lock.
+fn gone(pid: i32) {
+    let deadline = Instant::now() + WAIT;
+    // SAFETY: signal 0 only checks that the process exists.
+    while unsafe { libc::kill(pid, 0) } == 0 {
+        assert!(Instant::now() < deadline, "daemon {pid} never exited");
+        thread::sleep(Duration::from_millis(10));
+    }
+}
+
+fn idle_update() -> UpdateStatus {
+    UpdateStatus {
+        current: "test".into(),
+        auto: true,
+        state: UpdateState::Idle,
+    }
 }
 
 fn expect_snapshot(rx: &Receiver<Incoming>) {
+    assert_eq!(
+        rx.recv_timeout(WAIT).unwrap(),
+        Incoming::Update(idle_update())
+    );
     let first = rx.recv_timeout(WAIT).unwrap();
     assert!(
         matches!(first, Incoming::Event(Event::QueueChanged { .. })),
@@ -154,8 +195,9 @@ fn fake_daemon() {
         on_shutdown: Box::new(move || {
             let _ = quit_tx.try_send(());
         }),
+        on_update: Box::new(|_| {}),
     };
-    let server = match Server::start(session, hooks) {
+    let server = match Server::start(session, hooks, idle_update()) {
         Ok(s) => s,
         Err(ServeError::AlreadyRunning) => {
             println!("already running");
