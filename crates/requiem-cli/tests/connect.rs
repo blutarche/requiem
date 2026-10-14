@@ -319,6 +319,22 @@ fn requiem_update_prints_its_answer_alone() {
 }
 
 #[test]
+fn requiem_update_json_prints_its_answer_alone() {
+    let _g = serial();
+    let d = daemon();
+    let player = connect();
+    let out = Buf::default();
+    let code = app::run_update(&player, "update", out.clone(), Format::Json);
+    d.server.shutdown();
+    assert_eq!(code, 0);
+    let text = out.text();
+    let lines: Vec<&str> = text.lines().collect();
+    assert_eq!(lines.len(), 1, "{text}");
+    let json: serde_json::Value = serde_json::from_str(lines[0]).unwrap();
+    assert_eq!(json["type"], "update", "{text}");
+}
+
+#[test]
 fn update_check_waits_through_the_download_for_the_result() {
     let _g = serial();
     let (code, text) = run_update(daemon(), "update check\n", |d| {
