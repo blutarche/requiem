@@ -1,0 +1,31 @@
+[package]
+name = "requiem-provider-spotify"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+requiem-core.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+libc.workspace = true
+librespot-core.workspace = true
+librespot-audio.workspace = true
+librespot-metadata.workspace = true
+librespot-oauth.workspace = true
+librespot-protocol.workspace = true
+protobuf.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread", "sync", "time", "macros"] }
+futures-util = { workspace = true, features = ["alloc"] }
+log.workspace = true
+
+[dev-dependencies]
+symphonia.workspace = true
+tokio = { workspace = true, features = ["test-util"] }
+
+# Its `main` doubles as the helper, over a stub backend, that the provider under test spawns.
+[[test]]
+name = "helper"
+harness = false
