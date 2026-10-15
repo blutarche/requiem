@@ -86,12 +86,12 @@ enum Msg {
         req: u64,
         result: Result<Vec<Track>, ProviderError>,
     },
-    /// `account` is the provider's state after the browse, which may have signed it out.
+    /// `accounts` are the queried providers' states after the browse, which may have signed it out.
     Browsed {
         req: u64,
         page: Page,
         result: Result<Vec<Shelf>, ProviderError>,
-        account: Option<(ProviderId, AccountState)>,
+        accounts: Vec<(ProviderId, AccountState)>,
     },
     Account {
         provider: ProviderId,
@@ -239,6 +239,53 @@ fn sign_in_error(e: &ProviderError) -> String {
     }
 }
 
+/// Runs `call` on every provider in parallel and waits for all. Results are concatenated in
+/// provider order; a sign-in failure is skipped silently and any other is logged. It fails only
+/// when none succeeded, with the first error that isn't a sign-in error, else a sign-in error.
+fn fan_out<T: Send + 'static>(
+    what: &'static str,
+    providers: Vec<Arc<dyn Provider>>,
+    call: impl Fn(&dyn Provider) -> Result<Vec<T>, ProviderError> + Send + Sync + 'static,
+) -> Result<Vec<T>, ProviderError> {
+    let call = Arc::new(call);
+    let workers: Vec<_> = providers
+        .into_iter()
+        .map(|p| {
+            let call = call.clone();
+            thread::spawn(move || (p.id(), call(p.as_ref())))
+        })
+        .collect();
+    let mut merged = Vec::new();
+    let mut succeeded = false;
+    let mut hard = None;
+    let mut sign_in = None;
+    for worker in workers {
+        let Ok((id, result)) = worker.join() else {
+            eprintln!("requiem: {what} worker panicked");
+            continue;
+        };
+        match result {
+            Ok(items) => {
+                succeeded = true;
+                merged.extend(items);
+            }
+            Err(e @ ProviderError::SignInRequired(_)) => {
+                sign_in.get_or_insert(e);
+            }
+            Err(e) => {
+                eprintln!("requiem: {what} on {} failed: {e}", id.0);
+                hard.get_or_insert(e);
+            }
+        }
+    }
+    if succeeded {
+        return Ok(merged);
+    }
+    Err(hard
+        .or(sign_in)
+        .unwrap_or_else(|| ProviderError::Unplayable("no provider answered".into())))
+}
+
 fn resolve_with_retry(
     provider: &dyn Provider,
     track: &TrackId,
@@ -318,7 +365,7 @@ impl Actor {
                     req,
                     page,
                     result,
-                    account,
+                    accounts,
                 } => {
                     match result {
                         Ok(shelves) => self.emit(Event::BrowseResults { req, page, shelves }),
@@ -328,7 +375,7 @@ impl Actor {
                             error: e.to_string(),
                         }),
                     }
-                    if let Some((provider, state)) = account {
+                    for (provider, state) in accounts {
                         self.set_account(provider, state, false);
                     }
                 }
@@ -578,17 +625,18 @@ impl Actor {
     }
 
     fn search(&mut self, req: u64, query: String) {
-        let Some(provider) = self.providers.first().cloned() else {
+        if self.providers.is_empty() {
             self.emit(Event::SearchFailed {
                 req,
                 error: "no provider configured".into(),
             });
             return;
-        };
+        }
+        let providers = self.providers.clone();
         let tx = self.tx.clone();
         let limit = self.config.search_limit;
         thread::spawn(move || {
-            let result = provider.search(&query, limit);
+            let result = fan_out("search", providers, move |p| p.search(&query, limit));
             let _ = tx.send(Msg::Searched { req, result });
         });
     }
@@ -598,27 +646,59 @@ impl Actor {
     }
 
     fn browse(&mut self, req: u64, page: Page) {
-        let provider = match &page {
-            Page::Collection(c) => self.provider(&c.provider),
-            Page::Home | Page::Library => self.providers.first().cloned(),
+        let targets: Vec<Arc<dyn Provider>> = match &page {
+            Page::Collection(c) => self.provider(&c.provider).into_iter().collect(),
+            Page::Home => self
+                .providers
+                .iter()
+                .find(|p| p.has_home())
+                .cloned()
+                .into_iter()
+                .collect(),
+            Page::Library => {
+                let signed_in: Vec<_> = self
+                    .providers
+                    .iter()
+                    .filter(|p| {
+                        matches!(
+                            self.account_of(&p.id()),
+                            Some(AccountState::SignedIn { .. })
+                        )
+                    })
+                    .cloned()
+                    .collect();
+                if signed_in.is_empty() {
+                    let e = ProviderError::SignInRequired("sign in to browse your library".into());
+                    self.emit(Event::BrowseFailed {
+                        req,
+                        error: e.to_string(),
+                        sign_in_required: true,
+                    });
+                    return;
+                }
+                signed_in
+            }
         };
-        let Some(provider) = provider else {
+        if targets.is_empty() {
             self.emit(Event::BrowseFailed {
                 req,
                 error: "no provider for this page".into(),
                 sign_in_required: false,
             });
             return;
-        };
+        }
         let tx = self.tx.clone();
         thread::spawn(move || {
-            let result = provider.browse(&page);
-            let account = Some((provider.id(), provider.account()));
+            let result = fan_out("browse", targets.clone(), {
+                let page = page.clone();
+                move |p| p.browse(&page)
+            });
+            let accounts = targets.iter().map(|p| (p.id(), p.account())).collect();
             let _ = tx.send(Msg::Browsed {
                 req,
                 page,
                 result,
-                account,
+                accounts,
             });
         });
     }
@@ -642,6 +722,10 @@ impl Actor {
 
     fn sign_in(&mut self, id: ProviderId) {
         let Some(provider) = self.provider(&id) else {
+            self.emit(Event::AccountError {
+                provider: id.clone(),
+                error: format!("no provider {}", id.0),
+            });
             return;
         };
         let current = self.account_of(&id).cloned();
@@ -684,6 +768,10 @@ impl Actor {
 
     fn sign_out(&mut self, id: ProviderId) {
         let Some(provider) = self.provider(&id) else {
+            self.emit(Event::AccountError {
+                provider: id.clone(),
+                error: format!("no provider {}", id.0),
+            });
             return;
         };
         let tx = self.tx.clone();

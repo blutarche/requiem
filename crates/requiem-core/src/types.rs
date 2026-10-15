@@ -59,7 +59,8 @@ pub struct Shelf {
     pub items: Vec<Item>,
 }
 
-/// `Home` and `Library` go to the first provider; a collection to the provider that issued it.
+/// `Home` goes to the first provider with `has_home()`; `Library` to every signed-in provider,
+/// merged in provider order; a collection to the provider that issued it.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum Page {
     Home,
@@ -140,6 +141,11 @@ pub trait Provider: Send + Sync {
     /// Blocking; called on a worker thread.
     fn browse(&self, _page: &Page) -> Result<Vec<Shelf>, ProviderError> {
         Ok(Vec::new())
+    }
+
+    /// Whether `Page::Home` is meaningful for this provider.
+    fn has_home(&self) -> bool {
+        false
     }
 
     /// Called on the session thread: must not block.

@@ -168,7 +168,7 @@ fn search_play_await_playing_and_status() {
     exec_all(&app, "await playing 5\nstatus");
 
     let text = out.text();
-    assert!(text.contains("  1. A — Title t1 (2:05)\n"), "{text}");
+    assert!(text.contains("  1. A — Title t1 (2:05) · fake\n"), "{text}");
     assert!(
         text.contains("status: playing | A — Title t1 | 0:00 / 2:05 | volume 100\n"),
         "{text}"

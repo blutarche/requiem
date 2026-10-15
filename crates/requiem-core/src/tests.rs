@@ -23,9 +23,19 @@ fn config() -> SessionConfig {
 }
 
 fn rig(config: SessionConfig) -> Rig {
-    let provider = FakeProvider::new("fake");
+    rig_with(FakeProvider::new("fake"), vec![], config)
+}
+
+/// `provider` is first; `others` follow in order.
+fn rig_with(
+    provider: Arc<FakeProvider>,
+    others: Vec<Arc<FakeProvider>>,
+    config: SessionConfig,
+) -> Rig {
     let engine = FakeEngineHandle::new();
-    let session = Session::spawn(vec![provider.clone()], engine.factory(), config);
+    let mut all: Vec<Arc<dyn Provider>> = vec![provider.clone()];
+    all.extend(others.into_iter().map(|p| p as Arc<dyn Provider>));
+    let session = Session::spawn(all, engine.factory(), config);
     let rx = session.subscribe();
     Rig {
         session,
@@ -1145,7 +1155,10 @@ fn a_new_subscriber_first_hears_every_account() {
 
 #[test]
 fn browse_answers_under_the_request_id() {
-    let r = rig(config());
+    let provider = FakeProvider::new("fake");
+    provider.set_has_home(true);
+    provider.set_account(signed_in());
+    let r = rig_with(provider, vec![], config());
     let shelf = Shelf {
         title: "Shelf".into(),
         items: vec![Item::Track(track("a"))],
@@ -1211,7 +1224,9 @@ fn browse_of_another_providers_collection_fails() {
 
 #[test]
 fn a_browse_that_signs_the_provider_out_announces_it() {
-    let r = rig(config());
+    let provider = FakeProvider::new("fake");
+    provider.set_account(signed_in());
+    let r = rig_with(provider, vec![], config());
     let gate = Gate::new();
     r.provider.script_browse(
         Page::Library,
@@ -1221,10 +1236,10 @@ fn a_browse_that_signs_the_provider_out_announces_it() {
         req: 1,
         page: Page::Library,
     });
-    r.provider.set_account(signed_in());
+    r.provider.set_account(AccountState::SignedOut);
     gate.release();
     r.wait_event(|e| matches!(e, Event::BrowseFailed { .. }));
-    r.wait_event(is_account(signed_in()));
+    r.wait_event(is_account(AccountState::SignedOut));
 }
 
 #[test]
@@ -1326,4 +1341,217 @@ fn sign_out_reports_signed_out() {
     });
     r.wait_event(is_account(AccountState::SignedOut));
     assert_eq!(r.provider.sign_out_calls(), 1);
+}
+
+fn named_track(provider: &str, id: &str) -> Track {
+    let mut t = track(id);
+    t.id.provider = ProviderId(provider.into());
+    t
+}
+
+fn pair() -> (Arc<FakeProvider>, Arc<FakeProvider>) {
+    (FakeProvider::new("first"), FakeProvider::new("second"))
+}
+
+fn search_event(r: &Rig) -> Event {
+    r.send(Command::Search {
+        req: 1,
+        query: "q".into(),
+    });
+    r.wait_event(|e| matches!(e, Event::SearchResults { .. } | Event::SearchFailed { .. }))
+}
+
+#[test]
+fn search_merges_providers_in_provider_order() {
+    let (a, b) = pair();
+    let gate = Gate::new();
+    a.script_search(
+        "q",
+        vec![Step::ok(vec![named_track("first", "a1"), named_track("first", "a2")]).gated(&gate)],
+    );
+    b.script_search("q", vec![Step::ok(vec![named_track("second", "b1")])]);
+    let r = rig_with(a, vec![b.clone()], config());
+    r.send(Command::Search {
+        req: 1,
+        query: "q".into(),
+    });
+    // The second provider answers first, yet its tracks still come last.
+    b.wait_search_calls(1);
+    gate.release();
+    let ev = r.wait_event(|e| matches!(e, Event::SearchResults { .. }));
+    assert_eq!(
+        ev,
+        Event::SearchResults {
+            req: 1,
+            tracks: vec![
+                named_track("first", "a1"),
+                named_track("first", "a2"),
+                named_track("second", "b1")
+            ],
+        }
+    );
+}
+
+#[test]
+fn search_survives_one_failing_provider() {
+    let (a, b) = pair();
+    a.script_search("q", vec![Step::err(ProviderError::Network("down".into()))]);
+    b.script_search("q", vec![Step::ok(vec![named_track("second", "b1")])]);
+    let r = rig_with(a, vec![b], config());
+    assert_eq!(
+        search_event(&r),
+        Event::SearchResults {
+            req: 1,
+            tracks: vec![named_track("second", "b1")],
+        }
+    );
+}
+
+#[test]
+fn search_skips_a_provider_that_needs_sign_in() {
+    let (a, b) = pair();
+    a.script_search(
+        "q",
+        vec![Step::err(ProviderError::SignInRequired("sign in".into()))],
+    );
+    b.script_search("q", vec![Step::ok(vec![named_track("second", "b1")])]);
+    let r = rig_with(a, vec![b], config());
+    assert_eq!(
+        search_event(&r),
+        Event::SearchResults {
+            req: 1,
+            tracks: vec![named_track("second", "b1")],
+        }
+    );
+}
+
+#[test]
+fn search_fails_with_the_first_real_error_when_none_succeeds() {
+    let (a, b) = pair();
+    a.script_search(
+        "q",
+        vec![Step::err(ProviderError::SignInRequired("sign in".into()))],
+    );
+    b.script_search("q", vec![Step::err(ProviderError::Network("down".into()))]);
+    let r = rig_with(a, vec![b], config());
+    assert_eq!(
+        search_event(&r),
+        Event::SearchFailed {
+            req: 1,
+            error: "network error: down".into(),
+        }
+    );
+}
+
+#[test]
+fn search_fails_with_a_sign_in_error_when_all_need_it() {
+    let (a, b) = pair();
+    a.script_search(
+        "q",
+        vec![Step::err(ProviderError::SignInRequired("first".into()))],
+    );
+    b.script_search(
+        "q",
+        vec![Step::err(ProviderError::SignInRequired("second".into()))],
+    );
+    let r = rig_with(a, vec![b.clone()], config());
+    assert_eq!(
+        search_event(&r),
+        Event::SearchFailed {
+            req: 1,
+            error: "sign-in required: first".into(),
+        }
+    );
+    assert_eq!(b.search_calls(), 1);
+}
+
+#[test]
+fn library_comes_only_from_signed_in_providers_in_order() {
+    let (a, b) = pair();
+    let c = FakeProvider::new("third");
+    let shelf = |t: &str| Shelf {
+        title: t.into(),
+        items: vec![],
+    };
+    a.set_account(signed_in());
+    c.set_account(signed_in());
+    a.script_browse(Page::Library, vec![Step::ok(vec![shelf("a")])]);
+    b.script_browse(Page::Library, vec![Step::ok(vec![shelf("b")])]);
+    c.script_browse(Page::Library, vec![Step::ok(vec![shelf("c")])]);
+    let r = rig_with(a, vec![b.clone(), c], config());
+    r.send(Command::Browse {
+        req: 1,
+        page: Page::Library,
+    });
+    let ev = r.wait_event(|e| matches!(e, Event::BrowseResults { .. }));
+    assert_eq!(
+        ev,
+        Event::BrowseResults {
+            req: 1,
+            page: Page::Library,
+            shelves: vec![shelf("a"), shelf("c")],
+        }
+    );
+    assert!(b.browse_calls().is_empty());
+}
+
+#[test]
+fn library_with_nobody_signed_in_asks_for_sign_in() {
+    let (a, b) = pair();
+    let r = rig_with(a.clone(), vec![b.clone()], config());
+    r.send(Command::Browse {
+        req: 1,
+        page: Page::Library,
+    });
+    let ev = r.wait_event(|e| matches!(e, Event::BrowseFailed { .. }));
+    assert!(
+        matches!(
+            ev,
+            Event::BrowseFailed {
+                req: 1,
+                sign_in_required: true,
+                ..
+            }
+        ),
+        "{ev:?}"
+    );
+    assert!(a.browse_calls().is_empty() && b.browse_calls().is_empty());
+}
+
+#[test]
+fn home_goes_to_the_first_provider_with_a_home() {
+    let (a, b) = pair();
+    b.set_has_home(true);
+    let r = rig_with(a.clone(), vec![b.clone()], config());
+    r.send(Command::Browse {
+        req: 1,
+        page: Page::Home,
+    });
+    r.wait_event(|e| matches!(e, Event::BrowseResults { .. }));
+    assert_eq!(b.browse_calls(), [Page::Home]);
+    assert!(a.browse_calls().is_empty());
+}
+
+#[test]
+fn sign_in_and_out_of_an_unknown_provider_report_at_once() {
+    let r = rig(config());
+    let nope = ProviderId("nope".into());
+    for cmd in [
+        Command::SignIn {
+            provider: nope.clone(),
+        },
+        Command::SignOut {
+            provider: nope.clone(),
+        },
+    ] {
+        r.send(cmd);
+        let ev = r.wait_event(|e| matches!(e, Event::AccountError { .. }));
+        assert_eq!(
+            ev,
+            Event::AccountError {
+                provider: nope.clone(),
+                error: "no provider nope".into(),
+            }
+        );
+    }
 }

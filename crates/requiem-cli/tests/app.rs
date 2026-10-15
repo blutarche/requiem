@@ -38,7 +38,9 @@ struct Rig {
 }
 
 fn rig() -> Rig {
-    rig_with(FakeProvider::new("fake"))
+    let provider = FakeProvider::new("fake");
+    provider.set_has_home(true);
+    rig_with(provider)
 }
 
 /// For a provider whose starting state the test sets before the session reads it.
@@ -122,11 +124,11 @@ fn search_prints_numbered_results() {
     exec_all(&app, "search q\nawait results 5");
     let text = r.out.text();
     assert!(
-        text.contains("  1. A, B — Title t1 [Album] (2:05)\n"),
+        text.contains("  1. A, B — Title t1 [Album] (2:05) · fake\n"),
         "{text}"
     );
     assert!(
-        text.contains("  2. A, B — Title t2 [Album] (2:05)\n"),
+        text.contains("  2. A, B — Title t2 [Album] (2:05) · fake\n"),
         "{text}"
     );
 }
@@ -757,7 +759,9 @@ fn json_browse_prints_shelves_and_items() {
 
 #[test]
 fn library_that_needs_sign_in_says_so() {
-    let r = rig();
+    let provider = FakeProvider::new("fake");
+    provider.set_account(AccountState::SignedIn { name: None });
+    let r = rig_with(provider);
     r.provider.script_browse(
         Page::Library,
         vec![Step::err(ProviderError::SignInRequired(
