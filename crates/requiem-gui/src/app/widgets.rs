@@ -1389,7 +1389,7 @@ impl Slider {
     }
 }
 
-/// Centred icon, heading, subtext and primary action for an empty list.
+/// Centred icon, heading, subtext and primary actions for an empty list.
 pub struct EmptyState {
     pub view: Retained<NSView>,
     /// Fixed height, so resizing moves the block without squeezing its rows together.
@@ -1397,7 +1397,8 @@ pub struct EmptyState {
     icon: Retained<NSImageView>,
     heading: Retained<NSTextField>,
     sub: Retained<NSTextField>,
-    action: Retained<HoverButton>,
+    /// Side by side, tagged with their index.
+    actions: Vec<Retained<HoverButton>>,
     /// How much taller than one line the detail is now, which lifts the heading and icon.
     extra: Cell<CGFloat>,
 }
@@ -1407,8 +1408,10 @@ impl EmptyState {
     const GROUP_H: CGFloat = 136.0;
     /// The detail wraps within this, centred.
     const SUB_MAX_W: CGFloat = 560.0;
+    const MAX_ACTIONS: usize = 3;
+    const ACTION_GAP: CGFloat = 8.0;
 
-    /// The action button sends `action` to `target`.
+    /// The action buttons send `action` to `target`.
     pub fn new(
         mtm: MainThreadMarker,
         frame: NSRect,
@@ -1465,13 +1468,21 @@ impl EmptyState {
         sub.setSelectable(true);
         sub.setAutoresizingMask(centred);
         let action_sel = action;
-        let action = HoverButton::primary(mtm, rect(0.0, 0.0, 0.0, Self::BUTTON_H));
-        action.setAutoresizingMask(centred);
-        action.set_action(target, action_sel);
+        let actions: Vec<_> = (0..Self::MAX_ACTIONS)
+            .map(|i| {
+                let b = HoverButton::primary(mtm, rect(0.0, 0.0, 0.0, Self::BUTTON_H));
+                b.setAutoresizingMask(centred);
+                b.set_action(target, action_sel);
+                b.setTag(i as isize);
+                b
+            })
+            .collect();
         group.addSubview(&iconv);
         group.addSubview(&heading);
         group.addSubview(&sub);
-        group.addSubview(&action);
+        for b in &actions {
+            group.addSubview(b);
+        }
         view.addSubview(&group);
         EmptyState {
             view,
@@ -1479,7 +1490,7 @@ impl EmptyState {
             icon: iconv,
             heading,
             sub,
-            action,
+            actions,
             extra: Cell::new(0.0),
         }
     }
@@ -1515,23 +1526,38 @@ impl EmptyState {
 
     /// With no `action`, the button hides.
     pub fn set(&self, icon: Icon, heading: &str, sub: &str, action: Option<&str>) {
+        self.set_actions(icon, heading, sub, action.as_slice());
+    }
+
+    /// One button per label, up to `MAX_ACTIONS`, centred side by side; none hides them all.
+    pub fn set_actions(&self, icon: Icon, heading: &str, sub: &str, labels: &[&str]) {
         self.icon.setImage(icon.image(32.0).as_deref());
         set_text(&self.heading, heading);
         set_text(&self.sub, sub);
         self.fit_sub();
-        self.action.setHidden(action.is_none());
+        let labels = &labels[..labels.len().min(Self::MAX_ACTIONS)];
+        for (i, b) in self.actions.iter().enumerate() {
+            b.setHidden(i >= labels.len());
+        }
         // Lowers the rows by half the space a missing button leaves, so the block stays
         // centred.
-        let drop = if action.is_none() {
+        let drop = if labels.is_empty() {
             (self.sub.frame().origin.y / 2.0).round()
         } else {
             0.0
         };
         self.group.setBoundsOrigin(NSPoint::new(0.0, drop));
-        if let Some(action) = action {
-            let w = self.action.set_label(action);
-            let x = ((self.group.bounds().size.width - w) / 2.0).round();
-            self.action.setFrame(rect(x, 0.0, w, Self::BUTTON_H));
+        let widths: Vec<CGFloat> = labels
+            .iter()
+            .zip(&self.actions)
+            .map(|(l, b)| b.set_label(l))
+            .collect();
+        let total = widths.iter().sum::<CGFloat>()
+            + Self::ACTION_GAP * widths.len().saturating_sub(1) as CGFloat;
+        let mut x = ((self.group.bounds().size.width - total) / 2.0).round();
+        for (b, w) in self.actions.iter().zip(widths) {
+            b.setFrame(rect(x, 0.0, w, Self::BUTTON_H));
+            x += w + Self::ACTION_GAP;
         }
     }
 }

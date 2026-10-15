@@ -11,13 +11,14 @@ use objc2::runtime::{AnyObject, NSObject, ProtocolObject};
 use objc2::{MainThreadOnly, define_class, msg_send, sel};
 use objc2_app_kit::{
     NSAlert, NSAlertFirstButtonReturn, NSAnimatablePropertyContainer, NSApplication,
-    NSAttributedStringNSStringDrawing, NSColor, NSEvent, NSFont, NSLineBreakMode, NSPasteboard,
-    NSPasteboardTypeString, NSResponder, NSTextAlignment, NSTextField, NSTextFieldDelegate,
-    NSTrackingAreaOptions, NSView, NSWindow, NSWindowStyleMask, NSWindowTitleVisibility,
-    NSWorkspace,
+    NSAttributedStringNSStringDrawing, NSColor, NSControl, NSEvent, NSFont, NSLineBreakMode,
+    NSMenu, NSMenuItem, NSPasteboard, NSPasteboardTypeString, NSResponder, NSTextAlignment,
+    NSTextField, NSTextFieldDelegate, NSTrackingAreaOptions, NSView, NSWindow, NSWindowStyleMask,
+    NSWindowTitleVisibility, NSWorkspace,
 };
 use objc2_core_foundation::CGFloat;
 use objc2_foundation::{MainThreadMarker, NSPoint, NSRect, NSSize, NSString, NSURL};
+use requiem_core::ProviderId;
 use requiem_core::{Collection, Item, Shelf, Track};
 use requiem_ipc::UpdateRequest;
 use requiem_macos::artwork::Cover;
@@ -36,7 +37,7 @@ use super::widgets::{
 use super::{Delegate, MainWindow};
 use crate::vm::{
     self, Banner, Controls, Dirty, EmptyText, Intent, LibraryView, List, PageView, PaletteAction,
-    Place, QueueEdit, Selection, Toast, UiState, Vm,
+    Place, QueueEdit, Selection, Service, Toast, UiState, Vm,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -130,7 +131,7 @@ const COLLECTION_COVER: CGFloat = 120.0;
 const BACK_H: CGFloat = 28.0;
 const BUTTON_H: CGFloat = 36.0;
 const SIGN_IN_W: CGFloat = 560.0;
-const SIGN_IN_H: CGFloat = 250.0;
+const SIGN_IN_H: CGFloat = 280.0;
 /// How often the sign-in panel's countdown is redrawn.
 const EXPIRY_TICK: Duration = Duration::from_secs(30);
 const TOAST_H: CGFloat = 40.0;
@@ -231,9 +232,12 @@ struct ToastView {
 /// The Library's device-code panel.
 struct SignInPanel {
     view: Retained<NSView>,
+    heading: Retained<NSTextField>,
     sub: Retained<NSTextField>,
     code: Retained<NSTextField>,
     expiry: Retained<NSTextField>,
+    /// What the service asks the user to know before signing in; empty for most.
+    notice: Retained<NSTextField>,
     copy: Retained<HoverButton>,
     open: Retained<HoverButton>,
     cancel: Retained<HoverButton>,
@@ -520,7 +524,7 @@ impl Ui {
         let w = sign_out.set_label("Sign Out");
         sign_out.setFrame(rect(mw - PAD - w, hy - 16.0, w, 32.0));
         sign_out.setAutoresizingMask(PIN_TOP | PIN_RIGHT);
-        sign_out.set_action(target, sel!(signOut:));
+        sign_out.set_action(target, sel!(signOutOfAccount:));
         library_who.setFrame(rect(
             mw - PAD - w - 12.0 - 260.0,
             library_who.frame().origin.y,
@@ -686,7 +690,7 @@ impl Ui {
             l
         };
         let heading = centred(
-            "Sign in to Google",
+            "Sign in",
             &theme::font(16.0, Weight::SemiBold),
             &theme::ink(),
             SIGN_IN_H - 20.0,
@@ -709,6 +713,20 @@ impl Ui {
             &theme::muted(),
             SIGN_IN_H - 144.0,
         );
+        let notice = centred(
+            "",
+            &theme::font(12.0, Weight::Regular),
+            &theme::muted(),
+            SIGN_IN_H - 180.0,
+        );
+        notice.setUsesSingleLineMode(false);
+        notice.setMaximumNumberOfLines(2);
+        notice.setLineBreakMode(NSLineBreakMode::ByWordWrapping);
+        let notice_h = 2.0 * widgets::line_height(&theme::font(12.0, Weight::Regular));
+        let mut nf = notice.frame();
+        nf.origin.y -= notice_h - nf.size.height;
+        nf.size.height = notice_h;
+        notice.setFrame(nf);
         let copy = HoverButton::primary(mtm, rect(0.0, 0.0, 0.0, BUTTON_H));
         copy.set_action(target, sel!(copyCode:));
         let open = HoverButton::secondary(mtm, rect(0.0, 0.0, 0.0, BUTTON_H));
@@ -727,7 +745,7 @@ impl Ui {
         for l in [&sub, &code] {
             l.setSelectable(true);
         }
-        for v in [&heading, &sub, &code, &expiry] {
+        for v in [&heading, &sub, &code, &expiry, &notice] {
             view.addSubview(v);
         }
         for b in [&copy, &open, &cancel] {
@@ -736,9 +754,11 @@ impl Ui {
         view.setHidden(true);
         SignInPanel {
             view,
+            heading,
             sub,
             code,
             expiry,
+            notice,
             copy,
             open,
             cancel,
@@ -1087,8 +1107,8 @@ impl Ui {
             PaletteAction::ShowQueue => self.show(AppView::Queue),
             PaletteAction::ShowNowPlaying => self.show_now_playing(),
             PaletteAction::Refresh => self.intent(Intent::Refresh),
-            PaletteAction::SignIn => self.intent(Intent::SignIn),
-            PaletteAction::SignOut => self.confirm_sign_out(),
+            PaletteAction::SignIn(service) => self.sign_in(service.provider()),
+            PaletteAction::SignOut(service) => self.confirm_sign_out(service.provider()),
             PaletteAction::VolumeUp => self.intent(Intent::VolumeBy(vm::VOLUME_STEP)),
             PaletteAction::VolumeDown => self.intent(Intent::VolumeBy(-vm::VOLUME_STEP)),
             PaletteAction::ClearQueue => self.edit_queue(QueueEdit::Clear),
@@ -1185,14 +1205,23 @@ impl Ui {
         self.intent(Intent::Refresh);
     }
 
-    /// The Library empty state's button: Sign in, or Try again.
-    pub fn library_action(&self) {
-        let signed_out = self.vm.borrow().ui().library_view() == LibraryView::SignedOut;
-        self.intent(if signed_out {
-            Intent::SignIn
-        } else {
-            Intent::Refresh
-        });
+    /// The Library empty state's button `index`: Sign in to that provider, or Try again.
+    pub fn library_action(&self, index: usize) {
+        let view = self.vm.borrow().ui().library_view();
+        match view {
+            LibraryView::SignedOut(providers) => {
+                if let Some(provider) = providers.into_iter().nth(index) {
+                    self.sign_in(provider);
+                }
+            }
+            _ => self.intent(Intent::Refresh),
+        }
+    }
+
+    /// Starts a sign-in and shows the Library, where its code appears.
+    pub fn sign_in(&self, provider: ProviderId) {
+        self.intent(Intent::SignIn(provider));
+        self.show(AppView::Library);
     }
 
     pub fn play_collection(&self) {
@@ -1209,20 +1238,64 @@ impl Ui {
     }
 
     pub fn cancel_sign_in(&self) {
-        self.intent(Intent::SignOut);
+        if let LibraryView::Pending { provider, .. } = self.vm.borrow().ui().library_view() {
+            self.intent(Intent::SignOut(provider));
+        }
     }
 
-    /// Asks before signing out; the Library goes with the account.
-    pub fn confirm_sign_out(&self) {
+    /// The Library's Sign Out button: asks directly with one account signed in, else lists them.
+    pub fn sign_out_menu(&self, sender: Option<&objc2::runtime::AnyObject>) {
+        let signed_in: Vec<Service> = Service::ALL
+            .into_iter()
+            .filter(|s| self.can_run(PaletteAction::SignOut(*s)))
+            .collect();
+        match (signed_in.as_slice(), sender) {
+            ([], _) => {}
+            ([only], _) => self.confirm_sign_out(only.provider()),
+            (_, Some(sender)) => {
+                let Some(button) = sender.downcast_ref::<NSControl>() else {
+                    return;
+                };
+                let menu = NSMenu::new(self.mtm);
+                for service in signed_in {
+                    // SAFETY: `signOut:` is implemented by the button's target, which
+                    // reads the service from the item's tag.
+                    let item = unsafe {
+                        NSMenuItem::initWithTitle_action_keyEquivalent(
+                            NSMenuItem::alloc(self.mtm),
+                            &NSString::from_str(PaletteAction::SignOut(service).label()),
+                            Some(sel!(signOut:)),
+                            &NSString::new(),
+                        )
+                    };
+                    if let Some(i) = Service::ALL.iter().position(|s| *s == service) {
+                        item.setTag(i as isize);
+                    }
+                    // SAFETY: as above; the target outlives the menu, which closes with this call.
+                    unsafe { item.setTarget(button.target().as_deref()) };
+                    menu.addItem(&item);
+                }
+                let at = NSPoint::new(0.0, button.bounds().size.height + 4.0);
+                menu.popUpMenuPositioningItem_atLocation_inView(None, at, Some(button));
+            }
+            _ => {}
+        }
+    }
+
+    /// Asks before signing out; the provider's part of the Library goes with the account.
+    pub fn confirm_sign_out(&self, provider: ProviderId) {
         let alert = NSAlert::new(self.mtm);
-        alert.setMessageText(&NSString::from_str("Sign out of Google?"));
+        alert.setMessageText(&NSString::from_str(&format!(
+            "Sign out of {}?",
+            vm::provider_name(&provider.0)
+        )));
         alert.setInformativeText(&NSString::from_str(
-            "Your Library will be unavailable until you sign in again.",
+            "Its playlists and albums leave your Library until you sign in again.",
         ));
         alert.addButtonWithTitle(&NSString::from_str("Sign Out"));
         alert.addButtonWithTitle(&NSString::from_str("Cancel"));
         if alert.runModal() == NSAlertFirstButtonReturn {
-            self.intent(Intent::SignOut);
+            self.intent(Intent::SignOut(provider));
         }
     }
 
@@ -1692,19 +1765,27 @@ impl Ui {
         match view {
             LibraryView::Loading => state.set(Icon::Library, "Loading Library", "", None),
             LibraryView::Unavailable(text) => {
-                state.set(Icon::Library, "Google sign-in isn't set up", text, None);
+                state.set(Icon::Library, "Sign-in isn't set up", text, None);
             }
-            LibraryView::SignedOut => state.set(
-                Icon::Library,
-                "Sign in to see your Library",
-                "Your playlists and albums from YouTube Music appear here.",
-                Some("Sign in"),
-            ),
+            LibraryView::SignedOut(providers) => {
+                let labels: Vec<String> = providers
+                    .iter()
+                    .map(|p| format!("Sign in to {}", vm::provider_name(&p.0)))
+                    .collect();
+                let labels: Vec<&str> = labels.iter().map(String::as_str).collect();
+                state.set_actions(
+                    Icon::Library,
+                    "Sign in to see your Library",
+                    "Your playlists and albums appear here.",
+                    &labels,
+                );
+            }
             LibraryView::Pending {
+                provider,
                 verification_url,
                 user_code,
                 expires_at_unix,
-            } => self.show_sign_in(verification_url, user_code, *expires_at_unix),
+            } => self.show_sign_in(provider, verification_url, user_code, *expires_at_unix),
             LibraryView::SignedIn { name, page } => {
                 widgets::set_text(
                     &self.library_who,
@@ -1726,8 +1807,13 @@ impl Ui {
         }
     }
 
-    fn show_sign_in(&self, url: &str, code: &str, expires_at_unix: u64) {
+    fn show_sign_in(&self, provider: &ProviderId, url: &str, code: &str, expires_at_unix: u64) {
         let p = &self.sign_in;
+        widgets::set_text(
+            &p.heading,
+            &format!("Sign in to {}", vm::provider_name(&provider.0)),
+        );
+        widgets::set_text(&p.notice, vm::sign_in_notice(provider).unwrap_or(""));
         widgets::set_text(&p.sub, &vm::sign_in_hint(url));
         widgets::set_text(&p.code, code);
         widgets::set_text(&p.expiry, &vm::expires_text(expires_at_unix, unix_now()));
@@ -2428,6 +2514,6 @@ mod tests {
         let (vm, _) = demo::start_in(crate::args::View::Empty);
         let (rows, empty) = Patch::new(Dirty::RESULTS, vm.ui()).results.unwrap();
         assert!(rows.is_empty());
-        assert_eq!(empty.unwrap().heading, "Search YouTube Music");
+        assert_eq!(empty.unwrap().heading, "Search");
     }
 }

@@ -34,7 +34,7 @@ use requiem_macos::artwork;
 
 use crate::args::{Args, View};
 use crate::demo;
-use crate::vm::{Intent, PaletteAction, QueueEdit, SEEK_STEP_SECS, VOLUME_STEP, Vm};
+use crate::vm::{Intent, PaletteAction, QueueEdit, SEEK_STEP_SECS, Service, VOLUME_STEP, Vm};
 use backend::{Backend, Live};
 use ui::{AppView, Ui};
 
@@ -156,18 +156,28 @@ define_class!(
         }
 
         #[unsafe(method(signIn:))]
-        fn sign_in(&self, _sender: Option<&AnyObject>) {
-            ui::with(|ui| ui.intent(Intent::SignIn));
+        fn sign_in(&self, sender: Option<&AnyObject>) {
+            if let Some(service) = sender_service(sender) {
+                ui::with(|ui| ui.sign_in(service.provider()));
+            }
         }
 
         #[unsafe(method(signOut:))]
-        fn sign_out(&self, _sender: Option<&AnyObject>) {
-            ui::with(|ui| ui.confirm_sign_out());
+        fn sign_out(&self, sender: Option<&AnyObject>) {
+            if let Some(service) = sender_service(sender) {
+                ui::with(|ui| ui.confirm_sign_out(service.provider()));
+            }
+        }
+
+        #[unsafe(method(signOutOfAccount:))]
+        fn sign_out_of_account(&self, sender: Option<&AnyObject>) {
+            ui::with(|ui| ui.sign_out_menu(sender));
         }
 
         #[unsafe(method(libraryAction:))]
-        fn library_action(&self, _sender: Option<&AnyObject>) {
-            ui::with(|ui| ui.library_action());
+        fn library_action(&self, sender: Option<&AnyObject>) {
+            let index = sender_tag(sender).and_then(|t| usize::try_from(t).ok());
+            ui::with(|ui| ui.library_action(index.unwrap_or(0)));
         }
 
         #[unsafe(method(copyCode:))]
@@ -405,7 +415,7 @@ fn validate(ui: &Ui, item: &NSMenuItem) -> bool {
         let (playing, _) = ui.playback();
         item.setTitle(&NSString::from_str(if playing { "Pause" } else { "Play" }));
     }
-    if let Some(a) = palette_action(action) {
+    if let Some(a) = palette_action(item) {
         // These keys belong to a focused field, or for Return a focused button.
         let taken = match a {
             PaletteAction::Next
@@ -438,8 +448,36 @@ fn validate(ui: &Ui, item: &NSMenuItem) -> bool {
     }
 }
 
-/// The palette action a menu item's `action` runs, so both enable it alike.
-fn palette_action(action: Sel) -> Option<PaletteAction> {
+/// The tag of the menu item or button that sent an action.
+fn sender_tag(sender: Option<&AnyObject>) -> Option<isize> {
+    let sender = sender?;
+    if let Some(item) = sender.downcast_ref::<NSMenuItem>() {
+        Some(item.tag())
+    } else {
+        sender.downcast_ref::<NSControl>().map(|c| c.tag())
+    }
+}
+
+/// The service a sign-in or sign-out item is tagged with.
+fn sender_service(sender: Option<&AnyObject>) -> Option<Service> {
+    sender_tag(sender)
+        .and_then(|t| usize::try_from(t).ok())
+        .and_then(|i| Service::ALL.get(i).copied())
+}
+
+/// The palette action a menu item runs, so both enable it alike.
+fn palette_action(item: &NSMenuItem) -> Option<PaletteAction> {
+    let action = item.action()?;
+    let service = usize::try_from(item.tag())
+        .ok()
+        .and_then(|i| Service::ALL.get(i).copied());
+    if let Some(service) = service {
+        if action == sel!(signIn:) {
+            return Some(PaletteAction::SignIn(service));
+        } else if action == sel!(signOut:) {
+            return Some(PaletteAction::SignOut(service));
+        }
+    }
     [
         (sel!(toggle:), PaletteAction::PlayPause),
         (sel!(next:), PaletteAction::Next),
@@ -453,8 +491,6 @@ fn palette_action(action: Sel) -> Option<PaletteAction> {
         (sel!(showQueue:), PaletteAction::ShowQueue),
         (sel!(showNowPlaying:), PaletteAction::ShowNowPlaying),
         (sel!(refresh:), PaletteAction::Refresh),
-        (sel!(signIn:), PaletteAction::SignIn),
-        (sel!(signOut:), PaletteAction::SignOut),
         (sel!(volumeUp:), PaletteAction::VolumeUp),
         (sel!(volumeDown:), PaletteAction::VolumeDown),
         (sel!(clearQueue:), PaletteAction::ClearQueue),
@@ -693,6 +729,22 @@ fn menu_bar(mtm: MainThreadMarker, target: &Delegate) -> (Retained<NSMenu>, Reta
             item("Find", Some(sel!(focusSearch:)), "f", true),
         ],
     );
+    // Tagged with the `Service::ALL` index, which `palette_action` reads back.
+    let account_items: Vec<Retained<NSMenuItem>> = Service::ALL
+        .into_iter()
+        .enumerate()
+        .flat_map(|(i, service)| {
+            [
+                (PaletteAction::SignIn(service), sel!(signIn:)),
+                (PaletteAction::SignOut(service), sel!(signOut:)),
+            ]
+            .map(|(a, action)| {
+                let it = item(a.label(), Some(action), "", true);
+                it.setTag(i as isize);
+                it
+            })
+        })
+        .collect();
     submenu(
         "View",
         vec![
@@ -705,8 +757,10 @@ fn menu_bar(mtm: MainThreadMarker, target: &Delegate) -> (Retained<NSMenu>, Reta
             item("Refresh", Some(sel!(refresh:)), "r", true),
             item("Back", Some(sel!(goBack:)), "[", true),
             sep(),
-            item("Sign In to Google", Some(sel!(signIn:)), "", true),
-            item("Sign Out of Google\u{2026}", Some(sel!(signOut:)), "", true),
+            account_items[0].clone(),
+            account_items[1].clone(),
+            account_items[2].clone(),
+            account_items[3].clone(),
             sep(),
             item("Command Palette", Some(sel!(openPalette:)), "k", true),
         ],

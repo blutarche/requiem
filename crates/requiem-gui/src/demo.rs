@@ -229,9 +229,26 @@ pub fn covers() -> Vec<(String, usize)> {
     out
 }
 
+/// The first this many results, and Library entries, come from Spotify, which the merged
+/// lists put before YouTube Music.
+const SPOTIFY_RESULTS: usize = 6;
+const SPOTIFY_LIBRARY: usize = 4;
+
+fn spotify() -> ProviderId {
+    ProviderId("spotify".into())
+}
+
+fn ytmusic() -> ProviderId {
+    ProviderId("ytmusic".into())
+}
+
 fn collection_id(kind: &str, i: usize) -> CollectionId {
     CollectionId {
-        provider: ProviderId("demo".into()),
+        provider: if kind == "lib" && i < SPOTIFY_LIBRARY {
+            spotify()
+        } else {
+            ytmusic()
+        },
         id: format!("demo-{kind}-{i:02}"),
     }
 }
@@ -295,8 +312,17 @@ pub fn library() -> Vec<Shelf> {
         .map(|i| {
             let (title, subtitle) = if i == 0 {
                 (
-                    "Liked videos".to_owned(),
-                    "Auto playlist · 312 videos".to_owned(),
+                    "Liked Songs".to_owned(),
+                    "Auto playlist · 312 songs".to_owned(),
+                )
+            } else if i < SPOTIFY_LIBRARY {
+                (
+                    format!(
+                        "{} {}",
+                        LIBRARY_ADJECTIVES[i % LIBRARY_ADJECTIVES.len()],
+                        LIBRARY_NOUNS[i % LIBRARY_NOUNS.len()]
+                    ),
+                    format!("Playlist · {} songs", 8 + 7 * i),
                 )
             } else {
                 (
@@ -337,20 +363,17 @@ fn collection_tracks() -> Vec<Track> {
     tracks
 }
 
-pub fn provider() -> ProviderId {
-    ProviderId("ytmusic".into())
-}
-
 fn unix_now() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |d| d.as_secs())
 }
 
-/// The state a pending sign-in shows: 15 minutes, with half a minute of slack for the render.
+/// The state a pending Spotify sign-in shows: 15 minutes, with half a minute of slack for the
+/// render.
 fn pending() -> AccountState {
     AccountState::Pending {
-        verification_url: "https://www.google.com/device".into(),
+        verification_url: "https://www.spotify.com/pair".into(),
         user_code: "WXYZ-ABCD".into(),
         expires_at_unix: unix_now() + 14 * 60 + 30,
     }
@@ -370,7 +393,11 @@ pub fn results() -> Vec<Track> {
         .enumerate()
         .map(|(i, (title, artists, album, secs))| Track {
             id: TrackId {
-                provider: ProviderId("demo".into()),
+                provider: if i < SPOTIFY_RESULTS {
+                    spotify()
+                } else {
+                    ytmusic()
+                },
                 id: format!("demo-{i:02}"),
             },
             title: (*title).to_owned(),
@@ -391,7 +418,7 @@ pub struct Daemon {
     state: PlayState,
     volume: u8,
     position: Duration,
-    account: AccountState,
+    accounts: Vec<(ProviderId, AccountState)>,
 }
 
 impl Default for Daemon {
@@ -405,9 +432,15 @@ impl Default for Daemon {
             state: PlayState::Playing,
             volume: VOLUME,
             position: POSITION,
-            account: AccountState::SignedIn {
-                name: Some("Demo Listener".into()),
-            },
+            accounts: vec![
+                (
+                    spotify(),
+                    AccountState::SignedIn {
+                        name: Some("Demo Listener".into()),
+                    },
+                ),
+                (ytmusic(), AccountState::SignedOut),
+            ],
         }
     }
 }
@@ -415,16 +448,18 @@ impl Default for Daemon {
 impl Daemon {
     /// The events a daemon sends a new client, in the protocol's snapshot order.
     pub fn snapshot(&self) -> Vec<Event> {
-        let mut evs = vec![
-            Event::Account {
-                provider: provider(),
-                state: self.account.clone(),
-            },
-            Event::QueueChanged {
-                tracks: self.queue.clone(),
-                current: self.current,
-            },
-        ];
+        let mut evs: Vec<Event> = self
+            .accounts
+            .iter()
+            .map(|(provider, state)| Event::Account {
+                provider: provider.clone(),
+                state: state.clone(),
+            })
+            .collect();
+        evs.push(Event::QueueChanged {
+            tracks: self.queue.clone(),
+            current: self.current,
+        });
         let playing = self.playing();
         if let Some(t) = &playing {
             evs.push(Event::NowPlaying {
@@ -669,9 +704,16 @@ pub fn start_in(view: View) -> (Vm, Daemon) {
     let mut vm = Vm::new_at(t0);
     let mut daemon = Daemon::default();
     match view {
-        View::LibrarySignedOut => daemon.account = AccountState::SignedOut,
-        View::LibraryUnavailable => daemon.account = unavailable(),
-        View::SignIn => daemon.account = pending(),
+        View::LibrarySignedOut => {
+            daemon.accounts = vec![
+                (spotify(), AccountState::SignedOut),
+                (ytmusic(), AccountState::SignedOut),
+            ];
+        }
+        View::LibraryUnavailable => daemon.accounts = vec![(ytmusic(), unavailable())],
+        View::SignIn => {
+            daemon.accounts = vec![(spotify(), pending()), (ytmusic(), AccountState::SignedOut)];
+        }
         _ => {}
     }
     vm.link(Link::Demo);
@@ -786,7 +828,7 @@ mod tests {
         assert!(ui.results.is_empty());
         assert_eq!(ui.search, SearchStatus::Idle);
         let empty = ui.results_empty().unwrap();
-        assert_eq!(empty.heading, "Search YouTube Music");
+        assert_eq!(empty.heading, "Search");
         assert_eq!(empty.action, None);
         assert_eq!(ui.state, PlayState::Playing);
     }

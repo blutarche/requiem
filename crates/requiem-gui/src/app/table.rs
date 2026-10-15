@@ -83,6 +83,7 @@ enum Col {
     Title,
     Artists,
     Album,
+    Source,
     Duration,
     Add,
 }
@@ -93,6 +94,7 @@ impl Col {
             Col::Title => "title",
             Col::Artists => "artists",
             Col::Album => "album",
+            Col::Source => "source",
             Col::Duration => "duration",
             Col::Add => "add",
         }
@@ -103,6 +105,7 @@ impl Col {
             Col::Title,
             Col::Artists,
             Col::Album,
+            Col::Source,
             Col::Duration,
             Col::Add,
         ]
@@ -117,6 +120,8 @@ pub struct RowText {
     title: String,
     artists: String,
     album: String,
+    /// The provider's name, in the Source column.
+    source: String,
     duration: String,
     artwork: Option<String>,
 }
@@ -128,24 +133,35 @@ pub fn rows(tracks: &[Track]) -> Vec<RowText> {
             title: t.title.clone(),
             artists: vm::artists(t),
             album: t.album.clone().unwrap_or_default(),
+            source: vm::provider_name(&t.id.provider.0).to_owned(),
             duration: t.duration.map(vm::fmt_time).unwrap_or_default(),
             artwork: t.artwork_url.clone(),
         })
         .collect()
 }
 
-/// The Library's rows: the title, and the subtitle in the artists column.
+/// The Library's rows: the title, and the subtitle and source in the details column.
 pub fn collection_rows(collections: &[&Collection]) -> Vec<RowText> {
     collections
         .iter()
         .map(|c| RowText {
             title: c.title.clone(),
-            artists: c.subtitle.clone().unwrap_or_default(),
+            artists: details(c.subtitle.as_deref(), &c.id.provider.0),
             album: String::new(),
+            source: String::new(),
             duration: String::new(),
             artwork: c.artwork_url.clone(),
         })
         .collect()
+}
+
+/// "Playlist · Spotify": the subtitle, then the provider's name.
+fn details(subtitle: Option<&str>, provider: &str) -> String {
+    let source = vm::provider_name(provider);
+    match subtitle.filter(|s| !s.is_empty()) {
+        Some(sub) => format!("{sub} \u{b7} {source}"),
+        None => source.to_owned(),
+    }
 }
 
 /// Where the row `was`, selected at `at` before `rows` replaced the list, is now: at `at`
@@ -438,6 +454,7 @@ impl Controller {
             Col::Title => &r.title,
             Col::Artists => &r.artists,
             Col::Album => &r.album,
+            Col::Source => &r.source,
             Col::Duration => &r.duration,
             Col::Add => unreachable!(),
         };
@@ -1058,11 +1075,12 @@ impl ColumnHeader {
             self.setNeedsDisplay(true);
             return;
         }
-        let widths = column_widths(width, kind.adds());
+        let widths = column_widths(width, kind.adds(), kind == Kind::Results);
         for c in table.tableColumns().iter() {
             match Col::from_id(&c.identifier().to_string()) {
                 Some(Col::Title) => c.setWidth(widths.title),
                 Some(Col::Artists) => c.setWidth(widths.artists),
+                Some(Col::Source) => c.setWidth(SOURCE_W),
                 Some(Col::Album) => {
                     c.setHidden(widths.album.is_none());
                     if let Some(w) = widths.album {
@@ -1079,6 +1097,8 @@ impl ColumnHeader {
 const ADD_W: CGFloat = 44.0;
 const ADD_ICON: CGFloat = 16.0;
 const DURATION_W: CGFloat = 80.0;
+/// The Source column: wide enough for "YouTube Music".
+const SOURCE_W: CGFloat = 152.0;
 /// Narrower tables drop the album column.
 const ALBUM_MIN_W: CGFloat = 640.0;
 /// How long a "+" shows its check after an add.
@@ -1100,9 +1120,10 @@ fn library_widths(width: CGFloat) -> (CGFloat, CGFloat) {
 /// Text-column widths for a table `width` wide, with or without the "+" column. They fill
 /// what the fixed columns leave, rounding into the last, so the columns end flush with the
 /// table.
-fn column_widths(width: CGFloat, add: bool) -> Widths {
+fn column_widths(width: CGFloat, add: bool, source: bool) -> Widths {
     let add_w = if add { ADD_W } else { 0.0 };
-    let flex = (width - add_w - DURATION_W).max(0.0);
+    let source_w = if source { SOURCE_W } else { 0.0 };
+    let flex = (width - add_w - source_w - DURATION_W).max(0.0);
     if width < ALBUM_MIN_W {
         let title = (flex * 46.0 / 76.0).floor();
         Widths {
@@ -1156,20 +1177,24 @@ impl Table {
                 (Col::Title, "Title", 0.0),
                 (Col::Artists, "Artists", 0.0),
                 (Col::Album, "Album", 0.0),
+                (Col::Source, "Source", SOURCE_W),
                 (Col::Add, "", ADD_W),
                 (Col::Duration, "Time", DURATION_W),
             ]
         };
         let add = kind.adds();
         let mut titles = Vec::with_capacity(cols.len());
-        for &(col, title, width) in cols.iter().filter(|c| add || c.0 != Col::Add) {
+        for &(col, title, width) in cols
+            .iter()
+            .filter(|c| (add || c.0 != Col::Add) && (kind == Kind::Results || c.0 != Col::Source))
+        {
             let c = NSTableColumn::initWithIdentifier(
                 NSTableColumn::alloc(mtm),
                 &NSString::from_str(col.id()),
             );
             titles.push((title, col == Col::Duration));
             c.setWidth(width);
-            if matches!(col, Col::Duration | Col::Add) {
+            if matches!(col, Col::Duration | Col::Add | Col::Source) {
                 c.setMinWidth(width);
                 c.setMaxWidth(width);
                 c.setResizingMask(NSTableColumnResizingOptions::NoResizing);
@@ -1472,6 +1497,7 @@ mod tests {
             title: title.into(),
             artists: artists.into(),
             album: album.into(),
+            source: "test".into(),
             duration: duration.into(),
             artwork: None,
         }
@@ -1520,7 +1546,7 @@ mod tests {
 
     #[test]
     fn columns_split_46_30_24_and_fill_the_table() {
-        let w = column_widths(800.0, true);
+        let w = column_widths(800.0, true, false);
         assert_eq!(w.title, 310.0);
         assert_eq!(w.artists, 202.0);
         assert_eq!(w.album, Some(164.0));
@@ -1532,7 +1558,7 @@ mod tests {
 
     #[test]
     fn the_queue_gives_the_plus_column_to_the_text() {
-        let w = column_widths(800.0, false);
+        let w = column_widths(800.0, false, false);
         assert_eq!(w.title, 331.0);
         assert_eq!(w.artists, 216.0);
         assert_eq!(w.album, Some(173.0));
@@ -1541,11 +1567,11 @@ mod tests {
 
     #[test]
     fn narrow_tables_drop_the_album_column() {
-        let w = column_widths(ALBUM_MIN_W - 1.0, true);
+        let w = column_widths(ALBUM_MIN_W - 1.0, true, false);
         assert_eq!(w.album, None);
         assert_eq!(w.title + w.artists + ADD_W + DURATION_W, ALBUM_MIN_W - 1.0);
         assert!(w.title > w.artists);
-        assert!(column_widths(ALBUM_MIN_W, true).album.is_some());
+        assert!(column_widths(ALBUM_MIN_W, true, false).album.is_some());
     }
 
     #[test]
@@ -1562,6 +1588,36 @@ mod tests {
                 row("Two", "", "", ""),
                 row("Long", "C", "", "1:02:05"),
             ]
+        );
+    }
+
+    #[test]
+    fn rows_name_each_tracks_source() {
+        let mut spotify = track("One", &[], None, None);
+        spotify.id.provider = ProviderId("spotify".into());
+        let mut ytm = track("Two", &[], None, None);
+        ytm.id.provider = ProviderId("ytmusic".into());
+        let rows = rows(&[spotify, ytm]);
+        assert_eq!(rows[0].source, "Spotify");
+        assert_eq!(rows[1].source, "YouTube Music");
+    }
+
+    #[test]
+    fn library_details_end_with_the_source() {
+        assert_eq!(
+            details(Some("Playlist"), "spotify"),
+            "Playlist \u{b7} Spotify"
+        );
+        assert_eq!(details(None, "ytmusic"), "YouTube Music");
+        assert_eq!(details(Some(""), "ytmusic"), "YouTube Music");
+    }
+
+    #[test]
+    fn the_source_column_comes_out_of_the_text_columns() {
+        let w = column_widths(800.0, true, true);
+        assert_eq!(
+            w.title + w.artists + w.album.unwrap() + SOURCE_W + ADD_W + DURATION_W,
+            800.0
         );
     }
 

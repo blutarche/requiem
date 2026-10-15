@@ -37,11 +37,11 @@ pub enum View {
     NowPlayingEmpty,
     /// Demo only: the playing track's page with the queue's last track playing.
     NowPlayingLast,
-    /// Demo only: the Library with the account signed out.
+    /// Demo only: the Library with both accounts signed out.
     LibrarySignedOut,
     /// Demo only: the Library with no Google client set up.
     LibraryUnavailable,
-    /// Demo only: the Library showing a sign-in code.
+    /// Demo only: the Library showing a Spotify sign-in code.
     SignIn,
     /// Demo only: the search view before any query.
     Empty,

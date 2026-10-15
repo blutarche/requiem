@@ -198,8 +198,8 @@ pub enum Intent {
     },
     /// Fetches the current page again, if it is a browse page.
     Refresh,
-    SignIn,
-    SignOut,
+    SignIn(ProviderId),
+    SignOut(ProviderId),
 }
 
 /// Where the window is.
@@ -280,8 +280,10 @@ pub enum LibraryView {
     /// No account state yet.
     Loading,
     Unavailable(String),
-    SignedOut,
+    /// No provider is signed in; each listed provider can be.
+    SignedOut(Vec<ProviderId>),
     Pending {
+        provider: ProviderId,
         verification_url: String,
         user_code: String,
         expires_at_unix: u64,
@@ -371,7 +373,7 @@ pub struct UiState {
     pub home: Browse,
     pub library: Browse,
     pub collection: Option<CollectionPage>,
-    /// The daemon's account states, by provider; the first provider's is the one shown.
+    /// The daemon's account states, by provider.
     pub accounts: Vec<(ProviderId, AccountState)>,
     /// The player's self-update status: `None` before it sends one, while disconnected, and
     /// in dev builds, which show nothing.
@@ -487,54 +489,121 @@ impl UiState {
             | PaletteAction::ShowQueue
             | PaletteAction::ShowNowPlaying => true,
             PaletteAction::Refresh => can.player && self.refreshable(),
-            PaletteAction::SignIn => can.player && self.library_view() == LibraryView::SignedOut,
-            PaletteAction::SignOut => {
-                can.player && matches!(self.account_state(), Some(AccountState::SignedIn { .. }))
+            PaletteAction::SignIn(service) => {
+                can.player && self.sign_in_offers().contains(&service.provider())
+            }
+            PaletteAction::SignOut(service) => {
+                can.player
+                    && matches!(
+                        self.account_state(&service.provider()),
+                        Some(AccountState::SignedIn { .. })
+                    )
             }
         }
     }
 
-    /// The first provider's account state, which the Library page and Sign In act on.
-    pub fn account_state(&self) -> Option<&AccountState> {
-        self.accounts.first().map(|(_, s)| s)
+    pub fn account_state(&self, provider: &ProviderId) -> Option<&AccountState> {
+        self.accounts
+            .iter()
+            .find(|(p, _)| p == provider)
+            .map(|(_, s)| s)
+    }
+
+    fn signed_in(&self) -> impl Iterator<Item = &ProviderId> {
+        self.accounts
+            .iter()
+            .filter(|(_, s)| matches!(s, AccountState::SignedIn { .. }))
+            .map(|(p, _)| p)
+    }
+
+    /// The providers Sign In applies to: the signed-out ones, and every one when the Library
+    /// failed for want of a sign-in.
+    fn sign_in_offers(&self) -> Vec<ProviderId> {
+        let rejected = matches!(
+            self.library.load,
+            Load::Failed {
+                sign_in_required: true,
+                ..
+            }
+        );
+        self.accounts
+            .iter()
+            .filter(|(_, s)| {
+                matches!(s, AccountState::SignedOut)
+                    || (rejected && matches!(s, AccountState::SignedIn { .. }))
+            })
+            .map(|(p, _)| p.clone())
+            .collect()
     }
 
     /// The current place is a browse page that a fetch would fill.
     fn refreshable(&self) -> bool {
         match self.place {
             Place::Home => true,
-            Place::Library => matches!(self.account_state(), Some(AccountState::SignedIn { .. })),
+            Place::Library => self.signed_in().next().is_some(),
             Place::Collection => self.collection.is_some(),
             Place::Search | Place::Queue | Place::NowPlaying => false,
         }
     }
 
+    /// A pending sign-in shows first, then the Library once any provider is signed in; with
+    /// none, the sign-in choices.
     pub fn library_view(&self) -> LibraryView {
-        let Some(state) = self.account_state() else {
+        if self.accounts.is_empty() {
             return LibraryView::Loading;
-        };
-        match state {
-            AccountState::Unavailable(text) => LibraryView::Unavailable(text.clone()),
+        }
+        if let Some((
+            provider,
             AccountState::Pending {
                 verification_url,
                 user_code,
                 expires_at_unix,
-            } => LibraryView::Pending {
+            },
+        )) = self
+            .accounts
+            .iter()
+            .find(|(_, s)| matches!(s, AccountState::Pending { .. }))
+        {
+            return LibraryView::Pending {
+                provider: provider.clone(),
                 verification_url: verification_url.clone(),
                 user_code: user_code.clone(),
                 expires_at_unix: *expires_at_unix,
-            },
-            AccountState::SignedOut => LibraryView::SignedOut,
-            AccountState::SignedIn { name } => match self.library.load {
+            };
+        }
+        let offers = self.sign_in_offers();
+        if self.signed_in().next().is_some() {
+            if matches!(
+                self.library.load,
                 Load::Failed {
                     sign_in_required: true,
                     ..
-                } => LibraryView::SignedOut,
-                _ => LibraryView::SignedIn {
-                    name: name.clone(),
-                    page: self.library.view(),
-                },
-            },
+                }
+            ) {
+                return LibraryView::SignedOut(offers);
+            }
+            let names: Vec<&str> = self
+                .accounts
+                .iter()
+                .filter_map(|(_, s)| match s {
+                    AccountState::SignedIn { name } => name.as_deref(),
+                    _ => None,
+                })
+                .collect();
+            return LibraryView::SignedIn {
+                name: (!names.is_empty()).then(|| names.join(", ")),
+                page: self.library.view(),
+            };
+        }
+        if !offers.is_empty() {
+            return LibraryView::SignedOut(offers);
+        }
+        match self.accounts.iter().find_map(|(_, s)| match s {
+            AccountState::Unavailable(text) => Some(text.clone()),
+            _ => None,
+        }) {
+            Some(text) => LibraryView::Unavailable(text),
+            None => LibraryView::Loading,
         }
     }
 
@@ -645,7 +714,7 @@ impl UiState {
             }
         } else {
             EmptyText {
-                heading: "Search YouTube Music".to_owned(),
+                heading: "Search".to_owned(),
                 sub: "Type a song, artist or album, then press Return".to_owned(),
                 action: None,
             }
@@ -1145,16 +1214,12 @@ impl Vm {
                 };
                 self.fetch(slot).into_iter().collect()
             }
-            Intent::SignIn if can.player => self
-                .account_provider()
-                .map(|provider| Command::SignIn { provider })
-                .into_iter()
-                .collect(),
-            Intent::SignOut if can.player => self
-                .account_provider()
-                .map(|provider| Command::SignOut { provider })
-                .into_iter()
-                .collect(),
+            Intent::SignIn(provider) if can.player && self.knows(&provider) => {
+                vec![Command::SignIn { provider }]
+            }
+            Intent::SignOut(provider) if can.player && self.knows(&provider) => {
+                vec![Command::SignOut { provider }]
+            }
             _ => Vec::new(),
         }
     }
@@ -1202,8 +1267,8 @@ impl Vm {
         ]
     }
 
-    fn account_provider(&self) -> Option<ProviderId> {
-        self.ui.accounts.first().map(|(p, _)| p.clone())
+    fn knows(&self, provider: &ProviderId) -> bool {
+        self.ui.account_state(provider).is_some()
     }
 
     /// The slot that waits on `req`, which then waits on none.
@@ -1261,9 +1326,7 @@ impl Vm {
         let page = match slot {
             Slot::Home => Page::Home,
             Slot::Library => {
-                if !matches!(self.ui.account_state(), Some(AccountState::SignedIn { .. })) {
-                    return None;
-                }
+                self.ui.signed_in().next()?;
                 Page::Library
             }
             Slot::Collection => {
@@ -1317,8 +1380,7 @@ impl Vm {
     }
 
     fn set_account(&mut self, provider: ProviderId, state: AccountState) {
-        let signed_in =
-            |ui: &UiState| matches!(ui.account_state(), Some(AccountState::SignedIn { .. }));
+        let signed_in = |ui: &UiState| ui.signed_in().cloned().collect::<Vec<_>>();
         let was = signed_in(&self.ui);
         match self.ui.accounts.iter_mut().find(|(p, _)| *p == provider) {
             Some(entry) => entry.1 = state,
@@ -1326,10 +1388,13 @@ impl Vm {
         }
         self.dirty |= Dirty::ACCOUNT;
         let now = signed_in(&self.ui);
-        if was && !now {
+        if was == now {
+            return;
+        }
+        if now.is_empty() {
             self.pending_browse[Slot::Library as usize] = None;
             self.set_browse(Slot::Library, Browse::default());
-        } else if now && !was {
+        } else {
             let fetch = self.fetch(Slot::Library);
             self.outbox.extend(fetch);
         }
@@ -1624,11 +1689,49 @@ pub fn up_next(queue: &[Track], current: Option<usize>) -> &[Track] {
     &queue[start..(start + UP_NEXT).min(queue.len())]
 }
 
-fn provider_name(id: &str) -> &str {
+pub fn provider_name(id: &str) -> &str {
     match id {
         "ytmusic" => "YouTube Music",
+        "spotify" => "Spotify",
         other => other,
     }
+}
+
+/// A provider the menus and palette have sign-in items for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Service {
+    Spotify,
+    YouTubeMusic,
+}
+
+impl Service {
+    pub const ALL: [Service; 2] = [Service::Spotify, Service::YouTubeMusic];
+
+    fn id(self) -> &'static str {
+        match self {
+            Service::Spotify => "spotify",
+            Service::YouTubeMusic => "ytmusic",
+        }
+    }
+
+    pub fn provider(self) -> ProviderId {
+        ProviderId(self.id().to_owned())
+    }
+
+    pub fn name(self) -> &'static str {
+        provider_name(self.id())
+    }
+
+    pub fn of(provider: &ProviderId) -> Option<Service> {
+        Self::ALL.into_iter().find(|s| s.id() == provider.0)
+    }
+}
+
+/// What the sign-in panel adds under the code for `provider`.
+pub fn sign_in_notice(provider: &ProviderId) -> Option<&'static str> {
+    (provider.0 == "spotify").then_some(
+        "Spotify doesn't allow unofficial players, so your Spotify account could be suspended.",
+    )
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1645,15 +1748,15 @@ pub enum PaletteAction {
     ShowQueue,
     ShowNowPlaying,
     Refresh,
-    SignIn,
-    SignOut,
+    SignIn(Service),
+    SignOut(Service),
     VolumeUp,
     VolumeDown,
     ClearQueue,
 }
 
 impl PaletteAction {
-    pub const ALL: [PaletteAction; 17] = [
+    pub const ALL: [PaletteAction; 19] = [
         PaletteAction::PlayPause,
         PaletteAction::Next,
         PaletteAction::Previous,
@@ -1666,8 +1769,10 @@ impl PaletteAction {
         PaletteAction::ShowQueue,
         PaletteAction::ShowNowPlaying,
         PaletteAction::Refresh,
-        PaletteAction::SignIn,
-        PaletteAction::SignOut,
+        PaletteAction::SignIn(Service::Spotify),
+        PaletteAction::SignOut(Service::Spotify),
+        PaletteAction::SignIn(Service::YouTubeMusic),
+        PaletteAction::SignOut(Service::YouTubeMusic),
         PaletteAction::VolumeUp,
         PaletteAction::VolumeDown,
         PaletteAction::ClearQueue,
@@ -1687,8 +1792,10 @@ impl PaletteAction {
             PaletteAction::ShowQueue => "Show queue",
             PaletteAction::ShowNowPlaying => "Show now playing",
             PaletteAction::Refresh => "Refresh",
-            PaletteAction::SignIn => "Sign in to Google",
-            PaletteAction::SignOut => "Sign out of Google",
+            PaletteAction::SignIn(Service::Spotify) => "Sign in to Spotify\u{2026}",
+            PaletteAction::SignOut(Service::Spotify) => "Sign out of Spotify",
+            PaletteAction::SignIn(Service::YouTubeMusic) => "Sign in to YouTube Music\u{2026}",
+            PaletteAction::SignOut(Service::YouTubeMusic) => "Sign out of YouTube Music",
             PaletteAction::VolumeUp => "Volume up",
             PaletteAction::VolumeDown => "Volume down",
             PaletteAction::ClearQueue => "Clear queue",
@@ -1710,7 +1817,7 @@ impl PaletteAction {
             PaletteAction::ShowQueue => "⌘4",
             PaletteAction::ShowNowPlaying => "⌘L",
             PaletteAction::Refresh => "⌘R",
-            PaletteAction::SignIn | PaletteAction::SignOut => "",
+            PaletteAction::SignIn(_) | PaletteAction::SignOut(_) => "",
             PaletteAction::VolumeUp => "⌘↑",
             PaletteAction::VolumeDown => "⌘↓",
             PaletteAction::ClearQueue => "",
@@ -1719,7 +1826,7 @@ impl PaletteAction {
 
     /// Sign In and Sign Out are listed only while they apply.
     pub fn is_account(self) -> bool {
-        matches!(self, PaletteAction::SignIn | PaletteAction::SignOut)
+        matches!(self, PaletteAction::SignIn(_) | PaletteAction::SignOut(_))
     }
 
     /// Case-insensitive substring match on the label, in `ALL` order.
@@ -1805,7 +1912,7 @@ mod tests {
         });
         // Without a selection, Play selected and Add to queue wait; with no account, so do the
         // sign-in actions, and Refresh waits for a browse page.
-        assert_eq!(runnable(&vm, none).len(), PaletteAction::ALL.len() - 5);
+        assert_eq!(runnable(&vm, none).len(), PaletteAction::ALL.len() - 7);
         let queue_row = Selection {
             row: true,
             result: false,
@@ -1816,7 +1923,7 @@ mod tests {
             row: true,
             result: true,
         };
-        assert_eq!(runnable(&vm, result).len(), PaletteAction::ALL.len() - 3);
+        assert_eq!(runnable(&vm, result).len(), PaletteAction::ALL.len() - 5);
     }
 
     /// A vm with `n` results from a completed search.
@@ -2718,7 +2825,7 @@ mod tests {
         assert_eq!(
             vm.ui().results_empty(),
             Some(EmptyText {
-                heading: "Search YouTube Music".into(),
+                heading: "Search".into(),
                 sub: "Type a song, artist or album, then press Return".into(),
                 action: None,
             })
@@ -2821,7 +2928,7 @@ mod tests {
             keys,
             [
                 "Space", "⌘→", "⌘←", "↩", "⌘↩", "⌘F", "⌘1", "⌘2", "⌘3", "⌘4", "⌘L", "⌘R", "", "",
-                "⌘↑", "⌘↓", ""
+                "", "", "⌘↑", "⌘↓", ""
             ]
         );
     }
@@ -3671,6 +3778,23 @@ mod tests {
         })
     }
 
+    fn spotify() -> ProviderId {
+        Service::Spotify.provider()
+    }
+
+    fn spotify_account(state: AccountState) -> Event {
+        Event::Account {
+            provider: spotify(),
+            state,
+        }
+    }
+
+    fn spotify_signed_in() -> Event {
+        spotify_account(AccountState::SignedIn {
+            name: Some("Sam".into()),
+        })
+    }
+
     /// The reqs of the `Browse` commands in `cmds`, with their pages.
     fn browses(cmds: &[Command]) -> Vec<(u64, Page)> {
         cmds.iter()
@@ -3796,7 +3920,10 @@ mod tests {
         );
         assert!(vm.take_dirty().contains(Dirty::ACCOUNT));
         vm.apply(account(AccountState::SignedOut));
-        assert_eq!(vm.ui().library_view(), LibraryView::SignedOut);
+        assert_eq!(
+            vm.ui().library_view(),
+            LibraryView::SignedOut(vec![provider()])
+        );
         let pending = AccountState::Pending {
             verification_url: "https://www.google.com/device".into(),
             user_code: "WXYZ-ABCD".into(),
@@ -3806,6 +3933,7 @@ mod tests {
         assert_eq!(
             vm.ui().library_view(),
             LibraryView::Pending {
+                provider: provider(),
                 verification_url: "https://www.google.com/device".into(),
                 user_code: "WXYZ-ABCD".into(),
                 expires_at_unix: 1_000,
@@ -3825,19 +3953,25 @@ mod tests {
     #[test]
     fn sign_in_commands_name_the_accounts_provider() {
         let mut vm = connected();
-        assert!(vm.intent(Intent::SignIn).is_empty());
+        assert!(vm.intent(Intent::SignIn(provider())).is_empty());
         vm.apply(account(AccountState::SignedOut));
+        vm.apply(spotify_account(AccountState::SignedOut));
         assert_eq!(
-            vm.intent(Intent::SignIn),
+            vm.intent(Intent::SignIn(provider())),
             vec![Command::SignIn {
                 provider: provider()
             }]
         );
         assert_eq!(
-            vm.intent(Intent::SignOut),
+            vm.intent(Intent::SignOut(spotify())),
             vec![Command::SignOut {
-                provider: provider()
+                provider: spotify()
             }]
+        );
+        // A provider the daemon never reported gets nothing.
+        assert!(
+            vm.intent(Intent::SignIn(ProviderId("nope".into())))
+                .is_empty()
         );
     }
 
@@ -3880,8 +4014,14 @@ mod tests {
             error: "sign in first".into(),
             sign_in_required: true,
         });
-        assert_eq!(vm.ui().library_view(), LibraryView::SignedOut);
-        assert!(vm.ui().can_run(PaletteAction::SignIn, Selection::default()));
+        assert_eq!(
+            vm.ui().library_view(),
+            LibraryView::SignedOut(vec![provider()])
+        );
+        assert!(vm.ui().can_run(
+            PaletteAction::SignIn(Service::YouTubeMusic),
+            Selection::default()
+        ));
         // Any other failure keeps the page, with its error.
         let retry = browses(&vm.intent(Intent::Visit(Place::Library)));
         assert!(retry.is_empty(), "a failed page waits for Try Again");
@@ -4078,15 +4218,123 @@ mod tests {
     }
 
     #[test]
-    fn sign_in_and_out_apply_to_their_account_state() {
+    fn sign_in_and_out_apply_to_their_providers_state() {
         let mut vm = connected();
         let can = |vm: &Vm, a| vm.ui().can_run(a, Selection::default());
-        assert!(!can(&vm, PaletteAction::SignIn) && !can(&vm, PaletteAction::SignOut));
+        let [sp_in, sp_out] = [
+            PaletteAction::SignIn(Service::Spotify),
+            PaletteAction::SignOut(Service::Spotify),
+        ];
+        let [yt_in, yt_out] = [
+            PaletteAction::SignIn(Service::YouTubeMusic),
+            PaletteAction::SignOut(Service::YouTubeMusic),
+        ];
+        assert!(
+            ![sp_in, sp_out, yt_in, yt_out]
+                .into_iter()
+                .any(|a| can(&vm, a))
+        );
         vm.apply(account(AccountState::SignedOut));
-        assert!(can(&vm, PaletteAction::SignIn) && !can(&vm, PaletteAction::SignOut));
+        vm.apply(spotify_signed_in());
+        assert!(can(&vm, yt_in) && !can(&vm, yt_out));
+        assert!(!can(&vm, sp_in) && can(&vm, sp_out));
         vm.apply(signed_in());
-        assert!(!can(&vm, PaletteAction::SignIn) && can(&vm, PaletteAction::SignOut));
-        assert!(PaletteAction::SignIn.is_account() && !PaletteAction::Refresh.is_account());
+        vm.apply(spotify_account(AccountState::SignedOut));
+        assert!(!can(&vm, yt_in) && can(&vm, yt_out));
+        assert!(can(&vm, sp_in) && !can(&vm, sp_out));
+        assert!(sp_in.is_account() && !PaletteAction::Refresh.is_account());
+    }
+
+    #[test]
+    fn the_menu_and_palette_name_each_provider() {
+        let labels: Vec<_> = PaletteAction::ALL
+            .into_iter()
+            .filter(|a| a.is_account())
+            .map(PaletteAction::label)
+            .collect();
+        assert_eq!(
+            labels,
+            [
+                "Sign in to Spotify\u{2026}",
+                "Sign out of Spotify",
+                "Sign in to YouTube Music\u{2026}",
+                "Sign out of YouTube Music",
+            ]
+        );
+        assert!(
+            PaletteAction::ALL
+                .iter()
+                .all(|a| !a.label().contains("Google"))
+        );
+        assert_eq!(Service::of(&spotify()), Some(Service::Spotify));
+        assert_eq!(Service::of(&ProviderId("demo".into())), None);
+    }
+
+    #[test]
+    fn the_library_fetches_while_any_provider_is_signed_in() {
+        let mut vm = connected();
+        vm.apply(account(AccountState::SignedOut));
+        vm.apply(spotify_account(AccountState::SignedOut));
+        assert!(browses(&vm.take_commands()).is_empty());
+        assert_eq!(
+            vm.ui().library_view(),
+            LibraryView::SignedOut(vec![provider(), spotify()])
+        );
+        vm.apply(spotify_signed_in());
+        assert_eq!(browses(&vm.take_commands()).len(), 1);
+        // The other signing in changes what the Library merges, so it asks again.
+        vm.apply(signed_in());
+        assert_eq!(browses(&vm.take_commands()).len(), 1);
+        assert!(matches!(
+            vm.ui().library_view(),
+            LibraryView::SignedIn { name: Some(n), .. } if n == "Ada, Sam"
+        ));
+        // One signing out leaves the Library fetched for the rest.
+        vm.apply(spotify_account(AccountState::SignedOut));
+        assert_eq!(browses(&vm.take_commands()).len(), 1);
+        assert!(matches!(
+            vm.ui().library_view(),
+            LibraryView::SignedIn { .. }
+        ));
+        // The same set signed in is not a reason to ask.
+        vm.apply(signed_in());
+        assert!(vm.take_commands().is_empty());
+        vm.apply(account(AccountState::SignedOut));
+        assert_eq!(vm.ui().library.load, Load::Idle);
+        assert_eq!(
+            vm.ui().library_view(),
+            LibraryView::SignedOut(vec![provider(), spotify()])
+        );
+    }
+
+    #[test]
+    fn the_sign_in_panel_names_the_provider_that_is_pending() {
+        let mut vm = connected();
+        vm.apply(account(AccountState::SignedOut));
+        vm.apply(spotify_account(AccountState::Pending {
+            verification_url: "https://www.spotify.com/pair".into(),
+            user_code: "ABC123".into(),
+            expires_at_unix: 1_000,
+        }));
+        assert!(matches!(
+            vm.ui().library_view(),
+            LibraryView::Pending { provider, .. } if provider == spotify()
+        ));
+        assert!(sign_in_notice(&spotify()).unwrap().contains("suspended"));
+        assert_eq!(sign_in_notice(&provider()), None);
+        // The cancel sends Sign Out for the pending provider.
+        assert_eq!(
+            vm.intent(Intent::SignOut(spotify())),
+            vec![Command::SignOut {
+                provider: spotify()
+            }]
+        );
+    }
+
+    #[test]
+    fn provider_names_are_the_services_names() {
+        assert_eq!(provider_name("spotify"), "Spotify");
+        assert_eq!(provider_name("ytmusic"), "YouTube Music");
     }
 
     fn status(state: UpdateState) -> UpdateStatus {
