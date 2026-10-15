@@ -3,7 +3,7 @@
 
 use std::fs::{self, OpenOptions};
 use std::io::{self, Read, Write};
-use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
+use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 
 use librespot_core::authentication::Credentials;
@@ -11,6 +11,8 @@ use librespot_core::authentication::Credentials;
 pub(crate) const ENV: &str = "REQUIEM_SPOTIFY_CREDENTIALS_FILE";
 const NAME: &str = "spotify-credentials.json";
 const MAX_FILE_BYTES: u64 = 64 * 1024;
+/// A sign-in's brief librespot cache, beside the credentials file.
+const SCRATCH: &str = ".spotify-sign-in";
 
 /// `REQUIEM_SPOTIFY_CREDENTIALS_FILE`, else beside the Google sign-in: in
 /// `~/Library/Application Support/requiem` on macOS, `$XDG_STATE_HOME/requiem` on Linux.
@@ -69,15 +71,7 @@ pub(crate) fn check(path: &Path) -> Result<(), String> {
 
 /// Written 0600 through a temporary file and a rename, so a reader never sees half a file.
 pub(crate) fn save(path: &Path, creds: &Credentials) -> io::Result<()> {
-    let dir = path
-        .parent()
-        .ok_or_else(|| io::Error::other("credentials path has no parent"))?;
-    fs::DirBuilder::new()
-        .recursive(true)
-        .mode(0o700)
-        .create(dir)?;
-    // `create` leaves an existing directory as it was.
-    fs::set_permissions(dir, fs::Permissions::from_mode(0o700))?;
+    create_dirs(parent(path)?)?;
     let json = serde_json::to_vec(creds).map_err(io::Error::other)?;
     let mut tmp = path.as_os_str().to_owned();
     tmp.push(".tmp");
@@ -100,6 +94,31 @@ pub(crate) fn save(path: &Path, creds: &Credentials) -> io::Result<()> {
     result
 }
 
+fn parent(path: &Path) -> io::Result<&Path> {
+    path.parent()
+        .ok_or_else(|| io::Error::other("credentials path has no parent"))
+}
+
+/// Creates whichever of `dir` and its parents are missing, each 0700. Directories that exist
+/// are left as they are: they may be the user's, `$HOME` included.
+pub(crate) fn create_dirs(dir: &Path) -> io::Result<()> {
+    let mut missing = Vec::new();
+    for d in dir.ancestors() {
+        match fs::metadata(d) {
+            Ok(_) => break,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => missing.push(d),
+            Err(e) => return Err(e),
+        }
+    }
+    for d in missing.into_iter().rev() {
+        match fs::DirBuilder::new().mode(0o700).create(d) {
+            Err(e) if e.kind() != io::ErrorKind::AlreadyExists => return Err(e),
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
 pub(crate) fn remove(path: &Path) -> io::Result<()> {
     match fs::remove_file(path) {
         Err(e) if e.kind() != io::ErrorKind::NotFound => Err(e),
@@ -107,8 +126,59 @@ pub(crate) fn remove(path: &Path) -> io::Result<()> {
     }
 }
 
+/// Deletes the sign-in file and any sign-in scratch beside it.
+pub(crate) fn forget(path: &Path) -> Result<(), String> {
+    let scratch = remove_scratch(path);
+    remove(path)
+        .map_err(|e| format!("cannot delete {}: {e}", path.display()))
+        .and(scratch)
+}
+
+pub(crate) fn scratch_dir(path: &Path) -> io::Result<PathBuf> {
+    Ok(parent(path)?.join(SCRATCH))
+}
+
+/// Removes every `.spotify-sign-in*` entry beside the credentials file, so also the
+/// per-process names earlier helpers used.
+pub(crate) fn remove_scratch(path: &Path) -> Result<(), String> {
+    let Some(dir) = path.parent() else {
+        return Ok(());
+    };
+    let fail = |p: &Path, e: io::Error| format!("cannot delete {}: {e}", p.display());
+    let entries = match fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(fail(dir, e)),
+    };
+    let mut result = Ok(());
+    for entry in entries {
+        let entry = entry.map_err(|e| fail(dir, e))?;
+        if !entry
+            .file_name()
+            .as_encoded_bytes()
+            .starts_with(SCRATCH.as_bytes())
+        {
+            continue;
+        }
+        let p = entry.path();
+        // `file_type` doesn't follow symlinks: a link is removed, never what it points to.
+        let removed = match entry.file_type() {
+            Ok(t) if t.is_dir() => fs::remove_dir_all(&p),
+            Ok(_) => fs::remove_file(&p),
+            Err(e) => Err(e),
+        };
+        match removed {
+            Err(e) if e.kind() != io::ErrorKind::NotFound => result = Err(fail(&p, e)),
+            _ => {}
+        }
+    }
+    result
+}
+
 #[cfg(test)]
 mod tests {
+    use std::os::unix::fs::PermissionsExt;
+
     use librespot_protocol::authentication::AuthenticationType;
 
     use super::*;
@@ -196,15 +266,49 @@ mod tests {
         assert_eq!(load(&path).unwrap().unwrap(), creds);
         assert!(!dir.join("spotify-credentials.json.tmp").exists());
 
-        // Replacing a loose file leaves it 0600 too, and tightens a loose dir.
+        assert_eq!(mode(&tmp.path().join("state")), 0o700);
+
+        // Replacing a loose file leaves it 0600 too; a dir it didn't create keeps its mode.
         fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
         fs::set_permissions(&dir, fs::Permissions::from_mode(0o755)).unwrap();
         save(&path, &creds).unwrap();
         assert_eq!(mode(&path), 0o600);
-        assert_eq!(mode(&dir), 0o700);
+        assert_eq!(mode(&dir), 0o755);
 
         remove(&path).unwrap();
         assert!(!path.exists());
         remove(&path).unwrap();
+    }
+
+    #[test]
+    fn forgetting_removes_the_file_and_all_sign_in_scratch_only() {
+        let tmp = TempDir::new();
+        let path = tmp.path().join("spotify-credentials.json");
+        assert_eq!(
+            scratch_dir(&path).unwrap(),
+            tmp.path().join(".spotify-sign-in")
+        );
+        let outside = tmp.path().join("outside");
+        fs::create_dir(&outside).unwrap();
+        fs::write(outside.join("keep"), "").unwrap();
+        for d in [".spotify-sign-in", ".spotify-sign-in-4242"] {
+            fs::create_dir(tmp.path().join(d)).unwrap();
+            fs::write(tmp.path().join(d).join("credentials.json"), "{}").unwrap();
+        }
+        std::os::unix::fs::symlink(&outside, tmp.path().join(".spotify-sign-in-link")).unwrap();
+        fs::write(&path, "{}").unwrap();
+        fs::write(tmp.path().join("google-token.json"), "{}").unwrap();
+
+        forget(&path).unwrap();
+        let mut left: Vec<_> = fs::read_dir(tmp.path())
+            .unwrap()
+            .map(|e| e.unwrap().file_name().into_string().unwrap())
+            .collect();
+        left.sort();
+        assert_eq!(left, ["google-token.json", "outside"]);
+        assert!(outside.join("keep").exists());
+        forget(&path).unwrap();
+        // No directory to sweep is not an error.
+        assert_eq!(remove_scratch(&tmp.path().join("gone/c.json")), Ok(()));
     }
 }

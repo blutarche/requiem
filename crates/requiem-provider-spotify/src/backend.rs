@@ -3,11 +3,11 @@
 
 use std::collections::hash_map::RandomState;
 use std::collections::{HashMap, HashSet, VecDeque};
-use std::fmt::Write as _;
+use std::fmt::{Display, Write as _};
 use std::fs;
 use std::hash::{BuildHasher, Hasher};
 use std::io::{self, Read, Seek, SeekFrom};
-use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+use std::os::unix::fs::DirBuilderExt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, PoisonError};
@@ -37,6 +37,7 @@ use tokio::runtime::Runtime;
 use tokio::sync::Notify;
 
 use crate::keys::Keys;
+use crate::logger::redact;
 use crate::server::{Backend, Stream};
 use crate::wire::Pending;
 use crate::{PROVIDER_ID, creds};
@@ -93,9 +94,14 @@ fn no_place() -> ProviderError {
     ))
 }
 
+/// An error from librespot or its HTTP stack, as text fit to log or send to the daemon.
+fn shown(e: &impl Display) -> String {
+    redact(&e.to_string())
+}
+
 /// Our own message, then librespot's, which names the failure but never a token or key.
 fn api_error(what: &str, e: &Error) -> ProviderError {
-    let msg = format!("Spotify {what}: {e}");
+    let msg = format!("Spotify {what}: {}", shown(&e));
     match e.kind {
         ErrorKind::Unauthenticated => ProviderError::SignInRequired(msg),
         ErrorKind::Cancelled
@@ -112,10 +118,13 @@ fn api_error(what: &str, e: &Error) -> ProviderError {
 /// librespot reports a refused login as `PermissionDenied`.
 fn connect_error(e: &Error) -> ProviderError {
     match e.kind {
-        ErrorKind::PermissionDenied | ErrorKind::Unauthenticated => ProviderError::SignInRequired(
-            format!("Spotify did not accept the sign-in; sign in again ({e})"),
-        ),
-        _ => ProviderError::Network(format!("cannot reach Spotify: {e}")),
+        ErrorKind::PermissionDenied | ErrorKind::Unauthenticated => {
+            ProviderError::SignInRequired(format!(
+                "Spotify did not accept the sign-in; sign in again ({})",
+                shown(&e)
+            ))
+        }
+        _ => ProviderError::Network(format!("cannot reach Spotify: {}", shown(&e))),
     }
 }
 
@@ -124,7 +133,13 @@ fn cancelled() -> ProviderError {
 }
 
 impl Librespot {
+    /// Removes any sign-in scratch a killed helper left beside the credentials file.
     pub(crate) fn new(rt: Runtime, creds: Option<PathBuf>, tmp_dir: PathBuf) -> Self {
+        if let Some(path) = &creds
+            && let Err(e) = creds::remove_scratch(path)
+        {
+            eprintln!("[spotify] {e}");
+        }
         Self {
             rt,
             creds,
@@ -318,10 +333,14 @@ impl Librespot {
         let session = self.session().await?;
         let file = AudioFile::open(&session, prep.file, prep.bytes_per_second)
             .await
-            .map_err(|e| ProviderError::Network(format!("cannot open the Spotify stream: {e}")))?;
+            .map_err(|e| {
+                ProviderError::Network(format!("cannot open the Spotify stream: {}", shown(&e)))
+            })?;
         let len = file
             .get_stream_loader_controller()
-            .map_err(|e| ProviderError::Network(format!("cannot open the Spotify stream: {e}")))?
+            .map_err(|e| {
+                ProviderError::Network(format!("cannot open the Spotify stream: {}", shown(&e)))
+            })?
             .len() as u64;
         Ok(Box::new(Open {
             stream: Skipped::new(AudioDecrypt::new(Some(prep.key), file), len),
@@ -343,10 +362,10 @@ impl Librespot {
         let config = self.config();
         let client = DeviceAuthClientBuilder::new(&config.client_id, vec![SIGN_IN_SCOPE])
             .build()
-            .map_err(|e| ProviderError::ClientBroken(format!("Spotify sign-in: {e}")))?;
+            .map_err(|e| ProviderError::ClientBroken(format!("Spotify sign-in: {}", shown(&e))))?;
         let auth = tokio::select! {
             a = client.request_device_code_async() => a.map_err(|e| {
-                ProviderError::Network(format!("Spotify sign-in: {e}"))
+                ProviderError::Network(format!("Spotify sign-in: {}", shown(&e)))
             })?,
             () = &mut stop => return Err(cancelled()),
         };
@@ -360,7 +379,7 @@ impl Librespot {
         });
         let token = tokio::select! {
             t = client.poll_for_token_async(&auth) => t.map_err(|e| {
-                ProviderError::SignInRequired(format!("Spotify sign-in did not finish: {e}"))
+                ProviderError::SignInRequired(format!("Spotify sign-in did not finish: {}", shown(&e)))
             })?,
             () = &mut stop => return Err(cancelled()),
         };
@@ -393,7 +412,7 @@ impl Librespot {
         let broken = |e: io::Error| ProviderError::ClientBroken(format!("Spotify sign-in: {e}"));
         let scratch = Scratch::new(path).map_err(broken)?;
         let cache = Cache::new(Some(scratch.0.as_path()), None, None, None)
-            .map_err(|e| ProviderError::ClientBroken(format!("Spotify sign-in: {e}")))?;
+            .map_err(|e| ProviderError::ClientBroken(format!("Spotify sign-in: {}", shown(&e))))?;
         let session = Session::new(self.config(), Some(cache));
         session
             .connect(Credentials::with_access_token(access_token), true)
@@ -450,9 +469,7 @@ impl Backend for Librespot {
             s.shutdown();
         }
         match &self.creds {
-            Some(path) => creds::remove(path).map_err(|e| {
-                ProviderError::ClientBroken(format!("cannot delete {}: {e}", path.display()))
-            }),
+            Some(path) => creds::forget(path).map_err(ProviderError::ClientBroken),
             None => Ok(()),
         }
     }
@@ -482,21 +499,20 @@ impl SignInFlow {
     }
 }
 
-/// A 0700 directory beside the credentials file, removed on drop.
+/// A 0700 directory beside the credentials file, removed on drop. A helper killed while
+/// holding one leaves it for the next helper's start or a sign-out to remove.
 struct Scratch(PathBuf);
 
 impl Scratch {
     fn new(creds: &Path) -> io::Result<Self> {
-        let dir = creds
-            .parent()
-            .ok_or_else(|| io::Error::other("credentials path has no parent"))?;
-        fs::DirBuilder::new()
-            .recursive(true)
-            .mode(0o700)
-            .create(dir)?;
-        fs::set_permissions(dir, fs::Permissions::from_mode(0o700))?;
-        let scratch = dir.join(format!(".spotify-sign-in-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&scratch);
+        let scratch = creds::scratch_dir(creds)?;
+        if let Some(dir) = scratch.parent() {
+            creds::create_dirs(dir)?;
+        }
+        match fs::remove_dir_all(&scratch) {
+            Err(e) if e.kind() != io::ErrorKind::NotFound => return Err(e),
+            _ => {}
+        }
         fs::DirBuilder::new().mode(0o700).create(&scratch)?;
         Ok(Self(scratch))
     }
@@ -674,7 +690,7 @@ async fn tracks(session: &Session, ids: Vec<SpotifyId>) -> Result<Vec<Track>, Pr
     match first_err {
         Some(e) if out.is_empty() => Err(api_error("track details", &e)),
         Some(e) => {
-            eprintln!("[spotify] left out tracks without details: {e}");
+            eprintln!("[spotify] left out tracks without details: {}", shown(&e));
             Ok(out)
         }
         None => Ok(out),
@@ -859,6 +875,43 @@ mod tests {
     use librespot_protocol::playlist4_external::{ListItems, MetaItem, PictureSize};
 
     use super::*;
+    use crate::testing::TempDir;
+
+    #[test]
+    fn stale_sign_in_scratch_goes_at_start_and_at_sign_out() {
+        let tmp = TempDir::new();
+        let path = tmp.path().join("requiem/spotify-credentials.json");
+        let stale = |name: &str| {
+            let d = tmp.path().join("requiem").join(name);
+            fs::create_dir_all(&d).unwrap();
+            fs::write(d.join("credentials.json"), "{}").unwrap();
+            d
+        };
+        let (fixed, old) = (stale(".spotify-sign-in"), stale(".spotify-sign-in-4242"));
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let backend = Librespot::new(rt, Some(path.clone()), tmp.path().to_owned());
+        assert!(!fixed.exists() && !old.exists());
+
+        let fixed = stale(".spotify-sign-in");
+        fs::write(&path, "{}").unwrap();
+        backend.sign_out().unwrap();
+        assert!(!fixed.exists() && !path.exists());
+        assert!(tmp.path().join("requiem").exists());
+    }
+
+    #[test]
+    fn librespot_error_text_loses_url_queries() {
+        let e = Error::unavailable(io::Error::other(
+            "Fetching https://cdn.example/a?token=SECRET",
+        ));
+        let ProviderError::Network(m) = api_error("stream", &e) else {
+            panic!("not Network");
+        };
+        assert!(m.ends_with("https://cdn.example/a?<redacted> }"), "{m}");
+    }
 
     /// Hands out at most 5 bytes per read and refuses all but `SeekFrom::Start`.
     struct Picky(Cursor<Vec<u8>>);

@@ -14,6 +14,7 @@ use std::time::Duration;
 use requiem_core::{Page, ProviderError, Shelf, Track};
 use serde::Serialize;
 
+use crate::logger::redact;
 use crate::sys;
 use crate::wire::{
     self, Attached, Chunk, Done, MAX_READ, Pending, Prepared, Request, Shelves, SignInLine, Tracks,
@@ -206,7 +207,10 @@ fn serve_stream(
                 wire::write_line(w, &Chunk { ok: n })?;
                 w.write_all(&buf[..n])?;
             }
-            Err(e) => wire::write_err(w, &ProviderError::Network(format!("Spotify stream: {e}")))?,
+            Err(e) => wire::write_err(
+                w,
+                &ProviderError::Network(format!("Spotify stream: {}", redact(&e.to_string()))),
+            )?,
         }
         w.flush()?;
     }

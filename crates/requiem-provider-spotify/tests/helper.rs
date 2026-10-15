@@ -235,7 +235,12 @@ fn run(tmp: &Path) {
         "{pending:?}"
     );
     assert_eq!(p.account(), pending);
+    // As a helper killed mid sign-in leaves it; the fake helper never removes it.
+    let scratch = tmp.join(".spotify-sign-in");
+    fs::create_dir(&scratch).unwrap();
+    fs::write(scratch.join("credentials.json"), "{}").unwrap();
     p.sign_out().unwrap();
+    assert!(!scratch.exists());
     let ended = signing.join().unwrap();
     assert!(
         matches!(&ended, Err(ProviderError::SignInRequired(m)) if m.contains("cancelled")),

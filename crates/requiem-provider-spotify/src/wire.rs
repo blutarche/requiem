@@ -8,6 +8,8 @@ use requiem_core::{Page, ProviderError, Shelf, Track};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
+use crate::logger::redact;
+
 /// Longest line either side accepts; a large playlist's shelf is a few MiB.
 pub(crate) const MAX_LINE: usize = 16 * 1024 * 1024;
 /// Largest `read` either side asks for or serves; symphonia reads in 32 KiB blocks.
@@ -126,7 +128,7 @@ pub(crate) fn write_err<W: Write>(w: &mut W, e: &ProviderError) -> io::Result<()
         &ErrLine {
             err: WireError {
                 kind,
-                msg: msg.clone(),
+                msg: redact(msg),
             },
         },
     )
@@ -330,5 +332,22 @@ mod tests {
             read_reply::<_, Tracks>(&mut r),
             Err(ReplyError::Provider(ProviderError::SignInRequired(m))) if m == "m"
         ));
+    }
+
+    #[test]
+    fn urls_in_errors_lose_their_queries() {
+        let mut out = Vec::new();
+        let e = ProviderError::Network(
+            "Fetching https://audio.example/a/b?__token__=exp=1~hmac=SECRET failed".into(),
+        );
+        write_err(&mut out, &e).unwrap();
+        assert!(!String::from_utf8_lossy(&out).contains("SECRET"));
+        let mut r = BufReader::new(Cursor::new(out));
+        match read_reply::<_, Tracks>(&mut r) {
+            Err(ReplyError::Provider(ProviderError::Network(m))) => {
+                assert_eq!(m, "Fetching https://audio.example/a/b?<redacted> failed");
+            }
+            other => panic!("{other:?}"),
+        }
     }
 }

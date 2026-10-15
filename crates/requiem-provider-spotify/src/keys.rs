@@ -10,6 +10,8 @@ use std::time::{Duration, Instant};
 
 use requiem_core::ProviderError;
 
+use crate::logger::redact;
+
 /// Measured from the end of the previous request.
 pub(crate) const KEY_SPACING: Duration = Duration::from_secs(2);
 /// After a failed request, the waits before the second and the third attempt.
@@ -148,7 +150,10 @@ impl<I: Hash + Eq + Clone, K: Clone> Keys<I, K> {
                     return Ok(k);
                 }
                 Err(e) => {
-                    eprintln!("[spotify] audio key request failed: {e}");
+                    eprintln!(
+                        "[spotify] audio key request failed: {}",
+                        redact(&e.to_string())
+                    );
                     if policy.gate(now()) == Gate::Paused {
                         return Err(ProviderError::Unplayable(PAUSED.into()));
                     }

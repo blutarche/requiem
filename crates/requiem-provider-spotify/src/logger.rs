@@ -27,7 +27,8 @@ pub(crate) fn init() {
 }
 
 /// Drops URL query strings: librespot warns with CDN URLs, whose queries carry signed tokens.
-fn redact(msg: &str) -> String {
+/// Applied to every log line and every error the helper sends.
+pub(crate) fn redact(msg: &str) -> String {
     let mut out = String::with_capacity(msg.len());
     let mut rest = msg;
     while let Some(i) = rest.find("://") {

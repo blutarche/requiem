@@ -308,9 +308,7 @@ impl Provider for SpotifyProvider {
             Ok(())
         };
         let local = match &self.credentials {
-            Some(path) => creds::remove(path).map_err(|e| {
-                ProviderError::ClientBroken(format!("cannot delete {}: {e}", path.display()))
-            }),
+            Some(path) => creds::forget(path).map_err(ProviderError::ClientBroken),
             None => Ok(()),
         };
         local.and(remote)
