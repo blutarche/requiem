@@ -9,6 +9,7 @@ use requiem_core::{
     Command, EngineEventSink, EnqueueMode, Event, PersistSink, Session, SessionConfig,
 };
 use requiem_ipc::{Instance, ServeError, Server, ServerHooks};
+use requiem_provider_spotify::{SpotifyOptions, SpotifyProvider};
 use requiem_provider_ytmusic::{YtMusicOptions, YtMusicProvider};
 
 use idle::{Activity, IdleTimer};
@@ -58,6 +59,20 @@ fn main() -> ExitCode {
     unsafe { std::env::remove_var(REEXECED_ENV) };
     if std::env::args().nth(1).as_deref() == Some(SELF_TEST_ARG) {
         return self_test();
+    }
+    // Spawned by `SpotifyProvider`; it never takes the instance lock or opens audio.
+    if std::env::args_os().nth(1).as_deref() == Some(requiem_provider_spotify::HELPER_ARG.as_ref())
+    {
+        return match std::env::args_os().nth(2) {
+            Some(socket) => requiem_provider_spotify::run_helper(socket.as_ref()),
+            None => {
+                eprintln!(
+                    "requiemd: {} needs a socket path",
+                    requiem_provider_spotify::HELPER_ARG
+                );
+                ExitCode::from(2)
+            }
+        };
     }
     // Lets the live update test make a new version fail to start after the swap.
     #[cfg(debug_assertions)]
@@ -124,6 +139,11 @@ fn main() -> ExitCode {
         prefer_aac,
         ..YtMusicOptions::default()
     }));
+    let spotify = Arc::new(SpotifyProvider::new(SpotifyOptions {
+        exe: exe.clone(),
+        socket_dir: requiem_ipc::socket_dir().ok(),
+        credentials: requiem_provider_spotify::credentials_file(),
+    }));
     let state_path = persist::state_path();
     let restored = state_path.as_deref().and_then(persist::load);
     // Nothing is sent to the writer before the server is up, so an early return writes nothing.
@@ -138,7 +158,7 @@ fn main() -> ExitCode {
         None => (None, None),
     };
     let session = Session::spawn(
-        vec![provider],
+        vec![spotify, provider],
         move |sink| {
             let _ = slot.set(sink);
             Box::new(engine)
@@ -215,6 +235,12 @@ fn self_test() -> ExitCode {
     }
     if let Some(path) = requiem_provider_ytmusic::token_file()
         && let Err(e) = requiem_provider_ytmusic::check_token_file(&path)
+    {
+        eprintln!("requiemd: {e}");
+        ok = false;
+    }
+    if let Some(path) = requiem_provider_spotify::credentials_file()
+        && let Err(e) = requiem_provider_spotify::check_credentials_file(&path)
     {
         eprintln!("requiemd: {e}");
         ok = false;

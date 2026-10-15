@@ -2566,6 +2566,7 @@ dependencies = [
  "requiem-ipc",
  "requiem-linux",
  "requiem-macos",
+ "requiem-provider-spotify",
  "requiem-provider-ytmusic",
  "requiem-update",
  "semver",

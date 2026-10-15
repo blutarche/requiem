@@ -465,6 +465,7 @@ impl Updater {
         let files: Vec<PathBuf> = [
             persist::state_path(),
             requiem_provider_ytmusic::token_file(),
+            requiem_provider_spotify::credentials_file(),
         ]
         .into_iter()
         .flatten()
