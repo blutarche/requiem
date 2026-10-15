@@ -25,7 +25,9 @@ struct State {
     conn: Option<Conn>,
     len: u64,
     pos: u64,
-    /// Set once the connection fails: the helper has dropped the stream, so it stays failed.
+    /// Set once attaching or a read fails; the helper has dropped the stream by then, so it is
+    /// never attached again. `byte_len` is then `None`, which fails the decoder at probe rather
+    /// than at a seek, where symphonia unwraps the length.
     failed: Option<String>,
 }
 
@@ -193,6 +195,18 @@ mod tests {
         assert!(s.read(&mut [0; 4]).is_err());
         assert!(s.byte_len().is_none());
         assert!(!path.exists());
+    }
+
+    #[test]
+    fn a_failed_attach_is_kept_and_never_retried() {
+        let tmp = TempDir::new();
+        let mut s = HelperSource::new(tmp.path().join("spotify.sock"), "s-short".into());
+        let first = s.read(&mut [0; 4]).unwrap_err().to_string();
+        // A helper that would now answer is never asked.
+        serve(&tmp);
+        assert!(s.byte_len().is_none());
+        assert_eq!(s.read(&mut [0; 4]).unwrap_err().to_string(), first);
+        assert!(s.seek(SeekFrom::End(0)).is_err());
     }
 
     #[test]

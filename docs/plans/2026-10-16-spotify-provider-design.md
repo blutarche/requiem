@@ -46,8 +46,8 @@ There is one JSON request line per connection, answered by one JSON header line.
 |---|---|---|
 | `search` | `{"op":"search","q":..,"limit":n}` | `{"tracks":[Track..]}` |
 | `browse` | `{"op":"browse","page":Page}` | `{"shelves":[Shelf..]}` |
-| `prepare` | `{"op":"prepare","track":"<base62>"}` | `{"stream":"<id>","len":n}` |
-| `attach` | `{"op":"attach","stream":"<id>"}` | `{"ok":true}`, then the connection carries `read` lines |
+| `prepare` | `{"op":"prepare","track":"<base62>"}` | `{"stream":"<id>"}` |
+| `attach` | `{"op":"attach","stream":"<id>"}` | `{"ok":true,"len":n}`, then the connection carries `read` lines |
 | `read` (on an attached conn) | `{"op":"read","offset":o,"len":n}` | `{"ok":m}` then exactly m bytes (m < n only at EOF) |
 | `sign_in` | `{"op":"sign_in"}` | one line per state: `{"pending":{url,code,expires_at_unix}}`, then `{"signed_in":{}}`, or an error line |
 | `sign_out` | `{"op":"sign_out"}` | `{"ok":true}` |
@@ -56,10 +56,11 @@ There is one JSON request line per connection, answered by one JSON header line.
 - **Message types.** `Track`, `Shelf` and `Page` are the serde types from requiem-core.
 - **`resolve(track)`** sends `prepare`. The helper:
   1. resolves the file and audio key;
-  2. keeps `(file_id, key, len)` under a fresh stream id;
-  3. returns the id and the logical length.
+  2. keeps `(file_id, key)` under a fresh stream id;
+  3. returns the id.
 
-  `prepare` opens no CDN connection. The returned `ByteSource` holds only the socket path, stream id and length, and opens its connection with `attach` on the first read. This keeps the "no I/O until the first read" rule. Seeking only moves the source's offset.
+  `prepare` opens no CDN connection, so the length is not known yet: only the CDN's first response gives the file size. The returned `ByteSource` holds only the socket path and stream id, and opens its connection with `attach` on the first read, `SeekFrom::End` or `byte_len()`; `attach` replies with the logical length. Only the decoder calls `byte_len()`, at playback, so a pre-resolved source still does no I/O. Seeking from the start or the current offset only moves the source's offset.
+- **Attach failure.** The source keeps the error: `byte_len()` returns `None` and every read returns that error, without attaching again. The decoder then fails at probe, before it could seek without a length.
 - **Attach and drop.** `attach` opens the `AudioFile` (the CDN fetch starts) wrapped in `AudioDecrypt`. Logical offset `o` reads decrypted offset `o + 0xa7`, and every seek becomes `SeekFrom::Start`. Closing the connection drops the file.
 - **Prepared entries** expire 30 minutes after creation if never attached. Re-attaching an expired id fails with `Network`, so the session re-resolves.
 - **Read timeout.** The daemon sets a 15 s read timeout on stream connections. librespot's own read blocks for up to 8 s.
