@@ -311,6 +311,18 @@ fn aac_is_resampled_to_output_rate() {
 }
 
 #[test]
+fn ogg_vorbis_plays_to_end() {
+    let mut h = harness(4.0);
+    h.engine.load(
+        1,
+        mem(fixture("sine440_44k.ogg"), FormatHint::OggVorbis),
+        false,
+    );
+    h.wait_ended(1);
+    check_tone(&h, 6.0);
+}
+
+#[test]
 fn seek_right_after_start() {
     let mut h = harness(4.0);
     h.engine.load(1, opus(), false);

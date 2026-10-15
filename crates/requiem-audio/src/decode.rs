@@ -240,6 +240,7 @@ impl Player {
         h.with_extension(match hint {
             FormatHint::WebmOpus => "webm",
             FormatHint::Mp4Aac => "m4a",
+            FormatHint::OggVorbis => "ogg",
         });
         let mss =
             MediaSourceStream::new(Box::new(Source(bytes)), MediaSourceStreamOptions::default());

@@ -13,6 +13,7 @@ path = "src/main.rs"
 [dependencies]
 requiem-core.workspace = true
 requiem-audio.workspace = true
+requiem-provider-spotify.workspace = true
 requiem-provider-ytmusic.workspace = true
 requiem-ipc.workspace = true
 requiem-macos.workspace = true
