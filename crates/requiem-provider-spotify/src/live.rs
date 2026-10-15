@@ -186,7 +186,7 @@ fn live() {
     println!("  {} liked tracks", liked[0].items.len());
 
     println!("3-4. resolve, decode 10 s, seek to 60 s");
-    for (id, first) in [(AROUND_THE_WORLD, 10), (BOHEMIAN_RHAPSODY, 2)] {
+    for id in [AROUND_THE_WORLD, BOHEMIAN_RHAPSODY] {
         println!(" {id}");
         let t = Instant::now();
         let src = p
@@ -196,6 +196,6 @@ fn live() {
             })
             .unwrap();
         println!("  resolved in {:?}", t.elapsed());
-        decode(src, first, 60);
+        decode(src, 10, 60);
     }
 }
