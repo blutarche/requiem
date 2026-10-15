@@ -140,6 +140,10 @@ impl Provider for YtMusicProvider {
         }
     }
 
+    fn has_home(&self) -> bool {
+        true
+    }
+
     fn account(&self) -> AccountState {
         self.google.account()
     }

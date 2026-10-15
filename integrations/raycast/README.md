@@ -1,6 +1,6 @@
 # requiem for Raycast
 
-Drive the [requiem](../../README.md) YouTube Music player from Raycast.
+Drive the [requiem](../../README.md) music player from Raycast.
 
 ## Commands
 

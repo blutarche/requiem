@@ -29,8 +29,8 @@ const UPDATE_INSTALL_WAIT: Duration = Duration::from_secs(10);
 const HELP: &str = "\
 commands:
   search <query>        search; prints numbered results
-  home                  the YouTube Music home page; prints numbered items under each shelf
-  library               your playlists and liked videos (needs signin)
+  home                  the home page of the provider that has one; prints numbered items under each shelf
+  library               your playlists and liked songs from every signed-in provider (needs signin)
   open <n>              list the tracks of playlist or album n
   play <n>              replace the queue with track n of the last listing and play it
   add <n>               append track n of the last listing to the queue
@@ -49,9 +49,11 @@ commands:
   sleep <secs>          wait (fractional ok)
   await <results|playing|stopped|nowplaying> [timeout_secs=30]
                         wait for that event since the last play/next/prev/search/browse
-  signin [provider]     sign in to Google: prints a code to enter on another device and
-                        waits until it is entered or expires
-  signout [provider]    sign out and forget the saved sign-in
+  signin [provider]     sign in (spotify or ytmusic; default: the first not signed in): prints
+                        a code to enter on another device and waits until it is entered or
+                        expires
+  signout [provider]    sign out (spotify or ytmusic; default: the first signed in) and forget
+                        the saved sign-in
   account               show the sign-in state
   mark <name>           print MARK <name> <unix_millis>
   update                with --connect: the self-update status
@@ -213,7 +215,12 @@ impl Hub {
                 }
                 for (i, t) in tracks.iter().enumerate() {
                     self.emit(
-                        &format!("  {}. {}", i + 1, track_line(t)),
+                        &format!(
+                            "  {}. {} · {}",
+                            i + 1,
+                            track_line(t),
+                            provider_name(&t.id.provider)
+                        ),
                         track_json("result", t, [("index", json!(i + 1))]),
                     );
                 }
@@ -592,6 +599,14 @@ fn track_label(t: &Track) -> String {
     format!("{} — {}", t.artists.join(", "), t.title)
 }
 
+fn provider_name(id: &ProviderId) -> &str {
+    match id.0.as_str() {
+        "ytmusic" => "YouTube Music",
+        "spotify" => "Spotify",
+        other => other,
+    }
+}
+
 fn track_line(t: &Track) -> String {
     let mut s = track_label(t);
     if let Some(a) = &t.album {
@@ -763,7 +778,7 @@ impl<'a> App<'a> {
             },
             "signin" => return self.sign_in(cmd, arg),
             "signout" => {
-                if let Some(provider) = self.account_provider(arg) {
+                if let Some(provider) = self.account_provider(arg, true) {
                     self.player.send(Command::SignOut { provider });
                     self.hub.ack(cmd);
                 }
@@ -990,26 +1005,30 @@ impl<'a> App<'a> {
         ui
     }
 
-    /// The provider named by `arg`, else the first with an account.
-    fn account_provider(&self, arg: &str) -> Option<ProviderId> {
+    /// The provider named by `arg`. Else, for sign-out (`signed_in`), the first signed in; for
+    /// sign-in, the first that isn't. Failing that, the first with an account.
+    fn account_provider(&self, arg: &str, signed_in: bool) -> Option<ProviderId> {
         if !arg.is_empty() {
             return Some(ProviderId(arg.to_owned()));
         }
-        let first = self
-            .accounts_known()
+        let ui = self.accounts_known();
+        let pick = ui
             .accounts
-            .first()
+            .iter()
+            .find(|(_, s)| matches!(s, AccountState::SignedIn { .. }) == signed_in)
+            .or_else(|| ui.accounts.first())
             .map(|(p, _)| p.clone());
-        if first.is_none() {
+        drop(ui);
+        if pick.is_none() {
             self.hub.error("no provider has accounts");
         }
-        first
+        pick
     }
 
     /// Sends `SignIn` and waits until the sign-in ends: up to `SIGN_IN_START` for the code,
     /// then until the code expires.
     fn sign_in(&self, cmd: &str, arg: &str) -> Flow {
-        let Some(provider) = self.account_provider(arg) else {
+        let Some(provider) = self.account_provider(arg, false) else {
             return if self.script {
                 Flow::Exit(2)
             } else {

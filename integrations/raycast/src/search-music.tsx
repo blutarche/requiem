@@ -33,7 +33,7 @@ export default function Command() {
   }
 
   return (
-    <List isLoading={isLoading} throttle onSearchTextChange={setQuery} searchBarPlaceholder="Search YouTube Music">
+    <List isLoading={isLoading} throttle onSearchTextChange={setQuery} searchBarPlaceholder="Search music">
       {!text ? (
         <List.EmptyView icon={Icon.Music} title="Type to search" />
       ) : (

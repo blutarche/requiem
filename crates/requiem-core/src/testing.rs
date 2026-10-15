@@ -125,6 +125,7 @@ struct ProviderState {
     sign_in_calls: usize,
     sign_out_calls: usize,
     account: AccountState,
+    has_home: bool,
 }
 
 impl Default for ProviderState {
@@ -140,6 +141,7 @@ impl Default for ProviderState {
             sign_in_calls: 0,
             sign_out_calls: 0,
             account: AccountState::SignedOut,
+            has_home: false,
         }
     }
 }
@@ -193,6 +195,10 @@ impl FakeProvider {
 
     pub fn set_account(&self, state: AccountState) {
         self.state.lock().unwrap().account = state;
+    }
+
+    pub fn set_has_home(&self, has_home: bool) {
+        self.state.lock().unwrap().has_home = has_home;
     }
 
     pub fn browse_calls(&self) -> Vec<Page> {
@@ -279,6 +285,10 @@ impl Provider for FakeProvider {
             Some(s) => s.run(),
             None => Ok(Vec::new()),
         }
+    }
+
+    fn has_home(&self) -> bool {
+        self.state.lock().unwrap().has_home
     }
 
     fn account(&self) -> AccountState {
