@@ -134,6 +134,12 @@ There is one JSON request line per connection, answered by one JSON header line.
 - **Ban and terms.** The user accepted the account risk. Shipping a librespot-based player in a public repo and public releases also exposes other users who sign in; the sign-in notice covers that. Whether distribution itself raises legal issues is a question for a lawyer, not settled here.
 - **Spotify can break librespot at any time** (#1649 keys, #1737 client IDs). If it does, Spotify tracks fail as `Unplayable` and YouTube Music keeps working.
 - **Pinned to a git revision.** A fix means bumping the pin and re-running the live test.
+- **Advisories librespot-core brings in** (`cargo audit`, 2026-10-16), none fixable without patching librespot and none reachable:
+  - `rustls` 0.22.4 and `rustls-webpki` 0.102.8 come in through `hyper-proxy2`. Its TLS is only used to reach a proxy, and the helper never sets one.
+  - `rsa` RUSTSEC-2023-0071 is a timing attack on private-key operations. librespot only verifies the server's signature with a public key (`handshake.rs`).
+  - Two `quick-xml` denial-of-service bugs. It only parses the ProductInfo packet that Spotify's server sends after sign-in.
+
+  Re-check these whenever the pin moves.
 
 ## Checks
 
