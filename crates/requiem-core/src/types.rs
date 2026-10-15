@@ -87,6 +87,7 @@ pub enum AccountState {
 pub enum FormatHint {
     WebmOpus,
     Mp4Aac,
+    OggVorbis,
 }
 
 /// Seekable bytes with a known length. Symphonia's mkv reader fails on truncated
