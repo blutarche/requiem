@@ -97,6 +97,7 @@ There is one JSON request line per connection, answered by one JSON header line.
 - **Override:** `REQUIEM_SPOTIFY_CREDENTIALS_FILE`, which must be absolute.
 - **Format:** librespot's `Credentials` serde JSON at rev 4a005903e. The file the probe wrote is already at the macOS path, and the provider must accept it as-is.
 - **Writing:** create it 0600 (write a temp file 0600 in the same dir, then rename). Never print or log its contents.
+- **Sign-out** deletes the local file only: librespot offers no way to revoke the sign-in on Spotify's side.
 - **Why not the Keychain:** for the same reason as the Google token. The ad-hoc signed bundle would raise a Keychain prompt after every update.
 - **Updates:** `update.rs` Restart to Update must save and restore this file alongside `token_file()`. The daemon self-test parses it when present.
 
