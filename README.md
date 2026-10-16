@@ -82,7 +82,7 @@ Sign-in uses your own Google Cloud OAuth client, set up once:
 1. In the [Google Cloud console](https://console.cloud.google.com/), create a project.
 2. Enable the **YouTube Data API v3** for it.
 3. Configure its OAuth consent screen (Google Auth Platform) with an **External** audience, and add the scope `https://www.googleapis.com/auth/youtube.readonly`.
-4. Publish the app so its status is **In production**: while it is in **Testing**, Google expires the sign-in after 7 days. Google may then warn that the app is unverified; as its only user, you can continue past the warning.
+4. Publish the app so its status is **In production**: while it is in **Testing**, Google expires the sign-in after 7 days. Before Google lets you publish, its Branding page needs a home page and a privacy policy link, and their domain under **Authorized domains**. `https://github.com/blutarche/requiem`, `https://github.com/blutarche/requiem/blob/main/PRIVACY.md` and `github.com` work. Google may then warn that the app is unverified; as its only user, you can continue past the warning (**Advanced**, then **Go to … (unsafe)**).
 5. Create an OAuth client of type **TVs and Limited Input devices** and download its JSON.
 6. Save that JSON as `~/Library/Application Support/requiem/google-client.json` on macOS, or `$XDG_CONFIG_HOME/requiem/google-client.json` (default `~/.config/requiem/google-client.json`) on Linux. `REQUIEM_GOOGLE_CLIENT_FILE` overrides the path.
 
