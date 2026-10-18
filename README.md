@@ -68,7 +68,7 @@ The bundle embeds Homebrew's libopus. Its minimum macOS version is whatever that
 | `provider_broken` | `detail` |
 | `update` | `current`, `auto` (bool), `state`: `idle`, `checking`, `up_to_date`, `downloading` (with `version`), `ready` (with `version`), `failed` (with `version`, `reason`), `error` (with `reason`: a failed check, or a failed install that is tried again), `not_updatable` (with `reason`) or `unsupported` |
 | `update_downloading`, `update_restarting` | `version` |
-| `ack` | `command`: a command was sent (search, home, library, open, play, add, play-track, add-track, jump, remove, move, clear, next, prev, pause, resume, toggle, seek, vol, signin, signout, update check, update install, shutdown-daemon) |
+| `ack` | `command`: a command was sent (search, home, library, open, play, add, play-track, add-track, jump, remove, move, clear, next, prev, pause, resume, toggle, seek, vol, signin, signout, update check, update install, shutdown-daemon); `signout` acks only once the provider reports it signed out |
 | `mark` | `name`, `unix_millis` |
 | `help` | `text` |
 | `error` | `message` |
@@ -86,7 +86,7 @@ Sign-in uses your own Google Cloud OAuth client, set up once:
 5. Create an OAuth client of type **TVs and Limited Input devices** and download its JSON.
 6. Save that JSON as `~/Library/Application Support/requiem/google-client.json` on macOS, or `$XDG_CONFIG_HOME/requiem/google-client.json` (default `~/.config/requiem/google-client.json`) on Linux. `REQUIEM_GOOGLE_CLIENT_FILE` overrides the path.
 
-Then run `signin` in the CLI. It prints `Go to https://www.google.com/device and enter XXXX-XXXX`; open that page on any device, enter the code and allow access. `signin` waits until you do or the code expires. The player keeps the sign-in in `google-token.json`, readable only by you, next to `state.json` (`REQUIEM_GOOGLE_TOKEN_FILE` overrides the path). `account` shows the state; `signout` revokes the sign-in and deletes the file.
+Then run `signin` in the CLI. It prints `Go to https://www.google.com/device and enter XXXX-XXXX`; open that page on any device, enter the code and allow access. `signin` waits until you do or the code expires. The player keeps the sign-in in `google-token.json`, readable only by you, next to `state.json` (`REQUIEM_GOOGLE_TOKEN_FILE` overrides the path). `account` shows the state; `signout` revokes the sign-in, deletes the file and returns once both are done.
 
 What a sign-in gets you:
 
