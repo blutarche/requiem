@@ -2,6 +2,7 @@
 //! headers.
 
 use std::cell::{Cell, OnceCell, RefCell};
+use std::ops::Range;
 use std::time::Duration;
 
 use dispatch2::{DispatchQueue, DispatchTime, MainThreadBound};
@@ -173,6 +174,19 @@ fn reselect(rows: &[RowText], was: &RowText, at: usize) -> Option<usize> {
     (0..rows.len())
         .filter(|&i| rows[i] == *was)
         .min_by_key(|&i| i.abs_diff(at))
+}
+
+/// Whether a `visible` row's cover is still to come. `loading` says whether a row's cell waits
+/// on its cover, or `None` while the table hasn't made the cell, as before its first layout
+/// in a window that isn't on screen; such a row waits if it has artwork.
+fn covers_pending(
+    rows: &[RowText],
+    visible: Range<usize>,
+    loading: impl Fn(usize) -> Option<bool>,
+) -> bool {
+    visible.into_iter().any(|row| {
+        loading(row).unwrap_or_else(|| rows.get(row).is_some_and(|r| r.artwork.is_some()))
+    })
 }
 
 pub struct ControllerIvars {
@@ -1350,13 +1364,17 @@ impl Table {
             return false;
         }
         let range = self.table.rowsInRect(self.table.visibleRect());
-        (range.location..range.location + range.length).any(|row| {
-            self.table
-                .viewAtColumn_row_makeIfNecessary(col, row as isize, false)
-                .and_then(|v| v.downcast::<TextCell>().ok())
-                .and_then(|c| c.ivars().cover.get().map(|cv| cv.is_loading()))
-                .unwrap_or(false)
-        })
+        let rows = self.controller.ivars().rows.borrow();
+        covers_pending(
+            &rows,
+            range.location..range.location + range.length,
+            |row| {
+                self.table
+                    .viewAtColumn_row_makeIfNecessary(col, row as isize, false)
+                    .and_then(|v| v.downcast::<TextCell>().ok())
+                    .map(|c| c.ivars().cover.get().is_some_and(|cv| cv.is_loading()))
+            },
+        )
     }
 
     pub fn selected_row(&self) -> Option<usize> {
@@ -1535,6 +1553,20 @@ mod tests {
     fn reselect_picks_the_nearest_duplicate() {
         let rows = named(&["c", "a", "b", "c", "c", "c"]);
         assert_eq!(reselect(&rows, &row("c", "", "", ""), 2), Some(3));
+    }
+
+    #[test]
+    fn a_visible_row_with_artwork_waits_for_its_cover() {
+        let mut rows = named(&["liked", "mix", "plain"]);
+        rows[1].artwork = Some("https://i.scdn.co/image/ab".into());
+        // Before the table makes its cells, only the row with artwork waits.
+        assert!(covers_pending(&rows, 0..3, |_| None));
+        assert!(!covers_pending(&rows, 2..3, |_| None));
+        // Once made, each cell says.
+        assert!(covers_pending(&rows, 0..3, |r| Some(r == 1)));
+        assert!(!covers_pending(&rows, 0..3, |_| Some(false)));
+        // Rows scrolled away don't count.
+        assert!(!covers_pending(&rows, 2..2, |_| None));
     }
 
     #[test]

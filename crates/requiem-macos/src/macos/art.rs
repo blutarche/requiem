@@ -290,12 +290,20 @@ impl CoverArt {
         self.paint();
     }
 
+    /// The image goes in as a CGImage: `cacheDisplayInRect:`, which snapshots draw with, leaves
+    /// an NSImage of a JPEG with subsampled chroma blank, as Spotify's mix covers are, though
+    /// the screen shows it.
     fn paint(&self) {
         let Some(layer) = self.layer() else { return };
         let image = self.ivars().image.borrow();
-        let contents: Option<&AnyObject> = image.as_deref().map(|i| i.as_ref());
-        // SAFETY: on macOS a layer's contents may be an NSImage, and the gravity static is an
-        // immutable framework constant.
+        let mut rect = self.bounds();
+        // SAFETY: `rect` outlives the call, and no hints are passed.
+        let cg = image
+            .as_deref()
+            .and_then(|i| unsafe { i.CGImageForProposedRect_context_hints(&mut rect, None, None) });
+        let contents: Option<&AnyObject> = cg.as_deref().map(|c| c.as_ref());
+        // SAFETY: a layer's contents may be a CGImage, and the gravity static is an immutable
+        // framework constant.
         unsafe {
             layer.setContents(contents);
             layer.setContentsGravity(kCAGravityResizeAspectFill);

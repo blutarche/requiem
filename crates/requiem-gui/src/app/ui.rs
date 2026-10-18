@@ -1913,7 +1913,7 @@ impl Ui {
             PageView::Failed(e) => SnapshotState::Failed(e),
             PageView::Ready => SnapshotState::Loaded {
                 covers: self.shelves.covers_loading()
-                    || self.library_table.covers_loading()
+                    || (self.view.get() == AppView::Library && self.library_table.covers_loading())
                     || self.collection_head.cover.is_loading(),
             },
         }
