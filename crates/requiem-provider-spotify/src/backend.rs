@@ -58,6 +58,11 @@ const SIGN_IN_SCOPE: &str = "streaming";
 const CODE_LIFETIME: Duration = Duration::from_secs(3599);
 const ROOTLIST_PAGE: usize = 120;
 const MAX_PAGES: usize = 50;
+/// One whole-playlist fetch for a rootlist row, librespot's own retries included.
+const FULL_PLAYLIST_TIMEOUT: Duration = Duration::from_secs(10);
+/// All of a Library's whole-playlist fetches; rows still waiting then keep the rootlist's
+/// details, so the Library answers well within the daemon's call timeout.
+const FULL_PLAYLISTS_BUDGET: Duration = Duration::from_secs(30);
 /// As many as YouTube Music's provider shows.
 const MAX_COLLECTION_TRACKS: usize = 1000;
 const IMAGE_URL: &str = "https://i.scdn.co/image/";
@@ -215,6 +220,7 @@ impl Librespot {
             subtitle: None,
             artwork_url: None,
         })];
+        let mut rows = Vec::new();
         let mut from = 0;
         for _ in 0..MAX_PAGES {
             let bytes = session
@@ -225,11 +231,7 @@ impl Librespot {
             let list = SelectedListContent::parse_from_bytes(&bytes)
                 .map_err(|e| ProviderError::Parse(format!("Spotify playlists: {e}")))?;
             let got = list.contents.items.len();
-            items.extend(
-                rootlist_collections(&list)
-                    .into_iter()
-                    .map(Item::Collection),
-            );
+            rows.extend(rootlist_rows(&list));
             from += got;
             let done = match list.length {
                 Some(total) => from >= total.max(0) as usize,
@@ -239,6 +241,23 @@ impl Librespot {
                 break;
             }
         }
+        let deadline = tokio::time::Instant::now() + FULL_PLAYLISTS_BUDGET;
+        let session = &session;
+        let collections: Vec<_> = futures_util::stream::iter(rows)
+            .map(|row| async move {
+                if row.incomplete {
+                    completed(
+                        row.collection,
+                        full_playlist(session, &row.id, deadline).await,
+                    )
+                } else {
+                    Some(row.collection)
+                }
+            })
+            .buffered(METADATA_IN_FLIGHT)
+            .collect()
+            .await;
+        items.extend(collections.into_iter().flatten().map(Item::Collection));
         Ok(vec![Shelf {
             title: "Spotify".into(),
             items,
@@ -778,8 +797,18 @@ pub(crate) fn parse_json_page(
     Ok((ids, next))
 }
 
+/// A rootlist playlist as a Library row.
+pub(crate) struct RootlistRow {
+    pub(crate) id: SpotifyId,
+    pub(crate) collection: Collection,
+    /// The rootlist gave no name, or a size of none or 0, so the whole playlist is fetched for
+    /// them: some mixes list 0 there while holding 50, and a playlist that no longer exists
+    /// comes with neither.
+    pub(crate) incomplete: bool,
+}
+
 /// The rootlist's playlists in order; folder markers are skipped, so folders flatten.
-pub(crate) fn rootlist_collections(list: &SelectedListContent) -> Vec<Collection> {
+pub(crate) fn rootlist_rows(list: &SelectedListContent) -> Vec<RootlistRow> {
     let Some(contents) = list.contents.as_ref() else {
         return Vec::new();
     };
@@ -795,25 +824,78 @@ pub(crate) fn rootlist_collections(list: &SelectedListContent) -> Vec<Collection
             };
             let meta = metas.map(|m| &m[i]);
             let attrs = meta.and_then(|m| m.attributes.as_ref());
-            Some(Collection {
-                id: CollectionId {
-                    provider: provider(),
-                    id: format!("{PLAYLIST_PREFIX}{}", id.to_base62()),
+            let name = attrs.map(ListAttributes::name).filter(|n| !n.is_empty());
+            let length = meta.and_then(|m| m.length).filter(|n| *n > 0);
+            Some(RootlistRow {
+                id,
+                collection: Collection {
+                    id: CollectionId {
+                        provider: provider(),
+                        id: format!("{PLAYLIST_PREFIX}{}", id.to_base62()),
+                    },
+                    kind: CollectionKind::Playlist,
+                    title: name.unwrap_or("Playlist").to_owned(),
+                    subtitle: length.map(songs),
+                    artwork_url: attrs.and_then(playlist_artwork),
                 },
-                kind: CollectionKind::Playlist,
-                title: attrs
-                    .map(ListAttributes::name)
-                    .filter(|n| !n.is_empty())
-                    .unwrap_or("Playlist")
-                    .to_owned(),
-                subtitle: meta.and_then(|m| m.length).map(|n| match n {
-                    1 => "1 song".to_owned(),
-                    n => format!("{n} songs"),
-                }),
-                artwork_url: attrs.and_then(playlist_artwork),
+                incomplete: name.is_none() || length.is_none(),
             })
         })
         .collect()
+}
+
+fn songs(n: i32) -> String {
+    match n {
+        1 => "1 song".to_owned(),
+        n => format!("{n} songs"),
+    }
+}
+
+/// A whole playlist fetched for an incomplete rootlist row.
+pub(crate) enum Full {
+    Playlist(Box<SelectedListContent>),
+    /// Spotify has no such playlist.
+    NotFound,
+    /// Timed out, refused or unreadable.
+    Failed,
+}
+
+/// `row` completed from `full`: its name, size and artwork where the playlist has them, else
+/// the rootlist's. `None` drops a playlist that doesn't exist.
+pub(crate) fn completed(mut row: Collection, full: Full) -> Option<Collection> {
+    let list = match full {
+        Full::Playlist(list) => list,
+        Full::NotFound => return None,
+        Full::Failed => return Some(row),
+    };
+    let attrs = list.attributes.as_ref();
+    if let Some(name) = attrs.map(ListAttributes::name).filter(|n| !n.is_empty()) {
+        row.title = name.to_owned();
+    }
+    if let Some(n) = list.length {
+        row.subtitle = Some(songs(n));
+    }
+    if let Some(art) = attrs.and_then(playlist_artwork) {
+        row.artwork_url = Some(art);
+    }
+    Some(row)
+}
+
+/// The whole playlist `id`, given up on at `deadline` at the latest.
+async fn full_playlist(session: &Session, id: &SpotifyId, deadline: tokio::time::Instant) -> Full {
+    let until = deadline.min(tokio::time::Instant::now() + FULL_PLAYLIST_TIMEOUT);
+    let fetched = tokio::time::timeout_at(until, session.spclient().get_playlist(id)).await;
+    let why = match fetched {
+        Ok(Ok(bytes)) => match SelectedListContent::parse_from_bytes(&bytes) {
+            Ok(list) => return Full::Playlist(Box::new(list)),
+            Err(e) => e.to_string(),
+        },
+        Ok(Err(e)) if e.kind == ErrorKind::NotFound => return Full::NotFound,
+        Ok(Err(e)) => shown(&e),
+        Err(_) => "timed out".to_owned(),
+    };
+    eprintln!("[spotify] kept a playlist's rootlist details: {why}");
+    Full::Failed
 }
 
 fn playlist_artwork(a: &ListAttributes) -> Option<String> {
@@ -1069,25 +1151,136 @@ mod tests {
         ];
         let mut list = SelectedListContent::new();
         list.contents = Some(contents.clone()).into();
-        let got = rootlist_collections(&list);
+        let got = rootlist_rows(&list);
         assert_eq!(got.len(), 2);
-        assert_eq!(got[0].id.id, "playlist:37i9dQZF1DXcBWIGoYBM5M");
-        assert_eq!(got[0].title, "Mix");
-        assert_eq!(got[0].subtitle.as_deref(), Some("1 song"));
-        assert_eq!(got[0].artwork_url.as_deref(), Some("L"));
-        assert_eq!(got[1].id.id, "playlist:1pKYYY0dkg23sQQXi0Q5zN");
-        assert_eq!(got[1].title, "Playlist");
-        assert_eq!(got[1].subtitle.as_deref(), Some("30 songs"));
-        assert_eq!(got[1].kind, CollectionKind::Playlist);
-        assert_eq!(got[1].id.provider, provider());
+        assert_eq!(got[0].id.to_base62(), "37i9dQZF1DXcBWIGoYBM5M");
+        assert!(!got[0].incomplete);
+        let mix = &got[0].collection;
+        assert_eq!(mix.id.id, "playlist:37i9dQZF1DXcBWIGoYBM5M");
+        assert_eq!(mix.title, "Mix");
+        assert_eq!(mix.subtitle.as_deref(), Some("1 song"));
+        assert_eq!(mix.artwork_url.as_deref(), Some("L"));
+        // Nameless, so the whole playlist names it; "Playlist" stands in until then.
+        assert!(got[1].incomplete);
+        let nameless = &got[1].collection;
+        assert_eq!(nameless.id.id, "playlist:1pKYYY0dkg23sQQXi0Q5zN");
+        assert_eq!(nameless.title, "Playlist");
+        assert_eq!(nameless.subtitle.as_deref(), Some("30 songs"));
+        assert_eq!(nameless.kind, CollectionKind::Playlist);
+        assert_eq!(nameless.id.provider, provider());
 
-        // Without a matching meta list, playlists still show.
+        // Without a matching meta list, playlists still show, each to be fetched whole.
         contents.meta_items.pop();
         list.contents = Some(contents).into();
-        let got = rootlist_collections(&list);
+        let got = rootlist_rows(&list);
         assert_eq!(got.len(), 2);
-        assert_eq!(got[0].title, "Playlist");
-        assert_eq!(got[0].subtitle, None);
+        assert!(got.iter().all(|r| r.incomplete));
+        assert_eq!(got[0].collection.title, "Playlist");
+        assert_eq!(got[0].collection.subtitle, None);
+    }
+
+    fn rootlist_of(metas: Vec<MetaItem>) -> SelectedListContent {
+        let mut contents = ListItems::new();
+        contents.items = (0..metas.len())
+            .map(|_| {
+                let mut i = librespot_protocol::playlist4_external::Item::new();
+                i.set_uri("spotify:playlist:37i9dQZF1DXcBWIGoYBM5M".into());
+                i
+            })
+            .collect();
+        contents.meta_items = metas;
+        let mut list = SelectedListContent::new();
+        list.contents = Some(contents).into();
+        list
+    }
+
+    fn meta(name: &str, length: Option<i32>) -> MetaItem {
+        let mut a = ListAttributes::new();
+        a.set_name(name.into());
+        let mut m = MetaItem::new();
+        m.attributes = Some(a).into();
+        m.length = length;
+        m
+    }
+
+    #[test]
+    fn rows_without_a_name_or_a_size_are_fetched_whole() {
+        let got = rootlist_rows(&rootlist_of(vec![
+            meta("Mix", Some(50)),
+            meta("Hardcore Rock Mix", Some(0)),
+            meta("Unsized", None),
+            meta("", Some(12)),
+            meta("", None),
+        ]));
+        let incomplete: Vec<bool> = got.iter().map(|r| r.incomplete).collect();
+        assert_eq!(incomplete, [false, true, true, true, true]);
+        // A rootlist size of 0 is never shown: it may be wrong.
+        assert_eq!(got[1].collection.subtitle, None);
+        assert_eq!(got[1].collection.title, "Hardcore Rock Mix");
+        assert_eq!(got[3].collection.subtitle.as_deref(), Some("12 songs"));
+    }
+
+    fn row(title: &str, subtitle: Option<&str>, art: Option<&str>) -> Collection {
+        Collection {
+            id: CollectionId {
+                provider: provider(),
+                id: "playlist:37i9dQZF1DXcBWIGoYBM5M".into(),
+            },
+            kind: CollectionKind::Playlist,
+            title: title.into(),
+            subtitle: subtitle.map(Into::into),
+            artwork_url: art.map(Into::into),
+        }
+    }
+
+    fn whole(name: &str, length: Option<i32>, pic: Option<&str>) -> Box<SelectedListContent> {
+        let mut a = ListAttributes::new();
+        a.set_name(name.into());
+        if let Some(url) = pic {
+            let mut p = PictureSize::new();
+            p.set_target_name("large".into());
+            p.set_url(url.into());
+            a.picture_size.push(p);
+        }
+        let mut list = SelectedListContent::new();
+        list.attributes = Some(a).into();
+        list.length = length;
+        Box::new(list)
+    }
+
+    #[test]
+    fn a_whole_playlist_completes_its_row() {
+        let got = completed(
+            row("Hardcore Rock Mix", None, Some("old")),
+            Full::Playlist(whole("Hardcore Rock Mix", Some(50), Some("new"))),
+        )
+        .unwrap();
+        assert_eq!(got.title, "Hardcore Rock Mix");
+        assert_eq!(got.subtitle.as_deref(), Some("50 songs"));
+        assert_eq!(got.artwork_url.as_deref(), Some("new"));
+
+        let got = completed(
+            row("Playlist", Some("30 songs"), Some("old")),
+            Full::Playlist(whole("Named", None, None)),
+        )
+        .unwrap();
+        assert_eq!(got.title, "Named");
+        assert_eq!(got.subtitle.as_deref(), Some("30 songs"));
+        assert_eq!(got.artwork_url.as_deref(), Some("old"));
+
+        // The whole playlist's own 0 is real.
+        let got = completed(
+            row("Empty", None, None),
+            Full::Playlist(whole("", Some(0), None)),
+        );
+        assert_eq!(got.unwrap().subtitle.as_deref(), Some("0 songs"));
+    }
+
+    #[test]
+    fn a_missing_playlist_goes_and_a_failed_fetch_keeps_the_row() {
+        assert_eq!(completed(row("Playlist", None, None), Full::NotFound), None);
+        let kept = row("Metalcore Mix", None, Some("art"));
+        assert_eq!(completed(kept.clone(), Full::Failed), Some(kept));
     }
 
     #[test]

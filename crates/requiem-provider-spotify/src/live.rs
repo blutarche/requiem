@@ -175,6 +175,11 @@ fn live() {
     };
     assert_eq!(liked.title, "Liked Songs");
     println!("  {} collections", library[0].items.len());
+    for item in &library[0].items {
+        if let Item::Collection(c) = item {
+            println!("  {} | {}", c.title, c.subtitle.as_deref().unwrap_or("-"));
+        }
+    }
     let liked = p
         .browse(&Page::Collection(CollectionId {
             provider: spotify.clone(),
