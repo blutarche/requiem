@@ -119,6 +119,7 @@ struct ProviderState {
     search_scripts: HashMap<String, VecDeque<Step<Vec<Track>>>>,
     browse_scripts: HashMap<Page, VecDeque<Step<Vec<Shelf>>>>,
     sign_in_scripts: VecDeque<SignInScript>,
+    sign_out_gate: Option<Gate>,
     resolve_calls: HashMap<String, usize>,
     search_calls: usize,
     browse_calls: Vec<Page>,
@@ -135,6 +136,7 @@ impl Default for ProviderState {
             search_scripts: HashMap::new(),
             browse_scripts: HashMap::new(),
             sign_in_scripts: VecDeque::new(),
+            sign_out_gate: None,
             resolve_calls: HashMap::new(),
             search_calls: 0,
             browse_calls: Vec::new(),
@@ -193,6 +195,11 @@ impl FakeProvider {
         self.state.lock().unwrap().sign_in_scripts.push_back(script);
     }
 
+    /// The next `sign_out` waits for `gate` before it signs out.
+    pub fn gate_sign_out(&self, gate: Gate) {
+        self.state.lock().unwrap().sign_out_gate = Some(gate);
+    }
+
     pub fn set_account(&self, state: AccountState) {
         self.state.lock().unwrap().account = state;
     }
@@ -249,6 +256,16 @@ impl FakeProvider {
             .wait_timeout_while(st, WAIT, |s| s.search_calls < n)
             .unwrap();
         assert!(!res.timed_out(), "timed out waiting for {n} search calls");
+    }
+
+    /// Counts calls on entry, so it also fires for a sign-out still held by its gate.
+    pub fn wait_sign_out_calls(&self, n: usize) {
+        let st = self.state.lock().unwrap();
+        let (_st, res) = self
+            .called
+            .wait_timeout_while(st, WAIT, |s| s.sign_out_calls < n)
+            .unwrap();
+        assert!(!res.timed_out(), "timed out waiting for {n} sign-out calls");
     }
 }
 
@@ -331,9 +348,16 @@ impl Provider for FakeProvider {
     }
 
     fn sign_out(&self) -> Result<(), ProviderError> {
-        let mut st = self.state.lock().unwrap();
-        st.sign_out_calls += 1;
-        st.account = AccountState::SignedOut;
+        let gate = {
+            let mut st = self.state.lock().unwrap();
+            st.sign_out_calls += 1;
+            self.called.notify_all();
+            st.sign_out_gate.take()
+        };
+        if let Some(g) = gate {
+            g.wait();
+        }
+        self.set_account(AccountState::SignedOut);
         Ok(())
     }
 

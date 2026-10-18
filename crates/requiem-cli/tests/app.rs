@@ -913,3 +913,61 @@ fn json_signin_and_signout_report_the_account() {
     assert_eq!(accounts[2]["state"], "signed_out");
     assert_eq!(r.provider.sign_out_calls(), 1);
 }
+
+#[test]
+fn a_signin_after_a_signout_starts_from_signed_out() {
+    let provider = FakeProvider::new("fake");
+    provider.set_account(AccountState::SignedIn {
+        name: Some("Me".into()),
+    });
+    let r = rig_with(provider);
+    let gate = Gate::new();
+    r.provider.gate_sign_out(gate.clone());
+    r.provider.script_sign_in(SignInScript {
+        pending: Some(pending()),
+        gate: None,
+        outcome: Ok(AccountState::SignedIn {
+            name: Some("New".into()),
+        }),
+    });
+    let flow = thread::scope(|s| {
+        let waiter = s.spawn(|| exec_all(&r.app(true), "signout\nsignin"));
+        r.provider.wait_sign_out_calls(1);
+        thread::sleep(Duration::from_millis(200));
+        // A `signin` sent now would find the account still signed in and end on that.
+        assert!(!waiter.is_finished(), "{}", r.out.text());
+        assert_eq!(r.provider.sign_in_calls(), 0);
+        gate.release();
+        waiter.join().unwrap()
+    });
+    assert_eq!(flow, Flow::Continue);
+    assert_eq!(r.provider.sign_in_calls(), 1);
+    let text = r.out.text();
+    assert!(
+        text.ends_with(
+            "signed out\nGo to https://www.google.com/device and enter GQVQ-JKEC\nsigned in as New\n"
+        ),
+        "{text}"
+    );
+}
+
+#[test]
+fn a_signin_naming_its_provider_waits_past_the_announced_state() {
+    // The session announces `SignedOut` on subscribe, which a `signin` that came first would
+    // take for its outcome. It depends on thread timing, so it is tried a number of times.
+    for _ in 0..50 {
+        let r = rig();
+        r.provider.script_sign_in(SignInScript {
+            pending: Some(pending()),
+            gate: None,
+            outcome: Ok(AccountState::SignedIn { name: None }),
+        });
+        assert_eq!(
+            r.app(true).exec("signin fake"),
+            Flow::Continue,
+            "{}",
+            r.out.text()
+        );
+        assert_eq!(r.provider.sign_in_calls(), 1);
+    }
+}

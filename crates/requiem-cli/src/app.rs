@@ -20,6 +20,9 @@ const SYNC_TIMEOUT: Duration = Duration::from_secs(2);
 const SIGN_IN_START: Duration = Duration::from_secs(60);
 /// How long `signin` waits past the code's expiry for the provider to report it.
 const SIGN_IN_GRACE: Duration = Duration::from_secs(30);
+/// How long `signout` waits for the provider to report it; Google's revoke, the slowest part,
+/// gives up within 15 s.
+const SIGN_OUT_WAIT: Duration = Duration::from_secs(30);
 
 /// How long `update check` waits: a check, a 10 min download, then staging.
 const UPDATE_CHECK_WAIT: Duration = Duration::from_secs(12 * 60);
@@ -53,7 +56,7 @@ commands:
                         a code to enter on another device and waits until it is entered or
                         expires
   signout [provider]    sign out (spotify or ytmusic; default: the first signed in) and forget
-                        the saved sign-in
+                        the saved sign-in; waits until the provider reports it
   account               show the sign-in state
   mark <name>           print MARK <name> <unix_millis>
   update                with --connect: the self-update status
@@ -777,14 +780,9 @@ impl<'a> App<'a> {
                 None => {}
             },
             "signin" => return self.sign_in(cmd, arg),
-            "signout" => {
-                if let Some(provider) = self.account_provider(arg, true) {
-                    self.player.send(Command::SignOut { provider });
-                    self.hub.ack(cmd);
-                }
-            }
+            "signout" => return self.sign_out(cmd, arg),
             "account" => {
-                let ui = self.accounts_known();
+                let ui = self.accounts_known(None);
                 if ui.accounts.is_empty() {
                     self.hub
                         .emit("no accounts", json!({ "type": "no_accounts" }));
@@ -986,12 +984,17 @@ impl<'a> App<'a> {
         self.hub.ack(cmd);
     }
 
-    /// The UI once it knows of an account, or after `SYNC_TIMEOUT`. The session announces
-    /// accounts on subscribe; this covers a printer thread that is behind.
-    fn accounts_known(&self) -> MutexGuard<'_, Ui> {
+    /// The UI once it knows of an account, or of `provider`'s if given, or after
+    /// `SYNC_TIMEOUT`. The session announces accounts on subscribe; this covers a printer thread
+    /// that is behind, whose late announcement a sign-in would take for its outcome.
+    fn accounts_known(&self, provider: Option<&ProviderId>) -> MutexGuard<'_, Ui> {
         let deadline = Instant::now() + SYNC_TIMEOUT;
         let mut ui = self.hub.lock_ui();
-        while ui.accounts.is_empty() && !ui.closed {
+        let unknown = |ui: &Ui| match provider {
+            Some(p) => !ui.accounts.iter().any(|(q, _)| q == p),
+            None => ui.accounts.is_empty(),
+        };
+        while unknown(&ui) && !ui.closed {
             let Some(left) = deadline.checked_duration_since(Instant::now()) else {
                 break;
             };
@@ -1009,9 +1012,11 @@ impl<'a> App<'a> {
     /// sign-in, the first that isn't. Failing that, the first with an account.
     fn account_provider(&self, arg: &str, signed_in: bool) -> Option<ProviderId> {
         if !arg.is_empty() {
-            return Some(ProviderId(arg.to_owned()));
+            let provider = ProviderId(arg.to_owned());
+            drop(self.accounts_known(Some(&provider)));
+            return Some(provider);
         }
-        let ui = self.accounts_known();
+        let ui = self.accounts_known(None);
         let pick = ui
             .accounts
             .iter()
@@ -1086,6 +1091,49 @@ impl<'a> App<'a> {
                 }
             }
         }
+    }
+
+    /// Sends `SignOut` and waits up to `SIGN_OUT_WAIT` until the provider is neither signed in
+    /// nor signing in, so that a `signin` after it starts over.
+    fn sign_out(&self, cmd: &str, arg: &str) -> Flow {
+        let Some(provider) = self.account_provider(arg, true) else {
+            return Flow::Continue;
+        };
+        self.player.send(Command::SignOut {
+            provider: provider.clone(),
+        });
+        let deadline = Instant::now() + SIGN_OUT_WAIT;
+        let mut ui = self.hub.lock_ui();
+        while ui.accounts.iter().any(|(p, s)| {
+            *p == provider
+                && matches!(
+                    s,
+                    AccountState::SignedIn { .. } | AccountState::Pending { .. }
+                )
+        }) {
+            if ui.closed {
+                drop(ui);
+                return self.lost(true).unwrap_or(Flow::Continue);
+            }
+            let Some(left) = deadline.checked_duration_since(Instant::now()) else {
+                drop(ui);
+                self.hub.error("timed out waiting for sign-out");
+                return if self.script {
+                    Flow::Exit(2)
+                } else {
+                    Flow::Continue
+                };
+            };
+            ui = self
+                .hub
+                .changed
+                .wait_timeout(ui, left)
+                .unwrap_or_else(PoisonError::into_inner)
+                .0;
+        }
+        drop(ui);
+        self.hub.ack(cmd);
+        Flow::Continue
     }
 
     /// The 0-based queue index for a 1-based `queue` position, if it exists.
