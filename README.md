@@ -2,7 +2,7 @@
 
 A lightweight music app that uses about as many resources as a dead person 💀
 
-Native desktop client for **YouTube Music**, built to stay open all day without hogging RAM or CPU. Spotify support is deferred (see [`docs/plans/2026-10-10-spotify-spike.md`](docs/plans/2026-10-10-spotify-spike.md)).
+Native desktop client for **YouTube Music** and **Spotify**, built to stay open all day without hogging RAM or CPU.
 
 > **Status:** v1 — YouTube Music on macOS (menu-bar player + native window), plus a CLI. Linux runs the player and CLI, with a tray icon and MPRIS. Design: [`docs/plans/2026-10-11-v1-design.md`](docs/plans/2026-10-11-v1-design.md).
 
@@ -94,6 +94,14 @@ What a sign-in gets you:
 - **Not available:** your personalized home, Quick picks, saved albums and history. YouTube Music's own API rejects this kind of sign-in. Home always shows the public shelves.
 
 Playback stays anonymous whether or not you are signed in.
+
+## Spotify
+
+Spotify is off until you sign in: `signin spotify` in the CLI, or **Sign in to Spotify** in the app. Enter the code it shows at <https://www.spotify.com/pair>. Playback needs Spotify Premium.
+
+Requiem plays Spotify through [librespot](https://github.com/librespot-org/librespot), the way Spotify's own apps connect. Spotify doesn't allow unofficial players, so your Spotify account could be suspended.
+
+Once signed in, search lists Spotify results first, and Library shows Liked Songs and your playlists. The player keeps the sign-in in `spotify-credentials.json`, readable only by you, next to `state.json` (`REQUIEM_SPOTIFY_CREDENTIALS_FILE` overrides the path). `signout spotify` deletes it. Design: [`docs/plans/2026-10-16-spotify-provider-design.md`](docs/plans/2026-10-16-spotify-provider-design.md).
 
 ## Snapshots
 
