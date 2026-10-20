@@ -628,8 +628,9 @@ impl Google {
     }
 
     /// Keeps the user's own client, as just its id and secret, where `load_client` reads it,
-    /// and uses it from now on. A sign-in through another client is forgotten: Google ties a
-    /// refresh token to the client it was issued to. Errors never quote `json`.
+    /// and uses it from now on. A sign-in through another client is revoked, best effort, and
+    /// forgotten: Google ties a refresh token to the client it was issued to. Errors never
+    /// quote `json`.
     pub(crate) fn import_client(&self, json: &str) -> Result<(), ProviderError> {
         if json.len() as u64 > MAX_FILE_BYTES {
             return Err(ProviderError::SignInRequired(format!(
@@ -647,45 +648,74 @@ impl Google {
                 "no usable HOME: set {CLIENT_ENV} to where the Google OAuth client should be kept"
             )));
         };
-        let changed = locked(&self.client)
-            .as_ref()
-            .is_ok_and(|c| c.client_id != client.client_id);
         let body = serde_json::json!({
             "client_id": client.client_id,
             "client_secret": client.client_secret.expose(),
         })
         .to_string();
-        save_client(path, body.as_bytes()).map_err(|e| {
-            ProviderError::SignInRequired(format!(
-                "cannot save the Google OAuth client to {}: {e}",
-                path.display()
-            ))
-        })?;
-        if changed {
-            self.flow.cancel();
-            self.drop_grant();
+        // Under the client lock, so a sign-in either starts after this with the new client or
+        // started before it and is cancelled here.
+        let (result, dropped) = {
+            let mut slot = locked(&self.client);
+            let changed = slot.as_ref().is_ok_and(|c| c.client_id != client.client_id);
+            save_client(path, body.as_bytes()).map_err(|e| {
+                ProviderError::SignInRequired(format!(
+                    "cannot save the Google OAuth client to {}: {e}",
+                    path.display()
+                ))
+            })?;
+            let dropped = changed.then(|| {
+                self.flow.cancel();
+                self.take_grant()
+            });
+            *slot = load_client(&self.files);
+            let result = slot
+                .as_ref()
+                .map(|_| ())
+                .map_err(|hint| ProviderError::SignInRequired(hint.clone()));
+            (result, dropped)
+        };
+        if let Some((refresh, auth_gen)) = dropped {
+            // Outside the client lock: `account` waits on it, and this waits on Google. The
+            // import stands whether or not Google confirms.
+            if let Some(refresh) = refresh {
+                self.revoke(refresh.expose());
+            }
+            let st = locked(&self.state);
+            // Unless a sign-in through the new client has kept its own token since.
+            if st.auth_gen == auth_gen
+                && let Some(path) = &self.files.token
+            {
+                remove_token(path);
+            }
         }
-        let loaded = load_client(&self.files);
-        let result = loaded
-            .as_ref()
-            .map(|_| ())
-            .map_err(|hint| ProviderError::SignInRequired(hint.clone()));
-        *locked(&self.client) = loaded;
         result
     }
 
     pub(crate) fn sign_in(&self, on_state: &dyn Fn(AccountState)) -> Result<(), ProviderError> {
-        // The client file may have been saved since the player started.
-        let loaded = load_client(&self.files);
-        *locked(&self.client) = loaded;
-        let client = self.client()?;
-        let r#gen = self.flow.start();
+        // Under the client lock, so an import either comes first or cancels this flow.
+        let (client, r#gen) = {
+            let mut slot = locked(&self.client);
+            // The client file may have been saved since the player started.
+            *slot = load_client(&self.files);
+            let client = slot.clone().map_err(ProviderError::SignInRequired)?;
+            (client, self.flow.start())
+        };
         let code = request_code(&*self.http, &client, &*self.clock)?;
-        locked(&self.state).pending = Some((
-            code.verification_url.clone(),
-            code.user_code.clone(),
-            code.expires_at_unix,
-        ));
+        {
+            let mut st = locked(&self.state);
+            // A sign-out or import while the code was requested ends this flow.
+            if !self.flow.is_current(r#gen) {
+                return Err(ProviderError::SignInRequired(
+                    "sign-in was cancelled".into(),
+                ));
+            }
+            st.pending = Some((
+                code.verification_url.clone(),
+                code.user_code.clone(),
+                code.expires_at_unix,
+            ));
+        }
         on_state(self.account());
         let result = poll_tokens(&*self.http, &client, &code, &*self.clock, &self.flow, r#gen)
             .and_then(|tokens| self.finish_sign_in(tokens, r#gen));
@@ -721,7 +751,7 @@ impl Google {
             ProviderError::SignInRequired(format!("set {TOKEN_ENV} to keep the sign-in"))
         })?;
         let mut st = locked(&self.state);
-        // A sign-out while the token request was in flight wins.
+        // A sign-out or import while the token request was in flight wins.
         if !self.flow.is_current(r#gen) {
             drop(st);
             // Google already issued the grant; nothing else holds it.
@@ -796,16 +826,22 @@ impl Google {
 
     /// Forgets the grant here, without telling Google.
     fn drop_grant(&self) {
-        {
-            let mut st = locked(&self.state);
-            *st = State {
-                auth_gen: st.auth_gen + 1,
-                ..State::default()
-            };
-        }
+        self.take_grant();
         if let Some(path) = &self.files.token {
             remove_token(path);
         }
+    }
+
+    /// Forgets the grant in memory, leaving its file. Returns its refresh token and the
+    /// `auth_gen` that forgetting it started.
+    fn take_grant(&self) -> (Option<Secret>, u64) {
+        let mut st = locked(&self.state);
+        let refresh = st.refresh.take();
+        *st = State {
+            auth_gen: st.auth_gen + 1,
+            ..State::default()
+        };
+        (refresh, st.auth_gen)
     }
 
     fn access_token(&self) -> Result<Secret, ProviderError> {
@@ -1624,12 +1660,140 @@ mod tests {
         assert!(rig.token_path().exists());
         assert_eq!(g.client().unwrap().client_secret.expose(), "rotated");
 
+        assert!(rig.api.calls().is_empty(), "{:?}", rig.api.calls());
+
+        rig.api.script(REVOKE_URL, 200, "{}");
         g.import_client(r#"{"client_id":"other","client_secret":"s"}"#)
             .unwrap();
         assert_eq!(g.account(), AccountState::SignedOut);
         assert!(!rig.token_path().exists());
         assert_eq!(rig.google().account(), AccountState::SignedOut);
-        assert!(rig.api.calls().is_empty(), "{:?}", rig.api.calls());
+        assert_eq!(
+            rig.api.forms(REVOKE_URL),
+            [vec![("token".into(), "RT1".into())]]
+        );
+        assert_eq!(rig.api.calls(), [REVOKE_URL]);
+    }
+
+    /// Wraps the fake and runs `hook` as each request to `url` arrives.
+    struct Hooked {
+        inner: Arc<FakeApi>,
+        url: &'static str,
+        hook: Box<dyn Fn() + Send + Sync>,
+    }
+
+    impl ApiHttp for Hooked {
+        fn get(
+            &self,
+            url: &str,
+            query: &[(&str, &str)],
+            headers: &[(&str, &str)],
+        ) -> Result<crate::transport::HttpResponse, ProviderError> {
+            self.inner.get(url, query, headers)
+        }
+
+        fn post_form(
+            &self,
+            url: &str,
+            form: &[(&str, &str)],
+        ) -> Result<crate::transport::HttpResponse, ProviderError> {
+            if url == self.url {
+                (self.hook)();
+            }
+            self.inner.post_form(url, form)
+        }
+    }
+
+    #[test]
+    fn an_import_revokes_the_old_sign_in_before_deleting_it_and_stands_if_that_fails() {
+        let rig = Rig::new();
+        rig.signed_in();
+        let kept = Arc::new(StdMutex::new(Vec::new()));
+        let http = Arc::new(Hooked {
+            inner: rig.api.clone(),
+            url: REVOKE_URL,
+            hook: Box::new({
+                let (kept, token) = (kept.clone(), rig.token_path());
+                move || kept.lock().unwrap().push(token.exists())
+            }),
+        });
+        let g = Google::new(http, rig.clock.clone(), rig.files());
+        // Unscripted, so the revoke fails.
+        g.import_client(r#"{"client_id":"other","client_secret":"s"}"#)
+            .unwrap();
+        assert_eq!(*kept.lock().unwrap(), [true]);
+        assert_eq!(
+            rig.api.forms(REVOKE_URL),
+            [vec![("token".into(), "RT1".into())]]
+        );
+        assert_eq!(g.account(), AccountState::SignedOut);
+        assert!(!rig.token_path().exists());
+        assert_eq!(g.client().unwrap().client_id, "other");
+    }
+
+    #[test]
+    fn a_sign_in_through_the_new_client_during_the_revoke_is_kept() {
+        let rig = Rig::new();
+        rig.signed_in();
+        let google = Arc::new(std::sync::OnceLock::<std::sync::Weak<Google>>::new());
+        let http = Arc::new(Hooked {
+            inner: rig.api.clone(),
+            url: REVOKE_URL,
+            hook: Box::new({
+                let google = google.clone();
+                move || {
+                    let g = google.get().unwrap().upgrade().unwrap();
+                    let tokens = Tokens {
+                        access: Secret::new("AT2"),
+                        refresh: Secret::new("RT2"),
+                        expires_in: Duration::from_secs(3600),
+                    };
+                    g.finish_sign_in(tokens, g.flow.start()).unwrap();
+                }
+            }),
+        });
+        let g = Arc::new(Google::new(http, rig.clock.clone(), rig.files()));
+        google.set(Arc::downgrade(&g)).unwrap();
+        rig.api.script(REVOKE_URL, 200, "{}");
+        g.import_client(r#"{"client_id":"other","client_secret":"s"}"#)
+            .unwrap();
+        assert!(matches!(g.account(), AccountState::SignedIn { .. }));
+        assert_eq!(load_token(&rig.token_path()).unwrap().refresh_token, "RT2");
+    }
+
+    #[test]
+    fn an_import_while_a_sign_in_asks_for_its_code_cancels_it() {
+        let rig = Rig::new();
+        let google = Arc::new(std::sync::OnceLock::<std::sync::Weak<Google>>::new());
+        let http = Arc::new(Hooked {
+            inner: rig.api.clone(),
+            url: DEVICE_CODE_URL,
+            hook: Box::new({
+                let google = google.clone();
+                move || {
+                    let g = google.get().unwrap().upgrade().unwrap();
+                    g.import_client(r#"{"client_id":"other","client_secret":"s"}"#)
+                        .unwrap();
+                }
+            }),
+        });
+        let g = Arc::new(Google::new(http, rig.clock.clone(), rig.files()));
+        google.set(Arc::downgrade(&g)).unwrap();
+        rig.api.script(DEVICE_CODE_URL, 200, CODE);
+        let seen = StdMutex::new(Vec::new());
+        let err = g.sign_in(&|s| seen.lock().unwrap().push(s)).unwrap_err();
+        assert_eq!(
+            err,
+            ProviderError::SignInRequired("sign-in was cancelled".into())
+        );
+        // The old client's code never shows.
+        assert!(
+            seen.lock().unwrap().is_empty(),
+            "{:?}",
+            seen.lock().unwrap()
+        );
+        assert_eq!(g.account(), AccountState::SignedOut);
+        assert!(rig.api.forms(TOKEN_URL).is_empty());
     }
 
     #[test]

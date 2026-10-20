@@ -578,7 +578,7 @@ impl Actor {
             Command::Browse { req, page } => self.browse(req, page),
             Command::SignIn { provider } => self.sign_in(provider),
             Command::SignOut { provider } => self.sign_out(provider),
-            Command::ImportSignInClient { provider, json } => self.import_client(provider, json),
+            Command::ImportSignInClient { provider, json } => self.import_client(provider, json.0),
             Command::Shutdown => unreachable!("handled in run"),
         }
     }

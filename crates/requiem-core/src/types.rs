@@ -245,6 +245,29 @@ pub enum PlayState {
     Stopped,
 }
 
+/// Text that holds a secret: a plain string on the wire, but only its length under `Debug`.
+#[derive(Clone, PartialEq, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct Redacted(pub String);
+
+impl fmt::Debug for Redacted {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "<redacted, {} bytes>", self.0.len())
+    }
+}
+
+impl From<String> for Redacted {
+    fn from(s: String) -> Self {
+        Self(s)
+    }
+}
+
+impl From<&str> for Redacted {
+    fn from(s: &str) -> Self {
+        Self(s.to_owned())
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum Command {
     Search {
@@ -292,7 +315,7 @@ pub enum Command {
     /// Answered with the provider's `Account`, or with an `AccountError`.
     ImportSignInClient {
         provider: ProviderId,
-        json: String,
+        json: Redacted,
     },
 }
 

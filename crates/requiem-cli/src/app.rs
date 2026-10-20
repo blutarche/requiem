@@ -1211,8 +1211,10 @@ impl<'a> App<'a> {
             ended: None,
             failed: false,
         });
-        self.player
-            .send(Command::ImportSignInClient { provider, json });
+        self.player.send(Command::ImportSignInClient {
+            provider,
+            json: json.into(),
+        });
         let Some(w) = self.wait_answer(|ui| &mut ui.import_client) else {
             return self.lost(true).unwrap_or(Flow::Continue);
         };

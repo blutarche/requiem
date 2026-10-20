@@ -1451,6 +1451,22 @@ fn import(r: &Rig) {
 }
 
 #[test]
+fn an_imported_clients_json_never_shows_in_debug() {
+    let json = r#"{"client_id":"LEAKME-id","client_secret":"LEAKME-secret"}"#;
+    let cmd = Command::ImportSignInClient {
+        provider: fake_id(),
+        json: json.into(),
+    };
+    for shown in [format!("{cmd:?}"), format!("{cmd:#?}")] {
+        assert!(!shown.contains("LEAKME"), "{shown}");
+        assert!(
+            shown.contains(&format!("<redacted, {} bytes>", json.len())),
+            "{shown}"
+        );
+    }
+}
+
+#[test]
 fn an_imported_client_announces_the_account() {
     let provider = FakeProvider::new("fake");
     provider.set_account(AccountState::Unavailable("no client".into()));

@@ -1323,7 +1323,7 @@ impl Vm {
                 self.dirty |= Dirty::LIBRARY;
                 vec![Command::ImportSignInClient {
                     provider: setup.provider.clone(),
-                    json,
+                    json: json.into(),
                 }]
             }
             Intent::CancelSetup => {

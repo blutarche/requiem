@@ -688,6 +688,19 @@ fn browse_results_go_only_to_the_requester_and_accounts_to_everyone() {
 }
 
 #[test]
+fn an_imported_clients_json_is_a_plain_string_on_the_wire() {
+    let json = r#"{"client_id":"id","client_secret":"s"}"#;
+    let cmd = Command::ImportSignInClient {
+        provider: ProviderId("fake".into()),
+        json: json.into(),
+    };
+    assert_eq!(
+        serde_json::to_value(&cmd).unwrap(),
+        serde_json::json!({"ImportSignInClient": {"provider": "fake", "json": json}})
+    );
+}
+
+#[test]
 fn an_imported_client_reaches_the_provider() {
     let rig = rig();
     let (a, arx) = rig.client(Role::Gui);
@@ -699,7 +712,7 @@ fn an_imported_client_reaches_the_provider() {
     );
     a.send(Command::ImportSignInClient {
         provider: ProviderId("fake".into()),
-        json: json.clone(),
+        json: json.clone().into(),
     })
     .unwrap();
     assert_eq!(next_event(&arx), account());
