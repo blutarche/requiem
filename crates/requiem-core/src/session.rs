@@ -226,6 +226,8 @@ struct Actor {
     accounts: Vec<(ProviderId, AccountState)>,
     /// Providers with a sign-in worker running.
     signing_in: HashSet<ProviderId>,
+    /// Providers whose running sign-in a `SignOut` ended: its failure is not an error.
+    signed_out_while_signing_in: HashSet<ProviderId>,
 }
 
 /// The provider's own words, except that a network failure keeps its "network error" prefix.
@@ -332,6 +334,7 @@ impl Actor {
             last_parse_failure: None,
             accounts,
             signing_in: HashSet::new(),
+            signed_out_while_signing_in: HashSet::new(),
         }
     }
 
@@ -401,8 +404,11 @@ impl Actor {
                     state,
                 } => {
                     self.signing_in.remove(&provider);
+                    let signed_out = self.signed_out_while_signing_in.remove(&provider);
                     let failed = result.is_err();
-                    if let Err(e) = result {
+                    if let Err(e) = result
+                        && !signed_out
+                    {
                         self.emit(Event::AccountError {
                             provider: provider.clone(),
                             error: sign_in_error(&e),
@@ -776,6 +782,9 @@ impl Actor {
             });
             return;
         };
+        if self.signing_in.contains(&id) {
+            self.signed_out_while_signing_in.insert(id.clone());
+        }
         let tx = self.tx.clone();
         thread::spawn(move || {
             let result = provider.sign_out();

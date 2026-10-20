@@ -276,6 +276,7 @@ pub enum Command {
     SignIn {
         provider: ProviderId,
     },
+    /// Also ends a pending sign-in, whose failure is then no `AccountError`.
     SignOut {
         provider: ProviderId,
     },
@@ -326,8 +327,8 @@ pub enum Event {
         provider: ProviderId,
         state: AccountState,
     },
-    /// Why a sign-in ended without `SignedIn`, or what a sign-out could not finish. The
-    /// `Account` that follows has the new state.
+    /// Why a sign-in ended without `SignedIn`, unless a sign-out ended it, or what a sign-out
+    /// could not finish. The `Account` that follows has the new state.
     AccountError {
         provider: ProviderId,
         error: String,

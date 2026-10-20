@@ -6,8 +6,8 @@ use std::time::Duration;
 use requiem_cli::app::{self, App, Flow, Format};
 use requiem_core::testing::{EngineCall, FakeEngineHandle, FakeProvider, Gate, SignInScript, Step};
 use requiem_core::{
-    AccountState, Collection, CollectionId, CollectionKind, EngineEvent, Item, Page, ProviderError,
-    ProviderId, SeekTarget, Session, SessionConfig, Shelf, Track, TrackId,
+    AccountState, Collection, CollectionId, CollectionKind, Command, EngineEvent, Event, Item,
+    Page, ProviderError, ProviderId, SeekTarget, Session, SessionConfig, Shelf, Track, TrackId,
 };
 
 #[derive(Clone, Default)]
@@ -949,6 +949,87 @@ fn a_signin_after_a_signout_starts_from_signed_out() {
         ),
         "{text}"
     );
+}
+
+fn cancelled() -> ProviderError {
+    ProviderError::SignInRequired("sign-in was cancelled".into())
+}
+
+#[test]
+fn a_signin_that_a_signout_ends_says_it_was_cancelled() {
+    let r = rig();
+    let gate = Gate::new();
+    r.provider.script_sign_in(SignInScript {
+        pending: Some(pending()),
+        gate: Some(gate.clone()),
+        outcome: Err(cancelled()),
+    });
+    let flow = thread::scope(|s| {
+        let waiter = s.spawn(|| r.app(true).exec("signin"));
+        wait_out(
+            &r,
+            "Go to https://www.google.com/device and enter GQVQ-JKEC\n",
+            1,
+        );
+        // Another client's sign-out.
+        r.session.send(Command::SignOut {
+            provider: ProviderId("fake".into()),
+        });
+        r.provider.wait_sign_out_calls(1);
+        gate.release();
+        waiter.join().unwrap()
+    });
+    assert_eq!(flow, Flow::Exit(2));
+    // The session answers in order, so an error for the sign-in would be printed by now.
+    exec_all(&r.app(true), "vol 55");
+    wait_out(&r, "volume: 55\n", 1);
+    let text = r.out.text();
+    assert!(text.contains("error: sign-in was cancelled\n"), "{text}");
+    assert!(!text.contains("account error"), "{text}");
+}
+
+#[test]
+fn a_signout_during_a_pending_signin_acks() {
+    let r = rig();
+    let sign_in = Gate::new();
+    r.provider.script_sign_in(SignInScript {
+        pending: Some(pending()),
+        gate: Some(sign_in.clone()),
+        outcome: Err(cancelled()),
+    });
+    let events = r.session.subscribe();
+    r.session.send(Command::SignIn {
+        provider: ProviderId("fake".into()),
+    });
+    while !matches!(
+        events.recv_timeout(Duration::from_secs(5)).unwrap(),
+        Event::Account {
+            state: AccountState::Pending { .. },
+            ..
+        }
+    ) {}
+    // As with Google, the sign-out ends the sign-in before it finishes itself.
+    let sign_out = Gate::new();
+    r.provider.gate_sign_out(sign_out.clone());
+    let flow = thread::scope(|s| {
+        let waiter = s.spawn(|| r.json_app().exec("signout fake"));
+        r.provider.wait_sign_out_calls(1);
+        sign_in.release();
+        let flow = waiter.join().unwrap();
+        sign_out.release();
+        flow
+    });
+    assert_eq!(flow, Flow::Continue, "{}", r.out.text());
+    let lines = r.json_lines();
+    assert_eq!(
+        lines[lines.len() - 2..],
+        [
+            serde_json::json!({"type": "account", "provider": "fake", "state": "signed_out"}),
+            serde_json::json!({"type": "ack", "command": "signout"}),
+        ]
+    );
+    assert!(of_type(&lines, "account_error").is_empty(), "{lines:?}");
+    assert!(of_type(&lines, "error").is_empty(), "{lines:?}");
 }
 
 #[test]

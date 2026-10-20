@@ -130,6 +130,8 @@ struct SignInWait {
     expires_at_unix: Option<u64>,
     /// The first state after `Pending`.
     ended: Option<AccountState>,
+    /// An `AccountError` arrived.
+    failed: bool,
 }
 
 /// A `signout` waiting for the daemon's answer.
@@ -275,6 +277,9 @@ impl Hub {
             }
             Event::Account { provider, state } => self.on_account(&mut ui, provider, state),
             Event::AccountError { provider, error } => {
+                if let Some(w) = ui.sign_in.as_mut().filter(|w| w.provider == provider) {
+                    w.failed = true;
+                }
                 if let Some(w) = ui.sign_out.as_mut().filter(|w| w.provider == provider) {
                     w.failed = true;
                 }
@@ -1050,7 +1055,8 @@ impl<'a> App<'a> {
     }
 
     /// Sends `SignIn` and waits until the sign-in ends: up to `SIGN_IN_START` for the code,
-    /// then until the code expires.
+    /// then until the code expires. A sign-in that goes back to signed out with no error was
+    /// ended by a sign-out, which the session reports without one.
     fn sign_in(&self, cmd: &str, arg: &str) -> Flow {
         let Some(provider) = self.account_provider(arg, false) else {
             return if self.script {
@@ -1063,6 +1069,7 @@ impl<'a> App<'a> {
             provider: provider.clone(),
             expires_at_unix: None,
             ended: None,
+            failed: false,
         });
         self.player.send(Command::SignIn { provider });
         self.hub.ack(cmd);
@@ -1094,14 +1101,19 @@ impl<'a> App<'a> {
                 .unwrap_or_else(PoisonError::into_inner)
                 .0;
         };
-        let timed_out = ui.sign_in.take().is_some_and(|w| w.ended.is_none());
+        let w = ui.sign_in.take().expect("set above");
         drop(ui);
+        let cancelled = w.expires_at_unix.is_some()
+            && !w.failed
+            && matches!(w.ended, Some(AccountState::SignedOut));
         match outcome {
             Some(true) => Flow::Continue,
             None => self.lost(true).unwrap_or(Flow::Continue),
             Some(false) => {
-                if timed_out {
+                if w.ended.is_none() {
                     self.hub.error("timed out waiting for sign-in");
+                } else if cancelled {
+                    self.hub.error("sign-in was cancelled");
                 }
                 if self.script {
                     Flow::Exit(2)

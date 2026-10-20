@@ -88,6 +88,18 @@ impl Rig {
         }
     }
 
+    /// Reads events until `n` have matched `pred`, returning every event read.
+    fn events_until(&self, n: usize, pred: impl Fn(&Event) -> bool) -> Vec<Event> {
+        let mut seen = Vec::new();
+        let mut matched = 0;
+        while matched < n {
+            let ev = self.wait_event(|_| true);
+            matched += usize::from(pred(&ev));
+            seen.push(ev);
+        }
+        seen
+    }
+
     /// Plays `ids` from index 0 and reports the first track as started.
     fn play_started(&self, ids: &[&str]) -> u64 {
         self.enqueue(ids);
@@ -1352,6 +1364,81 @@ fn an_unchanged_state_after_a_sign_out_is_still_announced() {
     });
     r.wait_event(is_account(AccountState::SignedOut));
     assert_eq!(r.provider.sign_out_calls(), 1);
+}
+
+fn cancelled() -> ProviderError {
+    ProviderError::SignInRequired("sign-in was cancelled".into())
+}
+
+#[test]
+fn a_sign_in_that_a_sign_out_ends_is_no_error() {
+    let r = rig(config());
+    let gate = Gate::new();
+    r.provider.script_sign_in(SignInScript {
+        pending: Some(pending()),
+        gate: Some(gate.clone()),
+        outcome: Err(cancelled()),
+    });
+    r.send(Command::SignIn {
+        provider: fake_id(),
+    });
+    r.wait_event(is_account(pending()));
+    r.send(Command::SignOut {
+        provider: fake_id(),
+    });
+    r.provider.wait_sign_out_calls(1);
+    gate.release();
+    // The sign-out and the ended sign-in each announce the state, then the volume follows.
+    let mut seen = r.events_until(2, is_account(AccountState::SignedOut));
+    r.send(Command::SetVolume(55));
+    seen.extend(r.events_until(1, |e| *e == Event::Volume(55)));
+    assert!(
+        !seen.iter().any(|e| matches!(e, Event::AccountError { .. })),
+        "{seen:?}"
+    );
+
+    // The next sign-in's failure is an error again.
+    r.provider.script_sign_in(SignInScript {
+        pending: None,
+        gate: None,
+        outcome: Err(ProviderError::SignInRequired("access was denied".into())),
+    });
+    r.send(Command::SignIn {
+        provider: fake_id(),
+    });
+    let ev = r.wait_event(|e| matches!(e, Event::AccountError { .. }));
+    assert_eq!(
+        ev,
+        Event::AccountError {
+            provider: fake_id(),
+            error: "access was denied".into(),
+        }
+    );
+}
+
+#[test]
+fn a_sign_out_with_no_sign_in_running_hides_no_later_error() {
+    let r = rig(config());
+    r.send(Command::SignOut {
+        provider: fake_id(),
+    });
+    r.wait_event(is_account(AccountState::SignedOut));
+    r.provider.script_sign_in(SignInScript {
+        pending: Some(pending()),
+        gate: None,
+        outcome: Err(cancelled()),
+    });
+    r.send(Command::SignIn {
+        provider: fake_id(),
+    });
+    let ev = r.wait_event(|e| matches!(e, Event::AccountError { .. }));
+    assert_eq!(
+        ev,
+        Event::AccountError {
+            provider: fake_id(),
+            error: "sign-in was cancelled".into(),
+        }
+    );
 }
 
 fn named_track(provider: &str, id: &str) -> Track {
