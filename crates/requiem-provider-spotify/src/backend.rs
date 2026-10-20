@@ -65,6 +65,11 @@ const FULL_PLAYLIST_TIMEOUT: Duration = Duration::from_secs(10);
 const FULL_PLAYLISTS_BUDGET: Duration = Duration::from_secs(30);
 /// As many as YouTube Music's provider shows.
 const MAX_COLLECTION_TRACKS: usize = 1000;
+/// Home's most recently liked tracks.
+const HOME_LIKED: usize = 20;
+/// The ids of the playlists Spotify makes start with this: its mixes, Daily Mixes, "This Is"
+/// and editorial playlists alike.
+const MADE_FOR_YOU: &str = "37i9dQZF1";
 const IMAGE_URL: &str = "https://i.scdn.co/image/";
 const LIKED: &str = "Liked Songs";
 const LIKED_ID: &str = "collection";
@@ -210,67 +215,31 @@ impl Librespot {
 
     async fn library(&self) -> Result<Vec<Shelf>, ProviderError> {
         let session = self.session().await?;
-        let mut items = vec![Item::Collection(Collection {
-            id: CollectionId {
-                provider: provider(),
-                id: LIKED_ID.into(),
-            },
-            kind: CollectionKind::Playlist,
-            title: LIKED.into(),
-            subtitle: None,
-            artwork_url: None,
-        })];
-        let mut rows = Vec::new();
-        let mut from = 0;
-        for _ in 0..MAX_PAGES {
-            let bytes = session
-                .spclient()
-                .get_rootlist(from, Some(ROOTLIST_PAGE))
-                .await
-                .map_err(|e| api_error("playlists", &e))?;
-            let list = SelectedListContent::parse_from_bytes(&bytes)
-                .map_err(|e| ProviderError::Parse(format!("Spotify playlists: {e}")))?;
-            let got = list.contents.items.len();
-            rows.extend(rootlist_rows(&list));
-            from += got;
-            let done = match list.length {
-                Some(total) => from >= total.max(0) as usize,
-                None => got < ROOTLIST_PAGE,
-            };
-            if got == 0 || done {
-                break;
-            }
-        }
-        let deadline = tokio::time::Instant::now() + FULL_PLAYLISTS_BUDGET;
-        let session = &session;
-        let collections: Vec<_> = futures_util::stream::iter(rows)
-            .map(|row| async move {
-                if row.incomplete {
-                    completed(
-                        row.collection,
-                        full_playlist(session, &row.id, deadline).await,
-                    )
-                } else {
-                    Some(row.collection)
-                }
-            })
-            .buffered(METADATA_IN_FLIGHT)
-            .collect()
-            .await;
-        items.extend(collections.into_iter().flatten().map(Item::Collection));
+        let mut items = vec![Item::Collection(liked_card())];
+        items.extend(playlists(&session).await?.into_iter().map(Item::Collection));
         Ok(vec![Shelf {
             title: "Spotify".into(),
             items,
         }])
     }
 
+    async fn home(&self) -> Result<Vec<Shelf>, ProviderError> {
+        let session = self.session().await?;
+        let session = &session;
+        let (liked, playlists) = tokio::join!(
+            async {
+                let ids = context_ids(session, &liked_uri(session), HOME_LIKED).await?;
+                tracks(session, ids).await
+            },
+            playlists(session),
+        );
+        Ok(home_shelves(liked?, playlists?))
+    }
+
     async fn collection(&self, id: &str) -> Result<Vec<Shelf>, ProviderError> {
         let session = self.session().await?;
         let (uri, playlist) = if id == LIKED_ID {
-            (
-                format!("spotify:user:{}:collection", session.username()),
-                None,
-            )
+            (liked_uri(&session), None)
         } else {
             let pid = id
                 .strip_prefix(PLAYLIST_PREFIX)
@@ -278,38 +247,7 @@ impl Librespot {
                 .ok_or_else(|| ProviderError::Unplayable(format!("no Spotify collection {id}")))?;
             (format!("spotify:playlist:{}", pid.to_base62()), Some(pid))
         };
-        let ctx = session
-            .spclient()
-            .get_context(&uri)
-            .await
-            .map_err(|e| api_error("collection", &e))?;
-        let mut ids = context_tracks(&ctx.pages);
-        let mut next: VecDeque<String> = ctx
-            .pages
-            .iter()
-            .filter_map(|p| p.next_page_url.clone())
-            .filter(|u| !u.is_empty())
-            .collect();
-        let mut seen = HashSet::new();
-        let mut pages = 0;
-        while let Some(url) = next.pop_front() {
-            if ids.len() >= MAX_COLLECTION_TRACKS || pages >= MAX_PAGES {
-                break;
-            }
-            if !seen.insert(url.clone()) {
-                continue;
-            }
-            pages += 1;
-            let bytes = session
-                .spclient()
-                .get_next_page(&url)
-                .await
-                .map_err(|e| api_error("collection", &e))?;
-            let (more, then) = parse_json_page(&bytes)?;
-            ids.extend(more);
-            next.extend(then);
-        }
-        ids.truncate(MAX_COLLECTION_TRACKS);
+        let ids = context_ids(&session, &uri, MAX_COLLECTION_TRACKS).await?;
         let title = match playlist {
             None => LIKED.to_owned(),
             Some(pid) => playlist_name(&session, &pid)
@@ -454,7 +392,7 @@ impl Backend for Librespot {
 
     fn browse(&self, page: &Page) -> Result<Vec<Shelf>, ProviderError> {
         match page {
-            Page::Home => Ok(Vec::new()),
+            Page::Home => self.rt.block_on(self.home()),
             Page::Library => self.rt.block_on(self.library()),
             Page::Collection(c) => self.rt.block_on(self.collection(&c.id)),
         }
@@ -795,6 +733,132 @@ pub(crate) fn parse_json_page(
         .filter(|u| !u.is_empty())
         .map(str::to_owned);
     Ok((ids, next))
+}
+
+/// Context `uri`'s track ids in order, its later pages followed until there are `cap`.
+async fn context_ids(
+    session: &Session,
+    uri: &str,
+    cap: usize,
+) -> Result<Vec<SpotifyId>, ProviderError> {
+    let ctx = session
+        .spclient()
+        .get_context(uri)
+        .await
+        .map_err(|e| api_error("collection", &e))?;
+    let mut ids = context_tracks(&ctx.pages);
+    let mut next: VecDeque<String> = ctx
+        .pages
+        .iter()
+        .filter_map(|p| p.next_page_url.clone())
+        .filter(|u| !u.is_empty())
+        .collect();
+    let mut seen = HashSet::new();
+    let mut pages = 0;
+    while let Some(url) = next.pop_front() {
+        if ids.len() >= cap || pages >= MAX_PAGES {
+            break;
+        }
+        if !seen.insert(url.clone()) {
+            continue;
+        }
+        pages += 1;
+        let bytes = session
+            .spclient()
+            .get_next_page(&url)
+            .await
+            .map_err(|e| api_error("collection", &e))?;
+        let (more, then) = parse_json_page(&bytes)?;
+        ids.extend(more);
+        next.extend(then);
+    }
+    ids.truncate(cap);
+    Ok(ids)
+}
+
+/// Liked Songs' context, which lists the most recently liked first.
+fn liked_uri(session: &Session) -> String {
+    format!("spotify:user:{}:collection", session.username())
+}
+
+fn liked_card() -> Collection {
+    Collection {
+        id: CollectionId {
+            provider: provider(),
+            id: LIKED_ID.into(),
+        },
+        kind: CollectionKind::Playlist,
+        title: LIKED.into(),
+        subtitle: None,
+        artwork_url: None,
+    }
+}
+
+/// The rootlist's playlists in order, each completed where the rootlist left it incomplete.
+async fn playlists(session: &Session) -> Result<Vec<Collection>, ProviderError> {
+    let mut rows = Vec::new();
+    let mut from = 0;
+    for _ in 0..MAX_PAGES {
+        let bytes = session
+            .spclient()
+            .get_rootlist(from, Some(ROOTLIST_PAGE))
+            .await
+            .map_err(|e| api_error("playlists", &e))?;
+        let list = SelectedListContent::parse_from_bytes(&bytes)
+            .map_err(|e| ProviderError::Parse(format!("Spotify playlists: {e}")))?;
+        let got = list.contents.items.len();
+        rows.extend(rootlist_rows(&list));
+        from += got;
+        let done = match list.length {
+            Some(total) => from >= total.max(0) as usize,
+            None => got < ROOTLIST_PAGE,
+        };
+        if got == 0 || done {
+            break;
+        }
+    }
+    let deadline = tokio::time::Instant::now() + FULL_PLAYLISTS_BUDGET;
+    let collections: Vec<_> = futures_util::stream::iter(rows)
+        .map(|row| async move {
+            if row.incomplete {
+                completed(
+                    row.collection,
+                    full_playlist(session, &row.id, deadline).await,
+                )
+            } else {
+                Some(row.collection)
+            }
+        })
+        .buffered(METADATA_IN_FLIGHT)
+        .collect()
+        .await;
+    Ok(collections.into_iter().flatten().collect())
+}
+
+/// Home, without empty shelves: the `liked` tracks, the playlists Spotify made, then the
+/// Liked Songs card and the rest of the playlists.
+fn home_shelves(liked: Vec<Track>, playlists: Vec<Collection>) -> Vec<Shelf> {
+    let (made, own): (Vec<_>, Vec<_>) = playlists.into_iter().partition(|c| {
+        c.id.id
+            .strip_prefix(PLAYLIST_PREFIX)
+            .is_some_and(|id| id.starts_with(MADE_FOR_YOU))
+    });
+    let own = std::iter::once(liked_card()).chain(own);
+    [
+        ("Liked songs", liked.into_iter().map(Item::Track).collect()),
+        (
+            "Made for you",
+            made.into_iter().map(Item::Collection).collect(),
+        ),
+        ("Your playlists", own.map(Item::Collection).collect()),
+    ]
+    .into_iter()
+    .filter(|(_, items): &(_, Vec<Item>)| !items.is_empty())
+    .map(|(title, items)| Shelf {
+        title: title.into(),
+        items,
+    })
+    .collect()
 }
 
 /// A rootlist playlist as a Library row.
@@ -1281,6 +1345,70 @@ mod tests {
         assert_eq!(completed(row("Playlist", None, None), Full::NotFound), None);
         let kept = row("Metalcore Mix", None, Some("art"));
         assert_eq!(completed(kept.clone(), Full::Failed), Some(kept));
+    }
+
+    fn playlist(id: &str, title: &str) -> Collection {
+        Collection {
+            id: CollectionId {
+                provider: provider(),
+                id: format!("{PLAYLIST_PREFIX}{id}"),
+            },
+            ..row(title, None, None)
+        }
+    }
+
+    fn titles(shelf: &Shelf) -> Vec<&str> {
+        shelf
+            .items
+            .iter()
+            .map(|i| match i {
+                Item::Track(t) => t.title.as_str(),
+                Item::Collection(c) => c.title.as_str(),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn home_splits_the_playlists_spotify_made_from_the_rest() {
+        let liked = Track {
+            id: TrackId {
+                provider: provider(),
+                id: "t".into(),
+            },
+            title: "Song".into(),
+            artists: Vec::new(),
+            album: None,
+            duration: None,
+            artwork_url: None,
+        };
+        let shelves = home_shelves(
+            vec![liked],
+            vec![
+                playlist("1Ab2Cd3Ef4Gh5Ij6Kl7Mn8", "Mine"),
+                playlist("37i9dQZF1E39pZBVudb5vh", "Daily Mix 2"),
+                playlist("37i9dQZF1DZ06evO1JiPRm", "This Is Kado"),
+                playlist("37i9dQZEVXcJZyENOWUFo7", "Discover Weekly"),
+            ],
+        );
+        let got: Vec<_> = shelves.iter().map(|s| (&*s.title, titles(s))).collect();
+        assert_eq!(
+            got,
+            [
+                ("Liked songs", vec!["Song"]),
+                ("Made for you", vec!["Daily Mix 2", "This Is Kado"]),
+                (
+                    "Your playlists",
+                    vec!["Liked Songs", "Mine", "Discover Weekly"]
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn home_leaves_out_empty_shelves() {
+        let shelves = home_shelves(Vec::new(), vec![playlist("1Ab2", "Mine")]);
+        let got: Vec<_> = shelves.iter().map(|s| (&*s.title, titles(s))).collect();
+        assert_eq!(got, [("Your playlists", vec!["Liked Songs", "Mine"])]);
     }
 
     #[test]

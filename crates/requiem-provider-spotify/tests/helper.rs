@@ -167,8 +167,11 @@ fn run(tmp: &Path) {
         p.search("x", 1),
         Err(ProviderError::SignInRequired(_))
     ));
+    assert!(matches!(
+        p.browse(&Page::Home),
+        Err(ProviderError::SignInRequired(_))
+    ));
     assert!(!sockets.join("spotify.sock").exists());
-    assert_eq!(p.browse(&Page::Home), Ok(Vec::new()));
 
     fs::write(
         &creds,

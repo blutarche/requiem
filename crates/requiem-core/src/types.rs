@@ -59,8 +59,10 @@ pub struct Shelf {
     pub items: Vec<Item>,
 }
 
-/// `Home` goes to the first provider with `has_home()`; `Library` to every signed-in provider,
-/// merged in provider order; a collection to the provider that issued it.
+/// `Home` goes to every signed-in provider with `has_home()`, merged in provider order, with
+/// shelves that share a title made one whose items alternate between providers; `Library` to
+/// every signed-in provider, merged in provider order; a collection to the provider that
+/// issued it.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum Page {
     Home,

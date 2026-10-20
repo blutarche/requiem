@@ -29,8 +29,6 @@ use parse::{BROWSE_PREFIX, PROVIDER, StreamFormat};
 use range::{HttpRangeSource, RangeConfig};
 use transport::UreqTransport;
 
-const HOME: &str = "FEmusic_home";
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum IpFamily {
     #[default]
@@ -115,7 +113,7 @@ impl Provider for YtMusicProvider {
 
     fn browse(&self, page: &Page) -> Result<Vec<Shelf>, ProviderError> {
         match page {
-            Page::Home => parse::parse_home(&self.client.browse(HOME)?),
+            Page::Home => dataapi::home(&self.google),
             Page::Library => dataapi::library(&self.google),
             Page::Collection(c) if c.provider.0 == PROVIDER => {
                 if let Some(id) = c.id.strip_prefix(DATA_PREFIX) {

@@ -10,7 +10,7 @@ use serde_json::Value;
 
 mod browse;
 
-pub(crate) use browse::{BROWSE_PREFIX, collection_kind, parse_collection, parse_home};
+pub(crate) use browse::{BROWSE_PREFIX, collection_kind, parse_collection};
 
 pub(crate) const PROVIDER: &str = "ytmusic";
 
@@ -95,7 +95,6 @@ struct NavEndpoint {
 #[derive(Deserialize, Default)]
 #[serde(default, rename_all = "camelCase")]
 struct BrowseEndpoint {
-    browse_id: Option<String>,
     browse_endpoint_context_supported_configs: Option<BrowseConfigs>,
 }
 

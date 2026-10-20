@@ -10,8 +10,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     AccountState, AudioSource, Command, Engine, EngineEvent, EngineEventSink, EnqueueMode, Event,
-    FailureKind, Page, PlayState, Provider, ProviderError, ProviderId, SeekTarget, Shelf, Track,
-    TrackId,
+    FailureKind, Item, Page, PlayState, Provider, ProviderError, ProviderId, SeekTarget, Shelf,
+    Track, TrackId,
 };
 
 /// What a restart restores. `resume` is the queue index Play would start.
@@ -284,6 +284,35 @@ fn fan_out<T: Send + 'static>(
     Err(hard
         .or(sign_in)
         .unwrap_or_else(|| ProviderError::Unplayable("no provider answered".into())))
+}
+
+/// Shelves that share a title become one, where the title first appears, with their items
+/// taken in turn, in provider order; `shelves` are in provider order.
+fn merge_home(shelves: Vec<Shelf>) -> Vec<Shelf> {
+    let mut titles: Vec<(String, Vec<Vec<Item>>)> = Vec::new();
+    for shelf in shelves {
+        match titles.iter_mut().find(|(t, _)| *t == shelf.title) {
+            Some((_, lists)) => lists.push(shelf.items),
+            None => titles.push((shelf.title, vec![shelf.items])),
+        }
+    }
+    titles
+        .into_iter()
+        .map(|(title, lists)| {
+            let mut lists: Vec<_> = lists.into_iter().map(Vec::into_iter).collect();
+            let mut items = Vec::new();
+            loop {
+                let before = items.len();
+                for list in &mut lists {
+                    items.extend(list.next());
+                }
+                if items.len() == before {
+                    break;
+                }
+            }
+            Shelf { title, items }
+        })
+        .collect()
 }
 
 fn resolve_with_retry(
@@ -650,17 +679,11 @@ impl Actor {
     fn browse(&mut self, req: u64, page: Page) {
         let targets: Vec<Arc<dyn Provider>> = match &page {
             Page::Collection(c) => self.provider(&c.provider).into_iter().collect(),
-            Page::Home => self
-                .providers
-                .iter()
-                .find(|p| p.has_home())
-                .cloned()
-                .into_iter()
-                .collect(),
-            Page::Library => {
+            Page::Home | Page::Library => {
                 let signed_in: Vec<_> = self
                     .providers
                     .iter()
+                    .filter(|p| page != Page::Home || p.has_home())
                     .filter(|p| {
                         matches!(
                             self.account_of(&p.id()),
@@ -670,7 +693,12 @@ impl Actor {
                     .cloned()
                     .collect();
                 if signed_in.is_empty() {
-                    let e = ProviderError::SignInRequired("sign in to browse your library".into());
+                    let why = if page == Page::Home {
+                        "sign in to see your music"
+                    } else {
+                        "sign in to browse your library"
+                    };
+                    let e = ProviderError::SignInRequired(why.into());
                     self.emit(Event::BrowseFailed {
                         req,
                         error: e.to_string(),
@@ -695,6 +723,11 @@ impl Actor {
                 let page = page.clone();
                 move |p| p.browse(&page)
             });
+            let result = if page == Page::Home {
+                result.map(merge_home)
+            } else {
+                result
+            };
             let accounts = targets.iter().map(|p| (p.id(), p.account())).collect();
             let _ = tx.send(Msg::Browsed {
                 req,

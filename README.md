@@ -40,7 +40,7 @@ The bundle embeds Homebrew's libopus. Its minimum macOS version is whatever that
 ## Use
 
 - **Window:** type a query and press Enter; Return or a double-click plays a result, Cmd+Return (or the row's +) adds it to the queue. In the queue, Delete removes the selected track and Option+Cmd+Up / Option+Cmd+Down move it; right-click a queue row for Remove from Queue, Move Up, Move Down or Clear Queue (its toast offers Undo). Cmd+Z undoes a replaced or cleared queue until the queue changes again. Space toggles play/pause, Left / Right seek 5 s, Cmd+Left / Cmd+Right skip, Cmd+Up / Cmd+Down change the volume, Cmd+F focuses search, Cmd+1 to Cmd+4 switch between Home, Search, Library and Queue, Cmd+R refreshes the page, Cmd+K opens the palette. Cmd+Q closes the window and the music keeps playing; Option+Cmd+Q ("Quit and Stop Music") stops the player too.
-- **Home and Library:** the window opens on Home, YouTube Music's public shelves. A track card plays its shelf from that track and offers Undo like a search result; a playlist or album card opens its tracks (Play, Add to Queue, and Cmd+[ or the back control to return where you were). Library lists your playlists once you sign in: the Library page shows the device code with Copy Code, Open and Cancel while a sign-in waits, and "Sign Out" asks first. The palette has Sign in to Google and Sign out of Google while they apply.
+- **Home and Library:** the window opens on Home, your own music from every service you are signed in to: your most recently liked songs, the playlists Spotify made for you, and your playlists. A shelf that both services have takes from each in turn. Signed out, Home offers a sign-in to each service. A track card plays its shelf from that track and offers Undo like a search result; a playlist or album card opens its tracks (Play, Add to Queue, and Cmd+[ or the back control to return where you were). Library lists your playlists once you sign in: the Library page shows the device code with Copy Code, Open and Cancel while a sign-in waits, and "Sign Out" asks first. The palette has Sign in to Google and Sign out of Google while they apply.
 - **CLI:** `requiem --connect`, then `help`. Commands: `search <query>`, `home`, `library`, `open <n>`, `play <n>`, `add <n>`, `play-track <json>`, `add-track <json>`, `queue`, `jump <n>`, `remove <n>`, `move <from> <to>`, `clear`, `next`, `prev`, `pause`, `resume`, `toggle`, `seek <secs|+secs|-secs>`, `vol <0-100>`, `status`, `signin`, `signout`, `account`, `update`, `update check`, `update install`, `shutdown-daemon`, `quit`. `home` and `library` print numbered items under each shelf, numbered across shelves; `open <n>` lists the tracks of playlist or album n. `play <n>`, `add <n>` and `open <n>` take n from whichever listing printed last: search results, a browse page or an opened playlist. `--script <file>` runs commands from a file; `--script -` reads them from stdin. `requiem update`, `requiem update check` and `requiem update install` run one update command against the player (see [Updates](#updates)).
 
 ### JSON output
@@ -75,7 +75,7 @@ The bundle embeds Homebrew's libopus. Its minimum macOS version is whatever that
 
 ## YouTube library
 
-`home` shows YouTube Music's home page as a signed-out visitor sees it. Signing in to Google adds `library`: your playlists and your liked videos.
+Signing in to Google adds YouTube Music to `home` and `library`: your playlists and your liked videos.
 
 Sign-in uses your own Google Cloud OAuth client, set up once:
 
@@ -91,7 +91,7 @@ Then run `signin` in the CLI. It prints `Go to https://www.google.com/device and
 What a sign-in gets you:
 
 - **Available:** your playlists (the first 200) and Liked videos, each opened up to its first 1000 videos. These come from the YouTube Data API, so a project gets 10,000 requests a day, and each request returns up to 50 items.
-- **Not available:** your personalized home, Quick picks, saved albums and history. YouTube Music's own API rejects this kind of sign-in. Home always shows the public shelves.
+- **Not available:** YouTube Music's personalized home, Quick picks, saved albums and history. YouTube Music's own API rejects this kind of sign-in, so Home shows your 20 most recently liked videos and your playlists instead.
 
 Playback stays anonymous whether or not you are signed in.
 
@@ -101,11 +101,11 @@ Spotify is off until you sign in: `signin spotify` in the CLI, or **Sign in to S
 
 Requiem plays Spotify through [librespot](https://github.com/librespot-org/librespot), the way Spotify's own apps connect. Spotify doesn't allow unofficial players, so your Spotify account could be suspended.
 
-Once signed in, search lists Spotify results first, and Library shows Liked Songs and your playlists. The player keeps the sign-in in `spotify-credentials.json`, readable only by you, next to `state.json` (`REQUIEM_SPOTIFY_CREDENTIALS_FILE` overrides the path). `signout spotify` deletes it. Design: [`docs/plans/2026-10-16-spotify-provider-design.md`](docs/plans/2026-10-16-spotify-provider-design.md).
+Once signed in, search lists Spotify results first, Home shows your 20 most recently liked songs, the playlists Spotify made for you and your playlists, and Library shows Liked Songs and your playlists. The player keeps the sign-in in `spotify-credentials.json`, readable only by you, next to `state.json` (`REQUIEM_SPOTIFY_CREDENTIALS_FILE` overrides the path). `signout spotify` deletes it. Design: [`docs/plans/2026-10-16-spotify-provider-design.md`](docs/plans/2026-10-16-spotify-provider-design.md).
 
 ## Snapshots
 
-`requiem-gui --demo --snapshot out.png --view <view>` renders a view from fixed fake data without showing a window: `home`, `search`, `library`, `queue`, `palette`, `collection`, `library-signed-out`, `library-unavailable`, `signin`, `empty`, `disconnected`, `toast`, `out-of-date`, `update-ready`, `update-failed`, `not-updatable` or `up-to-date`. For `home` and `library`, `--snapshot` also works without `--demo`: it asks the running player (starting one if needed), waits up to 20 s for the page and its covers, then writes the PNG, exiting 1 if the page fails to load.
+`requiem-gui --demo --snapshot out.png --view <view>` renders a view from fixed fake data without showing a window: `home`, `home-signed-out`, `search`, `library`, `queue`, `palette`, `collection`, `library-signed-out`, `library-unavailable`, `signin`, `empty`, `disconnected`, `toast`, `out-of-date`, `update-ready`, `update-failed`, `not-updatable` or `up-to-date`. For `home` and `library`, `--snapshot` also works without `--demo`: it asks the running player (starting one if needed), waits up to 20 s for the page and its covers, then writes the PNG, exiting 1 if the page fails to load.
 
 ## Footprint
 

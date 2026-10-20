@@ -237,11 +237,12 @@ impl Provider for SpotifyProvider {
     }
 
     fn browse(&self, page: &Page) -> Result<Vec<Shelf>, ProviderError> {
-        if *page == Page::Home {
-            return Ok(Vec::new());
-        }
         self.call::<Shelves>(&Request::Browse { page: page.clone() })
             .map(|s| s.shelves)
+    }
+
+    fn has_home(&self) -> bool {
+        true
     }
 
     fn account(&self) -> AccountState {
