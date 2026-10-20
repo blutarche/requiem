@@ -110,7 +110,6 @@ fn rig() -> Rig {
     let dir = tmp.0.join("s");
     prepare_dir(&dir).unwrap();
     let provider = FakeProvider::new("fake");
-    provider.set_has_home(true);
     let engine = FakeEngineHandle::new();
     let (server, shutdowns, requests) = start(&dir, &provider, &engine).unwrap();
     Rig {
@@ -631,10 +630,11 @@ fn browse_results_go_only_to_the_requester_and_accounts_to_everyone() {
         items: vec![requiem_core::Item::Track(track("h1"))],
     };
     let p = &rig.provider;
-    p.script_browse(
-        requiem_core::Page::Home,
-        vec![Step::ok(vec![shelf.clone()])],
-    );
+    let page = requiem_core::Page::Collection(requiem_core::CollectionId {
+        provider: ProviderId("fake".into()),
+        id: "c".into(),
+    });
+    p.script_browse(page.clone(), vec![Step::ok(vec![shelf.clone()])]);
     let (a, arx) = rig.client(Role::Gui);
     let (b, brx) = rig.client(Role::Cli);
     take(&arx, IDLE_SNAPSHOT);
@@ -642,14 +642,14 @@ fn browse_results_go_only_to_the_requester_and_accounts_to_everyone() {
 
     a.send(Command::Browse {
         req: 3,
-        page: requiem_core::Page::Home,
+        page: page.clone(),
     })
     .unwrap();
     assert_eq!(
         next_event(&arx),
         Event::BrowseResults {
             req: 3,
-            page: requiem_core::Page::Home,
+            page,
             shelves: vec![shelf],
         }
     );

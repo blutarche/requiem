@@ -38,8 +38,14 @@ struct Rig {
 }
 
 fn rig() -> Rig {
+    rig_with(FakeProvider::new("fake"))
+}
+
+/// Signed in, so Home comes from it.
+fn home_rig() -> Rig {
     let provider = FakeProvider::new("fake");
     provider.set_has_home(true);
+    provider.set_account(AccountState::SignedIn { name: None });
     rig_with(provider)
 }
 
@@ -625,7 +631,7 @@ fn script_home(r: &Rig) {
 
 #[test]
 fn text_mode_never_prints_terminal_escapes_from_remote_titles() {
-    let r = rig();
+    let r = home_rig();
     let mut t = track("t1");
     t.title = "a\x1b]0;pwned\x07b\x1b[2Jc\u{9b}31m\x7f\r".into();
     r.provider.script_browse(
@@ -647,7 +653,7 @@ fn text_mode_never_prints_terminal_escapes_from_remote_titles() {
 
 #[test]
 fn home_numbers_items_across_shelves_and_open_lists_a_playlist() {
-    let r = rig();
+    let r = home_rig();
     script_home(&r);
     let app = r.app(true);
     exec_all(&app, "home\nawait results 5");
@@ -692,7 +698,7 @@ fn home_numbers_items_across_shelves_and_open_lists_a_playlist() {
 
 #[test]
 fn a_search_replaces_a_browse_listing() {
-    let r = rig();
+    let r = home_rig();
     script_home(&r);
     r.provider
         .script_search("q", vec![Step::ok(vec![track("s1")])]);
@@ -709,7 +715,7 @@ fn a_search_replaces_a_browse_listing() {
 
 #[test]
 fn json_browse_prints_shelves_and_items() {
-    let r = rig();
+    let r = home_rig();
     script_home(&r);
     let app = r.json_app();
     exec_all(&app, "home\nawait results 5");

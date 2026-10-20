@@ -1529,18 +1529,134 @@ fn library_with_nobody_signed_in_asks_for_sign_in() {
     assert!(a.browse_calls().is_empty() && b.browse_calls().is_empty());
 }
 
-#[test]
-fn home_goes_to_the_first_provider_with_a_home() {
-    let (a, b) = pair();
-    b.set_has_home(true);
-    let r = rig_with(a.clone(), vec![b.clone()], config());
+fn track_shelf(title: &str, provider: &str, ids: &[&str]) -> Shelf {
+    Shelf {
+        title: title.into(),
+        items: ids
+            .iter()
+            .map(|id| Item::Track(named_track(provider, id)))
+            .collect(),
+    }
+}
+
+fn home_event(r: &Rig) -> Event {
     r.send(Command::Browse {
         req: 1,
         page: Page::Home,
     });
-    r.wait_event(|e| matches!(e, Event::BrowseResults { .. }));
-    assert_eq!(b.browse_calls(), [Page::Home]);
-    assert!(a.browse_calls().is_empty());
+    r.wait_event(|e| matches!(e, Event::BrowseResults { .. } | Event::BrowseFailed { .. }))
+}
+
+#[test]
+fn home_comes_from_signed_in_providers_with_a_home_in_order() {
+    let (a, b) = pair();
+    let (c, d) = (FakeProvider::new("third"), FakeProvider::new("fourth"));
+    for p in [&a, &c, &d] {
+        p.set_has_home(true);
+    }
+    for p in [&a, &b, &d] {
+        p.set_account(signed_in());
+    }
+    a.script_browse(
+        Page::Home,
+        vec![Step::ok(vec![track_shelf("First", "first", &["a1"])])],
+    );
+    d.script_browse(
+        Page::Home,
+        vec![Step::ok(vec![track_shelf("Fourth", "fourth", &["d1"])])],
+    );
+    let r = rig_with(a, vec![b.clone(), c.clone(), d], config());
+    assert_eq!(
+        home_event(&r),
+        Event::BrowseResults {
+            req: 1,
+            page: Page::Home,
+            shelves: vec![
+                track_shelf("First", "first", &["a1"]),
+                track_shelf("Fourth", "fourth", &["d1"])
+            ],
+        }
+    );
+    // Signed in without a Home, and with a Home but signed out.
+    assert!(b.browse_calls().is_empty() && c.browse_calls().is_empty());
+}
+
+#[test]
+fn home_shelves_that_share_a_title_alternate_their_items() {
+    let (a, b) = pair();
+    for p in [&a, &b] {
+        p.set_has_home(true);
+        p.set_account(signed_in());
+    }
+    a.script_browse(
+        Page::Home,
+        vec![Step::ok(vec![
+            track_shelf("Liked songs", "first", &["a1", "a2", "a3"]),
+            track_shelf("Made for you", "first", &["m1"]),
+            track_shelf("Your playlists", "first", &["p1"]),
+        ])],
+    );
+    b.script_browse(
+        Page::Home,
+        vec![Step::ok(vec![
+            track_shelf("Liked songs", "second", &["b1"]),
+            track_shelf("Only second", "second", &["x1"]),
+            track_shelf("Your playlists", "second", &["q1", "q2", "q3"]),
+        ])],
+    );
+    let r = rig_with(a, vec![b], config());
+    let Event::BrowseResults { shelves, .. } = home_event(&r) else {
+        panic!("Home failed");
+    };
+    let mixed = |title: &str, items: &[(&str, &str)]| Shelf {
+        title: title.into(),
+        items: items
+            .iter()
+            .map(|(p, id)| Item::Track(named_track(p, id)))
+            .collect(),
+    };
+    assert_eq!(
+        shelves,
+        [
+            mixed(
+                "Liked songs",
+                &[
+                    ("first", "a1"),
+                    ("second", "b1"),
+                    ("first", "a2"),
+                    ("first", "a3")
+                ]
+            ),
+            track_shelf("Made for you", "first", &["m1"]),
+            mixed(
+                "Your playlists",
+                &[
+                    ("first", "p1"),
+                    ("second", "q1"),
+                    ("second", "q2"),
+                    ("second", "q3")
+                ]
+            ),
+            track_shelf("Only second", "second", &["x1"]),
+        ]
+    );
+}
+
+#[test]
+fn home_with_nobody_signed_in_asks_for_sign_in() {
+    let (a, b) = pair();
+    a.set_has_home(true);
+    b.set_account(signed_in());
+    let r = rig_with(a.clone(), vec![b.clone()], config());
+    assert_eq!(
+        home_event(&r),
+        Event::BrowseFailed {
+            req: 1,
+            error: "sign-in required: sign in to see your music".into(),
+            sign_in_required: true,
+        }
+    );
+    assert!(a.browse_calls().is_empty() && b.browse_calls().is_empty());
 }
 
 #[test]
