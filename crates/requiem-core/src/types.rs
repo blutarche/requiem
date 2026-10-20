@@ -169,6 +169,14 @@ pub trait Provider: Send + Sync {
     fn sign_out(&self) -> Result<(), ProviderError> {
         Ok(())
     }
+
+    /// Keeps `json`, the user's own OAuth client, for sign-in, so that `account` no longer
+    /// reports it missing. Blocking; called on a worker thread. Errors never quote `json`.
+    fn import_client(&self, _json: &str) -> Result<(), ProviderError> {
+        Err(ProviderError::SignInRequired(
+            "this provider has no client to import".into(),
+        ))
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -239,6 +247,29 @@ pub enum PlayState {
     Stopped,
 }
 
+/// Text that holds a secret: a plain string on the wire, but only its length under `Debug`.
+#[derive(Clone, PartialEq, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct Redacted(pub String);
+
+impl fmt::Debug for Redacted {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "<redacted, {} bytes>", self.0.len())
+    }
+}
+
+impl From<String> for Redacted {
+    fn from(s: String) -> Self {
+        Self(s)
+    }
+}
+
+impl From<&str> for Redacted {
+    fn from(s: &str) -> Self {
+        Self(s.to_owned())
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum Command {
     Search {
@@ -278,8 +309,15 @@ pub enum Command {
     SignIn {
         provider: ProviderId,
     },
+    /// Also ends a pending sign-in, whose failure is then no `AccountError`.
     SignOut {
         provider: ProviderId,
+    },
+    /// Gives `provider` the user's own OAuth client, as the JSON its console downloads.
+    /// Answered with the provider's `Account`, or with an `AccountError`.
+    ImportSignInClient {
+        provider: ProviderId,
+        json: Redacted,
     },
 }
 
@@ -328,8 +366,8 @@ pub enum Event {
         provider: ProviderId,
         state: AccountState,
     },
-    /// Why a sign-in ended without `SignedIn`, or what a sign-out could not finish. The
-    /// `Account` that follows has the new state.
+    /// Why a sign-in ended without `SignedIn`, unless a sign-out ended it, or what a sign-out
+    /// could not finish. The `Account` that follows has the new state.
     AccountError {
         provider: ProviderId,
         error: String,

@@ -88,6 +88,18 @@ impl Rig {
         }
     }
 
+    /// Reads events until `n` have matched `pred`, returning every event read.
+    fn events_until(&self, n: usize, pred: impl Fn(&Event) -> bool) -> Vec<Event> {
+        let mut seen = Vec::new();
+        let mut matched = 0;
+        while matched < n {
+            let ev = self.wait_event(|_| true);
+            matched += usize::from(pred(&ev));
+            seen.push(ev);
+        }
+        seen
+    }
+
     /// Plays `ids` from index 0 and reports the first track as started.
     fn play_started(&self, ids: &[&str]) -> u64 {
         self.enqueue(ids);
@@ -1354,6 +1366,180 @@ fn an_unchanged_state_after_a_sign_out_is_still_announced() {
     assert_eq!(r.provider.sign_out_calls(), 1);
 }
 
+fn cancelled() -> ProviderError {
+    ProviderError::SignInRequired("sign-in was cancelled".into())
+}
+
+#[test]
+fn a_sign_in_that_a_sign_out_ends_is_no_error() {
+    let r = rig(config());
+    let gate = Gate::new();
+    r.provider.script_sign_in(SignInScript {
+        pending: Some(pending()),
+        gate: Some(gate.clone()),
+        outcome: Err(cancelled()),
+    });
+    r.send(Command::SignIn {
+        provider: fake_id(),
+    });
+    r.wait_event(is_account(pending()));
+    r.send(Command::SignOut {
+        provider: fake_id(),
+    });
+    r.provider.wait_sign_out_calls(1);
+    gate.release();
+    // The sign-out and the ended sign-in each announce the state, then the volume follows.
+    let mut seen = r.events_until(2, is_account(AccountState::SignedOut));
+    r.send(Command::SetVolume(55));
+    seen.extend(r.events_until(1, |e| *e == Event::Volume(55)));
+    assert!(
+        !seen.iter().any(|e| matches!(e, Event::AccountError { .. })),
+        "{seen:?}"
+    );
+
+    // The next sign-in's failure is an error again.
+    r.provider.script_sign_in(SignInScript {
+        pending: None,
+        gate: None,
+        outcome: Err(ProviderError::SignInRequired("access was denied".into())),
+    });
+    r.send(Command::SignIn {
+        provider: fake_id(),
+    });
+    let ev = r.wait_event(|e| matches!(e, Event::AccountError { .. }));
+    assert_eq!(
+        ev,
+        Event::AccountError {
+            provider: fake_id(),
+            error: "access was denied".into(),
+        }
+    );
+}
+
+#[test]
+fn a_sign_out_with_no_sign_in_running_hides_no_later_error() {
+    let r = rig(config());
+    r.send(Command::SignOut {
+        provider: fake_id(),
+    });
+    r.wait_event(is_account(AccountState::SignedOut));
+    r.provider.script_sign_in(SignInScript {
+        pending: Some(pending()),
+        gate: None,
+        outcome: Err(cancelled()),
+    });
+    r.send(Command::SignIn {
+        provider: fake_id(),
+    });
+    let ev = r.wait_event(|e| matches!(e, Event::AccountError { .. }));
+    assert_eq!(
+        ev,
+        Event::AccountError {
+            provider: fake_id(),
+            error: "sign-in was cancelled".into(),
+        }
+    );
+}
+
+const CLIENT: &str = r#"{"installed":{"client_id":"id","client_secret":"s"}}"#;
+
+fn import(r: &Rig) {
+    r.send(Command::ImportSignInClient {
+        provider: fake_id(),
+        json: CLIENT.into(),
+    });
+}
+
+#[test]
+fn an_imported_clients_json_never_shows_in_debug() {
+    let json = r#"{"client_id":"LEAKME-id","client_secret":"LEAKME-secret"}"#;
+    let cmd = Command::ImportSignInClient {
+        provider: fake_id(),
+        json: json.into(),
+    };
+    for shown in [format!("{cmd:?}"), format!("{cmd:#?}")] {
+        assert!(!shown.contains("LEAKME"), "{shown}");
+        assert!(
+            shown.contains(&format!("<redacted, {} bytes>", json.len())),
+            "{shown}"
+        );
+    }
+}
+
+#[test]
+fn an_imported_client_announces_the_account() {
+    let provider = FakeProvider::new("fake");
+    provider.set_account(AccountState::Unavailable("no client".into()));
+    let r = rig_with(provider, vec![], config());
+    import(&r);
+    r.wait_event(is_account(AccountState::SignedOut));
+    assert_eq!(r.provider.imported(), [CLIENT]);
+    // An import that leaves the state as it was is still answered.
+    import(&r);
+    r.wait_event(is_account(AccountState::SignedOut));
+    assert_eq!(r.provider.imported().len(), 2);
+}
+
+#[test]
+fn a_failed_import_says_why() {
+    let provider = FakeProvider::new("fake");
+    provider.set_account(AccountState::Unavailable("no client".into()));
+    let r = rig_with(provider, vec![], config());
+    r.provider.fail_import(ProviderError::SignInRequired(
+        "not a Google OAuth client".into(),
+    ));
+    import(&r);
+    let mut seen = r.events_until(1, |e| matches!(e, Event::AccountError { .. }));
+    assert_eq!(
+        seen.pop(),
+        Some(Event::AccountError {
+            provider: fake_id(),
+            error: "not a Google OAuth client".into(),
+        })
+    );
+    // The error is the whole answer.
+    r.send(Command::SetVolume(55));
+    let after = r.events_until(1, |e| *e == Event::Volume(55));
+    assert_eq!(after, [Event::Volume(55)]);
+}
+
+struct NoAccounts;
+
+impl Provider for NoAccounts {
+    fn id(&self) -> ProviderId {
+        ProviderId("plain".into())
+    }
+
+    fn search(&self, _query: &str, _limit: usize) -> Result<Vec<Track>, ProviderError> {
+        Ok(Vec::new())
+    }
+
+    fn resolve(&self, _track: &TrackId) -> Result<AudioSource, ProviderError> {
+        Err(ProviderError::Unplayable("no tracks".into()))
+    }
+}
+
+#[test]
+fn a_provider_with_no_client_to_import_says_so() {
+    let engine = FakeEngineHandle::new();
+    let session = Session::spawn(vec![Arc::new(NoAccounts)], engine.factory(), config());
+    let rx = session.subscribe();
+    let plain = ProviderId("plain".into());
+    session.send(Command::ImportSignInClient {
+        provider: plain.clone(),
+        json: CLIENT.into(),
+    });
+    let ev = std::iter::from_fn(|| rx.recv_timeout(SECS(5)).ok())
+        .find(|e| matches!(e, Event::AccountError { .. }));
+    assert_eq!(
+        ev,
+        Some(Event::AccountError {
+            provider: plain,
+            error: "this provider has no client to import".into(),
+        })
+    );
+}
+
 fn named_track(provider: &str, id: &str) -> Track {
     let mut t = track(id);
     t.id.provider = ProviderId(provider.into());
@@ -1669,6 +1855,10 @@ fn sign_in_and_out_of_an_unknown_provider_report_at_once() {
         },
         Command::SignOut {
             provider: nope.clone(),
+        },
+        Command::ImportSignInClient {
+            provider: nope.clone(),
+            json: CLIENT.into(),
         },
     ] {
         r.send(cmd);

@@ -107,6 +107,11 @@ enum Msg {
         result: Result<(), ProviderError>,
         state: AccountState,
     },
+    ClientImported {
+        provider: ProviderId,
+        result: Result<(), ProviderError>,
+        state: AccountState,
+    },
     Resolved {
         purpose: Purpose,
         result: Result<AudioSource, ProviderError>,
@@ -226,6 +231,8 @@ struct Actor {
     accounts: Vec<(ProviderId, AccountState)>,
     /// Providers with a sign-in worker running.
     signing_in: HashSet<ProviderId>,
+    /// Providers whose running sign-in a `SignOut` ended: its failure is not an error.
+    signed_out_while_signing_in: HashSet<ProviderId>,
 }
 
 /// The provider's own words, except that a network failure keeps its "network error" prefix.
@@ -361,6 +368,7 @@ impl Actor {
             last_parse_failure: None,
             accounts,
             signing_in: HashSet::new(),
+            signed_out_while_signing_in: HashSet::new(),
         }
     }
 
@@ -430,8 +438,11 @@ impl Actor {
                     state,
                 } => {
                     self.signing_in.remove(&provider);
+                    let signed_out = self.signed_out_while_signing_in.remove(&provider);
                     let failed = result.is_err();
-                    if let Err(e) = result {
+                    if let Err(e) = result
+                        && !signed_out
+                    {
                         self.emit(Event::AccountError {
                             provider: provider.clone(),
                             error: sign_in_error(&e),
@@ -441,6 +452,18 @@ impl Actor {
                     // client waiting on its `SignIn` hears the outcome; a success already was.
                     self.set_account(provider, state, failed);
                 }
+                Msg::ClientImported {
+                    provider,
+                    result,
+                    state,
+                } => match result {
+                    // Announced even when unchanged, so a client waiting on its import hears it.
+                    Ok(()) => self.set_account(provider, state, true),
+                    Err(e) => self.emit(Event::AccountError {
+                        provider,
+                        error: sign_in_error(&e),
+                    }),
+                },
             }
         }
     }
@@ -584,6 +607,7 @@ impl Actor {
             Command::Browse { req, page } => self.browse(req, page),
             Command::SignIn { provider } => self.sign_in(provider),
             Command::SignOut { provider } => self.sign_out(provider),
+            Command::ImportSignInClient { provider, json } => self.import_client(provider, json.0),
             Command::Shutdown => unreachable!("handled in run"),
         }
     }
@@ -809,11 +833,34 @@ impl Actor {
             });
             return;
         };
+        if self.signing_in.contains(&id) {
+            self.signed_out_while_signing_in.insert(id.clone());
+        }
         let tx = self.tx.clone();
         thread::spawn(move || {
             let result = provider.sign_out();
             let state = provider.account();
             let _ = tx.send(Msg::SignOutDone {
+                provider: id,
+                result,
+                state,
+            });
+        });
+    }
+
+    fn import_client(&mut self, id: ProviderId, json: String) {
+        let Some(provider) = self.provider(&id) else {
+            self.emit(Event::AccountError {
+                provider: id.clone(),
+                error: format!("no provider {}", id.0),
+            });
+            return;
+        };
+        let tx = self.tx.clone();
+        thread::spawn(move || {
+            let result = provider.import_client(&json);
+            let state = provider.account();
+            let _ = tx.send(Msg::ClientImported {
                 provider: id,
                 result,
                 state,

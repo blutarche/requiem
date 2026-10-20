@@ -165,9 +165,14 @@ pub(crate) fn load_client(files: &GoogleFiles) -> Result<ClientConfig, String> {
         }
         Err(e) => return Err(format!("cannot read the Google OAuth client {shown}: {e}")),
     };
-    let invalid =
-        || format!("invalid Google OAuth client {shown}: expected client_id and client_secret");
-    let root: Value = serde_json::from_slice(&bytes).map_err(|_| invalid())?;
+    parse_client(&bytes).ok_or_else(|| {
+        format!("invalid Google OAuth client {shown}: expected client_id and client_secret")
+    })
+}
+
+/// Google's downloaded client JSON (`{"installed": {...}}`) or the same keys at the top level.
+fn parse_client(bytes: &[u8]) -> Option<ClientConfig> {
+    let root: Value = serde_json::from_slice(bytes).ok()?;
     let obj = root.get("installed").unwrap_or(&root);
     let field = |k: &str| {
         obj.get(k)
@@ -175,13 +180,10 @@ pub(crate) fn load_client(files: &GoogleFiles) -> Result<ClientConfig, String> {
             .filter(|s| !s.is_empty())
             .map(str::to_owned)
     };
-    match (field("client_id"), field("client_secret")) {
-        (Some(client_id), Some(secret)) => Ok(ClientConfig {
-            client_id,
-            client_secret: Secret(secret),
-        }),
-        _ => Err(invalid()),
-    }
+    Some(ClientConfig {
+        client_id: field("client_id")?,
+        client_secret: Secret(field("client_secret")?),
+    })
 }
 
 #[derive(Serialize, Deserialize)]
@@ -254,6 +256,12 @@ fn save_token(path: &Path, token: &TokenFile) -> io::Result<()> {
     // `create` leaves an existing directory as it was.
     fs::set_permissions(dir, fs::Permissions::from_mode(0o700))?;
     let json = serde_json::to_vec(token).map_err(io::Error::other)?;
+    write_private(path, &json)
+}
+
+/// Replaces `path` through a temp file and a rename, so a reader never sees half of it. Only
+/// the user can read it, from its creation on.
+fn write_private(path: &Path, bytes: &[u8]) -> io::Result<()> {
     let mut tmp = path.as_os_str().to_owned();
     tmp.push(".tmp");
     let tmp = PathBuf::from(tmp);
@@ -265,7 +273,7 @@ fn save_token(path: &Path, token: &TokenFile) -> io::Result<()> {
         .mode(0o600)
         .open(&tmp)
         .and_then(|mut f| {
-            f.write_all(&json)?;
+            f.write_all(bytes)?;
             f.sync_all()
         })
         .and_then(|()| fs::rename(&tmp, path));
@@ -273,6 +281,19 @@ fn save_token(path: &Path, token: &TokenFile) -> io::Result<()> {
         let _ = fs::remove_file(&tmp);
     }
     result
+}
+
+/// Unlike the token's, the client's directory may be one the user named through
+/// `REQUIEM_GOOGLE_CLIENT_FILE`, so only a directory created here is made private.
+fn save_client(path: &Path, bytes: &[u8]) -> io::Result<()> {
+    let dir = path
+        .parent()
+        .ok_or_else(|| io::Error::other("client path has no parent"))?;
+    fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(dir)?;
+    write_private(path, bytes)
 }
 
 fn remove_token(path: &Path) {
@@ -606,18 +627,98 @@ impl Google {
             .map_err(ProviderError::SignInRequired)
     }
 
+    /// Keeps the user's own client, as just its id and secret, where `load_client` reads it,
+    /// and uses it from now on. A sign-in through another client, or through a client this
+    /// can no longer read, is revoked, best effort, and forgotten: Google ties a refresh token
+    /// to the client it was issued to. Errors never quote `json`.
+    pub(crate) fn import_client(&self, json: &str) -> Result<(), ProviderError> {
+        if json.len() as u64 > MAX_FILE_BYTES {
+            return Err(ProviderError::SignInRequired(format!(
+                "the Google OAuth client file is over {} KiB",
+                MAX_FILE_BYTES / 1024
+            )));
+        }
+        let client = parse_client(json.as_bytes()).ok_or_else(|| {
+            ProviderError::SignInRequired(
+                "not a Google OAuth client: expected client_id and client_secret".into(),
+            )
+        })?;
+        let Some(path) = self.files.client.as_deref() else {
+            return Err(ProviderError::SignInRequired(format!(
+                "no usable HOME: set {CLIENT_ENV} to where the Google OAuth client should be kept"
+            )));
+        };
+        let body = serde_json::json!({
+            "client_id": client.client_id,
+            "client_secret": client.client_secret.expose(),
+        })
+        .to_string();
+        // Under the client lock, so a sign-in either starts after this with the new client or
+        // started before it and is cancelled here.
+        let (result, dropped) = {
+            let mut slot = locked(&self.client);
+            let changed = match &*slot {
+                Ok(c) => c.client_id != client.client_id,
+                Err(_) => locked(&self.state).refresh.is_some(),
+            };
+            save_client(path, body.as_bytes()).map_err(|e| {
+                ProviderError::SignInRequired(format!(
+                    "cannot save the Google OAuth client to {}: {e}",
+                    path.display()
+                ))
+            })?;
+            let dropped = changed.then(|| {
+                self.flow.cancel();
+                self.take_grant()
+            });
+            *slot = load_client(&self.files);
+            let result = slot
+                .as_ref()
+                .map(|_| ())
+                .map_err(|hint| ProviderError::SignInRequired(hint.clone()));
+            (result, dropped)
+        };
+        if let Some((refresh, auth_gen)) = dropped {
+            // Outside the client lock: `account` waits on it, and this waits on Google. The
+            // import stands whether or not Google confirms.
+            if let Some(refresh) = refresh {
+                self.revoke(refresh.expose());
+            }
+            let st = locked(&self.state);
+            // Unless a sign-in through the new client has kept its own token since.
+            if st.auth_gen == auth_gen
+                && let Some(path) = &self.files.token
+            {
+                remove_token(path);
+            }
+        }
+        result
+    }
+
     pub(crate) fn sign_in(&self, on_state: &dyn Fn(AccountState)) -> Result<(), ProviderError> {
-        // The client file may have been saved since the player started.
-        let loaded = load_client(&self.files);
-        *locked(&self.client) = loaded;
-        let client = self.client()?;
-        let r#gen = self.flow.start();
+        // Under the client lock, so an import either comes first or cancels this flow.
+        let (client, r#gen) = {
+            let mut slot = locked(&self.client);
+            // The client file may have been saved since the player started.
+            *slot = load_client(&self.files);
+            let client = slot.clone().map_err(ProviderError::SignInRequired)?;
+            (client, self.flow.start())
+        };
         let code = request_code(&*self.http, &client, &*self.clock)?;
-        locked(&self.state).pending = Some((
-            code.verification_url.clone(),
-            code.user_code.clone(),
-            code.expires_at_unix,
-        ));
+        {
+            let mut st = locked(&self.state);
+            // A sign-out or import while the code was requested ends this flow.
+            if !self.flow.is_current(r#gen) {
+                return Err(ProviderError::SignInRequired(
+                    "sign-in was cancelled".into(),
+                ));
+            }
+            st.pending = Some((
+                code.verification_url.clone(),
+                code.user_code.clone(),
+                code.expires_at_unix,
+            ));
+        }
         on_state(self.account());
         let result = poll_tokens(&*self.http, &client, &code, &*self.clock, &self.flow, r#gen)
             .and_then(|tokens| self.finish_sign_in(tokens, r#gen));
@@ -653,7 +754,7 @@ impl Google {
             ProviderError::SignInRequired(format!("set {TOKEN_ENV} to keep the sign-in"))
         })?;
         let mut st = locked(&self.state);
-        // A sign-out while the token request was in flight wins.
+        // A sign-out or import while the token request was in flight wins.
         if !self.flow.is_current(r#gen) {
             drop(st);
             // Google already issued the grant; nothing else holds it.
@@ -722,17 +823,28 @@ impl Google {
 
     /// Forgets a grant Google no longer honours.
     fn forget(&self) -> ProviderError {
-        {
-            let mut st = locked(&self.state);
-            *st = State {
-                auth_gen: st.auth_gen + 1,
-                ..State::default()
-            };
-        }
+        self.drop_grant();
+        ProviderError::SignInRequired("the Google sign-in expired or was revoked".into())
+    }
+
+    /// Forgets the grant here, without telling Google.
+    fn drop_grant(&self) {
+        self.take_grant();
         if let Some(path) = &self.files.token {
             remove_token(path);
         }
-        ProviderError::SignInRequired("the Google sign-in expired or was revoked".into())
+    }
+
+    /// Forgets the grant in memory, leaving its file. Returns its refresh token and the
+    /// `auth_gen` that forgetting it started.
+    fn take_grant(&self) -> (Option<Secret>, u64) {
+        let mut st = locked(&self.state);
+        let refresh = st.refresh.take();
+        *st = State {
+            auth_gen: st.auth_gen + 1,
+            ..State::default()
+        };
+        (refresh, st.auth_gen)
     }
 
     fn access_token(&self) -> Result<Secret, ProviderError> {
@@ -1492,6 +1604,295 @@ mod tests {
             ProviderError::ClientBroken("Google sign-in failed: invalid_scope".into())
         );
         assert_eq!(g.account(), AccountState::SignedOut);
+    }
+
+    fn google_at(client: Option<PathBuf>, tmp: &TempDir) -> Google {
+        let files = GoogleFiles {
+            client,
+            token: Some(tmp.path().join("google-token.json")),
+        };
+        Google::new(
+            Arc::new(FakeApi::default()),
+            Arc::new(FakeClock::default()),
+            files,
+        )
+    }
+
+    #[test]
+    fn an_imported_client_is_kept_private_and_used() {
+        let tmp = TempDir::new();
+        let path = tmp.path().join("new").join("google-client.json");
+        let g = google_at(Some(path.clone()), &tmp);
+        assert!(matches!(g.account(), AccountState::Unavailable(_)));
+        let installed = r#"{"installed":{"client_id":"id1.apps.googleusercontent.com",
+            "project_id":"p","client_secret":"s1"}}"#;
+        g.import_client(installed).unwrap();
+        assert_eq!(g.account(), AccountState::SignedOut);
+        let mode = |p: &Path| fs::metadata(p).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode(&path), 0o600);
+        assert_eq!(mode(path.parent().unwrap()), 0o700);
+        assert!(!path.with_extension("json.tmp").exists());
+        let saved: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        assert_eq!(
+            saved,
+            serde_json::json!({"client_id": "id1.apps.googleusercontent.com", "client_secret": "s1"})
+        );
+
+        g.import_client(r#"{"client_id":"id2","client_secret":"s2"}"#)
+            .unwrap();
+        let c = g.client().unwrap();
+        assert_eq!(
+            (c.client_id.as_str(), c.client_secret.expose()),
+            ("id2", "s2")
+        );
+        assert_eq!(mode(&path), 0o600);
+    }
+
+    #[test]
+    fn an_import_of_another_client_forgets_the_sign_in() {
+        let rig = Rig::new();
+        let g = rig.signed_in();
+        let signed_in = AccountState::SignedIn {
+            name: Some("Me".into()),
+        };
+        assert_eq!(g.account(), signed_in);
+        // A new secret for the same client keeps the sign-in.
+        g.import_client(r#"{"client_id":"cid","client_secret":"rotated"}"#)
+            .unwrap();
+        assert_eq!(g.account(), signed_in);
+        assert!(rig.token_path().exists());
+        assert_eq!(g.client().unwrap().client_secret.expose(), "rotated");
+
+        assert!(rig.api.calls().is_empty(), "{:?}", rig.api.calls());
+
+        rig.api.script(REVOKE_URL, 200, "{}");
+        g.import_client(r#"{"client_id":"other","client_secret":"s"}"#)
+            .unwrap();
+        assert_eq!(g.account(), AccountState::SignedOut);
+        assert!(!rig.token_path().exists());
+        assert_eq!(rig.google().account(), AccountState::SignedOut);
+        assert_eq!(
+            rig.api.forms(REVOKE_URL),
+            [vec![("token".into(), "RT1".into())]]
+        );
+        assert_eq!(rig.api.calls(), [REVOKE_URL]);
+    }
+
+    /// Wraps the fake and runs `hook` as each request to `url` arrives.
+    struct Hooked {
+        inner: Arc<FakeApi>,
+        url: &'static str,
+        hook: Box<dyn Fn() + Send + Sync>,
+    }
+
+    impl ApiHttp for Hooked {
+        fn get(
+            &self,
+            url: &str,
+            query: &[(&str, &str)],
+            headers: &[(&str, &str)],
+        ) -> Result<crate::transport::HttpResponse, ProviderError> {
+            self.inner.get(url, query, headers)
+        }
+
+        fn post_form(
+            &self,
+            url: &str,
+            form: &[(&str, &str)],
+        ) -> Result<crate::transport::HttpResponse, ProviderError> {
+            if url == self.url {
+                (self.hook)();
+            }
+            self.inner.post_form(url, form)
+        }
+    }
+
+    #[test]
+    fn an_import_over_an_unreadable_client_forgets_the_sign_in() {
+        let rig = Rig::new();
+        rig.signed_in();
+        fs::write(rig.tmp.path().join("client.json"), "{").unwrap();
+        let g = rig.google();
+        assert!(matches!(g.account(), AccountState::Unavailable(_)));
+        rig.api.script(REVOKE_URL, 200, "{}");
+        g.import_client(r#"{"client_id":"cid","client_secret":"csecret"}"#)
+            .unwrap();
+        assert_eq!(g.account(), AccountState::SignedOut);
+        assert!(!rig.token_path().exists());
+        assert_eq!(
+            rig.api.forms(REVOKE_URL),
+            [vec![("token".into(), "RT1".into())]]
+        );
+    }
+
+    #[test]
+    fn an_import_revokes_the_old_sign_in_before_deleting_it_and_stands_if_that_fails() {
+        let rig = Rig::new();
+        rig.signed_in();
+        let kept = Arc::new(StdMutex::new(Vec::new()));
+        let http = Arc::new(Hooked {
+            inner: rig.api.clone(),
+            url: REVOKE_URL,
+            hook: Box::new({
+                let (kept, token) = (kept.clone(), rig.token_path());
+                move || kept.lock().unwrap().push(token.exists())
+            }),
+        });
+        let g = Google::new(http, rig.clock.clone(), rig.files());
+        // Unscripted, so the revoke fails.
+        g.import_client(r#"{"client_id":"other","client_secret":"s"}"#)
+            .unwrap();
+        assert_eq!(*kept.lock().unwrap(), [true]);
+        assert_eq!(
+            rig.api.forms(REVOKE_URL),
+            [vec![("token".into(), "RT1".into())]]
+        );
+        assert_eq!(g.account(), AccountState::SignedOut);
+        assert!(!rig.token_path().exists());
+        assert_eq!(g.client().unwrap().client_id, "other");
+    }
+
+    #[test]
+    fn a_sign_in_through_the_new_client_during_the_revoke_is_kept() {
+        let rig = Rig::new();
+        rig.signed_in();
+        let google = Arc::new(std::sync::OnceLock::<std::sync::Weak<Google>>::new());
+        let http = Arc::new(Hooked {
+            inner: rig.api.clone(),
+            url: REVOKE_URL,
+            hook: Box::new({
+                let google = google.clone();
+                move || {
+                    let g = google.get().unwrap().upgrade().unwrap();
+                    let tokens = Tokens {
+                        access: Secret::new("AT2"),
+                        refresh: Secret::new("RT2"),
+                        expires_in: Duration::from_secs(3600),
+                    };
+                    g.finish_sign_in(tokens, g.flow.start()).unwrap();
+                }
+            }),
+        });
+        let g = Arc::new(Google::new(http, rig.clock.clone(), rig.files()));
+        google.set(Arc::downgrade(&g)).unwrap();
+        rig.api.script(REVOKE_URL, 200, "{}");
+        g.import_client(r#"{"client_id":"other","client_secret":"s"}"#)
+            .unwrap();
+        assert!(matches!(g.account(), AccountState::SignedIn { .. }));
+        assert_eq!(load_token(&rig.token_path()).unwrap().refresh_token, "RT2");
+    }
+
+    #[test]
+    fn an_import_while_a_sign_in_asks_for_its_code_cancels_it() {
+        let rig = Rig::new();
+        let google = Arc::new(std::sync::OnceLock::<std::sync::Weak<Google>>::new());
+        let http = Arc::new(Hooked {
+            inner: rig.api.clone(),
+            url: DEVICE_CODE_URL,
+            hook: Box::new({
+                let google = google.clone();
+                move || {
+                    let g = google.get().unwrap().upgrade().unwrap();
+                    g.import_client(r#"{"client_id":"other","client_secret":"s"}"#)
+                        .unwrap();
+                }
+            }),
+        });
+        let g = Arc::new(Google::new(http, rig.clock.clone(), rig.files()));
+        google.set(Arc::downgrade(&g)).unwrap();
+        rig.api.script(DEVICE_CODE_URL, 200, CODE);
+        let seen = StdMutex::new(Vec::new());
+        let err = g.sign_in(&|s| seen.lock().unwrap().push(s)).unwrap_err();
+        assert_eq!(
+            err,
+            ProviderError::SignInRequired("sign-in was cancelled".into())
+        );
+        // The old client's code never shows.
+        assert!(
+            seen.lock().unwrap().is_empty(),
+            "{:?}",
+            seen.lock().unwrap()
+        );
+        assert_eq!(g.account(), AccountState::SignedOut);
+        assert!(rig.api.forms(TOKEN_URL).is_empty());
+    }
+
+    #[test]
+    fn an_import_leaves_an_existing_directory_as_it_was() {
+        let tmp = TempDir::new();
+        let dir = tmp.path().join("shared");
+        fs::create_dir(&dir).unwrap();
+        fs::set_permissions(&dir, fs::Permissions::from_mode(0o755)).unwrap();
+        let path = dir.join("my-client.json");
+        let g = google_at(Some(path.clone()), &tmp);
+        g.import_client(r#"{"client_id":"id","client_secret":"s"}"#)
+            .unwrap();
+        let mode = |p: &Path| fs::metadata(p).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode(&dir), 0o755);
+        assert_eq!(mode(&path), 0o600);
+    }
+
+    #[test]
+    fn a_bad_import_changes_nothing_and_quotes_nothing() {
+        let tmp = TempDir::new();
+        let path = tmp.path().join("google-client.json");
+        let g = google_at(Some(path.clone()), &tmp);
+        let good = r#"{"client_id":"id","client_secret":"s"}"#;
+        g.import_client(good).unwrap();
+        let big = format!(
+            r#"{{"client_id":"LEAKME","client_secret":"LEAKME","pad":"{}"}}"#,
+            "x".repeat(64 * 1024)
+        );
+        for (bad, why) in [
+            ("not json LEAKME", "not a Google OAuth client"),
+            (
+                r#"{"installed":{"client_id":"LEAKME"}}"#,
+                "not a Google OAuth client",
+            ),
+            (r#"{"client_secret":"LEAKME"}"#, "not a Google OAuth client"),
+            (
+                r#"{"web":{"client_id":"LEAKME"}}"#,
+                "not a Google OAuth client",
+            ),
+            (&big, "over 64 KiB"),
+        ] {
+            let ProviderError::SignInRequired(m) = g.import_client(bad).unwrap_err() else {
+                panic!("{bad:.40}");
+            };
+            assert!(m.contains(why), "{m}");
+            assert!(!m.contains("LEAKME"), "{m}");
+            assert_eq!(fs::read_to_string(&path).unwrap(), good);
+            assert_eq!(g.account(), AccountState::SignedOut);
+        }
+        // The cap is the same as for reading the file.
+        let pad = 64 * 1024 - r#"{"client_id":"id","client_secret":"s","pad":""}"#.len();
+        let max = format!(
+            r#"{{"client_id":"id","client_secret":"s","pad":"{}"}}"#,
+            "x".repeat(pad)
+        );
+        assert_eq!(max.len(), 64 * 1024);
+        g.import_client(&max).unwrap();
+    }
+
+    #[test]
+    fn an_import_with_nowhere_to_keep_it_says_so() {
+        let tmp = TempDir::new();
+        let client = r#"{"client_id":"LEAKME","client_secret":"LEAKME"}"#;
+        let g = google_at(None, &tmp);
+        let ProviderError::SignInRequired(m) = g.import_client(client).unwrap_err() else {
+            panic!();
+        };
+        assert!(m.contains(CLIENT_ENV), "{m}");
+
+        let file = tmp.path().join("file");
+        fs::write(&file, "").unwrap();
+        let g = google_at(Some(file.join("google-client.json")), &tmp);
+        let ProviderError::SignInRequired(m) = g.import_client(client).unwrap_err() else {
+            panic!();
+        };
+        assert!(m.starts_with("cannot save the Google OAuth client"), "{m}");
+        assert!(!m.contains("LEAKME"), "{m}");
+        assert!(matches!(g.account(), AccountState::Unavailable(_)));
     }
 
     #[test]

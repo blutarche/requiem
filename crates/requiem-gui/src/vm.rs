@@ -1,7 +1,7 @@
 //! View model: folds daemon events and connection status into `UiState`, and maps user
 //! intents to `Command`s. No AppKit types, so it is unit-tested on every OS.
 
-use std::io;
+use std::io::{self, Read};
 use std::ops::{BitOr, BitOrAssign};
 use std::time::{Duration, Instant};
 
@@ -33,6 +33,8 @@ const STUCK_HINT: &str = "If this persists, choose Quit and Stop Music from the 
                           menu-bar icon, then reopen Requiem.";
 /// How long the answer to Check for Updates… stays when there is nothing new.
 pub const UP_TO_DATE_FOR: Duration = Duration::from_secs(4);
+/// The largest client file the setup sheet sends; providers take no more.
+const MAX_CLIENT_FILE: u64 = 64 * 1024;
 
 /// Regions of the window that need refreshing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -198,8 +200,13 @@ pub enum Intent {
     },
     /// Fetches the current page again, if it is a browse page.
     Refresh,
+    /// Starts a sign-in, or opens the setup sheet for a provider that needs setting up first.
     SignIn(ProviderId),
     SignOut(ProviderId),
+    /// The setup sheet's chosen client file: its text, or why it couldn't be read.
+    ImportClient(Result<String, String>),
+    /// The setup sheet's Cancel.
+    CancelSetup,
 }
 
 /// Where the window is.
@@ -288,6 +295,14 @@ pub enum LibraryView {
         user_code: String,
         expires_at_unix: u64,
     },
+    /// The setup sheet: `provider` needs its client before it can sign in.
+    Setup {
+        provider: ProviderId,
+        /// Why, as the provider puts it.
+        reason: String,
+        /// Why the last client file was refused; shown instead of `reason`.
+        error: Option<String>,
+    },
     SignedIn {
         name: Option<String>,
         page: PageView,
@@ -300,6 +315,15 @@ pub enum HomeView {
     /// Home needs a signed-in provider; each listed provider can be.
     SignedOut(Vec<ProviderId>),
     Page(PageView),
+}
+
+/// The setup sheet, while it is open.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Setup {
+    pub provider: ProviderId,
+    pub error: Option<String>,
+    /// A client was sent and not answered yet; a `SignedOut` answer starts the sign-in.
+    pub importing: bool,
 }
 
 impl Browse {
@@ -328,6 +352,22 @@ pub fn expires_text(expires_at_unix: u64, now_unix: u64) -> String {
         0 => "Code expired".to_owned(),
         left => format!("Code expires in {} min", left.div_ceil(60)),
     }
+}
+
+/// The text of the client file the setup sheet's file panel chose, opened or not; the error
+/// is the sheet's.
+pub fn read_client_file(file: io::Result<impl Read>) -> Result<String, String> {
+    let mut bytes = Vec::new();
+    file.and_then(|f| f.take(MAX_CLIENT_FILE + 1).read_to_end(&mut bytes))
+        .map_err(|e| format!("Couldn’t read that file: {e}"))?;
+    if bytes.len() as u64 > MAX_CLIENT_FILE {
+        return Err(format!(
+            "That file is larger than {} KiB; choose the client JSON you downloaded.",
+            MAX_CLIENT_FILE / 1024
+        ));
+    }
+    String::from_utf8(bytes)
+        .map_err(|_| "That file isn’t text; choose the client JSON you downloaded.".to_owned())
 }
 
 /// A change to the queue: to one row, by index, or to all of it.
@@ -383,6 +423,7 @@ pub struct UiState {
     pub collection: Option<CollectionPage>,
     /// The daemon's account states, by provider.
     pub accounts: Vec<(ProviderId, AccountState)>,
+    pub setup: Option<Setup>,
     /// The player's self-update status: `None` before it sends one, while disconnected, and
     /// in dev builds, which show nothing.
     pub update: Option<UpdateStatus>,
@@ -409,6 +450,7 @@ impl Default for UiState {
             library: Browse::default(),
             collection: None,
             accounts: Vec::new(),
+            setup: None,
             update: None,
         }
     }
@@ -524,9 +566,9 @@ impl UiState {
             .map(|(p, _)| p)
     }
 
-    /// The providers Sign In applies to: the signed-out ones, and every one when the Library
-    /// or Home failed for want of a sign-in.
-    fn sign_in_offers(&self) -> Vec<ProviderId> {
+    /// The providers Sign In applies to: the signed-out ones, the ones that need setting up
+    /// first, and every one when the Library or Home failed for want of a sign-in.
+    pub fn sign_in_offers(&self) -> Vec<ProviderId> {
         let rejected = [&self.library.load, &self.home.load].into_iter().any(|l| {
             matches!(
                 l,
@@ -538,12 +580,26 @@ impl UiState {
         });
         self.accounts
             .iter()
-            .filter(|(_, s)| {
+            .filter(|(p, s)| {
                 matches!(s, AccountState::SignedOut)
                     || (rejected && matches!(s, AccountState::SignedIn { .. }))
+                    || self.needs_setup(p).is_some()
             })
             .map(|(p, _)| p.clone())
             .collect()
+    }
+
+    /// Why `provider` can't sign in until the user gives it a client, if it is one that takes
+    /// one: its `Unavailable` text.
+    pub fn needs_setup(&self, provider: &ProviderId) -> Option<&str> {
+        match self.account_state(provider)? {
+            AccountState::Unavailable(reason)
+                if Service::of(provider) == Some(Service::YouTubeMusic) =>
+            {
+                Some(reason)
+            }
+            _ => None,
+        }
     }
 
     /// The current place is a browse page that a fetch would fill.
@@ -567,11 +623,21 @@ impl UiState {
         }
     }
 
-    /// A pending sign-in shows first, then the Library once any provider is signed in; with
-    /// none, the sign-in choices.
+    /// The setup sheet shows first, as the user's latest choice, then a pending sign-in, then
+    /// the Library once any provider is signed in; with none, the sign-in choices. A provider
+    /// with its sheet open needs setup, so it has no sign-in pending.
     pub fn library_view(&self) -> LibraryView {
         if self.accounts.is_empty() {
             return LibraryView::Loading;
+        }
+        if let Some(setup) = &self.setup
+            && let Some(reason) = self.needs_setup(&setup.provider)
+        {
+            return LibraryView::Setup {
+                provider: setup.provider.clone(),
+                reason: reason.to_owned(),
+                error: setup.error.clone(),
+            };
         }
         if let Some((
             provider,
@@ -1028,7 +1094,14 @@ impl Vm {
                 }
             }
             Event::Account { provider, state } => self.set_account(provider, state),
-            Event::AccountError { error, .. } => self.toast(error, true),
+            Event::AccountError { provider, error } => match &mut self.ui.setup {
+                Some(setup) if setup.provider == provider => {
+                    setup.error = Some(error);
+                    setup.importing = false;
+                    self.dirty |= Dirty::LIBRARY;
+                }
+                _ => self.toast(error, true),
+            },
             // The detail is for stderr, which the backend writes it to.
             Event::ProviderBroken { provider, .. } => {
                 self.toast(
@@ -1236,7 +1309,59 @@ impl Vm {
                 self.fetch(slot).into_iter().collect()
             }
             Intent::SignIn(provider) if can.player && self.knows(&provider) => {
-                vec![Command::SignIn { provider }]
+                if self.ui.needs_setup(&provider).is_none() {
+                    // The sheet would cover the code this sign-in shows.
+                    if self.ui.setup.take().is_some() {
+                        self.dirty |= Dirty::LIBRARY;
+                    }
+                    return vec![Command::SignIn { provider }];
+                }
+                if self
+                    .ui
+                    .setup
+                    .as_ref()
+                    .is_none_or(|s| s.provider != provider)
+                {
+                    self.ui.setup = Some(Setup {
+                        provider,
+                        error: None,
+                        importing: false,
+                    });
+                    self.dirty |= Dirty::LIBRARY;
+                }
+                Vec::new()
+            }
+            Intent::ImportClient(file) => {
+                let Some(setup) = &mut self.ui.setup else {
+                    return Vec::new();
+                };
+                let json = match file {
+                    Ok(json) if can.player => json,
+                    Ok(_) => {
+                        setup.error =
+                            Some("Not connected to the player. Try again in a moment.".into());
+                        self.dirty |= Dirty::LIBRARY;
+                        return Vec::new();
+                    }
+                    Err(e) => {
+                        setup.error = Some(e);
+                        self.dirty |= Dirty::LIBRARY;
+                        return Vec::new();
+                    }
+                };
+                setup.error = None;
+                setup.importing = true;
+                self.dirty |= Dirty::LIBRARY;
+                vec![Command::ImportSignInClient {
+                    provider: setup.provider.clone(),
+                    json: json.into(),
+                }]
+            }
+            Intent::CancelSetup => {
+                if self.ui.setup.take().is_some() {
+                    self.dirty |= Dirty::LIBRARY;
+                }
+                Vec::new()
             }
             Intent::SignOut(provider) if can.player && self.knows(&provider) => {
                 vec![Command::SignOut { provider }]
@@ -1393,6 +1518,7 @@ impl Vm {
         self.ui.home = Browse::default();
         self.ui.library = Browse::default();
         self.ui.accounts.clear();
+        self.ui.setup = None;
         if let Some(page) = &mut self.ui.collection {
             page.browse = Browse::default();
             page.tracks.clear();
@@ -1401,6 +1527,19 @@ impl Vm {
     }
 
     fn set_account(&mut self, provider: ProviderId, state: AccountState) {
+        // The sheet closes once its provider is set up, and an import it sent goes on to the
+        // sign-in it was for.
+        if let Some(setup) = self
+            .ui
+            .setup
+            .take_if(|s| s.provider == provider && !matches!(state, AccountState::Unavailable(_)))
+            && setup.importing
+            && state == AccountState::SignedOut
+        {
+            self.outbox.push(Command::SignIn {
+                provider: provider.clone(),
+            });
+        }
         let signed_in = |ui: &UiState| ui.signed_in().cloned().collect::<Vec<_>>();
         let was = signed_in(&self.ui);
         let known = match self.ui.accounts.iter_mut().find(|(p, _)| *p == provider) {
@@ -3949,7 +4088,9 @@ mod tests {
     fn the_account_comes_from_the_snapshot_and_from_events() {
         let mut vm = connected();
         assert_eq!(vm.ui().library_view(), LibraryView::Loading);
-        vm.apply(account(AccountState::Unavailable("set up a client".into())));
+        vm.apply(spotify_account(AccountState::Unavailable(
+            "set up a client".into(),
+        )));
         assert_eq!(
             vm.ui().library_view(),
             LibraryView::Unavailable("set up a client".into())
@@ -4303,6 +4444,202 @@ mod tests {
         assert!(vm.intent(Intent::Refresh).is_empty());
         vm.intent(Intent::Visit(Place::Search));
         assert!(vm.intent(Intent::Refresh).is_empty());
+    }
+
+    /// Connected, with YouTube Music missing its client and its setup sheet open.
+    fn setting_up() -> Vm {
+        let mut vm = connected();
+        vm.apply(account(AccountState::Unavailable("no client".into())));
+        assert!(vm.intent(Intent::SignIn(provider())).is_empty());
+        vm.take_dirty();
+        vm
+    }
+
+    fn sheet(error: Option<&str>) -> LibraryView {
+        LibraryView::Setup {
+            provider: provider(),
+            reason: "no client".into(),
+            error: error.map(str::to_owned),
+        }
+    }
+
+    const CLIENT: &str = r#"{"installed":{"client_id":"id","client_secret":"s"}}"#;
+
+    fn import(vm: &mut Vm) -> Vec<Command> {
+        vm.intent(Intent::ImportClient(Ok(CLIENT.into())))
+    }
+
+    #[test]
+    fn a_provider_that_needs_setup_is_offered_and_opens_the_sheet() {
+        let mut vm = connected();
+        vm.apply(account(AccountState::Unavailable("no client".into())));
+        vm.apply(spotify_account(AccountState::SignedOut));
+        assert_eq!(vm.ui().sign_in_offers(), [provider(), spotify()]);
+        assert_eq!(vm.ui().needs_setup(&provider()), Some("no client"));
+        assert_eq!(vm.ui().needs_setup(&spotify()), None);
+        assert!(vm.ui().can_run(
+            PaletteAction::SignIn(Service::YouTubeMusic),
+            Selection::default()
+        ));
+        assert_eq!(
+            vm.ui().library_view(),
+            LibraryView::SignedOut(vec![provider(), spotify()])
+        );
+        // Only YouTube Music takes a client from the user.
+        vm.apply(spotify_account(AccountState::Unavailable("nope".into())));
+        assert_eq!(vm.ui().sign_in_offers(), [provider()]);
+        assert_eq!(vm.ui().needs_setup(&spotify()), None);
+
+        vm.take_dirty();
+        assert!(vm.intent(Intent::SignIn(provider())).is_empty());
+        assert_eq!(vm.ui().library_view(), sheet(None));
+        assert!(vm.take_dirty().contains(Dirty::LIBRARY));
+        assert!(vm.intent(Intent::CancelSetup).is_empty());
+        assert_eq!(
+            vm.ui().library_view(),
+            LibraryView::SignedOut(vec![provider()])
+        );
+        assert_eq!(vm.ui().toast, None);
+    }
+
+    #[test]
+    fn an_imported_client_starts_the_sign_in() {
+        let mut vm = setting_up();
+        assert_eq!(
+            import(&mut vm),
+            [Command::ImportSignInClient {
+                provider: provider(),
+                json: CLIENT.into(),
+            }]
+        );
+        assert_eq!(vm.ui().library_view(), sheet(None));
+        vm.apply(account(AccountState::SignedOut));
+        assert_eq!(
+            vm.take_commands(),
+            [Command::SignIn {
+                provider: provider()
+            }]
+        );
+        assert_eq!(vm.ui().setup, None);
+    }
+
+    #[test]
+    fn a_refused_client_shows_on_the_sheet() {
+        let mut vm = setting_up();
+        import(&mut vm);
+        vm.apply(Event::AccountError {
+            provider: provider(),
+            error: "not a Google OAuth client".into(),
+        });
+        assert_eq!(vm.ui().toast, None);
+        assert_eq!(
+            vm.ui().library_view(),
+            sheet(Some("not a Google OAuth client"))
+        );
+        assert!(vm.take_dirty().contains(Dirty::LIBRARY));
+        // Another provider's error is still a toast.
+        vm.apply(Event::AccountError {
+            provider: spotify(),
+            error: "the code expired".into(),
+        });
+        assert!(vm.ui().toast.is_some());
+        // A file that couldn't be read sends nothing.
+        let unread = Err("Couldn’t read that file".to_owned());
+        assert!(vm.intent(Intent::ImportClient(unread)).is_empty());
+        assert_eq!(
+            vm.ui().library_view(),
+            sheet(Some("Couldn’t read that file"))
+        );
+        // The next file clears it, and a still missing client keeps the sheet.
+        assert_eq!(import(&mut vm).len(), 1);
+        assert_eq!(vm.ui().library_view(), sheet(None));
+        vm.apply(account(AccountState::Unavailable("no client".into())));
+        assert_eq!(vm.ui().library_view(), sheet(None));
+        assert!(vm.take_commands().is_empty());
+    }
+
+    #[test]
+    fn the_sheet_closes_without_a_sign_in_it_did_not_ask_for() {
+        // Set up elsewhere: the sheet closes, and the sign-in waits for the user.
+        let mut vm = setting_up();
+        vm.apply(account(AccountState::SignedOut));
+        assert_eq!(vm.ui().setup, None);
+        assert!(vm.take_commands().is_empty());
+        // Already signed in once the client is in: nothing to start.
+        let mut vm = setting_up();
+        import(&mut vm);
+        vm.apply(signed_in());
+        assert_eq!(vm.ui().setup, None);
+        assert!(
+            !vm.take_commands()
+                .iter()
+                .any(|c| matches!(c, Command::SignIn { .. }))
+        );
+        // Another provider's pending sign-in stays under the sheet, the user's latest choice.
+        let mut vm = setting_up();
+        vm.apply(spotify_account(AccountState::Pending {
+            verification_url: "https://www.spotify.com/pair".into(),
+            user_code: "ABC123".into(),
+            expires_at_unix: 1_000,
+        }));
+        assert_eq!(vm.ui().library_view(), sheet(None));
+        vm.intent(Intent::CancelSetup);
+        assert!(matches!(
+            vm.ui().library_view(),
+            LibraryView::Pending { .. }
+        ));
+        // Signing in to it closes the sheet, which would cover its code.
+        assert!(vm.intent(Intent::SignIn(provider())).is_empty());
+        assert_eq!(vm.ui().library_view(), sheet(None));
+        vm.take_dirty();
+        assert_eq!(
+            vm.intent(Intent::SignIn(spotify())),
+            [Command::SignIn {
+                provider: spotify()
+            }]
+        );
+        assert_eq!(vm.ui().setup, None);
+        assert!(vm.take_dirty().contains(Dirty::LIBRARY));
+        // A new connection starts the Library over.
+        vm.link(Link::Lost(LinkError::NotResponding));
+        vm.link(Link::Connected);
+        vm.apply(account(AccountState::Unavailable("no client".into())));
+        assert_eq!(
+            vm.ui().library_view(),
+            LibraryView::SignedOut(vec![provider()])
+        );
+        assert!(import(&mut vm).is_empty());
+    }
+
+    #[test]
+    fn a_client_chosen_while_disconnected_says_so() {
+        let mut vm = setting_up();
+        vm.link(Link::Lost(LinkError::NotResponding));
+        vm.take_dirty();
+        assert!(import(&mut vm).is_empty());
+        let setup = vm.ui().setup.as_ref().unwrap();
+        assert_eq!(
+            setup.error.as_deref(),
+            Some("Not connected to the player. Try again in a moment.")
+        );
+        assert!(!setup.importing);
+        assert!(vm.take_dirty().contains(Dirty::LIBRARY));
+    }
+
+    #[test]
+    fn a_client_file_is_read_up_to_64_kib_of_text() {
+        let read = |bytes: Vec<u8>| read_client_file(Ok(io::Cursor::new(bytes)));
+        assert_eq!(read(CLIENT.into()), Ok(CLIENT.to_owned()));
+        assert_eq!(read(vec![b' '; 64 * 1024]).map(|s| s.len()), Ok(64 * 1024));
+        let big = read(vec![b' '; 64 * 1024 + 1]).unwrap_err();
+        assert!(big.contains("larger than 64 KiB"), "{big}");
+        let binary = read(vec![0xff, 0xfe]).unwrap_err();
+        assert!(binary.contains("isn’t text"), "{binary}");
+        let missing = read_client_file(Err::<io::Cursor<Vec<u8>>, _>(io::Error::from(
+            io::ErrorKind::NotFound,
+        )))
+        .unwrap_err();
+        assert!(missing.starts_with("Couldn’t read that file"), "{missing}");
     }
 
     #[test]

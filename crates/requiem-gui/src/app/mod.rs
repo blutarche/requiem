@@ -201,6 +201,21 @@ define_class!(
             ui::with(|ui| ui.cancel_sign_in());
         }
 
+        #[unsafe(method(chooseClientFile:))]
+        fn choose_client_file(&self, _sender: Option<&AnyObject>) {
+            ui::with(|ui| ui.choose_client_file());
+        }
+
+        #[unsafe(method(openSetupGuide:))]
+        fn open_setup_guide(&self, _sender: Option<&AnyObject>) {
+            ui::with(|ui| ui.open_setup_guide());
+        }
+
+        #[unsafe(method(cancelSetup:))]
+        fn cancel_setup(&self, _sender: Option<&AnyObject>) {
+            ui::with(|ui| ui.cancel_setup());
+        }
+
         #[unsafe(method(playCollection:))]
         fn play_collection(&self, _sender: Option<&AnyObject>) {
             ui::with(|ui| ui.play_collection());
@@ -916,9 +931,11 @@ pub fn run(args: Args) {
             }
         }
         View::HomeSignedOut => ui.show(AppView::Home),
-        View::Library | View::LibrarySignedOut | View::LibraryUnavailable | View::SignIn => {
-            ui.show(AppView::Library)
-        }
+        View::Library
+        | View::LibrarySignedOut
+        | View::LibraryUnavailable
+        | View::SignIn
+        | View::SignInSetup => ui.show(AppView::Library),
         View::Collection => ui.show(AppView::Collection),
         View::Queue => ui.show(AppView::Queue),
         View::NowPlaying | View::NowPlayingEmpty | View::NowPlayingLast => ui.show_now_playing(),

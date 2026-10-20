@@ -6,8 +6,8 @@ use std::time::Duration;
 use requiem_cli::app::{self, App, Flow, Format};
 use requiem_core::testing::{EngineCall, FakeEngineHandle, FakeProvider, Gate, SignInScript, Step};
 use requiem_core::{
-    AccountState, Collection, CollectionId, CollectionKind, EngineEvent, Item, Page, ProviderError,
-    ProviderId, SeekTarget, Session, SessionConfig, Shelf, Track, TrackId,
+    AccountState, Collection, CollectionId, CollectionKind, Command, EngineEvent, Event, Item,
+    Page, ProviderError, ProviderId, SeekTarget, Session, SessionConfig, Shelf, Track, TrackId,
 };
 
 #[derive(Clone, Default)]
@@ -957,6 +957,87 @@ fn a_signin_after_a_signout_starts_from_signed_out() {
     );
 }
 
+fn cancelled() -> ProviderError {
+    ProviderError::SignInRequired("sign-in was cancelled".into())
+}
+
+#[test]
+fn a_signin_that_a_signout_ends_says_it_was_cancelled() {
+    let r = rig();
+    let gate = Gate::new();
+    r.provider.script_sign_in(SignInScript {
+        pending: Some(pending()),
+        gate: Some(gate.clone()),
+        outcome: Err(cancelled()),
+    });
+    let flow = thread::scope(|s| {
+        let waiter = s.spawn(|| r.app(true).exec("signin"));
+        wait_out(
+            &r,
+            "Go to https://www.google.com/device and enter GQVQ-JKEC\n",
+            1,
+        );
+        // Another client's sign-out.
+        r.session.send(Command::SignOut {
+            provider: ProviderId("fake".into()),
+        });
+        r.provider.wait_sign_out_calls(1);
+        gate.release();
+        waiter.join().unwrap()
+    });
+    assert_eq!(flow, Flow::Exit(2));
+    // The session answers in order, so an error for the sign-in would be printed by now.
+    exec_all(&r.app(true), "vol 55");
+    wait_out(&r, "volume: 55\n", 1);
+    let text = r.out.text();
+    assert!(text.contains("error: sign-in was cancelled\n"), "{text}");
+    assert!(!text.contains("account error"), "{text}");
+}
+
+#[test]
+fn a_signout_during_a_pending_signin_acks() {
+    let r = rig();
+    let sign_in = Gate::new();
+    r.provider.script_sign_in(SignInScript {
+        pending: Some(pending()),
+        gate: Some(sign_in.clone()),
+        outcome: Err(cancelled()),
+    });
+    let events = r.session.subscribe();
+    r.session.send(Command::SignIn {
+        provider: ProviderId("fake".into()),
+    });
+    while !matches!(
+        events.recv_timeout(Duration::from_secs(5)).unwrap(),
+        Event::Account {
+            state: AccountState::Pending { .. },
+            ..
+        }
+    ) {}
+    // As with Google, the sign-out ends the sign-in before it finishes itself.
+    let sign_out = Gate::new();
+    r.provider.gate_sign_out(sign_out.clone());
+    let flow = thread::scope(|s| {
+        let waiter = s.spawn(|| r.json_app().exec("signout fake"));
+        r.provider.wait_sign_out_calls(1);
+        sign_in.release();
+        let flow = waiter.join().unwrap();
+        sign_out.release();
+        flow
+    });
+    assert_eq!(flow, Flow::Continue, "{}", r.out.text());
+    let lines = r.json_lines();
+    assert_eq!(
+        lines[lines.len() - 2..],
+        [
+            serde_json::json!({"type": "account", "provider": "fake", "state": "signed_out"}),
+            serde_json::json!({"type": "ack", "command": "signout"}),
+        ]
+    );
+    assert!(of_type(&lines, "account_error").is_empty(), "{lines:?}");
+    assert!(of_type(&lines, "error").is_empty(), "{lines:?}");
+}
+
 #[test]
 fn a_signin_naming_its_provider_waits_past_the_announced_state() {
     // The session announces `SignedOut` on subscribe, which a `signin` that came first would
@@ -1070,4 +1151,160 @@ fn signout_naming_an_unknown_provider_exits_2_without_sending() {
         of_type(&lines, "ack"),
         [&serde_json::json!({"type": "ack", "command": "vol"})]
     );
+}
+
+const CLIENT: &str = r#"{"installed":{"client_id":"id","client_secret":"s"}}"#;
+
+/// A file under the temp dir, removed on drop.
+struct TempFile(std::path::PathBuf);
+
+impl TempFile {
+    fn new(name: &str, body: &[u8]) -> Self {
+        let path = std::env::temp_dir().join(format!("rq-cli-{}-{name}", std::process::id()));
+        std::fs::write(&path, body).unwrap();
+        Self(path)
+    }
+}
+
+impl Drop for TempFile {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
+    }
+}
+
+fn needs_setup_rig() -> Rig {
+    let provider = FakeProvider::new("fake");
+    provider.set_account(AccountState::Unavailable("no client".into()));
+    rig_with(provider)
+}
+
+#[test]
+fn signin_client_sends_the_file_and_acks() {
+    let r = needs_setup_rig();
+    let file = TempFile::new("my client.json", CLIENT.as_bytes());
+    let app = r.json_app();
+    let line = format!("signin-client fake {}", file.0.display());
+    assert_eq!(app.exec(&line), Flow::Continue);
+    assert_eq!(r.provider.imported(), [CLIENT]);
+    let lines = r.json_lines();
+    assert_eq!(
+        lines.last(),
+        Some(&serde_json::json!({"type": "ack", "command": "signin-client"}))
+    );
+    assert_eq!(
+        of_type(&lines, "account").last(),
+        Some(&&serde_json::json!({"type": "account", "provider": "fake", "state": "signed_out"}))
+    );
+    assert!(of_type(&lines, "error").is_empty(), "{lines:?}");
+}
+
+#[test]
+fn a_failed_signin_client_says_why_and_exits_2_without_an_ack() {
+    let r = needs_setup_rig();
+    let file = TempFile::new("bad.json", CLIENT.as_bytes());
+    let line = format!("signin-client fake {}", file.0.display());
+    r.provider
+        .fail_import(ProviderError::SignInRequired("not a client".into()));
+    let started = std::time::Instant::now();
+    assert_eq!(r.json_app().exec(&line), Flow::Exit(2));
+    assert!(started.elapsed() < Duration::from_secs(5));
+    let lines = r.json_lines();
+    assert_eq!(
+        of_type(&lines, "account_error"),
+        [
+            &serde_json::json!({"type": "account_error", "provider": "fake", "error": "not a client"})
+        ]
+    );
+    assert!(of_type(&lines, "ack").is_empty(), "{lines:?}");
+
+    r.provider
+        .fail_import(ProviderError::SignInRequired("not a client".into()));
+    assert_eq!(r.app(false).exec(&line), Flow::Continue);
+    assert_eq!(r.provider.imported().len(), 2);
+}
+
+#[test]
+fn signin_client_waits_past_another_signins_code() {
+    let r = rig();
+    let (import, sign_in) = (Gate::new(), Gate::new());
+    r.provider.gate_import(import.clone());
+    r.provider.script_sign_in(SignInScript {
+        pending: Some(pending()),
+        gate: Some(sign_in.clone()),
+        outcome: Ok(AccountState::SignedIn { name: None }),
+    });
+    let file = TempFile::new("client.json", CLIENT.as_bytes());
+    let line = format!("signin-client fake {}", file.0.display());
+    let flow = thread::scope(|s| {
+        let waiter = s.spawn(|| r.app(true).exec(&line));
+        r.provider.wait_import_calls(1);
+        // Another client's sign-in shows its code while the import runs.
+        r.session.send(Command::SignIn {
+            provider: ProviderId("fake".into()),
+        });
+        wait_out(
+            &r,
+            "Go to https://www.google.com/device and enter GQVQ-JKEC\n",
+            1,
+        );
+        thread::sleep(Duration::from_millis(200));
+        assert!(!waiter.is_finished(), "{}", r.out.text());
+        import.release();
+        sign_in.release();
+        waiter.join().unwrap()
+    });
+    assert_eq!(flow, Flow::Continue);
+    let text = r.out.text();
+    assert!(text.contains("signed in\n"), "{text}");
+    assert!(!text.contains("error"), "{text}");
+}
+
+#[test]
+fn signin_client_checks_its_arguments_and_file_before_sending() {
+    let r = needs_setup_rig();
+    let good = TempFile::new("good.json", CLIENT.as_bytes());
+    let mut big = b"{\"client_secret\":\"LEAKME\",\"pad\":\"".to_vec();
+    big.resize(64 * 1024 + 1, b'x');
+    let big = TempFile::new("big.json", &big);
+    let binary = TempFile::new("binary.json", &[0xff, 0xfe, b'{']);
+    let missing = std::env::temp_dir().join(format!("rq-cli-{}-none", std::process::id()));
+    let app = r.app(true);
+    for (line, error) in [
+        (
+            "signin-client".to_owned(),
+            "usage: signin-client <provider> <path>".to_owned(),
+        ),
+        (
+            "signin-client fake".to_owned(),
+            "usage: signin-client <provider> <path>".to_owned(),
+        ),
+        (
+            format!("signin-client fake {}", big.0.display()),
+            format!("signin-client: {}: over 64 KiB", big.0.display()),
+        ),
+        (
+            format!("signin-client fake {}", binary.0.display()),
+            format!("signin-client: {}: not UTF-8 text", binary.0.display()),
+        ),
+        (
+            format!("signin-client fake {}", missing.display()),
+            format!("signin-client: {}: No such file", missing.display()),
+        ),
+        (
+            format!("signin-client foo {}", good.0.display()),
+            "no provider foo".to_owned(),
+        ),
+    ] {
+        assert_eq!(app.exec(&line), Flow::Exit(2), "{line}");
+        let text = r.out.text();
+        assert!(text.contains(&format!("error: {error}")), "{text}");
+    }
+    assert_eq!(r.app(false).exec("signin-client"), Flow::Continue);
+    // The session answers commands in order, so an import sent would be answered by now.
+    exec_all(&app, "vol 55");
+    wait_out(&r, "volume: 55\n", 1);
+    assert!(r.provider.imported().is_empty());
+    let text = r.out.text();
+    assert!(!text.contains("LEAKME"), "{text}");
+    assert!(!text.contains("account"), "{text}");
 }

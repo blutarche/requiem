@@ -383,8 +383,8 @@ fn pending() -> AccountState {
 
 fn unavailable() -> AccountState {
     AccountState::Unavailable(
-        "Save your Google OAuth client as ~/Library/Application Support/requiem/google-client.json, \
-         then reopen Requiem."
+        "no Google OAuth client: save the JSON of a \"TVs and Limited Input devices\" client to \
+         ~/Library/Application Support/requiem/google-client.json"
             .into(),
     )
 }
@@ -560,7 +560,8 @@ impl Daemon {
             Command::Shutdown
             | Command::Cue(_)
             | Command::SignIn { .. }
-            | Command::SignOut { .. } => Vec::new(),
+            | Command::SignOut { .. }
+            | Command::ImportSignInClient { .. } => Vec::new(),
         }
     }
 
@@ -713,8 +714,8 @@ fn run_intent(vm: &mut Vm, daemon: &mut Daemon, intent: Intent) {
 
 /// `start`, staged for a demo-only `view`: `Empty` skips the search; `Disconnected`,
 /// `OutOfDate`, `Toast` and the update views add their banner or toast; the Library views and
-/// `HomeSignedOut` set the account; `NowPlayingEmpty` stops playback; `NowPlayingLast` plays the queue's last
-/// track. Other views get the plain start.
+/// `HomeSignedOut` set the account, and `SignInSetup` opens the setup sheet; `NowPlayingEmpty`
+/// stops playback; `NowPlayingLast` plays the queue's last track. Other views get the plain start.
 pub fn start_in(view: View) -> (Vm, Daemon) {
     let t0 = Instant::now();
     let mut vm = Vm::new_at(t0);
@@ -726,7 +727,9 @@ pub fn start_in(view: View) -> (Vm, Daemon) {
                 (ytmusic(), AccountState::SignedOut),
             ];
         }
-        View::LibraryUnavailable => daemon.accounts = vec![(ytmusic(), unavailable())],
+        View::LibraryUnavailable | View::SignInSetup => {
+            daemon.accounts = vec![(ytmusic(), unavailable())];
+        }
         View::SignIn => {
             daemon.accounts = vec![(spotify(), pending()), (ytmusic(), AccountState::SignedOut)];
         }
@@ -774,6 +777,10 @@ pub fn start_in(view: View) -> (Vm, Daemon) {
         }
         View::Library | View::LibrarySignedOut | View::LibraryUnavailable | View::SignIn => {
             run_intent(&mut vm, &mut daemon, Intent::Visit(Place::Library));
+        }
+        View::SignInSetup => {
+            run_intent(&mut vm, &mut daemon, Intent::Visit(Place::Library));
+            run_intent(&mut vm, &mut daemon, Intent::SignIn(ytmusic()));
         }
         View::Collection => {
             run_intent(&mut vm, &mut daemon, Intent::Visit(Place::Library));

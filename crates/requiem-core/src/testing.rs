@@ -121,6 +121,9 @@ struct ProviderState {
     sign_in_scripts: VecDeque<SignInScript>,
     sign_out_gate: Option<Gate>,
     sign_out_error: Option<ProviderError>,
+    import_gate: Option<Gate>,
+    import_error: Option<ProviderError>,
+    imported: Vec<String>,
     resolve_calls: HashMap<String, usize>,
     search_calls: usize,
     browse_calls: Vec<Page>,
@@ -139,6 +142,9 @@ impl Default for ProviderState {
             sign_in_scripts: VecDeque::new(),
             sign_out_gate: None,
             sign_out_error: None,
+            import_gate: None,
+            import_error: None,
+            imported: Vec::new(),
             resolve_calls: HashMap::new(),
             search_calls: 0,
             browse_calls: Vec::new(),
@@ -208,6 +214,21 @@ impl FakeProvider {
         self.state.lock().unwrap().sign_out_error = Some(e);
     }
 
+    /// The next `import_client` waits for `gate` before it imports.
+    pub fn gate_import(&self, gate: Gate) {
+        self.state.lock().unwrap().import_gate = Some(gate);
+    }
+
+    /// The next `import_client` fails with `e` and changes nothing.
+    pub fn fail_import(&self, e: ProviderError) {
+        self.state.lock().unwrap().import_error = Some(e);
+    }
+
+    /// The JSON of every `import_client` call, in order.
+    pub fn imported(&self) -> Vec<String> {
+        self.state.lock().unwrap().imported.clone()
+    }
+
     pub fn set_account(&self, state: AccountState) {
         self.state.lock().unwrap().account = state;
     }
@@ -274,6 +295,16 @@ impl FakeProvider {
             .wait_timeout_while(st, WAIT, |s| s.sign_out_calls < n)
             .unwrap();
         assert!(!res.timed_out(), "timed out waiting for {n} sign-out calls");
+    }
+
+    /// Counts calls on entry, so it also fires for an import still held by its gate.
+    pub fn wait_import_calls(&self, n: usize) {
+        let st = self.state.lock().unwrap();
+        let (_st, res) = self
+            .called
+            .wait_timeout_while(st, WAIT, |s| s.imported.len() < n)
+            .unwrap();
+        assert!(!res.timed_out(), "timed out waiting for {n} import calls");
     }
 }
 
@@ -367,6 +398,28 @@ impl Provider for FakeProvider {
         }
         self.set_account(AccountState::SignedOut);
         error.map_or(Ok(()), Err)
+    }
+
+    /// Like a provider that was missing only its client, a successful import makes an
+    /// `Unavailable` account `SignedOut`.
+    fn import_client(&self, json: &str) -> Result<(), ProviderError> {
+        let gate = {
+            let mut st = self.state.lock().unwrap();
+            st.imported.push(json.to_owned());
+            self.called.notify_all();
+            st.import_gate.take()
+        };
+        if let Some(g) = gate {
+            g.wait();
+        }
+        let mut st = self.state.lock().unwrap();
+        if let Some(e) = st.import_error.take() {
+            return Err(e);
+        }
+        if matches!(st.account, AccountState::Unavailable(_)) {
+            st.account = AccountState::SignedOut;
+        }
+        Ok(())
     }
 
     fn resolve(&self, track: &TrackId) -> Result<AudioSource, ProviderError> {

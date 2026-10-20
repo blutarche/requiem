@@ -2,22 +2,28 @@
 //! the backend.
 
 use std::cell::{Cell, RefCell};
+use std::fs::File;
 use std::rc::Rc;
 use std::time::{Duration, Instant};
 
 use dispatch2::{DispatchQueue, DispatchTime};
 use objc2::rc::Retained;
 use objc2::runtime::{AnyObject, NSObject, ProtocolObject};
-use objc2::{MainThreadOnly, define_class, msg_send, sel};
+use objc2::{MainThreadOnly, Message, define_class, msg_send, sel};
 use objc2_app_kit::{
     NSAlert, NSAlertFirstButtonReturn, NSAnimatablePropertyContainer, NSApplication,
-    NSAttributedStringNSStringDrawing, NSColor, NSControl, NSEvent, NSFont, NSLineBreakMode,
-    NSMenu, NSMenuItem, NSPasteboard, NSPasteboardTypeString, NSResponder, NSTextAlignment,
-    NSTextField, NSTextFieldDelegate, NSTrackingAreaOptions, NSView, NSWindow, NSWindowStyleMask,
-    NSWindowTitleVisibility, NSWorkspace,
+    NSAttributedStringNSStringDrawing, NSColor, NSControl, NSEvent, NSFont, NSFontAttributeName,
+    NSForegroundColorAttributeName, NSLineBreakMode, NSMenu, NSMenuItem, NSModalResponseOK,
+    NSMutableParagraphStyle, NSOpenPanel, NSParagraphStyleAttributeName, NSPasteboard,
+    NSPasteboardTypeString, NSResponder, NSTextAlignment, NSTextField, NSTextFieldDelegate,
+    NSTrackingAreaOptions, NSView, NSWindow, NSWindowStyleMask, NSWindowTitleVisibility,
+    NSWorkspace,
 };
 use objc2_core_foundation::CGFloat;
-use objc2_foundation::{MainThreadMarker, NSPoint, NSRect, NSSize, NSString, NSURL};
+use objc2_foundation::{
+    MainThreadMarker, NSArray, NSAttributedString, NSDictionary, NSPoint, NSRect, NSSize, NSString,
+    NSURL,
+};
 use requiem_core::ProviderId;
 use requiem_core::{Collection, Item, Shelf, Track};
 use requiem_ipc::UpdateRequest;
@@ -73,6 +79,31 @@ impl AppView {
             Place::Collection => AppView::Collection,
             Place::NowPlaying => AppView::NowPlaying,
         }
+    }
+}
+
+/// `SETUP_STEPS`, with a line that wraps indented under the text after its number.
+fn setup_steps(font: &NSFont) -> Retained<NSAttributedString> {
+    let ink = theme::ink();
+    let style = NSMutableParagraphStyle::new();
+    style.setHeadIndent(widgets::attributed("0. ", font, &ink).size().width.ceil());
+    style.setParagraphSpacing(4.0);
+    // SAFETY: the attribute-name statics are immutable framework constants, each paired with
+    // a value of the type it names.
+    unsafe {
+        let attrs = NSDictionary::from_retained_objects(
+            &[
+                NSFontAttributeName,
+                NSForegroundColorAttributeName,
+                NSParagraphStyleAttributeName,
+            ],
+            &[
+                Retained::into_super(Retained::into_super(font.retain())),
+                Retained::into_super(Retained::into_super(ink)),
+                Retained::into_super(Retained::into_super(Retained::into_super(style))),
+            ],
+        );
+        NSAttributedString::new_with_attributes(&NSString::from_str(SETUP_STEPS), &attrs)
     }
 }
 
@@ -132,6 +163,16 @@ const BACK_H: CGFloat = 28.0;
 const BUTTON_H: CGFloat = 36.0;
 const SIGN_IN_W: CGFloat = 560.0;
 const SIGN_IN_H: CGFloat = 280.0;
+const SETUP_W: CGFloat = 560.0;
+const SETUP_H: CGFloat = 330.0;
+const SETUP_HEADING: &str = "Set up YouTube Music sign-in";
+const SETUP_INTRO: &str = "YouTube Music sign-in uses your own Google Cloud client.";
+const SETUP_STEPS: &str = "\
+1. Create a Google Cloud project and enable the YouTube Data API v3.
+2. Set up the OAuth consent screen and publish the app, or sign-in expires after 7 days.
+3. Create an OAuth client of type \"TVs and Limited Input devices\" and download its JSON.
+4. Choose that file.";
+const SETUP_GUIDE: &str = "https://github.com/blutarche/requiem#youtube-music";
 /// How often the sign-in panel's countdown is redrawn.
 const EXPIRY_TICK: Duration = Duration::from_secs(30);
 const TOAST_H: CGFloat = 40.0;
@@ -243,6 +284,13 @@ struct SignInPanel {
     cancel: Retained<HoverButton>,
 }
 
+/// The Library's sheet for a provider that needs the user's own client before it can sign in.
+struct SetupPanel {
+    view: Retained<NSView>,
+    /// The provider's reason, or in red why the chosen file was refused.
+    note: Retained<NSTextField>,
+}
+
 /// An open collection's cover, name and buttons.
 struct CollectionHead {
     view: Retained<NSView>,
@@ -283,6 +331,7 @@ pub struct Ui {
     library_table: Table,
     library_state: EmptyState,
     sign_in: SignInPanel,
+    setup: SetupPanel,
     expiry_scheduled: Cell<bool>,
     collection_page: Retained<NSView>,
     collection_head: CollectionHead,
@@ -543,10 +592,12 @@ impl Ui {
             sel!(libraryAction:),
         );
         let sign_in = Self::sign_in_panel(mtm, mw, mh, target);
+        let setup = Self::setup_panel(mtm, mw, mh, target);
         library_page.addSubview(&library_head);
         library_page.addSubview(&library_table.view);
         library_page.addSubview(&library_state.view);
         library_page.addSubview(&sign_in.view);
+        library_page.addSubview(&setup.view);
         main.addSubview(&library_page);
 
         // Collection page.
@@ -641,6 +692,7 @@ impl Ui {
             library_table,
             library_state,
             sign_in,
+            setup,
             expiry_scheduled: Cell::new(false),
             collection_page,
             collection_head,
@@ -666,6 +718,98 @@ impl Ui {
         ui.search.set_value(&query);
         ui.show(AppView::Home);
         ui
+    }
+
+    fn setup_panel(
+        mtm: MainThreadMarker,
+        mw: CGFloat,
+        mh: CGFloat,
+        target: &AnyObject,
+    ) -> SetupPanel {
+        let view = widgets::view(
+            mtm,
+            rect(
+                ((mw - SETUP_W) / 2.0).round(),
+                ((mh - SETUP_H) / 2.0 + 8.0).round(),
+                SETUP_W,
+                SETUP_H,
+            ),
+            PIN_LEFT | PIN_RIGHT | PIN_TOP | PIN_BOTTOM,
+        );
+        let centred = |text: &str, font: &NSFont, color: &NSColor, mid_y: CGFloat| {
+            let l = widgets::placed_label(mtm, text, font, color, 0.0, mid_y, SETUP_W, FLEX_W);
+            l.setAlignment(NSTextAlignment::Center);
+            l
+        };
+        let heading = centred(
+            SETUP_HEADING,
+            &theme::font(16.0, Weight::SemiBold),
+            &theme::ink(),
+            SETUP_H - 20.0,
+        );
+        let intro = centred(
+            SETUP_INTRO,
+            &theme::font(14.0, Weight::Regular),
+            &theme::muted(),
+            SETUP_H - 48.0,
+        );
+        // Wrapped, `top` down for `lines` lines.
+        let wrapped = |l: &NSTextField, font: &NSFont, top: CGFloat, lines: CGFloat| {
+            l.setUsesSingleLineMode(false);
+            l.setMaximumNumberOfLines(0);
+            l.setLineBreakMode(NSLineBreakMode::ByWordWrapping);
+            let h = lines * widgets::line_height(font);
+            let mut f = l.frame();
+            f.origin.y = top - h;
+            f.size.height = h;
+            l.setFrame(f);
+        };
+        let steps_font = theme::font(13.0, Weight::Regular);
+        let steps = widgets::placed_label(
+            mtm,
+            "",
+            &steps_font,
+            &theme::ink(),
+            20.0,
+            0.0,
+            SETUP_W - 40.0,
+            FLEX_W,
+        );
+        steps.setAttributedStringValue(&setup_steps(&steps_font));
+        wrapped(&steps, &steps_font, SETUP_H - 66.0, 6.75);
+        let note_font = theme::font(12.0, Weight::Regular);
+        let note = centred("", &note_font, &theme::muted(), 0.0);
+        wrapped(&note, &note_font, SETUP_H - 200.0, 3.0);
+        note.setSelectable(true);
+        let buttons = [
+            ("Choose Client File\u{2026}", sel!(chooseClientFile:), true),
+            ("Setup Guide", sel!(openSetupGuide:), false),
+            ("Cancel", sel!(cancelSetup:), false),
+        ]
+        .map(|(title, action, primary)| {
+            let frame = rect(0.0, 0.0, 0.0, BUTTON_H);
+            let b = if primary {
+                HoverButton::primary(mtm, frame)
+            } else {
+                HoverButton::secondary(mtm, frame)
+            };
+            b.set_action(target, action);
+            let w = b.set_label(title);
+            (b, w)
+        });
+        let total = buttons.iter().map(|(_, w)| w).sum::<CGFloat>()
+            + 8.0 * (buttons.len() as CGFloat - 1.0);
+        let mut x = ((SETUP_W - total) / 2.0).round();
+        for (b, w) in &buttons {
+            b.setFrame(rect(x, 20.0, *w, BUTTON_H));
+            x += w + 8.0;
+            view.addSubview(b);
+        }
+        for v in [&heading, &intro, &steps, &note] {
+            view.addSubview(v);
+        }
+        view.setHidden(true);
+        SetupPanel { view, note }
     }
 
     fn sign_in_panel(
@@ -1231,7 +1375,8 @@ impl Ui {
         }
     }
 
-    /// Starts a sign-in and shows the Library, where its code appears.
+    /// Starts a sign-in, or opens the setup sheet for a provider that needs it first, and
+    /// shows the Library, where the code or the sheet appears.
     pub fn sign_in(&self, provider: ProviderId) {
         self.intent(Intent::SignIn(provider));
         self.show(AppView::Library);
@@ -1334,6 +1479,44 @@ impl Ui {
         {
             NSWorkspace::sharedWorkspace().openURL(&url);
         }
+    }
+
+    /// The setup sheet's Choose Client File…: sends the chosen file, and the sign-in starts
+    /// once the provider takes it.
+    pub fn choose_client_file(&self) {
+        let open = self.vm.borrow().ui().setup.is_some();
+        if !open {
+            return;
+        }
+        let panel = NSOpenPanel::openPanel(self.mtm);
+        panel.setCanChooseFiles(true);
+        panel.setCanChooseDirectories(false);
+        panel.setAllowsMultipleSelection(false);
+        // Its replacement takes UTTypes, which this crate has no bindings for.
+        #[allow(deprecated)]
+        panel.setAllowedFileTypes(Some(&NSArray::from_retained_slice(&[NSString::from_str(
+            "json",
+        )])));
+        // The panel's run loop goes on delivering the player's events, which borrow the view
+        // model, so nothing here may hold it.
+        if panel.runModal() != NSModalResponseOK {
+            return;
+        }
+        let Some(path) = panel.URLs().firstObject().and_then(|url| url.path()) else {
+            return;
+        };
+        let file = vm::read_client_file(File::open(path.to_string()));
+        self.intent(Intent::ImportClient(file));
+    }
+
+    pub fn open_setup_guide(&self) {
+        if let Some(url) = NSURL::URLWithString(&NSString::from_str(SETUP_GUIDE)) {
+            NSWorkspace::sharedWorkspace().openURL(&url);
+        }
+    }
+
+    pub fn cancel_setup(&self) {
+        self.intent(Intent::CancelSetup);
     }
 
     /// `intent`; true when it sent anything.
@@ -1776,6 +1959,7 @@ impl Ui {
 
     fn show_library(&self, view: &LibraryView, rows: Vec<table::RowText>) {
         let panel = matches!(view, LibraryView::Pending { .. });
+        let setup = matches!(view, LibraryView::Setup { .. });
         let list = matches!(
             view,
             LibraryView::SignedIn {
@@ -1785,9 +1969,10 @@ impl Ui {
         ) && !rows.is_empty();
         let head = matches!(view, LibraryView::SignedIn { .. });
         self.sign_in.view.setHidden(!panel);
+        self.setup.view.setHidden(!setup);
         self.library_head.setHidden(!head);
         self.library_table.view.setHidden(!list);
-        self.library_state.view.setHidden(panel || list);
+        self.library_state.view.setHidden(panel || setup || list);
         let state = &self.library_state;
         match view {
             LibraryView::Loading => state.set(Icon::Library, "Loading Library", "", None),
@@ -1810,6 +1995,7 @@ impl Ui {
                 user_code,
                 expires_at_unix,
             } => self.show_sign_in(provider, verification_url, user_code, *expires_at_unix),
+            LibraryView::Setup { reason, error, .. } => self.show_setup(reason, error.as_deref()),
             LibraryView::SignedIn { name, page } => {
                 widgets::set_text(
                     &self.library_who,
@@ -1828,6 +2014,23 @@ impl Ui {
             .set_rows(if list { rows } else { Vec::new() }, None);
         if list {
             self.library_table.deselect();
+        }
+    }
+
+    fn show_setup(&self, reason: &str, error: Option<&str>) {
+        let note = &self.setup.note;
+        match error {
+            Some(e) => {
+                if note.stringValue().to_string() != e {
+                    widgets::announce(self.mtm, e);
+                }
+                widgets::set_text(note, e);
+                note.setTextColor(Some(&theme::bad()));
+            }
+            None => {
+                widgets::set_text(note, reason);
+                note.setTextColor(Some(&theme::muted()));
+            }
         }
     }
 
