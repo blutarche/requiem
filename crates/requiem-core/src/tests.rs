@@ -1343,6 +1343,17 @@ fn sign_out_reports_signed_out() {
     assert_eq!(r.provider.sign_out_calls(), 1);
 }
 
+#[test]
+fn an_unchanged_state_after_a_sign_out_is_still_announced() {
+    let r = rig(config());
+    r.wait_event(is_account(AccountState::SignedOut));
+    r.send(Command::SignOut {
+        provider: fake_id(),
+    });
+    r.wait_event(is_account(AccountState::SignedOut));
+    assert_eq!(r.provider.sign_out_calls(), 1);
+}
+
 fn named_track(provider: &str, id: &str) -> Track {
     let mut t = track(id);
     t.id.provider = ProviderId(provider.into());

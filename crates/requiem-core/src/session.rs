@@ -391,7 +391,9 @@ impl Actor {
                             error: sign_in_error(&e),
                         });
                     }
-                    self.set_account(provider, state, false);
+                    // Announced even when it leaves the state as it was, so a client waiting on
+                    // its `SignOut` hears the outcome.
+                    self.set_account(provider, state, true);
                 }
                 Msg::SignInDone {
                     provider,

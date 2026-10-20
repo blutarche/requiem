@@ -132,6 +132,15 @@ struct SignInWait {
     ended: Option<AccountState>,
 }
 
+/// A `signout` waiting for the daemon's answer.
+struct SignOutWait {
+    provider: ProviderId,
+    /// The first state reported after the request.
+    ended: Option<AccountState>,
+    /// An `AccountError` arrived.
+    failed: bool,
+}
+
 struct Ui {
     /// The latest search or browse; earlier answers are dropped.
     latest_req: u64,
@@ -140,6 +149,7 @@ struct Ui {
     listing: Option<Vec<Item>>,
     accounts: Vec<(ProviderId, AccountState)>,
     sign_in: Option<SignInWait>,
+    sign_out: Option<SignOutWait>,
     queue: Vec<Track>,
     current: Option<usize>,
     state: PlayState,
@@ -264,10 +274,15 @@ impl Hub {
                 );
             }
             Event::Account { provider, state } => self.on_account(&mut ui, provider, state),
-            Event::AccountError { provider, error } => self.emit(
-                &format!("account error: {error}"),
-                json!({ "type": "account_error", "provider": provider.0, "error": error }),
-            ),
+            Event::AccountError { provider, error } => {
+                if let Some(w) = ui.sign_out.as_mut().filter(|w| w.provider == provider) {
+                    w.failed = true;
+                }
+                self.emit(
+                    &format!("account error: {error}"),
+                    json!({ "type": "account_error", "provider": provider.0, "error": error }),
+                );
+            }
             Event::QueueChanged { tracks, current } => {
                 let cur = current.map_or("none".to_owned(), |i| (i + 1).to_string());
                 self.emit(
@@ -372,6 +387,9 @@ impl Hub {
                 } => w.expires_at_unix = Some(*expires_at_unix),
                 other => w.ended = Some(other.clone()),
             }
+        }
+        if let Some(w) = ui.sign_out.as_mut().filter(|w| w.provider == provider) {
+            w.ended.get_or_insert_with(|| state.clone());
         }
         match ui.accounts.iter_mut().find(|(p, _)| *p == provider) {
             Some((_, known)) => {
@@ -681,6 +699,7 @@ impl<'a> App<'a> {
                 listing: None,
                 accounts: Vec::new(),
                 sign_in: None,
+                sign_out: None,
                 queue: Vec::new(),
                 current: None,
                 state: PlayState::Stopped,
@@ -1093,36 +1112,52 @@ impl<'a> App<'a> {
         }
     }
 
-    /// Sends `SignOut` and waits up to `SIGN_OUT_WAIT` until the provider is neither signed in
-    /// nor signing in, so that a `signin` after it starts over.
+    /// Sends `SignOut` and waits up to `SIGN_OUT_WAIT` for the daemon's answer. It succeeds
+    /// when the provider is left neither signed in nor signing in, so that a `signin` after it
+    /// starts over, and no error came with it.
     fn sign_out(&self, cmd: &str, arg: &str) -> Flow {
+        let failed = || {
+            if self.script {
+                Flow::Exit(2)
+            } else {
+                Flow::Continue
+            }
+        };
         let Some(provider) = self.account_provider(arg, true) else {
             return Flow::Continue;
         };
-        self.player.send(Command::SignOut {
+        let mut ui = self.hub.lock_ui();
+        // A closed connection is reported by the wait below.
+        if !ui.closed && !ui.accounts.iter().any(|(p, _)| *p == provider) {
+            drop(ui);
+            self.hub.error(&format!("no provider {}", provider.0));
+            return failed();
+        }
+        ui.sign_out = Some(SignOutWait {
             provider: provider.clone(),
+            ended: None,
+            failed: false,
         });
+        drop(ui);
+        self.player.send(Command::SignOut { provider });
         let deadline = Instant::now() + SIGN_OUT_WAIT;
         let mut ui = self.hub.lock_ui();
-        while ui.accounts.iter().any(|(p, s)| {
-            *p == provider
-                && matches!(
-                    s,
+        let outcome = loop {
+            let w = ui.sign_out.as_ref().expect("set above");
+            if w.failed {
+                break Some(false);
+            }
+            if let Some(state) = &w.ended {
+                break Some(!matches!(
+                    state,
                     AccountState::SignedIn { .. } | AccountState::Pending { .. }
-                )
-        }) {
+                ));
+            }
             if ui.closed {
-                drop(ui);
-                return self.lost(true).unwrap_or(Flow::Continue);
+                break None;
             }
             let Some(left) = deadline.checked_duration_since(Instant::now()) else {
-                drop(ui);
-                self.hub.error("timed out waiting for sign-out");
-                return if self.script {
-                    Flow::Exit(2)
-                } else {
-                    Flow::Continue
-                };
+                break Some(false);
             };
             ui = self
                 .hub
@@ -1130,10 +1165,25 @@ impl<'a> App<'a> {
                 .wait_timeout(ui, left)
                 .unwrap_or_else(PoisonError::into_inner)
                 .0;
-        }
+        };
+        let timed_out = ui
+            .sign_out
+            .take()
+            .is_some_and(|w| !w.failed && w.ended.is_none());
         drop(ui);
-        self.hub.ack(cmd);
-        Flow::Continue
+        match outcome {
+            Some(true) => {
+                self.hub.ack(cmd);
+                Flow::Continue
+            }
+            None => self.lost(true).unwrap_or(Flow::Continue),
+            Some(false) => {
+                if timed_out {
+                    self.hub.error("timed out waiting for sign-out");
+                }
+                failed()
+            }
+        }
     }
 
     /// The 0-based queue index for a 1-based `queue` position, if it exists.

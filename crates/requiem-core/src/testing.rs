@@ -120,6 +120,7 @@ struct ProviderState {
     browse_scripts: HashMap<Page, VecDeque<Step<Vec<Shelf>>>>,
     sign_in_scripts: VecDeque<SignInScript>,
     sign_out_gate: Option<Gate>,
+    sign_out_error: Option<ProviderError>,
     resolve_calls: HashMap<String, usize>,
     search_calls: usize,
     browse_calls: Vec<Page>,
@@ -137,6 +138,7 @@ impl Default for ProviderState {
             browse_scripts: HashMap::new(),
             sign_in_scripts: VecDeque::new(),
             sign_out_gate: None,
+            sign_out_error: None,
             resolve_calls: HashMap::new(),
             search_calls: 0,
             browse_calls: Vec::new(),
@@ -198,6 +200,12 @@ impl FakeProvider {
     /// The next `sign_out` waits for `gate` before it signs out.
     pub fn gate_sign_out(&self, gate: Gate) {
         self.state.lock().unwrap().sign_out_gate = Some(gate);
+    }
+
+    /// The next `sign_out` signs out, then fails with `e`, like a revoke the server didn't
+    /// confirm.
+    pub fn fail_sign_out(&self, e: ProviderError) {
+        self.state.lock().unwrap().sign_out_error = Some(e);
     }
 
     pub fn set_account(&self, state: AccountState) {
@@ -348,17 +356,17 @@ impl Provider for FakeProvider {
     }
 
     fn sign_out(&self) -> Result<(), ProviderError> {
-        let gate = {
+        let (gate, error) = {
             let mut st = self.state.lock().unwrap();
             st.sign_out_calls += 1;
             self.called.notify_all();
-            st.sign_out_gate.take()
+            (st.sign_out_gate.take(), st.sign_out_error.take())
         };
         if let Some(g) = gate {
             g.wait();
         }
         self.set_account(AccountState::SignedOut);
-        Ok(())
+        error.map_or(Ok(()), Err)
     }
 
     fn resolve(&self, track: &TrackId) -> Result<AudioSource, ProviderError> {

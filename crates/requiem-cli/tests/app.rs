@@ -971,3 +971,97 @@ fn a_signin_naming_its_provider_waits_past_the_announced_state() {
         assert_eq!(r.provider.sign_in_calls(), 1);
     }
 }
+
+fn signed_in_rig() -> Rig {
+    let provider = FakeProvider::new("fake");
+    provider.set_account(AccountState::SignedIn {
+        name: Some("Me".into()),
+    });
+    rig_with(provider)
+}
+
+const UNCONFIRMED: &str = "signed out on this computer, but the server did not confirm";
+
+#[test]
+fn a_signout_acks_once_signed_out() {
+    let r = signed_in_rig();
+    let app = r.json_app();
+    assert_eq!(app.exec("signout fake"), Flow::Continue);
+    let lines = r.json_lines();
+    assert_eq!(
+        lines[lines.len() - 2..],
+        [
+            serde_json::json!({"type": "account", "provider": "fake", "state": "signed_out"}),
+            serde_json::json!({"type": "ack", "command": "signout"}),
+        ]
+    );
+    assert!(of_type(&lines, "account_error").is_empty(), "{lines:?}");
+}
+
+#[test]
+fn a_signout_with_nobody_signed_in_acks_at_once() {
+    let r = rig();
+    let app = r.json_app();
+    let started = std::time::Instant::now();
+    assert_eq!(app.exec("signout"), Flow::Continue);
+    assert!(started.elapsed() < Duration::from_secs(5));
+    let lines = r.json_lines();
+    assert_eq!(
+        lines,
+        [serde_json::json!({"type": "ack", "command": "signout"})]
+    );
+    assert_eq!(r.provider.sign_out_calls(), 1);
+}
+
+#[test]
+fn a_failed_signout_says_why_and_exits_2_without_an_ack() {
+    let r = signed_in_rig();
+    r.provider
+        .fail_sign_out(ProviderError::ClientBroken(UNCONFIRMED.into()));
+    let app = r.json_app();
+    assert_eq!(app.exec("signout"), Flow::Exit(2));
+    let lines = r.json_lines();
+    assert_eq!(
+        of_type(&lines, "account_error"),
+        [&serde_json::json!({"type": "account_error", "provider": "fake", "error": UNCONFIRMED})]
+    );
+    assert!(of_type(&lines, "ack").is_empty(), "{lines:?}");
+    assert_eq!(r.provider.sign_out_calls(), 1);
+}
+
+#[test]
+fn a_failed_signout_of_a_signed_out_provider_is_reported() {
+    let r = rig();
+    r.provider
+        .fail_sign_out(ProviderError::ClientBroken(UNCONFIRMED.into()));
+    assert_eq!(r.app(true).exec("signout fake"), Flow::Exit(2));
+    let text = r.out.text();
+    assert!(
+        text.ends_with(&format!("account error: {UNCONFIRMED}\n")),
+        "{text}"
+    );
+    r.provider
+        .fail_sign_out(ProviderError::ClientBroken(UNCONFIRMED.into()));
+    assert_eq!(r.app(false).exec("signout fake"), Flow::Continue);
+    assert_eq!(r.provider.sign_out_calls(), 2);
+}
+
+#[test]
+fn signout_naming_an_unknown_provider_exits_2_without_sending() {
+    let r = rig();
+    let app = r.json_app();
+    assert_eq!(app.exec("signout foo"), Flow::Exit(2));
+    // The session answers commands in order, so a `SignOut` sent would be answered by now.
+    exec_all(&app, "vol 55");
+    wait_out(&r, r#""volume":55"#, 1);
+    let lines = r.json_lines();
+    assert_eq!(
+        of_type(&lines, "error"),
+        [&serde_json::json!({"type": "error", "message": "no provider foo"})]
+    );
+    assert!(of_type(&lines, "account_error").is_empty(), "{lines:?}");
+    assert_eq!(
+        of_type(&lines, "ack"),
+        [&serde_json::json!({"type": "ack", "command": "vol"})]
+    );
+}
