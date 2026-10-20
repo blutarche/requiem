@@ -11,10 +11,11 @@ usage: requiem-gui [--demo] [--smoke] [--snapshot <png>] [--view <view>]
                      without it, for home or library, from the running player once the page
                      and its covers have loaded (20 s at most); exits 1 if the page fails
   --view <view>      the view shown at start: home (default), search, library, queue or
-                     palette; with --demo also home-scrolled, home-shelf-paged, collection,
-                     now-playing, now-playing-empty, now-playing-last, library-signed-out,
-                     library-unavailable, signin, empty, disconnected, toast, out-of-date,
-                     update-ready, update-failed, not-updatable or up-to-date";
+                     palette; with --demo also home-scrolled, home-shelf-paged,
+                     home-signed-out, collection, now-playing, now-playing-empty,
+                     now-playing-last, library-signed-out, library-unavailable, signin, empty,
+                     disconnected, toast, out-of-date, update-ready, update-failed,
+                     not-updatable or up-to-date";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum View {
@@ -29,6 +30,8 @@ pub enum View {
     HomeScrolled,
     /// Demo only: Home with its first shelf of cards paged forward once.
     HomeShelfPaged,
+    /// Demo only: Home with both accounts signed out.
+    HomeSignedOut,
     /// Demo only: a playlist's tracks, opened from the Library.
     Collection,
     /// Demo only: the playing track's page.
@@ -62,7 +65,7 @@ pub enum View {
 }
 
 impl View {
-    const NAMES: [(&str, View); 22] = [
+    const NAMES: [(&str, View); 23] = [
         ("home", View::Home),
         ("search", View::Search),
         ("library", View::Library),
@@ -70,6 +73,7 @@ impl View {
         ("palette", View::Palette),
         ("home-scrolled", View::HomeScrolled),
         ("home-shelf-paged", View::HomeShelfPaged),
+        ("home-signed-out", View::HomeSignedOut),
         ("collection", View::Collection),
         ("now-playing", View::NowPlaying),
         ("now-playing-empty", View::NowPlayingEmpty),
@@ -241,6 +245,7 @@ mod tests {
         for (name, view) in [
             ("home-scrolled", View::HomeScrolled),
             ("home-shelf-paged", View::HomeShelfPaged),
+            ("home-signed-out", View::HomeSignedOut),
             ("collection", View::Collection),
             ("now-playing", View::NowPlaying),
             ("now-playing-empty", View::NowPlayingEmpty),

@@ -294,6 +294,14 @@ pub enum LibraryView {
     },
 }
 
+/// What the Home page shows.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum HomeView {
+    /// Home needs a signed-in provider; each listed provider can be.
+    SignedOut(Vec<ProviderId>),
+    Page(PageView),
+}
+
 impl Browse {
     pub fn view(&self) -> PageView {
         match &self.load {
@@ -517,15 +525,17 @@ impl UiState {
     }
 
     /// The providers Sign In applies to: the signed-out ones, and every one when the Library
-    /// failed for want of a sign-in.
+    /// or Home failed for want of a sign-in.
     fn sign_in_offers(&self) -> Vec<ProviderId> {
-        let rejected = matches!(
-            self.library.load,
-            Load::Failed {
-                sign_in_required: true,
-                ..
-            }
-        );
+        let rejected = [&self.library.load, &self.home.load].into_iter().any(|l| {
+            matches!(
+                l,
+                Load::Failed {
+                    sign_in_required: true,
+                    ..
+                }
+            )
+        });
         self.accounts
             .iter()
             .filter(|(_, s)| {
@@ -543,6 +553,17 @@ impl UiState {
             Place::Library => self.signed_in().next().is_some(),
             Place::Collection => self.collection.is_some(),
             Place::Search | Place::Queue | Place::NowPlaying => false,
+        }
+    }
+
+    /// The sign-in choices when Home failed for want of a sign-in; else the page.
+    pub fn home_view(&self) -> HomeView {
+        match &self.home.load {
+            Load::Failed {
+                sign_in_required: true,
+                ..
+            } => HomeView::SignedOut(self.sign_in_offers()),
+            _ => HomeView::Page(self.home.view()),
         }
     }
 
@@ -1382,14 +1403,29 @@ impl Vm {
     fn set_account(&mut self, provider: ProviderId, state: AccountState) {
         let signed_in = |ui: &UiState| ui.signed_in().cloned().collect::<Vec<_>>();
         let was = signed_in(&self.ui);
-        match self.ui.accounts.iter_mut().find(|(p, _)| *p == provider) {
-            Some(entry) => entry.1 = state,
-            None => self.ui.accounts.push((provider, state)),
-        }
+        let known = match self.ui.accounts.iter_mut().find(|(p, _)| *p == provider) {
+            Some(entry) => {
+                entry.1 = state;
+                true
+            }
+            None => {
+                self.ui.accounts.push((provider, state));
+                false
+            }
+        };
         self.dirty |= Dirty::ACCOUNT;
+        // Its sign-in choices follow the accounts.
+        if matches!(self.ui.home_view(), HomeView::SignedOut(_)) {
+            self.dirty |= Dirty::HOME;
+        }
         let now = signed_in(&self.ui);
         if was == now {
             return;
+        }
+        // The snapshot after a connect only adds providers, and Home was asked for with it.
+        if known && self.ui.home.load != Load::Idle {
+            let fetch = self.fetch(Slot::Home);
+            self.outbox.extend(fetch);
         }
         if now.is_empty() {
             self.pending_browse[Slot::Library as usize] = None;
@@ -4035,6 +4071,89 @@ mod tests {
             vm.ui().library_view(),
             LibraryView::SignedIn { page: PageView::Failed(e), .. } if e == "timeout"
         ));
+    }
+
+    fn pending() -> AccountState {
+        AccountState::Pending {
+            verification_url: "https://www.spotify.com/pair".into(),
+            user_code: "ABCDEF".into(),
+            expires_at_unix: 1_000,
+        }
+    }
+
+    #[test]
+    fn home_is_fetched_again_when_an_account_signs_in_or_out() {
+        let (mut vm, req) = home();
+        // The snapshot's accounts are the ones the first fetch was answered for.
+        vm.apply(account(AccountState::SignedOut));
+        vm.apply(spotify_signed_in());
+        let cmds = browses(&vm.take_commands());
+        assert!(matches!(cmds.as_slice(), [(_, Page::Library)]), "{cmds:?}");
+        vm.apply(results(req, Page::Home, vec![shelf("A", Vec::new())]));
+
+        vm.apply(spotify_account(pending()));
+        let home_fetches = |vm: &mut Vm| {
+            browses(&vm.take_commands())
+                .into_iter()
+                .filter(|(_, p)| *p == Page::Home)
+                .count()
+        };
+        // Signed out, then pending: Home lost its only account.
+        assert_eq!(home_fetches(&mut vm), 1);
+        assert_eq!(vm.ui().home.load, Load::Loading);
+        vm.apply(signed_in());
+        assert_eq!(home_fetches(&mut vm), 1);
+        // The same state announced again changes nothing.
+        vm.apply(signed_in());
+        assert_eq!(home_fetches(&mut vm), 0);
+        vm.apply(account(AccountState::SignedOut));
+        assert_eq!(home_fetches(&mut vm), 1);
+    }
+
+    #[test]
+    fn a_home_never_shown_waits_for_its_visit() {
+        let mut vm = connected();
+        vm.apply(account(AccountState::SignedOut));
+        vm.apply(signed_in());
+        let cmds = browses(&vm.take_commands());
+        assert!(matches!(cmds.as_slice(), [(_, Page::Library)]), "{cmds:?}");
+        assert_eq!(vm.ui().home.load, Load::Idle);
+    }
+
+    #[test]
+    fn a_home_that_needs_a_sign_in_offers_the_librarys_choices() {
+        let (mut vm, req) = home();
+        vm.apply(account(AccountState::SignedOut));
+        vm.apply(spotify_account(AccountState::SignedOut));
+        vm.apply(Event::BrowseFailed {
+            req,
+            error: "sign-in required: sign in to see your music".into(),
+            sign_in_required: true,
+        });
+        let both = vec![provider(), spotify()];
+        assert_eq!(vm.ui().home_view(), HomeView::SignedOut(both.clone()));
+        assert_eq!(vm.ui().library_view(), LibraryView::SignedOut(both));
+        vm.take_dirty();
+
+        // Its choices follow the accounts.
+        vm.apply(spotify_account(pending()));
+        assert!(vm.take_dirty().contains(Dirty::HOME));
+        assert_eq!(vm.ui().home_view(), HomeView::SignedOut(vec![provider()]));
+
+        // A signed-in account that Home still turns away can sign in again.
+        vm.apply(signed_in());
+        let req = browses(&vm.take_commands())
+            .into_iter()
+            .find(|(_, p)| *p == Page::Home)
+            .expect("a Home fetch")
+            .0;
+        assert_eq!(vm.ui().home_view(), HomeView::Page(PageView::Loading));
+        vm.apply(Event::BrowseFailed {
+            req,
+            error: "sign-in required: sign in to Google".into(),
+            sign_in_required: true,
+        });
+        assert_eq!(vm.ui().home_view(), HomeView::SignedOut(vec![provider()]));
     }
 
     fn with_home_shelf(items: Vec<Item>) -> Vm {

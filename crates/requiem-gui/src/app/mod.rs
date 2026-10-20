@@ -180,6 +180,12 @@ define_class!(
             ui::with(|ui| ui.library_action(index.unwrap_or(0)));
         }
 
+        #[unsafe(method(homeAction:))]
+        fn home_action(&self, sender: Option<&AnyObject>) {
+            let index = sender_tag(sender).and_then(|t| usize::try_from(t).ok());
+            ui::with(|ui| ui.home_action(index.unwrap_or(0)));
+        }
+
         #[unsafe(method(copyCode:))]
         fn copy_code(&self, _sender: Option<&AnyObject>) {
             ui::with(|ui| ui.copy_code());
@@ -909,6 +915,7 @@ pub fn run(args: Args) {
                 ui.shelves.page(row, true);
             }
         }
+        View::HomeSignedOut => ui.show(AppView::Home),
         View::Library | View::LibrarySignedOut | View::LibraryUnavailable | View::SignIn => {
             ui.show(AppView::Library)
         }

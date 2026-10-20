@@ -183,17 +183,6 @@ pub fn artwork_url(i: usize) -> Option<String> {
     (i % 4 != 3).then(|| format!("demo:{i:02}"))
 }
 
-const ALBUMS: [(&str, &str); 8] = [
-    ("Low Tide Radio", "Hollow Coast"),
-    ("Glasshouse", "Mira Vance"),
-    ("Orbit Hymns", "The Lantern Choir"),
-    ("After Hours Transit", "Velvet Static"),
-    ("Wildfire Season", "Saint Ember"),
-    ("Signal & Noise", "Cobalt Garden"),
-    ("Small Hours", "Elias Wren"),
-    ("Second Bloom", "Juniper & Ash"),
-];
-
 const MIXES: [&str; 8] = [
     "Late Night Drive",
     "Rainy Day Focus",
@@ -210,7 +199,7 @@ const LIBRARY_NOUNS: [&str; 4] = ["Mornings", "Roads", "Rooms", "Waves"];
 
 /// The first demo cover URL index of each group; every URL is `demo:NN`.
 const HOME_TRACK_ART: usize = 30;
-const HOME_ALBUM_ART: usize = 42;
+const HOME_PLAYLIST_ART: usize = 42;
 const HOME_MIX_ART: usize = 50;
 const LIBRARY_ART: usize = 60;
 const LIBRARY_LEN: usize = 20;
@@ -263,18 +252,31 @@ fn home_tracks() -> Vec<Track> {
     tracks
 }
 
-/// Home: a Quick picks grid of tracks, then two shelves of cards.
+/// Home as both accounts merge into it: a grid of liked songs, then two shelves of cards. The
+/// Liked cards have no cover, as neither service gives them one.
 pub fn home() -> Vec<Shelf> {
-    let albums = ALBUMS
-        .iter()
+    let playlists = ["Liked Songs", "Liked videos"]
+        .into_iter()
+        .map(|t| (t.to_owned(), None, None))
+        .chain((2..8).map(|i| {
+            (
+                format!(
+                    "{} {}",
+                    LIBRARY_ADJECTIVES[i % LIBRARY_ADJECTIVES.len()],
+                    LIBRARY_NOUNS[i % LIBRARY_NOUNS.len()]
+                ),
+                Some(format!("Playlist · {} songs", 9 + 4 * i)),
+                Some(demo_url(HOME_PLAYLIST_ART + i)),
+            )
+        }))
         .enumerate()
-        .map(|(i, (title, artist))| {
+        .map(|(i, (title, subtitle, artwork_url))| {
             Item::Collection(Collection {
-                id: collection_id("album", i),
-                kind: CollectionKind::Album,
-                title: (*title).to_owned(),
-                subtitle: Some(format!("Album · {artist}")),
-                artwork_url: Some(demo_url(HOME_ALBUM_ART + i)),
+                id: collection_id("playlist", i),
+                kind: CollectionKind::Playlist,
+                title,
+                subtitle,
+                artwork_url,
             })
         })
         .collect();
@@ -293,16 +295,16 @@ pub fn home() -> Vec<Shelf> {
         .collect();
     vec![
         Shelf {
-            title: "Quick picks".into(),
+            title: "Liked songs".into(),
             items: home_tracks().into_iter().map(Item::Track).collect(),
         },
         Shelf {
-            title: "Listen again".into(),
-            items: albums,
+            title: "Made for you".into(),
+            items: mixes,
         },
         Shelf {
-            title: "Mixed for you".into(),
-            items: mixes,
+            title: "Your playlists".into(),
+            items: playlists,
         },
     ]
 }
@@ -530,6 +532,20 @@ impl Daemon {
                 evs.push(self.queue_changed());
                 evs
             }
+            Command::Browse {
+                req,
+                page: Page::Home,
+            } if !self
+                .accounts
+                .iter()
+                .any(|(_, s)| matches!(s, AccountState::SignedIn { .. })) =>
+            {
+                vec![Event::BrowseFailed {
+                    req,
+                    error: "sign-in required: sign in to see your music".into(),
+                    sign_in_required: true,
+                }]
+            }
             Command::Browse { req, page } => {
                 let shelves = match page {
                     Page::Home => home(),
@@ -696,15 +712,15 @@ fn run_intent(vm: &mut Vm, daemon: &mut Daemon, intent: Intent) {
 }
 
 /// `start`, staged for a demo-only `view`: `Empty` skips the search; `Disconnected`,
-/// `OutOfDate`, `Toast` and the update views add their banner or toast; the Library views set
-/// the account; `NowPlayingEmpty` stops playback; `NowPlayingLast` plays the queue's last
+/// `OutOfDate`, `Toast` and the update views add their banner or toast; the Library views and
+/// `HomeSignedOut` set the account; `NowPlayingEmpty` stops playback; `NowPlayingLast` plays the queue's last
 /// track. Other views get the plain start.
 pub fn start_in(view: View) -> (Vm, Daemon) {
     let t0 = Instant::now();
     let mut vm = Vm::new_at(t0);
     let mut daemon = Daemon::default();
     match view {
-        View::LibrarySignedOut => {
+        View::LibrarySignedOut | View::HomeSignedOut => {
             daemon.accounts = vec![
                 (spotify(), AccountState::SignedOut),
                 (ytmusic(), AccountState::SignedOut),
@@ -753,7 +769,7 @@ pub fn start_in(view: View) -> (Vm, Daemon) {
             });
             vm.apply(daemon.queue_changed());
         }
-        View::Home | View::HomeScrolled | View::HomeShelfPaged => {
+        View::Home | View::HomeScrolled | View::HomeShelfPaged | View::HomeSignedOut => {
             run_intent(&mut vm, &mut daemon, Intent::Visit(Place::Home))
         }
         View::Library | View::LibrarySignedOut | View::LibraryUnavailable | View::SignIn => {
@@ -793,7 +809,7 @@ fn update(state: UpdateState) -> UpdateStatus {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::vm::{Connection, List, QueueEdit, SearchStatus};
+    use crate::vm::{Connection, HomeView, List, PageView, QueueEdit, SearchStatus};
 
     fn run(vm: &mut Vm, daemon: &mut Daemon, intent: Intent) {
         for cmd in vm.intent(intent) {
@@ -818,6 +834,21 @@ mod tests {
         assert_eq!(ui.total_text(), "3:45");
         assert_eq!(ui.volume, 70);
         assert_eq!(ui.now_playing.as_ref(), Some(&ui.queue[2]));
+    }
+
+    #[test]
+    fn home_shows_the_accounts_music_or_asks_for_a_sign_in() {
+        let (vm, _) = start_in(View::Home);
+        let titles: Vec<&str> = vm.ui().home.shelves.iter().map(|s| &*s.title).collect();
+        assert_eq!(titles, ["Liked songs", "Made for you", "Your playlists"]);
+        assert_eq!(vm.ui().home_view(), HomeView::Page(PageView::Ready));
+
+        let (vm, _) = start_in(View::HomeSignedOut);
+        assert_eq!(vm.ui().place, Place::Home);
+        assert_eq!(
+            vm.ui().home_view(),
+            HomeView::SignedOut(vec![spotify(), ytmusic()])
+        );
     }
 
     #[test]

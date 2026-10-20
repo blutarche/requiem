@@ -36,8 +36,8 @@ use super::widgets::{
 };
 use super::{Delegate, MainWindow};
 use crate::vm::{
-    self, Banner, Controls, Dirty, EmptyText, Intent, LibraryView, List, PageView, PaletteAction,
-    Place, QueueEdit, Selection, Service, Toast, UiState, Vm,
+    self, Banner, Controls, Dirty, EmptyText, HomeView, Intent, LibraryView, List, PageView,
+    PaletteAction, Place, QueueEdit, Selection, Service, Toast, UiState, Vm,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -485,7 +485,7 @@ impl Ui {
             rect(0.0, 0.0, mw, mh),
             Icon::Home,
             target,
-            sel!(refresh:),
+            sel!(homeAction:),
         );
         home_page.addSubview(&shelves.view);
         home_page.addSubview(&home_state.view);
@@ -1218,6 +1218,19 @@ impl Ui {
         }
     }
 
+    /// The Home empty state's button `index`: Sign in to that provider, or Try again.
+    pub fn home_action(&self, index: usize) {
+        let view = self.vm.borrow().ui().home_view();
+        match view {
+            HomeView::SignedOut(providers) => {
+                if let Some(provider) = providers.into_iter().nth(index) {
+                    self.sign_in(provider);
+                }
+            }
+            HomeView::Page(_) => self.intent(Intent::Refresh),
+        }
+    }
+
     /// Starts a sign-in and shows the Library, where its code appears.
     pub fn sign_in(&self, provider: ProviderId) {
         self.intent(Intent::SignIn(provider));
@@ -1728,13 +1741,25 @@ impl Ui {
         ]
     }
 
-    fn show_home(&self, view: &PageView, shelves: &[Shelf]) {
-        let ready = *view == PageView::Ready && shelves.iter().any(|s| !s.items.is_empty());
+    fn show_home(&self, view: &HomeView, shelves: &[Shelf]) {
+        let ready =
+            *view == HomeView::Page(PageView::Ready) && shelves.iter().any(|s| !s.items.is_empty());
         self.shelves.set_shelves(if ready { shelves } else { &[] });
         self.shelves.view.setHidden(!ready);
         self.home_state.view.setHidden(ready);
-        if !ready {
-            Self::page_state(&self.home_state, Icon::Home, view, "Home");
+        match view {
+            _ if ready => {}
+            HomeView::SignedOut(providers) => {
+                let labels = sign_in_labels(providers);
+                let labels: Vec<&str> = labels.iter().map(String::as_str).collect();
+                self.home_state.set_actions(
+                    Icon::Home,
+                    "Sign in to see your music",
+                    "Search works without signing in.",
+                    &labels,
+                );
+            }
+            HomeView::Page(page) => Self::page_state(&self.home_state, Icon::Home, page, "Home"),
         }
     }
 
@@ -1770,10 +1795,7 @@ impl Ui {
                 state.set(Icon::Library, "Sign-in isn't set up", text, None);
             }
             LibraryView::SignedOut(providers) => {
-                let labels: Vec<String> = providers
-                    .iter()
-                    .map(|p| format!("Sign in to {}", vm::provider_name(&p.0)))
-                    .collect();
+                let labels = sign_in_labels(providers);
                 let labels: Vec<&str> = labels.iter().map(String::as_str).collect();
                 state.set_actions(
                     Icon::Library,
@@ -1898,7 +1920,10 @@ impl Ui {
         let vm = self.vm.borrow();
         let ui = vm.ui();
         let page = match self.view.get() {
-            AppView::Home => ui.home.view(),
+            AppView::Home => match ui.home_view() {
+                HomeView::SignedOut(_) => PageView::Ready,
+                HomeView::Page(page) => page,
+            },
             AppView::Library => match ui.library_view() {
                 LibraryView::Loading => PageView::Loading,
                 LibraryView::SignedIn { page, .. } => page,
@@ -2297,6 +2322,14 @@ struct CollectionPatch {
     rows: Vec<table::RowText>,
 }
 
+/// The sign-in panels' buttons, one per provider.
+fn sign_in_labels(providers: &[ProviderId]) -> Vec<String> {
+    providers
+        .iter()
+        .map(|p| format!("Sign in to {}", vm::provider_name(&p.0)))
+        .collect()
+}
+
 fn unix_now() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -2317,7 +2350,7 @@ struct Patch {
     search_status: Option<Option<(String, bool)>>,
     queue: Option<(Vec<table::RowText>, Option<usize>)>,
     queue_badge: Option<Option<String>>,
-    home: Option<(PageView, Vec<Shelf>)>,
+    home: Option<(HomeView, Vec<Shelf>)>,
     library: Option<(LibraryView, Vec<table::RowText>)>,
     collection: Option<Option<CollectionPatch>>,
     now_playing: Option<NowPlaying>,
@@ -2341,7 +2374,7 @@ impl Patch {
             search_status: any(Dirty::SEARCH_STATUS).then(|| s.search_status_text()),
             queue: any(Dirty::QUEUE).then(|| (table::rows(&s.queue), s.current)),
             queue_badge: any(Dirty::QUEUE).then(|| s.queue_badge()),
-            home: any(Dirty::HOME).then(|| (s.home.view(), s.home.shelves.clone())),
+            home: any(Dirty::HOME).then(|| (s.home_view(), s.home.shelves.clone())),
             library: (any(Dirty::LIBRARY) || any(Dirty::ACCOUNT)).then(|| {
                 (
                     s.library_view(),
