@@ -26,8 +26,10 @@ Steps:
 
 - **Add.** Find the "+" button on a result row in `rqv tree` and `rqv press` it. The tree or
   toast confirms "Added to queue".
-- **Add a whole playlist.** On a collection page (see [home.md](home.md)), use
-  `rqv press "$RUN" '^\s*\d+ button Add to Queue$'`. `rqv cli "$RUN" status` shows
+- **Add a whole playlist.** On a collection page, use
+  `rqv press "$RUN" '^\s*\d+ button Add to Queue$'`. Since 0.3.1 a fresh install's Home has no
+  playlist cards, so this step needs a collection reached some other way; otherwise report it as
+  skipped. `rqv cli "$RUN" status` shows
   `queue: <n> tracks, current none` and `state: stopped`.
 - **Open the queue.** `rqv press "$RUN" '^\s*\d+ button Queue(, \d+)?$'`, then
   `rqv tree "$RUN" 02-queue`. The sidebar label carries the count (`Queue, 88`), and the page
