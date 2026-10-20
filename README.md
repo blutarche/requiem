@@ -73,20 +73,20 @@ The bundle embeds Homebrew's libopus. Its minimum macOS version is whatever that
 | `help` | `text` |
 | `error` | `message` |
 
-## YouTube library
+## YouTube Music
 
 `home` shows YouTube Music's home page as a signed-out visitor sees it. Signing in to Google adds `library`: your playlists and your liked videos.
 
-Sign-in uses your own Google Cloud OAuth client, set up once:
+Sign-in uses your own Google Cloud OAuth client, set up once in the [Google Cloud console](https://console.cloud.google.com/). Until there is one, **Sign in to YouTube Music** in the app shows these steps:
 
-1. In the [Google Cloud console](https://console.cloud.google.com/), create a project.
-2. Enable the **YouTube Data API v3** for it.
-3. Configure its OAuth consent screen (Google Auth Platform) with an **External** audience, and add the scope `https://www.googleapis.com/auth/youtube.readonly`.
-4. Publish the app so its status is **In production**: while it is in **Testing**, Google expires the sign-in after 7 days. Before Google lets you publish, its Branding page needs a home page and a privacy policy link, and their domain under **Authorized domains**. `https://github.com/blutarche/requiem`, `https://github.com/blutarche/requiem/blob/main/PRIVACY.md` and `github.com` work. Google may then warn that the app is unverified; as its only user, you can continue past the warning (**Advanced**, then **Go to … (unsafe)**).
-5. Create an OAuth client of type **TVs and Limited Input devices** and download its JSON.
-6. Save that JSON as `~/Library/Application Support/requiem/google-client.json` on macOS, or `$XDG_CONFIG_HOME/requiem/google-client.json` (default `~/.config/requiem/google-client.json`) on Linux. `REQUIEM_GOOGLE_CLIENT_FILE` overrides the path.
+1. **Create a Google Cloud project and enable the YouTube Data API v3.** Create the project from the project picker at the top of the console. Then, in **APIs & Services → Library**, find **YouTube Data API v3** and click **Enable**.
+2. **Set up the OAuth consent screen and publish the app.** In **Google Auth Platform**, choose an **External** audience, and under **Data Access** add the scope `https://www.googleapis.com/auth/youtube.readonly`. Then, under **Audience**, publish the app so its status is **In production**: while it is in **Testing**, Google expires the sign-in after 7 days. Before Google lets you publish, the **Branding** page needs a home page and a privacy policy link, and their domain under **Authorized domains**. `https://github.com/blutarche/requiem`, `https://github.com/blutarche/requiem/blob/main/PRIVACY.md` and `github.com` work. Google may then warn that the app is unverified; as its only user, you can continue past the warning (**Advanced**, then **Go to … (unsafe)**).
+3. **Create an OAuth client of type "TVs and Limited Input devices" and download its JSON.** Under **Clients**, create a client of that type, then download the JSON from the dialog that shows the new client.
+4. **Choose that file.** In the app, click **Choose Client File…** under the steps and pick the JSON; the sign-in starts as soon as Requiem takes it. In the CLI, run `signin-client ytmusic <path>`, then `signin`.
 
-Then run `signin` in the CLI. It prints `Go to https://www.google.com/device and enter XXXX-XXXX`; open that page on any device, enter the code and allow access. `signin` waits until you do or the code expires. The player keeps the sign-in in `google-token.json`, readable only by you, next to `state.json` (`REQUIEM_GOOGLE_TOKEN_FILE` overrides the path). `account` shows the state; `signout` revokes the sign-in, deletes the file and returns once both are done.
+Requiem keeps its own copy of the client, readable only by you, as `~/Library/Application Support/requiem/google-client.json` on macOS, or `$XDG_CONFIG_HOME/requiem/google-client.json` (default `~/.config/requiem/google-client.json`) on Linux. `REQUIEM_GOOGLE_CLIENT_FILE` overrides the path. Saving the JSON there yourself also works; the player reads it when it next starts. Choosing a client with another client ID ends the current sign-in, so you sign in again with the new client.
+
+Signing in shows a code: the app shows it on the Library page, and the CLI's `signin` prints `Go to https://www.google.com/device and enter XXXX-XXXX`. Open that page on any device, enter the code and allow access. `signin` waits until you do or the code expires. The player keeps the sign-in in `google-token.json`, readable only by you, next to `state.json` (`REQUIEM_GOOGLE_TOKEN_FILE` overrides the path). `account` shows the state; `signout` revokes the sign-in, deletes the file and returns once both are done.
 
 What a sign-in gets you:
 
