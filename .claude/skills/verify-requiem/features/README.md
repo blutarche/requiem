@@ -33,9 +33,12 @@ this index first, then follow the feature file that matches what you're checking
 - [library.md](library.md): the signed-out Library and its sign-in buttons.
 - [search.md](search.md): searching both services and reading the results.
 - [queue.md](queue.md): adding to the queue and editing it, without playback.
+- [palette.md](palette.md): the command palette (⌘K), filtering and running actions.
+- [now-playing.md](now-playing.md): the Now Playing page (⌘L).
+- [update.md](update.md): checking for updates against the real release feed.
 
-Not mapped yet: the command palette (⌘K), Now Playing (⌘L), the menu-bar mini player, Raycast,
-self-update and the CLI. Map them before calling a release fully checked.
+Not mapped yet: the menu-bar mini player (the daemon's status item), Raycast and the CLI. Report
+them as skipped until they are mapped.
 
 ## Feature entry contract
 

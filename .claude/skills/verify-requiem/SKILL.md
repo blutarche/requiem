@@ -15,8 +15,8 @@ its own `HOME` and `REQUIEM_SOCKET_DIR` under `/tmp/rqv.XXXXXX`, so the copy beh
 first launch on a new Mac:
 
 - Spotify is signed out.
-- YouTube Music sign-in is unavailable, because there's no `google-client.json`.
-- Home shows the anonymous YouTube Music shelves.
+- YouTube Music has no client, because there's no `google-client.json`.
+- Nothing is in the queue.
 
 It drives the window with `orca computer` against the copy's pid. It never reads or writes the
 real app's files in `~/Library/Application Support/requiem`, and `doctor` and `stop` check their
@@ -74,10 +74,15 @@ How the tree works:
 
 - Tree lines look like `<index> <role> [(state)] <label>`, for example `14 button (selected) Library`.
 - `press` and `set` take a regex for a tree line, not an index. Indexes change after every action.
-- The sidebar's buttons are `Home`, `Search`, `Library` and `Queue`. Match them anchored, as in
-  `'^\s*\d+ button Library$'`, because a shelf card can also contain the word "Library".
+- The sidebar's buttons are `Home`, `Search`, `Library` and `Queue`. Once the queue holds tracks,
+  the Queue button's label becomes `Queue, <count>`. Match them anchored, as in
+  `'^\s*\d+ button Library$'` and `'^\s*\d+ button Queue(, \d+)?$'`, because a shelf card can also
+  contain the word "Library".
 - Menu shortcuts work through `key`: ⌘1–⌘4 for the sidebar views, ⌘K for the palette, ⌘L for
   Now Playing, ⌘R to refresh, ⌘[ to go back.
+- Menu-bar clicks don't work. System Events clicks a menu item without reaching the copy, because
+  the copy shares its bundle id with the installed app. Use a key, the palette, or a window button
+  instead.
 
 After every action:
 
