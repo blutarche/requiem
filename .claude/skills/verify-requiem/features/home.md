@@ -44,8 +44,9 @@ Steps:
 - Signed-in Home can't be driven in the throwaway copy: that needs the real credentials, which
   never get copied. `home-page` and `home-open` therefore show only in `--demo`, so report them
   as skipped in the window, or drive them on the installed app if the user is fine with that.
-- `Made for you` is every rootlist playlist whose id starts with `37i9dQZF1`, meaning the ones
-  Spotify owns. That includes editorial playlists the user saved, such as `Sleep`, not just mixes.
+- `Made for you` is every rootlist playlist whose id starts with `37i9dQZF1` or `37i9dQZEVX`
+  (Discover Weekly, Release Radar), meaning the ones Spotify owns. That includes editorial
+  playlists the user saved, such as `Sleep`, not just mixes.
 - Pressing a track in `Liked songs` starts playback, which makes sound. Don't press one.
 - Before 0.3.1, Home showed anonymous YouTube Music shelves (`Quick picks`,
   `Trending community playlists`). Those are gone on purpose.

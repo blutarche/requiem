@@ -67,9 +67,9 @@ const FULL_PLAYLISTS_BUDGET: Duration = Duration::from_secs(30);
 const MAX_COLLECTION_TRACKS: usize = 1000;
 /// Home's most recently liked tracks.
 const HOME_LIKED: usize = 20;
-/// The ids of the playlists Spotify makes start with this: its mixes, Daily Mixes, "This Is"
-/// and editorial playlists alike.
-const MADE_FOR_YOU: &str = "37i9dQZF1";
+/// The ids of the playlists Spotify makes start with one of these: its mixes, Daily Mixes,
+/// "This Is" and editorial playlists, then Discover Weekly and Release Radar.
+const MADE_FOR_YOU: [&str; 2] = ["37i9dQZF1", "37i9dQZEVX"];
 const IMAGE_URL: &str = "https://i.scdn.co/image/";
 const LIKED: &str = "Liked Songs";
 const LIKED_ID: &str = "collection";
@@ -233,7 +233,12 @@ impl Librespot {
             },
             playlists(session),
         );
-        Ok(home_shelves(liked?, playlists?))
+        // Without the liked songs, Home still has the playlists.
+        let liked = liked.unwrap_or_else(|e| {
+            eprintln!("[spotify] Home left out the liked songs: {}", shown(&e));
+            Vec::new()
+        });
+        Ok(home_shelves(liked, playlists?))
     }
 
     async fn collection(&self, id: &str) -> Result<Vec<Shelf>, ProviderError> {
@@ -841,7 +846,7 @@ fn home_shelves(liked: Vec<Track>, playlists: Vec<Collection>) -> Vec<Shelf> {
     let (made, own): (Vec<_>, Vec<_>) = playlists.into_iter().partition(|c| {
         c.id.id
             .strip_prefix(PLAYLIST_PREFIX)
-            .is_some_and(|id| id.starts_with(MADE_FOR_YOU))
+            .is_some_and(|id| MADE_FOR_YOU.iter().any(|p| id.starts_with(p)))
     });
     let own = std::iter::once(liked_card()).chain(own);
     [
@@ -1395,11 +1400,11 @@ mod tests {
             got,
             [
                 ("Liked songs", vec!["Song"]),
-                ("Made for you", vec!["Daily Mix 2", "This Is Kado"]),
                 (
-                    "Your playlists",
-                    vec!["Liked Songs", "Mine", "Discover Weekly"]
+                    "Made for you",
+                    vec!["Daily Mix 2", "This Is Kado", "Discover Weekly"]
                 ),
+                ("Your playlists", vec!["Liked Songs", "Mine"]),
             ]
         );
     }
