@@ -688,6 +688,25 @@ fn browse_results_go_only_to_the_requester_and_accounts_to_everyone() {
 }
 
 #[test]
+fn an_imported_client_reaches_the_provider() {
+    let rig = rig();
+    let (a, arx) = rig.client(Role::Gui);
+    take(&arx, IDLE_SNAPSHOT);
+    // As large as a provider takes.
+    let json = format!(
+        r#"{{"client_id":"id","pad":"{}"}}"#,
+        "x".repeat(64 * 1024 - 32)
+    );
+    a.send(Command::ImportSignInClient {
+        provider: ProviderId("fake".into()),
+        json: json.clone(),
+    })
+    .unwrap();
+    assert_eq!(next_event(&arx), account());
+    assert_eq!(rig.provider.imported(), [json]);
+}
+
+#[test]
 fn slow_client_loses_positions_then_its_connection() {
     let rig = rig();
     let sub = rig.server.subscribe();

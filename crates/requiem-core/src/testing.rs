@@ -121,6 +121,8 @@ struct ProviderState {
     sign_in_scripts: VecDeque<SignInScript>,
     sign_out_gate: Option<Gate>,
     sign_out_error: Option<ProviderError>,
+    import_error: Option<ProviderError>,
+    imported: Vec<String>,
     resolve_calls: HashMap<String, usize>,
     search_calls: usize,
     browse_calls: Vec<Page>,
@@ -139,6 +141,8 @@ impl Default for ProviderState {
             sign_in_scripts: VecDeque::new(),
             sign_out_gate: None,
             sign_out_error: None,
+            import_error: None,
+            imported: Vec::new(),
             resolve_calls: HashMap::new(),
             search_calls: 0,
             browse_calls: Vec::new(),
@@ -206,6 +210,16 @@ impl FakeProvider {
     /// confirm.
     pub fn fail_sign_out(&self, e: ProviderError) {
         self.state.lock().unwrap().sign_out_error = Some(e);
+    }
+
+    /// The next `import_client` fails with `e` and changes nothing.
+    pub fn fail_import(&self, e: ProviderError) {
+        self.state.lock().unwrap().import_error = Some(e);
+    }
+
+    /// The JSON of every `import_client` call, in order.
+    pub fn imported(&self) -> Vec<String> {
+        self.state.lock().unwrap().imported.clone()
     }
 
     pub fn set_account(&self, state: AccountState) {
@@ -367,6 +381,20 @@ impl Provider for FakeProvider {
         }
         self.set_account(AccountState::SignedOut);
         error.map_or(Ok(()), Err)
+    }
+
+    /// Like a provider that was missing only its client, a successful import makes an
+    /// `Unavailable` account `SignedOut`.
+    fn import_client(&self, json: &str) -> Result<(), ProviderError> {
+        let mut st = self.state.lock().unwrap();
+        st.imported.push(json.to_owned());
+        if let Some(e) = st.import_error.take() {
+            return Err(e);
+        }
+        if matches!(st.account, AccountState::Unavailable(_)) {
+            st.account = AccountState::SignedOut;
+        }
+        Ok(())
     }
 
     fn resolve(&self, track: &TrackId) -> Result<AudioSource, ProviderError> {

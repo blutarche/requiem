@@ -155,4 +155,8 @@ impl Provider for YtMusicProvider {
     fn sign_out(&self) -> Result<(), ProviderError> {
         self.google.sign_out()
     }
+
+    fn import_client(&self, json: &str) -> Result<(), ProviderError> {
+        self.google.import_client(json)
+    }
 }

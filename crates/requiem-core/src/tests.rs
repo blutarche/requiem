@@ -1441,6 +1441,89 @@ fn a_sign_out_with_no_sign_in_running_hides_no_later_error() {
     );
 }
 
+const CLIENT: &str = r#"{"installed":{"client_id":"id","client_secret":"s"}}"#;
+
+fn import(r: &Rig) {
+    r.send(Command::ImportSignInClient {
+        provider: fake_id(),
+        json: CLIENT.into(),
+    });
+}
+
+#[test]
+fn an_imported_client_announces_the_account() {
+    let provider = FakeProvider::new("fake");
+    provider.set_account(AccountState::Unavailable("no client".into()));
+    let r = rig_with(provider, vec![], config());
+    import(&r);
+    r.wait_event(is_account(AccountState::SignedOut));
+    assert_eq!(r.provider.imported(), [CLIENT]);
+    // An import that leaves the state as it was is still answered.
+    import(&r);
+    r.wait_event(is_account(AccountState::SignedOut));
+    assert_eq!(r.provider.imported().len(), 2);
+}
+
+#[test]
+fn a_failed_import_says_why() {
+    let provider = FakeProvider::new("fake");
+    provider.set_account(AccountState::Unavailable("no client".into()));
+    let r = rig_with(provider, vec![], config());
+    r.provider.fail_import(ProviderError::SignInRequired(
+        "not a Google OAuth client".into(),
+    ));
+    import(&r);
+    let mut seen = r.events_until(1, |e| matches!(e, Event::AccountError { .. }));
+    assert_eq!(
+        seen.pop(),
+        Some(Event::AccountError {
+            provider: fake_id(),
+            error: "not a Google OAuth client".into(),
+        })
+    );
+    // The error is the whole answer.
+    r.send(Command::SetVolume(55));
+    let after = r.events_until(1, |e| *e == Event::Volume(55));
+    assert_eq!(after, [Event::Volume(55)]);
+}
+
+struct NoAccounts;
+
+impl Provider for NoAccounts {
+    fn id(&self) -> ProviderId {
+        ProviderId("plain".into())
+    }
+
+    fn search(&self, _query: &str, _limit: usize) -> Result<Vec<Track>, ProviderError> {
+        Ok(Vec::new())
+    }
+
+    fn resolve(&self, _track: &TrackId) -> Result<AudioSource, ProviderError> {
+        Err(ProviderError::Unplayable("no tracks".into()))
+    }
+}
+
+#[test]
+fn a_provider_with_no_client_to_import_says_so() {
+    let engine = FakeEngineHandle::new();
+    let session = Session::spawn(vec![Arc::new(NoAccounts)], engine.factory(), config());
+    let rx = session.subscribe();
+    let plain = ProviderId("plain".into());
+    session.send(Command::ImportSignInClient {
+        provider: plain.clone(),
+        json: CLIENT.into(),
+    });
+    let ev = std::iter::from_fn(|| rx.recv_timeout(SECS(5)).ok())
+        .find(|e| matches!(e, Event::AccountError { .. }));
+    assert_eq!(
+        ev,
+        Some(Event::AccountError {
+            provider: plain,
+            error: "this provider has no client to import".into(),
+        })
+    );
+}
+
 fn named_track(provider: &str, id: &str) -> Track {
     let mut t = track(id);
     t.id.provider = ProviderId(provider.into());
@@ -1640,6 +1723,10 @@ fn sign_in_and_out_of_an_unknown_provider_report_at_once() {
         },
         Command::SignOut {
             provider: nope.clone(),
+        },
+        Command::ImportSignInClient {
+            provider: nope.clone(),
+            json: CLIENT.into(),
         },
     ] {
         r.send(cmd);

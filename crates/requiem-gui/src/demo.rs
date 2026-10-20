@@ -544,7 +544,8 @@ impl Daemon {
             Command::Shutdown
             | Command::Cue(_)
             | Command::SignIn { .. }
-            | Command::SignOut { .. } => Vec::new(),
+            | Command::SignOut { .. }
+            | Command::ImportSignInClient { .. } => Vec::new(),
         }
     }
 

@@ -1,4 +1,5 @@
-use std::io::{self, BufRead, Write};
+use std::fs::File;
+use std::io::{self, BufRead, Read, Write};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -20,9 +21,11 @@ const SYNC_TIMEOUT: Duration = Duration::from_secs(2);
 const SIGN_IN_START: Duration = Duration::from_secs(60);
 /// How long `signin` waits past the code's expiry for the provider to report it.
 const SIGN_IN_GRACE: Duration = Duration::from_secs(30);
-/// How long `signout` waits for the provider to report it; Google's revoke, the slowest part,
-/// gives up within 15 s.
+/// How long `signout` and `signin-client` wait for the provider to report it; Google's
+/// revoke, the slowest part, gives up within 15 s.
 const SIGN_OUT_WAIT: Duration = Duration::from_secs(30);
+/// The largest file `signin-client` sends; providers take no more.
+const MAX_CLIENT_FILE: u64 = 64 * 1024;
 
 /// How long `update check` waits: a check, a 10 min download, then staging.
 const UPDATE_CHECK_WAIT: Duration = Duration::from_secs(12 * 60);
@@ -57,6 +60,9 @@ commands:
                         expires
   signout [provider]    sign out (spotify or ytmusic; default: the first signed in) and forget
                         the saved sign-in; waits until the provider reports it
+  signin-client <provider> <path>
+                        give the provider your own OAuth client, the JSON file its console
+                        downloads (ytmusic: Google Cloud); waits until the provider reports it
   account               show the sign-in state
   mark <name>           print MARK <name> <unix_millis>
   update                with --connect: the self-update status
@@ -134,8 +140,8 @@ struct SignInWait {
     failed: bool,
 }
 
-/// A `signout` waiting for the daemon's answer.
-struct SignOutWait {
+/// A `signout` or `signin-client` waiting for the daemon's answer.
+struct AccountWait {
     provider: ProviderId,
     /// The first state reported after the request.
     ended: Option<AccountState>,
@@ -151,7 +157,8 @@ struct Ui {
     listing: Option<Vec<Item>>,
     accounts: Vec<(ProviderId, AccountState)>,
     sign_in: Option<SignInWait>,
-    sign_out: Option<SignOutWait>,
+    sign_out: Option<AccountWait>,
+    import_client: Option<AccountWait>,
     queue: Vec<Track>,
     current: Option<usize>,
     state: PlayState,
@@ -280,8 +287,11 @@ impl Hub {
                 if let Some(w) = ui.sign_in.as_mut().filter(|w| w.provider == provider) {
                     w.failed = true;
                 }
-                if let Some(w) = ui.sign_out.as_mut().filter(|w| w.provider == provider) {
-                    w.failed = true;
+                let ui = &mut *ui;
+                for w in [&mut ui.sign_out, &mut ui.import_client] {
+                    if let Some(w) = w.as_mut().filter(|w| w.provider == provider) {
+                        w.failed = true;
+                    }
                 }
                 self.emit(
                     &format!("account error: {error}"),
@@ -393,8 +403,10 @@ impl Hub {
                 other => w.ended = Some(other.clone()),
             }
         }
-        if let Some(w) = ui.sign_out.as_mut().filter(|w| w.provider == provider) {
-            w.ended.get_or_insert_with(|| state.clone());
+        for w in [&mut ui.sign_out, &mut ui.import_client] {
+            if let Some(w) = w.as_mut().filter(|w| w.provider == provider) {
+                w.ended.get_or_insert_with(|| state.clone());
+            }
         }
         match ui.accounts.iter_mut().find(|(p, _)| *p == provider) {
             Some((_, known)) => {
@@ -621,6 +633,18 @@ fn unix_now() -> u64 {
         .map_or(0, |d| d.as_secs())
 }
 
+/// The file's text, up to `MAX_CLIENT_FILE` bytes. Errors never quote it.
+fn read_client_file(path: &str) -> Result<String, String> {
+    let mut bytes = Vec::new();
+    File::open(path)
+        .and_then(|f| f.take(MAX_CLIENT_FILE + 1).read_to_end(&mut bytes))
+        .map_err(|e| e.to_string())?;
+    if bytes.len() as u64 > MAX_CLIENT_FILE {
+        return Err(format!("over {} KiB", MAX_CLIENT_FILE / 1024));
+    }
+    String::from_utf8(bytes).map_err(|_| "not UTF-8 text".to_owned())
+}
+
 fn track_label(t: &Track) -> String {
     format!("{} — {}", t.artists.join(", "), t.title)
 }
@@ -705,6 +729,7 @@ impl<'a> App<'a> {
                 accounts: Vec::new(),
                 sign_in: None,
                 sign_out: None,
+                import_client: None,
                 queue: Vec::new(),
                 current: None,
                 state: PlayState::Stopped,
@@ -805,6 +830,7 @@ impl<'a> App<'a> {
             },
             "signin" => return self.sign_in(cmd, arg),
             "signout" => return self.sign_out(cmd, arg),
+            "signin-client" => return self.import_client(cmd, arg),
             "account" => {
                 let ui = self.accounts_known(None);
                 if ui.accounts.is_empty() {
@@ -1128,48 +1154,107 @@ impl<'a> App<'a> {
     /// when the provider is left neither signed in nor signing in, so that a `signin` after it
     /// starts over, and no error came with it.
     fn sign_out(&self, cmd: &str, arg: &str) -> Flow {
-        let failed = || {
-            if self.script {
-                Flow::Exit(2)
-            } else {
-                Flow::Continue
-            }
-        };
         let Some(provider) = self.account_provider(arg, true) else {
             return Flow::Continue;
         };
-        let mut ui = self.hub.lock_ui();
-        // A closed connection is reported by the wait below.
-        if !ui.closed && !ui.accounts.iter().any(|(p, _)| *p == provider) {
-            drop(ui);
-            self.hub.error(&format!("no provider {}", provider.0));
-            return failed();
+        if !self.has_account(&provider) {
+            return self.failed();
         }
-        ui.sign_out = Some(SignOutWait {
+        self.hub.lock_ui().sign_out = Some(AccountWait {
             provider: provider.clone(),
             ended: None,
             failed: false,
         });
-        drop(ui);
         self.player.send(Command::SignOut { provider });
+        let Some(w) = self.wait_answer(|ui| &mut ui.sign_out) else {
+            return self.lost(true).unwrap_or(Flow::Continue);
+        };
+        let left = w.ended.as_ref().is_some_and(|state| {
+            !matches!(
+                state,
+                AccountState::SignedIn { .. } | AccountState::Pending { .. }
+            )
+        });
+        if left && !w.failed {
+            self.hub.ack(cmd);
+            return Flow::Continue;
+        }
+        if !w.failed && w.ended.is_none() {
+            self.hub.error("timed out waiting for sign-out");
+        }
+        self.failed()
+    }
+
+    /// Reads the client file at the path in `arg`, sends `ImportSignInClient` and waits up to
+    /// `SIGN_OUT_WAIT` for the provider's account, the sign of success.
+    fn import_client(&self, cmd: &str, arg: &str) -> Flow {
+        let Some((name, path)) = arg
+            .split_once(char::is_whitespace)
+            .map(|(p, f)| (p, f.trim()))
+        else {
+            self.hub.error("usage: signin-client <provider> <path>");
+            return self.failed();
+        };
+        let json = match read_client_file(path) {
+            Ok(json) => json,
+            Err(e) => {
+                self.hub.error(&format!("signin-client: {path}: {e}"));
+                return self.failed();
+            }
+        };
+        let provider = ProviderId(name.to_owned());
+        if !self.has_account(&provider) {
+            return self.failed();
+        }
+        self.hub.lock_ui().import_client = Some(AccountWait {
+            provider: provider.clone(),
+            ended: None,
+            failed: false,
+        });
+        self.player
+            .send(Command::ImportSignInClient { provider, json });
+        let Some(w) = self.wait_answer(|ui| &mut ui.import_client) else {
+            return self.lost(true).unwrap_or(Flow::Continue);
+        };
+        if w.failed {
+            return self.failed();
+        }
+        if w.ended.is_none() {
+            self.hub.error("timed out waiting for signin-client");
+            return self.failed();
+        }
+        self.hub.ack(cmd);
+        Flow::Continue
+    }
+
+    /// Whether `provider` has an account, once the UI knows; says so when it has none. A
+    /// closed connection passes, for the caller's wait to report.
+    fn has_account(&self, provider: &ProviderId) -> bool {
+        let ui = self.accounts_known(Some(provider));
+        let known = ui.closed || ui.accounts.iter().any(|(p, _)| p == provider);
+        drop(ui);
+        if !known {
+            self.hub.error(&format!("no provider {}", provider.0));
+        }
+        known
+    }
+
+    /// Waits up to `SIGN_OUT_WAIT` for the answer the `slot` of the UI waits on, and takes
+    /// it. `None` when the connection ended first.
+    fn wait_answer(&self, slot: fn(&mut Ui) -> &mut Option<AccountWait>) -> Option<AccountWait> {
         let deadline = Instant::now() + SIGN_OUT_WAIT;
         let mut ui = self.hub.lock_ui();
-        let outcome = loop {
-            let w = ui.sign_out.as_ref().expect("set above");
-            if w.failed {
-                break Some(false);
-            }
-            if let Some(state) = &w.ended {
-                break Some(!matches!(
-                    state,
-                    AccountState::SignedIn { .. } | AccountState::Pending { .. }
-                ));
+        loop {
+            let w = slot(&mut ui).as_ref().expect("set by the caller");
+            if w.failed || w.ended.is_some() {
+                break;
             }
             if ui.closed {
-                break None;
+                slot(&mut ui).take();
+                return None;
             }
             let Some(left) = deadline.checked_duration_since(Instant::now()) else {
-                break Some(false);
+                break;
             };
             ui = self
                 .hub
@@ -1177,24 +1262,15 @@ impl<'a> App<'a> {
                 .wait_timeout(ui, left)
                 .unwrap_or_else(PoisonError::into_inner)
                 .0;
-        };
-        let timed_out = ui
-            .sign_out
-            .take()
-            .is_some_and(|w| !w.failed && w.ended.is_none());
-        drop(ui);
-        match outcome {
-            Some(true) => {
-                self.hub.ack(cmd);
-                Flow::Continue
-            }
-            None => self.lost(true).unwrap_or(Flow::Continue),
-            Some(false) => {
-                if timed_out {
-                    self.hub.error("timed out waiting for sign-out");
-                }
-                failed()
-            }
+        }
+        slot(&mut ui).take()
+    }
+
+    fn failed(&self) -> Flow {
+        if self.script {
+            Flow::Exit(2)
+        } else {
+            Flow::Continue
         }
     }
 
