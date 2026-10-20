@@ -628,9 +628,9 @@ impl Google {
     }
 
     /// Keeps the user's own client, as just its id and secret, where `load_client` reads it,
-    /// and uses it from now on. A sign-in through another client is revoked, best effort, and
-    /// forgotten: Google ties a refresh token to the client it was issued to. Errors never
-    /// quote `json`.
+    /// and uses it from now on. A sign-in through another client, or through a client this
+    /// can no longer read, is revoked, best effort, and forgotten: Google ties a refresh token
+    /// to the client it was issued to. Errors never quote `json`.
     pub(crate) fn import_client(&self, json: &str) -> Result<(), ProviderError> {
         if json.len() as u64 > MAX_FILE_BYTES {
             return Err(ProviderError::SignInRequired(format!(
@@ -657,7 +657,10 @@ impl Google {
         // started before it and is cancelled here.
         let (result, dropped) = {
             let mut slot = locked(&self.client);
-            let changed = slot.as_ref().is_ok_and(|c| c.client_id != client.client_id);
+            let changed = match &*slot {
+                Ok(c) => c.client_id != client.client_id,
+                Err(_) => locked(&self.state).refresh.is_some(),
+            };
             save_client(path, body.as_bytes()).map_err(|e| {
                 ProviderError::SignInRequired(format!(
                     "cannot save the Google OAuth client to {}: {e}",
@@ -1702,6 +1705,24 @@ mod tests {
             }
             self.inner.post_form(url, form)
         }
+    }
+
+    #[test]
+    fn an_import_over_an_unreadable_client_forgets_the_sign_in() {
+        let rig = Rig::new();
+        rig.signed_in();
+        fs::write(rig.tmp.path().join("client.json"), "{").unwrap();
+        let g = rig.google();
+        assert!(matches!(g.account(), AccountState::Unavailable(_)));
+        rig.api.script(REVOKE_URL, 200, "{}");
+        g.import_client(r#"{"client_id":"cid","client_secret":"csecret"}"#)
+            .unwrap();
+        assert_eq!(g.account(), AccountState::SignedOut);
+        assert!(!rig.token_path().exists());
+        assert_eq!(
+            rig.api.forms(REVOKE_URL),
+            [vec![("token".into(), "RT1".into())]]
+        );
     }
 
     #[test]

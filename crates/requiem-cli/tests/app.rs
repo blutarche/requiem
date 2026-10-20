@@ -1218,6 +1218,42 @@ fn a_failed_signin_client_says_why_and_exits_2_without_an_ack() {
 }
 
 #[test]
+fn signin_client_waits_past_another_signins_code() {
+    let r = rig();
+    let (import, sign_in) = (Gate::new(), Gate::new());
+    r.provider.gate_import(import.clone());
+    r.provider.script_sign_in(SignInScript {
+        pending: Some(pending()),
+        gate: Some(sign_in.clone()),
+        outcome: Ok(AccountState::SignedIn { name: None }),
+    });
+    let file = TempFile::new("client.json", CLIENT.as_bytes());
+    let line = format!("signin-client fake {}", file.0.display());
+    let flow = thread::scope(|s| {
+        let waiter = s.spawn(|| r.app(true).exec(&line));
+        r.provider.wait_import_calls(1);
+        // Another client's sign-in shows its code while the import runs.
+        r.session.send(Command::SignIn {
+            provider: ProviderId("fake".into()),
+        });
+        wait_out(
+            &r,
+            "Go to https://www.google.com/device and enter GQVQ-JKEC\n",
+            1,
+        );
+        thread::sleep(Duration::from_millis(200));
+        assert!(!waiter.is_finished(), "{}", r.out.text());
+        import.release();
+        sign_in.release();
+        waiter.join().unwrap()
+    });
+    assert_eq!(flow, Flow::Continue);
+    let text = r.out.text();
+    assert!(text.contains("signed in\n"), "{text}");
+    assert!(!text.contains("error"), "{text}");
+}
+
+#[test]
 fn signin_client_checks_its_arguments_and_file_before_sending() {
     let r = needs_setup_rig();
     let good = TempFile::new("good.json", CLIENT.as_bytes());

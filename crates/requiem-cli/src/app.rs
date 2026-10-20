@@ -403,8 +403,10 @@ impl Hub {
                 other => w.ended = Some(other.clone()),
             }
         }
-        for w in [&mut ui.sign_out, &mut ui.import_client] {
-            if let Some(w) = w.as_mut().filter(|w| w.provider == provider) {
+        // A concurrent `signin`'s code is no answer to an import.
+        let pending = matches!(state, AccountState::Pending { .. });
+        for (w, answers) in [(&mut ui.sign_out, true), (&mut ui.import_client, !pending)] {
+            if let Some(w) = w.as_mut().filter(|w| answers && w.provider == provider) {
                 w.ended.get_or_insert_with(|| state.clone());
             }
         }

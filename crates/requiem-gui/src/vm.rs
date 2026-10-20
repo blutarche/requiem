@@ -602,11 +602,21 @@ impl UiState {
         }
     }
 
-    /// A pending sign-in shows first, then the setup sheet, then the Library once any provider
-    /// is signed in; with none, the sign-in choices.
+    /// The setup sheet shows first, as the user's latest choice, then a pending sign-in, then
+    /// the Library once any provider is signed in; with none, the sign-in choices. A provider
+    /// with its sheet open needs setup, so it has no sign-in pending.
     pub fn library_view(&self) -> LibraryView {
         if self.accounts.is_empty() {
             return LibraryView::Loading;
+        }
+        if let Some(setup) = &self.setup
+            && let Some(reason) = self.needs_setup(&setup.provider)
+        {
+            return LibraryView::Setup {
+                provider: setup.provider.clone(),
+                reason: reason.to_owned(),
+                error: setup.error.clone(),
+            };
         }
         if let Some((
             provider,
@@ -625,15 +635,6 @@ impl UiState {
                 verification_url: verification_url.clone(),
                 user_code: user_code.clone(),
                 expires_at_unix: *expires_at_unix,
-            };
-        }
-        if let Some(setup) = &self.setup
-            && let Some(reason) = self.needs_setup(&setup.provider)
-        {
-            return LibraryView::Setup {
-                provider: setup.provider.clone(),
-                reason: reason.to_owned(),
-                error: setup.error.clone(),
             };
         }
         let offers = self.sign_in_offers();
@@ -1288,6 +1289,10 @@ impl Vm {
             }
             Intent::SignIn(provider) if can.player && self.knows(&provider) => {
                 if self.ui.needs_setup(&provider).is_none() {
+                    // The sheet would cover the code this sign-in shows.
+                    if self.ui.setup.take().is_some() {
+                        self.dirty |= Dirty::LIBRARY;
+                    }
                     return vec![Command::SignIn { provider }];
                 }
                 if self
@@ -1311,7 +1316,12 @@ impl Vm {
                 };
                 let json = match file {
                     Ok(json) if can.player => json,
-                    Ok(_) => return Vec::new(),
+                    Ok(_) => {
+                        setup.error =
+                            Some("Not connected to the player. Try again in a moment.".into());
+                        self.dirty |= Dirty::LIBRARY;
+                        return Vec::new();
+                    }
                     Err(e) => {
                         setup.error = Some(e);
                         self.dirty |= Dirty::LIBRARY;
@@ -4446,17 +4456,31 @@ mod tests {
                 .iter()
                 .any(|c| matches!(c, Command::SignIn { .. }))
         );
-        // A pending sign-in shows over the sheet.
+        // Another provider's pending sign-in stays under the sheet, the user's latest choice.
         let mut vm = setting_up();
         vm.apply(spotify_account(AccountState::Pending {
             verification_url: "https://www.spotify.com/pair".into(),
             user_code: "ABC123".into(),
             expires_at_unix: 1_000,
         }));
+        assert_eq!(vm.ui().library_view(), sheet(None));
+        vm.intent(Intent::CancelSetup);
         assert!(matches!(
             vm.ui().library_view(),
             LibraryView::Pending { .. }
         ));
+        // Signing in to it closes the sheet, which would cover its code.
+        assert!(vm.intent(Intent::SignIn(provider())).is_empty());
+        assert_eq!(vm.ui().library_view(), sheet(None));
+        vm.take_dirty();
+        assert_eq!(
+            vm.intent(Intent::SignIn(spotify())),
+            [Command::SignIn {
+                provider: spotify()
+            }]
+        );
+        assert_eq!(vm.ui().setup, None);
+        assert!(vm.take_dirty().contains(Dirty::LIBRARY));
         // A new connection starts the Library over.
         vm.link(Link::Lost(LinkError::NotResponding));
         vm.link(Link::Connected);
@@ -4466,6 +4490,21 @@ mod tests {
             LibraryView::SignedOut(vec![provider()])
         );
         assert!(import(&mut vm).is_empty());
+    }
+
+    #[test]
+    fn a_client_chosen_while_disconnected_says_so() {
+        let mut vm = setting_up();
+        vm.link(Link::Lost(LinkError::NotResponding));
+        vm.take_dirty();
+        assert!(import(&mut vm).is_empty());
+        let setup = vm.ui().setup.as_ref().unwrap();
+        assert_eq!(
+            setup.error.as_deref(),
+            Some("Not connected to the player. Try again in a moment.")
+        );
+        assert!(!setup.importing);
+        assert!(vm.take_dirty().contains(Dirty::LIBRARY));
     }
 
     #[test]
