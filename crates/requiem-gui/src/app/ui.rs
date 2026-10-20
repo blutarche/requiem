@@ -1238,7 +1238,9 @@ impl Ui {
     }
 
     pub fn cancel_sign_in(&self) {
-        if let LibraryView::Pending { provider, .. } = self.vm.borrow().ui().library_view() {
+        // Bound first: an `if let` keeps the borrow through its body, and `intent` borrows mutably.
+        let view = self.vm.borrow().ui().library_view();
+        if let LibraryView::Pending { provider, .. } = view {
             self.intent(Intent::SignOut(provider));
         }
     }
