@@ -13,8 +13,8 @@ usage: requiem-gui [--demo] [--smoke] [--snapshot <png>] [--view <view>]
   --view <view>      the view shown at start: home (default), search, library, queue or
                      palette; with --demo also home-scrolled, home-shelf-paged, collection,
                      now-playing, now-playing-empty, now-playing-last, library-signed-out,
-                     library-unavailable, signin, empty, disconnected, toast, out-of-date,
-                     update-ready, update-failed, not-updatable or up-to-date";
+                     library-unavailable, signin, signin-setup, empty, disconnected, toast,
+                     out-of-date, update-ready, update-failed, not-updatable or up-to-date";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum View {
@@ -43,6 +43,8 @@ pub enum View {
     LibraryUnavailable,
     /// Demo only: the Library showing a Spotify sign-in code.
     SignIn,
+    /// Demo only: the Library's YouTube Music setup sheet.
+    SignInSetup,
     /// Demo only: the search view before any query.
     Empty,
     /// Demo only: the reconnecting banner.
@@ -62,7 +64,7 @@ pub enum View {
 }
 
 impl View {
-    const NAMES: [(&str, View); 22] = [
+    const NAMES: [(&str, View); 23] = [
         ("home", View::Home),
         ("search", View::Search),
         ("library", View::Library),
@@ -77,6 +79,7 @@ impl View {
         ("library-signed-out", View::LibrarySignedOut),
         ("library-unavailable", View::LibraryUnavailable),
         ("signin", View::SignIn),
+        ("signin-setup", View::SignInSetup),
         ("empty", View::Empty),
         ("disconnected", View::Disconnected),
         ("toast", View::Toast),
@@ -248,6 +251,7 @@ mod tests {
             ("library-signed-out", View::LibrarySignedOut),
             ("library-unavailable", View::LibraryUnavailable),
             ("signin", View::SignIn),
+            ("signin-setup", View::SignInSetup),
             ("empty", View::Empty),
             ("disconnected", View::Disconnected),
             ("toast", View::Toast),

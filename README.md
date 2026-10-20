@@ -105,7 +105,7 @@ Once signed in, search lists Spotify results first, and Library shows Liked Song
 
 ## Snapshots
 
-`requiem-gui --demo --snapshot out.png --view <view>` renders a view from fixed fake data without showing a window: `home`, `search`, `library`, `queue`, `palette`, `collection`, `library-signed-out`, `library-unavailable`, `signin`, `empty`, `disconnected`, `toast`, `out-of-date`, `update-ready`, `update-failed`, `not-updatable` or `up-to-date`. For `home` and `library`, `--snapshot` also works without `--demo`: it asks the running player (starting one if needed), waits up to 20 s for the page and its covers, then writes the PNG, exiting 1 if the page fails to load.
+`requiem-gui --demo --snapshot out.png --view <view>` renders a view from fixed fake data without showing a window: `home`, `search`, `library`, `queue`, `palette`, `collection`, `library-signed-out`, `library-unavailable`, `signin`, `signin-setup`, `empty`, `disconnected`, `toast`, `out-of-date`, `update-ready`, `update-failed`, `not-updatable` or `up-to-date`. For `home` and `library`, `--snapshot` also works without `--demo`: it asks the running player (starting one if needed), waits up to 20 s for the page and its covers, then writes the PNG, exiting 1 if the page fails to load.
 
 ## Footprint
 
