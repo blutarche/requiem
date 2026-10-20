@@ -105,7 +105,9 @@ ls -l "$dir"
 [ "$publish" -eq 1 ] || exit 0
 
 git tag -a "$tag" -m "Requiem $version"
-git push origin "$tag"
+# Through gh's credentials, which the steps below need anyway: a non-interactive shell can't
+# answer git's own credential prompt.
+git -c credential.helper= -c 'credential.helper=!gh auth git-credential' push origin "$tag"
 
 notes="Download $dmg_name, open it and drag Requiem onto Applications. The first time, macOS blocks it because it isn't notarized: click Done, then Open Anyway in System Settings → Privacy & Security.
 
