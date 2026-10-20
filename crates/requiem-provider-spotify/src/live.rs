@@ -131,14 +131,11 @@ fn decode(src: AudioSource, first: u64, seek_to: i64) {
     );
 }
 
-/// Run with `cargo test -p requiem-provider-spotify live -- --ignored --nocapture`. Uses the
-/// sign-in file at its default place; never prints or copies it.
-#[test]
-#[ignore = "talks to Spotify with the real sign-in; run by hand"]
-fn live() {
+/// A provider whose helper serves from this process, in `tmp`, with the sign-in file at its
+/// default place, which it never prints or copies.
+fn live_provider(tmp: &TempDir) -> SpotifyProvider {
     let creds = crate::credentials_file().expect("no place for the sign-in file");
     assert!(creds.exists(), "sign in to Spotify first");
-    let tmp = TempDir::new();
     let socket = tmp.path().join("spotify.sock");
     let rt = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(crate::HELPER_WORKERS)
@@ -152,7 +149,15 @@ fn live() {
     ));
     let listener = server::bind(&socket).unwrap();
     thread::spawn(move || server::accept_loop(&listener, &backend));
-    let p = SpotifyProvider::with_running_helper(socket, Some(creds));
+    SpotifyProvider::with_running_helper(socket, Some(creds))
+}
+
+/// Run with `cargo test -p requiem-provider-spotify live -- --ignored --nocapture`.
+#[test]
+#[ignore = "talks to Spotify with the real sign-in; run by hand"]
+fn live() {
+    let tmp = TempDir::new();
+    let p = live_provider(&tmp);
     let spotify = ProviderId(PROVIDER_ID.into());
     assert_eq!(p.account(), AccountState::SignedIn { name: None });
 
@@ -203,4 +208,33 @@ fn live() {
         println!("  resolved in {:?}", t.elapsed());
         decode(src, 10, 60);
     }
+}
+
+/// Run with `cargo test -p requiem-provider-spotify live_home -- --ignored --nocapture`.
+/// Prints shelf titles and counts only.
+#[test]
+#[ignore = "talks to Spotify with the real sign-in; run by hand"]
+fn live_home() {
+    let tmp = TempDir::new();
+    let p = live_provider(&tmp);
+    assert!(p.has_home());
+    let home = p.browse(&Page::Home).unwrap();
+    for shelf in &home {
+        println!("  {}: {} items", shelf.title, shelf.items.len());
+        assert!(!shelf.items.is_empty());
+    }
+    let titles: Vec<_> = home.iter().map(|s| s.title.as_str()).collect();
+    assert_eq!(titles, ["Liked songs", "Made for you", "Your playlists"]);
+    assert!(home[0].items.len() <= 20);
+    assert!(home[0].items.iter().all(|i| matches!(i, Item::Track(_))));
+    assert!(
+        home[1..]
+            .iter()
+            .flat_map(|s| &s.items)
+            .all(|i| matches!(i, Item::Collection(_)))
+    );
+    let Some(Item::Collection(liked)) = home[2].items.first() else {
+        panic!("no Liked Songs first");
+    };
+    assert_eq!(liked.title, "Liked Songs");
 }
