@@ -1,0 +1,228 @@
+#!/usr/bin/env bash
+# Runs a Requiem.app as a fresh install: a throwaway HOME and socket dir, so it has no accounts,
+# no Google client file, no queue, and never touches the real app's files or daemon.
+# Needs the Bash sandbox off (window server, orca, Unix sockets).
+set -euo pipefail
+
+here=$(cd "$(dirname "$0")" && pwd)
+repo=$(git -C "$here" rev-parse --show-toplevel)
+EVIDENCE_ROOT=${RQV_EVIDENCE:-${TMPDIR:-/tmp}/requiem-verify}
+ORCA=${ORCA_CLI_COMMAND:-orca}
+REAL_SUPPORT="$HOME/Library/Application Support/requiem"
+REAL_FILES=(spotify-credentials.json google-token.json google-client.json state.json)
+
+die() { echo "rqv: $*" >&2; exit 1; }
+
+usage() {
+  cat <<'EOF'
+usage: rqv launch [<Requiem.app>] [-- <requiem-gui args>]   start a fresh-install copy; prints RUN
+       rqv doctor <RUN>          is it alive, isolated, and the build you think?
+       rqv tree <RUN> [<name>]   screenshot + accessibility tree into the evidence dir; prints the tree
+       rqv press <RUN> <regex>   click the first tree line matching <regex> (e.g. 'button Cancel$')
+       rqv set <RUN> <regex> <text>  set the value of the first matching field (e.g. a search field)
+       rqv key <RUN> <key>       press a key or chord: Return, Escape, CmdOrCtrl+K
+       rqv cli <RUN> <command>…  run requiem CLI commands against this copy's daemon
+       rqv crashed <RUN>         exit 0 and print the reason if the window process died
+       rqv stop <RUN>            stop what launch started, keep the evidence, delete RUN
+RUN is the /tmp/rqv.XXXXXX dir launch printed. Evidence: $RQV_EVIDENCE or $TMPDIR/requiem-verify/<id>/.
+EOF
+  exit 2
+}
+
+need_run() {
+  [ -n "${1:-}" ] && [ -f "$1/gui.pid" ] || die "not a run dir: ${1:-<missing>}"
+  RUN=$1
+  PID=$(cat "$RUN/gui.pid")
+  APP=$(cat "$RUN/app")
+  EV=$(cat "$RUN/evidence")
+}
+
+real_mtimes() {
+  local f
+  for f in "${REAL_FILES[@]}"; do
+    if [ -e "$REAL_SUPPORT/$f" ]; then echo "$f $(stat -f %m "$REAL_SUPPORT/$f")"; else echo "$f absent"; fi
+  done
+}
+
+in_env() {
+  local up=http://127.0.0.1:9
+  [ "${RQV_UPDATES:-0}" = 1 ] && up=""
+  env HOME="$RUN/home" REQUIEM_SOCKET_DIR="$RUN/sock" ${up:+REQUIEM_UPDATE_BASE=$up} REQUIEM_LOG=debug "$@"
+}
+
+# The window sometimes reads as off screen for a moment after a click; retry before failing.
+state_json() {
+  local out
+  for _ in 1 2 3 4 5; do
+    out=$("$ORCA" computer get-app-state --app "pid:$PID" --restore-window --json 2>/dev/null || true)
+    if python3 -c 'import json,sys; sys.exit(0 if json.loads(sys.argv[1]).get("ok") else 1)' "$out" 2>/dev/null; then
+      printf '%s' "$out"
+      return
+    fi
+    sleep 1
+  done
+  printf '%s' "$out"
+}
+
+# The element index of the first tree line matching $1 (indexes go stale; look up per action).
+find_idx() {
+  state_json | python3 -c '
+import json, re, sys
+tree = (json.load(sys.stdin).get("result", {}).get("snapshot") or {}).get("treeText", "")
+for line in tree.splitlines():
+    if re.search(sys.argv[1], line):
+        m = re.match(r"\s*(\d+) ", line)
+        if m:
+            print(m.group(1)); break
+' "$1"
+}
+
+cmd=${1:-}
+[ $# -gt 0 ] && shift
+case $cmd in
+launch)
+  APP=$repo/target/Requiem.app
+  if [ $# -gt 0 ] && [ "$1" != "--" ]; then APP=$(cd "$1" && pwd); shift; fi
+  [ "${1:-}" = "--" ] && shift
+  [ -x "$APP/Contents/MacOS/requiem-gui" ] || die "no $APP/Contents/MacOS/requiem-gui; run scripts/bundle-macos.sh"
+  # Short on purpose: the socket path must stay under 104 bytes.
+  RUN=$(mktemp -d /tmp/rqv.XXXXXX)
+  EV=$EVIDENCE_ROOT/$(basename "$RUN")
+  mkdir -p "$EV" "$RUN/home"
+  mkdir -m 700 "$RUN/sock"
+  echo "$APP" >"$RUN/app"
+  echo "$EV" >"$RUN/evidence"
+  date +%s >"$RUN/started"
+  real_mtimes >"$RUN/real-mtimes"
+  /usr/libexec/PlistBuddy -c "Print CFBundleShortVersionString" "$APP/Contents/Info.plist" >"$EV/version"
+  # Through Launch Services, as a user's double-click: a directly exec'd copy shares the
+  # installed app's bundle id and orca can't address it.
+  bin="$APP/Contents/MacOS/requiem-gui"
+  before=$(pgrep -f "^$bin" || true)
+  envs=(--env "HOME=$RUN/home" --env "REQUIEM_SOCKET_DIR=$RUN/sock" --env REQUIEM_LOG=debug)
+  [ "${RQV_UPDATES:-0}" = 1 ] || envs+=(--env REQUIEM_UPDATE_BASE=http://127.0.0.1:9)
+  open -n "$APP" "${envs[@]}" --stdout "$EV/gui.log" --stderr "$EV/gui.log" ${1:+--args "$@"}
+  PID=
+  for _ in $(seq 1 20); do
+    PID=$(pgrep -f "^$bin" | grep -vxF "${before:-none}" | tail -1 || true)
+    [ -n "$PID" ] && break
+    sleep 0.5
+  done
+  [ -n "$PID" ] || die "requiem-gui didn't start; log: $EV/gui.log"
+  echo "$PID" >"$RUN/gui.pid"
+  for _ in $(seq 1 60); do
+    kill -0 "$PID" 2>/dev/null || { cat "$EV/gui.log" >&2; die "requiem-gui exited during launch; log: $EV/gui.log"; }
+    if "$ORCA" computer list-windows --app "pid:$PID" --json 2>/dev/null |
+      python3 -c 'import json,sys; sys.exit(0 if (json.load(sys.stdin).get("result") or {}).get("windows") else 1)' 2>/dev/null; then
+      echo "RUN=$RUN"
+      echo "pid=$PID version=$(cat "$EV/version") evidence=$EV"
+      exit 0
+    fi
+    sleep 0.5
+  done
+  die "no window after 30 s; RUN=$RUN (run: rqv stop $RUN)"
+  ;;
+doctor)
+  need_run "${1:-}"
+  ok=1
+  if kill -0 "$PID" 2>/dev/null; then echo "window process: up (pid $PID)"; else echo "window process: GONE"; ok=0; fi
+  echo "build: $APP ($(cat "$EV/version"))"
+  if [ -S "$RUN/sock/daemon.sock" ]; then echo "daemon socket: $RUN/sock/daemon.sock"; else echo "daemon socket: missing"; ok=0; fi
+  echo "accounts:"
+  in_env "$APP/Contents/MacOS/requiem" --connect --script - <<<'account' 2>&1 | sed 's/^/  /' || ok=0
+  if real_mtimes | diff -q - "$RUN/real-mtimes" >/dev/null; then
+    echo "real app files: untouched"
+  else
+    echo "real app files: CHANGED since launch"; ok=0
+  fi
+  [ $ok = 1 ] && echo "doctor: ok" || { echo "doctor: FAIL"; exit 1; }
+  ;;
+tree)
+  need_run "${1:-}"
+  name=${2:-$(date +%H%M%S)}
+  kill -0 "$PID" 2>/dev/null || die "window process is gone; run: rqv crashed $RUN"
+  state_json | python3 -c '
+import json, shutil, sys
+d = json.load(sys.stdin)
+if not d.get("ok"):
+    sys.exit("orca: %s" % (d.get("error") or {}).get("message"))
+r = d["result"]
+ev, name = sys.argv[1], sys.argv[2]
+tree = (r.get("snapshot") or {}).get("treeText", "")
+open(f"{ev}/{name}.tree.txt", "w").write(tree)
+shot = (r.get("screenshot") or {}).get("path")
+if shot:
+    shutil.copy(shot, f"{ev}/{name}.png")
+print(tree)
+print(f"[saved {ev}/{name}.png and {name}.tree.txt]")
+' "$EV" "$name"
+  ;;
+press | set)
+  need_run "${1:-}"
+  re=${2:?regex}
+  kill -0 "$PID" 2>/dev/null || die "window process is gone; run: rqv crashed $RUN"
+  idx=$(find_idx "$re")
+  [ -n "$idx" ] || die "no tree line matches /$re/; run: rqv tree $RUN"
+  if [ "$cmd" = press ]; then
+    act=(click --element-index "$idx")
+  else
+    act=(set-value --element-index "$idx" --value "${3:?text}")
+  fi
+  # orca often reports the window off screen after acting; the action still lands, so read
+  # the result from the next `rqv tree`, not from this line.
+  "$ORCA" computer "${act[@]}" --app "pid:$PID" --no-screenshot --json 2>/dev/null |
+    python3 -c 'import json,sys; d=json.load(sys.stdin); print(sys.argv[1], sys.argv[2], "ok" if d.get("ok") else "(orca: %s)" % (d.get("error") or {}).get("message"))' "$cmd" "$idx"
+  ;;
+key)
+  need_run "${1:-}"
+  chord=${2:?key, e.g. CmdOrCtrl+K or Return}
+  # Keys need the copy frontmost, and orca's own restore can't raise it: the installed app
+  # shares its bundle id.
+  osascript -e "tell application \"System Events\" to set frontmost of (first process whose unix id is $PID) to true" >/dev/null
+  sleep 0.3
+  case $chord in
+    *+*) "$ORCA" computer hotkey --app "pid:$PID" --key "$chord" --no-screenshot --json >/dev/null 2>&1 || true ;;
+    *) "$ORCA" computer press-key --app "pid:$PID" --key "$chord" --no-screenshot --json >/dev/null 2>&1 || true ;;
+  esac
+  echo "key $chord sent"
+  ;;
+cli)
+  need_run "${1:-}"
+  shift
+  printf '%s\n' "$@" | in_env "$APP/Contents/MacOS/requiem" --connect --script -
+  ;;
+crashed)
+  need_run "${1:-}"
+  if kill -0 "$PID" 2>/dev/null; then echo "running"; exit 1; fi
+  echo "requiem-gui (pid $PID) is gone"
+  grep -m3 -E "panicked|already borrowed|fatal|abort" "$EV/gui.log" || true
+  started=$(cat "$RUN/started")
+  for f in "$HOME"/Library/Logs/DiagnosticReports/requiem-gui*.ips; do
+    [ -e "$f" ] && [ "$(stat -f %m "$f")" -ge "$started" ] && cp "$f" "$EV/" && echo "crash report: $EV/$(basename "$f")"
+  done
+  exit 0
+  ;;
+stop)
+  need_run "${1:-}"
+  kill "$PID" 2>/dev/null || true
+  for _ in $(seq 1 10); do kill -0 "$PID" 2>/dev/null || break; sleep 0.5; done
+  kill -9 "$PID" 2>/dev/null || true
+  if [ -S "$RUN/sock/daemon.sock" ]; then
+    in_env "$APP/Contents/MacOS/requiem" --connect --script - <<<'shutdown-daemon' >/dev/null 2>&1 || true
+  fi
+  # Whatever still holds this run's lock or socket was started by this run.
+  for _ in $(seq 1 10); do
+    pids=$(lsof -t "$RUN/sock/daemon.lock" "$RUN/sock/daemon.sock" 2>/dev/null | sort -u || true)
+    [ -z "$pids" ] && break
+    sleep 0.5
+  done
+  for p in $pids; do pkill -P "$p" 2>/dev/null || true; kill "$p" 2>/dev/null || true; done
+  cp "$RUN/sock/daemon.log" "$EV/daemon.log" 2>/dev/null || true
+  if ! real_mtimes | diff -q - "$RUN/real-mtimes" >/dev/null; then
+    echo "WARNING: the real app's files changed during this run" | tee "$EV/WARNING"
+  fi
+  rm -rf "$RUN"
+  echo "stopped; evidence kept in $EV"
+  ;;
+*) usage ;;
+esac
