@@ -1,5 +1,5 @@
 //! Live smoke tests against YouTube. Run with `-- --ignored live_ --test-threads=1`.
-//! `live_library` needs a signed-in account: point `REQUIEM_GOOGLE_CLIENT_FILE` and
+//! `live_home` and `live_library` need a signed-in account: point `REQUIEM_GOOGLE_CLIENT_FILE` and
 //! `REQUIEM_GOOGLE_TOKEN_FILE` at the client JSON and at the token a `signin` saved.
 
 use std::io::{Read, Seek, SeekFrom};
@@ -123,14 +123,23 @@ fn summary(shelves: &[Shelf]) -> Vec<(String, usize)> {
 #[ignore]
 fn live_home() {
     let p = provider(false, IpFamily::Any);
+    assert!(matches!(p.account(), AccountState::SignedIn { .. }));
     let home = p.browse(&Page::Home).unwrap();
     println!("home: {:?}", summary(&home));
-    assert!(home.iter().all(|s| !s.items.is_empty()));
-    let page = first_collection(&home).expect("a playlist or album on home");
-    let opened = p.browse(&page).unwrap();
-    println!("{page:?}: {:?}", summary(&opened));
-    assert_eq!(opened.len(), 1);
-    assert!(!opened[0].items.is_empty());
+    let titles: Vec<&str> = home.iter().map(|s| s.title.as_str()).collect();
+    assert_eq!(titles, ["Liked songs", "Your playlists"]);
+    assert!(home[0].items.len() <= 20);
+    assert!(home[0].items.iter().all(|i| matches!(i, Item::Track(_))));
+    assert!(
+        home[1]
+            .items
+            .iter()
+            .all(|i| matches!(i, Item::Collection(_)))
+    );
+    let Some(Item::Collection(liked)) = home[1].items.first() else {
+        panic!("no Liked videos first");
+    };
+    assert_eq!(liked.title, "Liked videos");
 }
 
 #[test]

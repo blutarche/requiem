@@ -1,5 +1,5 @@
-//! The signed-in library through the YouTube Data API v3: the user's playlists and liked
-//! videos. Every call costs one unit of the project's 10,000-unit daily quota.
+//! The signed-in library and Home through the YouTube Data API v3: the user's playlists and
+//! liked videos. Every call costs one unit of the project's 10,000-unit daily quota.
 
 use std::collections::HashMap;
 use std::time::Duration;
@@ -21,6 +21,8 @@ pub(crate) const DATA_PREFIX: &str = "data:";
 const PER_PAGE: usize = 50;
 const MAX_PLAYLISTS: usize = 200;
 const MAX_TRACKS: usize = 1000;
+/// Home's most recently liked videos.
+const HOME_LIKED: usize = 20;
 const LIKED: &str = "Liked videos";
 
 /// Authorized Data API calls.
@@ -223,14 +225,17 @@ fn paginate<T>(
     Ok(out)
 }
 
-/// One shelf, "Playlists": liked videos first, then up to 200 of the user's playlists.
-pub(crate) fn library(api: &dyn DataApi) -> Result<Vec<Shelf>, ProviderError> {
-    let likes = match api.likes() {
-        Ok(l) => Some(l),
-        // An account without a YouTube channel has no liked-videos playlist.
-        Err(ProviderError::Unplayable(_)) => None,
-        Err(e) => return Err(e),
-    };
+/// The liked-videos playlist, if the account has a YouTube channel to keep one.
+fn likes(api: &dyn DataApi) -> Result<Option<String>, ProviderError> {
+    match api.likes() {
+        Ok(l) => Ok(Some(l)),
+        Err(ProviderError::Unplayable(_)) => Ok(None),
+        Err(e) => Err(e),
+    }
+}
+
+/// Liked videos first, then up to 200 of the user's playlists.
+fn collections(api: &dyn DataApi, likes: Option<&str>) -> Result<Vec<Collection>, ProviderError> {
     let playlists = paginate(
         api,
         PLAYLISTS_URL,
@@ -239,21 +244,60 @@ pub(crate) fn library(api: &dyn DataApi) -> Result<Vec<Shelf>, ProviderError> {
         parse_playlists,
     )?;
     let liked = likes.map(|l| Collection {
-        id: collection_id(&l),
+        id: collection_id(l),
         kind: CollectionKind::Playlist,
         title: LIKED.to_owned(),
         subtitle: None,
         artwork_url: None,
     });
-    let items = liked
-        .into_iter()
-        .chain(playlists)
-        .map(Item::Collection)
-        .collect();
+    Ok(liked.into_iter().chain(playlists).collect())
+}
+
+/// One shelf, "Playlists": liked videos first, then up to 200 of the user's playlists.
+pub(crate) fn library(api: &dyn DataApi) -> Result<Vec<Shelf>, ProviderError> {
+    let likes = likes(api)?;
     Ok(vec![Shelf {
         title: "Playlists".to_owned(),
-        items,
+        items: collections(api, likes.as_deref())?
+            .into_iter()
+            .map(Item::Collection)
+            .collect(),
     }])
+}
+
+/// "Liked songs", the 20 most recently liked videos, then "Your playlists", the Library's
+/// collections; empty shelves are left out.
+pub(crate) fn home(api: &dyn DataApi) -> Result<Vec<Shelf>, ProviderError> {
+    let likes = likes(api)?;
+    let liked = match &likes {
+        Some(l) => {
+            let mut tracks = paginate(
+                api,
+                PLAYLIST_ITEMS_URL,
+                &[("part", "snippet,contentDetails"), ("playlistId", l)],
+                HOME_LIKED,
+                parse_playlist_items,
+            )?;
+            add_durations(api, &mut tracks)?;
+            tracks
+        }
+        None => Vec::new(),
+    };
+    let own = collections(api, likes.as_deref())?;
+    Ok([
+        ("Liked songs", liked.into_iter().map(Item::Track).collect()),
+        (
+            "Your playlists",
+            own.into_iter().map(Item::Collection).collect(),
+        ),
+    ]
+    .into_iter()
+    .filter(|(_, items): &(_, Vec<Item>)| !items.is_empty())
+    .map(|(title, items)| Shelf {
+        title: title.to_owned(),
+        items,
+    })
+    .collect())
 }
 
 fn playlist_title(api: &dyn DataApi, id: &str) -> Result<String, ProviderError> {
@@ -283,6 +327,15 @@ pub(crate) fn playlist(api: &dyn DataApi, id: &str) -> Result<Vec<Shelf>, Provid
         MAX_TRACKS,
         parse_playlist_items,
     )?;
+    add_durations(api, &mut tracks)?;
+    Ok(vec![Shelf {
+        title,
+        items: tracks.into_iter().map(Item::Track).collect(),
+    }])
+}
+
+/// One `videos.list` call per 50 tracks.
+fn add_durations(api: &dyn DataApi, tracks: &mut [Track]) -> Result<(), ProviderError> {
     let ids: Vec<String> = tracks.iter().map(|t| t.id.id.clone()).collect();
     let mut durations = HashMap::new();
     for chunk in ids.chunks(PER_PAGE) {
@@ -297,13 +350,10 @@ pub(crate) fn playlist(api: &dyn DataApi, id: &str) -> Result<Vec<Shelf>, Provid
         )?;
         durations.extend(parse_durations(&body)?);
     }
-    for t in &mut tracks {
+    for t in tracks {
         t.duration = durations.get(&t.id.id).copied();
     }
-    Ok(vec![Shelf {
-        title,
-        items: tracks.into_iter().map(Item::Track).collect(),
-    }])
+    Ok(())
 }
 
 #[cfg(test)]
@@ -580,6 +630,50 @@ mod tests {
             ("v999", Some(Duration::from_secs(60)))
         );
         assert_eq!(last.artists, ["A"]);
+    }
+
+    const ONE_PLAYLIST: &str =
+        r#"{"items": [{"id": "PLroadtrip", "snippet": {"title": "Road trip"}}]}"#;
+
+    #[test]
+    fn home_is_the_latest_likes_then_the_library_in_three_calls() {
+        let f = Fake::new();
+        f.api
+            .script(PLAYLIST_ITEMS_URL, 200, &items_page(0, 50, "next"));
+        f.api.script(VIDEOS_URL, 200, &videos_for(0..20));
+        f.api.script(PLAYLISTS_URL, 200, ONE_PLAYLIST);
+        let shelves = home(&f).unwrap();
+        let titles: Vec<_> = shelves.iter().map(|s| s.title.as_str()).collect();
+        assert_eq!(titles, ["Liked songs", "Your playlists"]);
+        assert_eq!(shelves[0].items.len(), 20);
+        let Item::Track(last) = &shelves[0].items[19] else {
+            panic!()
+        };
+        assert_eq!(
+            (last.id.id.as_str(), last.duration),
+            ("v19", Some(Duration::from_secs(60)))
+        );
+        assert_eq!(track_ids(&shelves[1]), ["data:LLme", "data:PLroadtrip"]);
+        let q = &f.api.queries(PLAYLIST_ITEMS_URL)[0];
+        assert!(q.contains(&("playlistId".into(), "LLme".into())), "{q:?}");
+        assert_eq!(f.api.calls().len(), 3);
+    }
+
+    #[test]
+    fn home_without_a_channel_or_playlists_leaves_out_empty_shelves() {
+        let mut f = Fake::new();
+        f.likes = Err(ProviderError::Unplayable("no channel".into()));
+        f.api.script(PLAYLISTS_URL, 200, ONE_PLAYLIST);
+        let shelves = home(&f).unwrap();
+        assert_eq!(shelves.len(), 1);
+        assert_eq!(shelves[0].title, "Your playlists");
+        assert_eq!(f.api.queries(PLAYLIST_ITEMS_URL).len(), 0);
+
+        f.api.script(PLAYLISTS_URL, 200, r#"{"items": []}"#);
+        assert_eq!(home(&f).unwrap(), []);
+
+        f.likes = Err(ProviderError::SignInRequired("sign in".into()));
+        assert!(matches!(home(&f), Err(ProviderError::SignInRequired(_))));
     }
 
     #[test]
