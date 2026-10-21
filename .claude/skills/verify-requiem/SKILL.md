@@ -126,8 +126,11 @@ Proof standards:
   Signed-in features are checked read-only on the installed app, or not at all.
 - No audio: don't press Play, a track, or Play All unless the user said sound is OK. Everything up
   to that click is fair game.
-- By default the copy's update checks go to a dead URL (`http://127.0.0.1:9`), so it can never
-  download or install an update. Set `RQV_UPDATES=1` to test real update checks.
+- `rqv` points the copy's update checks at a dead URL (`http://127.0.0.1:9`), but only a debug
+  build reads that override (`requiem-update/src/fetch.rs`). Every bundle this skill drives,
+  from `scripts/bundle-macos.sh` or a release zip, is a release build, so it checks the real
+  release feed, and a copy older than the latest release can offer an update. Never press
+  Restart to Update in it unless the update itself is under test.
 
 ## Cleanup
 
