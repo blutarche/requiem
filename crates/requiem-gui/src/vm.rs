@@ -4999,12 +4999,26 @@ mod tests {
                 provider: spotify()
             }]
         );
-        // Setting up, importing a client, cancelling and signing out stay too.
+        // Its row shows the code, and the other's row the client form.
+        vm.apply(spotify_account(pending()));
         assert!(vm.intent(Intent::SignIn(provider())).is_empty());
+        let states: Vec<_> = vm
+            .ui()
+            .settings_view()
+            .into_iter()
+            .map(|r| r.state)
+            .collect();
+        assert!(
+            matches!(
+                states.as_slice(),
+                [AccountRowState::Pending { .. }, AccountRowState::Setup(_)]
+            ),
+            "{states:?}"
+        );
+        // Importing a client, cancelling and signing out stay too.
         assert_eq!(import(&mut vm).len(), 1);
         vm.intent(Intent::CancelSetup);
         vm.intent(Intent::SignOut(spotify()));
-        assert_eq!(vm.ui().place, Place::Settings);
         assert_eq!(vm.ui().sign_in_place(), None);
     }
 
@@ -5098,7 +5112,7 @@ mod tests {
     }
 
     #[test]
-    fn the_secret_leaves_with_the_import_and_stays_nowhere() {
+    fn the_secret_is_sent_but_neither_kept_nor_printed_by_the_vm() {
         let mut vm = setting_up();
         let cmds = vm.intent(Intent::ImportClient(client_json(CLIENT_ID, SECRET)));
         let [Command::ImportSignInClient { provider: p, json }] = cmds.as_slice() else {
