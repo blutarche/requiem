@@ -464,6 +464,22 @@ fn takes_client(provider: &ProviderId) -> bool {
     Service::of(provider) == Some(Service::YouTubeMusic)
 }
 
+/// The Sign Out sheet's informative text for `provider`. The account doesn't say how it
+/// signed in, so a provider that takes a browser session always mentions it.
+pub fn sign_out_info(provider: &ProviderId) -> String {
+    let service = provider_name(&provider.0);
+    let mut info = format!(
+        "Your {service} playlists, albums and Home shelves leave Requiem until you sign in again."
+    );
+    if takes_client(provider) {
+        info.push_str(
+            " If you signed in with a browser session, Requiem can't sign that browser out; log \
+             out there to end it.",
+        );
+    }
+    info
+}
+
 impl Browse {
     pub fn view(&self) -> PageView {
         match &self.load {
@@ -5161,6 +5177,20 @@ mod tests {
         assert!(vm.intent(Intent::UseBrowserSession(spotify())).is_empty());
         assert_eq!(vm.ui().setup, None);
         assert_eq!(vm.ui().settings_view()[1].state, AccountRowState::SignedOut);
+    }
+
+    #[test]
+    fn signing_out_of_youtube_music_says_the_browser_stays_signed_in() {
+        assert_eq!(
+            sign_out_info(&provider()),
+            "Your YouTube Music playlists, albums and Home shelves leave Requiem until you sign \
+             in again. If you signed in with a browser session, Requiem can't sign that browser \
+             out; log out there to end it."
+        );
+        assert_eq!(
+            sign_out_info(&spotify()),
+            "Your Spotify playlists, albums and Home shelves leave Requiem until you sign in again."
+        );
     }
 
     #[test]

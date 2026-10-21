@@ -1536,9 +1536,7 @@ impl Ui {
         let service = vm::provider_name(&provider.0).to_owned();
         self.ask(
             &format!("Sign out of {service}?"),
-            &format!(
-                "Your {service} playlists, albums and Home shelves leave Requiem until you sign in again."
-            ),
+            &vm::sign_out_info(&provider),
             "Sign Out",
             true,
             move |ui| ui.intent(Intent::SignOut(provider.clone())),
