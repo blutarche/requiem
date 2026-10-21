@@ -804,6 +804,8 @@ fn menu_bar(mtm: MainThreadMarker, target: &Delegate) -> (Retained<NSMenu>, Reta
     }
     app_items.extend([
         sep(),
+        item("Settings\u{2026}", Some(sel!(showSettings:)), ",", true),
+        sep(),
         item("Hide Requiem", Some(sel!(hide:)), "h", false),
         with_mods(
             item(
