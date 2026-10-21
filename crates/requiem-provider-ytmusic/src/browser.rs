@@ -105,6 +105,14 @@ pub(crate) fn authorization(unix: u64, sapisid: &str) -> String {
 
 type Fields = Vec<(String, String)>;
 
+/// The headers [`keep`] reads.
+const KEPT: [&str; 4] = [
+    "cookie",
+    "x-goog-authuser",
+    "x-goog-pageid",
+    "x-goog-visitor-id",
+];
+
 fn has_cookie(fields: &Fields) -> bool {
     fields.iter().any(|(k, _)| k == "cookie")
 }
@@ -128,19 +136,18 @@ fn header_lines(text: &str) -> Fields {
 }
 
 /// Chrome's copy of the headers pane: each name on its own line, with or without a colon, and
-/// its value on the next.
+/// its value on the next. Only a header that is kept starts a pair: headings such as
+/// "General", the other headers and their values are each skipped alone, so a stray line
+/// can't shift the pairing.
 fn separate_lines(text: &str) -> Fields {
     let mut fields = Vec::new();
-    let mut name: Option<String> = None;
+    let mut name: Option<&str> = None;
     for line in text.lines().map(str::trim).filter(|l| !l.is_empty()) {
         match name.take() {
-            Some(n) => fields.push((n, line.to_owned())),
+            Some(n) => fields.push((n.to_owned(), line.to_owned())),
             None => {
-                let n = line.trim_start_matches(':').trim_end_matches(':');
-                // A line that is no name, such as a pane's heading, starts nothing.
-                if is_name(n) {
-                    name = Some(line.trim_end_matches(':').to_ascii_lowercase());
-                }
+                let n = line.strip_suffix(':').unwrap_or(line);
+                name = KEPT.into_iter().find(|k| k.eq_ignore_ascii_case(n));
             }
         }
     }
@@ -420,6 +427,21 @@ mod tests {
         assert_eq!(h.cookie.expose(), COOKIE);
         assert_eq!(h.visitor_id.as_deref(), Some("CgtWSVNJVE9S"));
         assert_eq!(h.authuser, "0");
+    }
+
+    #[test]
+    fn chrome_separate_lines_pair_only_the_headers_kept() {
+        // A heading, then headers whose values look like names, as a pane copy can run.
+        let pane = format!(
+            "General\n:method\nPOST\nx-goog-authuser\n1\nsec-fetch-mode\ncors\n\
+             Cookie:\n{COOKIE}\npriority\nu=1, i\nX-Goog-PageId\n42\nx-goog-visitor-id\n"
+        );
+        let h = ok(&pane);
+        assert_eq!(h.cookie.expose(), COOKIE);
+        assert_eq!(h.authuser, "1");
+        assert_eq!(h.page_id.as_deref(), Some("42"));
+        // A kept name on the last line has no value.
+        assert_eq!(h.visitor_id, None);
     }
 
     #[test]
