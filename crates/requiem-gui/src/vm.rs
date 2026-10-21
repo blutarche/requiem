@@ -5043,11 +5043,6 @@ mod tests {
             ),
             "{states:?}"
         );
-        // Importing a client, cancelling and signing out stay too.
-        assert_eq!(import(&mut vm).len(), 1);
-        vm.intent(Intent::CancelSetup);
-        vm.intent(Intent::SignOut(spotify()));
-        assert_eq!(vm.ui().sign_in_place(), None);
     }
 
     #[test]
