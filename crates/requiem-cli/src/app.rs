@@ -377,9 +377,19 @@ impl Hub {
                 &format!("{}:", shelf.title),
                 json!({ "type": "shelf", "title": shelf.title }),
             );
+            let mixed = shelf
+                .items
+                .iter()
+                .any(|i| item_provider(i) != item_provider(&shelf.items[0]));
             for item in shelf.items {
                 let n = listing.len() + 1;
-                self.emit(&format!("  {n}. {}", item_line(&item)), item_json(&item, n));
+                let line = item_line(&item);
+                let line = if mixed {
+                    format!("{line} · {}", provider_name(item_provider(&item)))
+                } else {
+                    line
+                };
+                self.emit(&format!("  {n}. {line}"), item_json(&item, n));
                 listing.push(item);
             }
         }
@@ -516,6 +526,13 @@ fn item_line(item: &Item) -> String {
     match item {
         Item::Track(t) => track_line(t),
         Item::Collection(c) => collection_line(c),
+    }
+}
+
+fn item_provider(item: &Item) -> &ProviderId {
+    match item {
+        Item::Track(t) => &t.id.provider,
+        Item::Collection(c) => &c.id.provider,
     }
 }
 
