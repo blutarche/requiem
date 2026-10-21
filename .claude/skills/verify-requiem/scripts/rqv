@@ -82,7 +82,7 @@ cmd=${1:-}
 case $cmd in
 launch)
   APP=$repo/target/Requiem.app
-  if [ $# -gt 0 ] && [ "$1" != "--" ]; then APP=$(cd "$1" && pwd); shift; fi
+  if [ $# -gt 0 ] && [ "$1" != "--" ]; then APP=$(cd "$1" && pwd -P); shift; fi
   [ "${1:-}" = "--" ] && shift
   [ -x "$APP/Contents/MacOS/requiem-gui" ] || die "no $APP/Contents/MacOS/requiem-gui; run scripts/bundle-macos.sh"
   # Short on purpose: the socket path must stay under 104 bytes.
