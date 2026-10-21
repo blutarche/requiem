@@ -63,6 +63,11 @@ pub fn token_file() -> Option<PathBuf> {
     GoogleFiles::from_env().token
 }
 
+/// The browser session file [`YtMusicProvider::new`] reads: beside [`token_file`].
+pub fn session_file() -> Option<PathBuf> {
+    session::path_beside(token_file().as_deref())
+}
+
 /// Parses the Google sign-in file at `path` without changing it; a missing file passes.
 pub fn check_token_file(path: &Path) -> Result<(), String> {
     google::check_token(path)
