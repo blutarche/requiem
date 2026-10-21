@@ -26,10 +26,11 @@ use objc2_foundation::{
 use requiem_core::{Collection, Track};
 use requiem_macos::artwork::Cover;
 
+use super::badge::{self, Badge};
 use super::theme::{self, Icon, Weight};
 use super::ui;
 use super::widgets::{self, FLEX_H, FLEX_W, HoverButton, PIN_BOTTOM, PIN_LEFT, PIN_TOP, rect};
-use crate::vm::{self, Intent, List, QueueEdit};
+use crate::vm::{self, Intent, List, QueueEdit, Service};
 
 pub const ROW_H: CGFloat = 36.0;
 /// The Library's rows are taller, for a larger cover.
@@ -84,7 +85,6 @@ enum Col {
     Title,
     Artists,
     Album,
-    Source,
     Duration,
     Add,
 }
@@ -95,7 +95,6 @@ impl Col {
             Col::Title => "title",
             Col::Artists => "artists",
             Col::Album => "album",
-            Col::Source => "source",
             Col::Duration => "duration",
             Col::Add => "add",
         }
@@ -106,7 +105,6 @@ impl Col {
             Col::Title,
             Col::Artists,
             Col::Album,
-            Col::Source,
             Col::Duration,
             Col::Add,
         ]
@@ -121,48 +119,41 @@ pub struct RowText {
     title: String,
     artists: String,
     album: String,
-    /// The provider's name, in the Source column.
-    source: String,
     duration: String,
     artwork: Option<String>,
+    /// The service badge on the artwork, in a list that mixes services.
+    badge: Option<Service>,
 }
 
 pub fn rows(tracks: &[Track]) -> Vec<RowText> {
+    let mixed = vm::mixed(tracks.iter().map(|t| &t.id.provider));
     tracks
         .iter()
         .map(|t| RowText {
             title: t.title.clone(),
             artists: vm::artists(t),
             album: t.album.clone().unwrap_or_default(),
-            source: vm::provider_name(&t.id.provider.0).to_owned(),
             duration: t.duration.map(vm::fmt_time).unwrap_or_default(),
             artwork: t.artwork_url.clone(),
+            badge: vm::badge(&t.id.provider, mixed),
         })
         .collect()
 }
 
-/// The Library's rows: the title, and the subtitle and source in the details column.
+/// The Library's rows: the title, and the subtitle in the details column.
 pub fn collection_rows(collections: &[&Collection]) -> Vec<RowText> {
+    let mixed = vm::mixed(collections.iter().map(|c| &c.id.provider));
     collections
         .iter()
         .map(|c| RowText {
             title: c.title.clone(),
-            artists: details(c.subtitle.as_deref(), &c.id.provider.0),
+            artists: c.subtitle.clone().unwrap_or_default(),
             album: String::new(),
-            source: String::new(),
             duration: String::new(),
             artwork: c.artwork_url.clone(),
+            badge: vm::badge(&c.id.provider, mixed),
         })
         .collect()
-}
-
-/// "Playlist · Spotify": the subtitle, then the provider's name.
-fn details(subtitle: Option<&str>, provider: &str) -> String {
-    let source = vm::provider_name(provider);
-    match subtitle.filter(|s| !s.is_empty()) {
-        Some(sub) => format!("{sub} \u{b7} {source}"),
-        None => source.to_owned(),
-    }
 }
 
 /// Where the row `was`, selected at `at` before `rows` replaced the list, is now: at `at`
@@ -468,7 +459,6 @@ impl Controller {
             Col::Title => &r.title,
             Col::Artists => &r.artists,
             Col::Album => &r.album,
-            Col::Source => &r.source,
             Col::Duration => &r.duration,
             Col::Add => unreachable!(),
         };
@@ -480,7 +470,7 @@ impl Controller {
         if let Some(l) = iv.label.get() {
             widgets::set_text(l, text);
             if col == Col::Title {
-                let spoken = spoken_title(text, current, played);
+                let spoken = spoken_title(text, current, played, r.badge);
                 cell.setAccessibilityLabel(Some(&NSString::from_str(&spoken)));
             }
         }
@@ -490,20 +480,28 @@ impl Controller {
         if let Some(cover) = iv.cover.get() {
             cover.set_url(r.artwork.as_deref());
         }
+        if let Some(b) = iv.badge.get() {
+            b.set(r.badge);
+        }
         Some(Retained::into_super(cell))
     }
 }
 
-/// What VoiceOver reads for a title cell. The current and played rows are otherwise marked
-/// only in paint.
-fn spoken_title(title: &str, current: bool, played: bool) -> String {
-    if current {
+/// What VoiceOver reads for a title cell. The current and played rows, and the service a
+/// badge shows, are otherwise marked only in paint.
+fn spoken_title(title: &str, current: bool, played: bool, badge: Option<Service>) -> String {
+    let mut spoken = if current {
         format!("Now playing, {title}")
     } else if played {
         format!("{title}, played")
     } else {
         title.to_owned()
+    };
+    if let Some(s) = badge {
+        spoken.push_str(", ");
+        spoken.push_str(s.name());
     }
+    spoken
 }
 
 pub struct KeyTableIvars {
@@ -728,6 +726,7 @@ pub struct TextCellIvars {
     bar: OnceCell<Retained<NSView>>,
     /// The title's artwork.
     cover: OnceCell<Retained<Cover>>,
+    badge: OnceCell<Retained<Badge>>,
     /// Muted text, raised to ink-2 on a selected row.
     secondary: bool,
     row_selected: Cell<bool>,
@@ -752,6 +751,7 @@ impl TextCell {
             label: OnceCell::new(),
             bar: OnceCell::new(),
             cover: OnceCell::new(),
+            badge: OnceCell::new(),
             secondary: col != Col::Title,
             row_selected: Cell::new(false),
             played: Cell::new(false),
@@ -790,15 +790,16 @@ impl TextCell {
         this.addSubview(&label);
         add_rule(mtm, &this, w);
         if col == Col::Title {
-            let cover = widgets::cover(
-                mtm,
-                rect(PAD, ((row_h - thumb) / 2.0).round(), thumb, thumb),
-                4.0,
-                14.0,
-            );
+            let at = rect(PAD, ((row_h - thumb) / 2.0).round(), thumb, thumb);
+            let cover = widgets::cover(mtm, at, 4.0, 14.0);
             cover.setAutoresizingMask(PIN_LEFT);
             this.addSubview(&cover);
             let _ = this.ivars().cover.set(cover);
+            // Clear of the row's rule.
+            let badge = Badge::new(mtm, badge::frame(at, at.origin.y - 1.0, false));
+            badge.setAutoresizingMask(PIN_LEFT);
+            this.addSubview(&badge);
+            let _ = this.ivars().badge.set(badge);
             let bar = widgets::panel(
                 mtm,
                 rect(0.0, 0.0, 2.0, row_h),
@@ -841,8 +842,12 @@ impl TextCell {
         let iv = self.ivars();
         iv.played.set(played);
         self.paint_text();
+        let alpha = if played { PLAYED_COVER } else { 1.0 };
         if let Some(cover) = iv.cover.get() {
-            cover.setAlphaValue(if played { PLAYED_COVER } else { 1.0 });
+            cover.setAlphaValue(alpha);
+        }
+        if let Some(b) = iv.badge.get() {
+            b.setAlphaValue(alpha);
         }
     }
 
@@ -1089,12 +1094,11 @@ impl ColumnHeader {
             self.setNeedsDisplay(true);
             return;
         }
-        let widths = column_widths(width, kind.adds(), kind == Kind::Results);
+        let widths = column_widths(width, kind.adds());
         for c in table.tableColumns().iter() {
             match Col::from_id(&c.identifier().to_string()) {
                 Some(Col::Title) => c.setWidth(widths.title),
                 Some(Col::Artists) => c.setWidth(widths.artists),
-                Some(Col::Source) => c.setWidth(SOURCE_W),
                 Some(Col::Album) => {
                     c.setHidden(widths.album.is_none());
                     if let Some(w) = widths.album {
@@ -1111,8 +1115,6 @@ impl ColumnHeader {
 const ADD_W: CGFloat = 44.0;
 const ADD_ICON: CGFloat = 16.0;
 const DURATION_W: CGFloat = 80.0;
-/// The Source column: wide enough for "YouTube Music".
-const SOURCE_W: CGFloat = 152.0;
 /// Narrower tables drop the album column.
 const ALBUM_MIN_W: CGFloat = 640.0;
 /// How long a "+" shows its check after an add.
@@ -1134,10 +1136,9 @@ fn library_widths(width: CGFloat) -> (CGFloat, CGFloat) {
 /// Text-column widths for a table `width` wide, with or without the "+" column. They fill
 /// what the fixed columns leave, rounding into the last, so the columns end flush with the
 /// table.
-fn column_widths(width: CGFloat, add: bool, source: bool) -> Widths {
+fn column_widths(width: CGFloat, add: bool) -> Widths {
     let add_w = if add { ADD_W } else { 0.0 };
-    let source_w = if source { SOURCE_W } else { 0.0 };
-    let flex = (width - add_w - source_w - DURATION_W).max(0.0);
+    let flex = (width - add_w - DURATION_W).max(0.0);
     if width < ALBUM_MIN_W {
         let title = (flex * 46.0 / 76.0).floor();
         Widths {
@@ -1191,24 +1192,20 @@ impl Table {
                 (Col::Title, "Title", 0.0),
                 (Col::Artists, "Artists", 0.0),
                 (Col::Album, "Album", 0.0),
-                (Col::Source, "Source", SOURCE_W),
                 (Col::Add, "", ADD_W),
                 (Col::Duration, "Time", DURATION_W),
             ]
         };
         let add = kind.adds();
         let mut titles = Vec::with_capacity(cols.len());
-        for &(col, title, width) in cols
-            .iter()
-            .filter(|c| (add || c.0 != Col::Add) && (kind == Kind::Results || c.0 != Col::Source))
-        {
+        for &(col, title, width) in cols.iter().filter(|c| add || c.0 != Col::Add) {
             let c = NSTableColumn::initWithIdentifier(
                 NSTableColumn::alloc(mtm),
                 &NSString::from_str(col.id()),
             );
             titles.push((title, col == Col::Duration));
             c.setWidth(width);
-            if matches!(col, Col::Duration | Col::Add | Col::Source) {
+            if matches!(col, Col::Duration | Col::Add) {
                 c.setMinWidth(width);
                 c.setMaxWidth(width);
                 c.setResizingMask(NSTableColumnResizingOptions::NoResizing);
@@ -1515,9 +1512,9 @@ mod tests {
             title: title.into(),
             artists: artists.into(),
             album: album.into(),
-            source: "test".into(),
             duration: duration.into(),
             artwork: None,
+            badge: None,
         }
     }
 
@@ -1571,14 +1568,28 @@ mod tests {
 
     #[test]
     fn only_the_current_title_reads_as_now_playing() {
-        assert_eq!(spoken_title("One", true, false), "Now playing, One");
-        assert_eq!(spoken_title("One", false, false), "One");
-        assert_eq!(spoken_title("One", false, true), "One, played");
+        assert_eq!(spoken_title("One", true, false, None), "Now playing, One");
+        assert_eq!(spoken_title("One", false, false, None), "One");
+        assert_eq!(spoken_title("One", false, true, None), "One, played");
+    }
+
+    #[test]
+    fn a_badged_title_ends_with_its_service() {
+        let spotify = Some(Service::Spotify);
+        assert_eq!(spoken_title("One", false, false, spotify), "One, Spotify");
+        assert_eq!(
+            spoken_title("One", true, false, Some(Service::YouTubeMusic)),
+            "Now playing, One, YouTube Music"
+        );
+        assert_eq!(
+            spoken_title("One", false, true, spotify),
+            "One, played, Spotify"
+        );
     }
 
     #[test]
     fn columns_split_46_30_24_and_fill_the_table() {
-        let w = column_widths(800.0, true, false);
+        let w = column_widths(800.0, true);
         assert_eq!(w.title, 310.0);
         assert_eq!(w.artists, 202.0);
         assert_eq!(w.album, Some(164.0));
@@ -1590,7 +1601,7 @@ mod tests {
 
     #[test]
     fn the_queue_gives_the_plus_column_to_the_text() {
-        let w = column_widths(800.0, false, false);
+        let w = column_widths(800.0, false);
         assert_eq!(w.title, 331.0);
         assert_eq!(w.artists, 216.0);
         assert_eq!(w.album, Some(173.0));
@@ -1599,11 +1610,11 @@ mod tests {
 
     #[test]
     fn narrow_tables_drop_the_album_column() {
-        let w = column_widths(ALBUM_MIN_W - 1.0, true, false);
+        let w = column_widths(ALBUM_MIN_W - 1.0, true);
         assert_eq!(w.album, None);
         assert_eq!(w.title + w.artists + ADD_W + DURATION_W, ALBUM_MIN_W - 1.0);
         assert!(w.title > w.artists);
-        assert!(column_widths(ALBUM_MIN_W, true, false).album.is_some());
+        assert!(column_widths(ALBUM_MIN_W, true).album.is_some());
     }
 
     #[test]
@@ -1623,34 +1634,47 @@ mod tests {
         );
     }
 
-    #[test]
-    fn rows_name_each_tracks_source() {
-        let mut spotify = track("One", &[], None, None);
-        spotify.id.provider = ProviderId("spotify".into());
-        let mut ytm = track("Two", &[], None, None);
-        ytm.id.provider = ProviderId("ytmusic".into());
-        let rows = rows(&[spotify, ytm]);
-        assert_eq!(rows[0].source, "Spotify");
-        assert_eq!(rows[1].source, "YouTube Music");
+    fn from(provider: &str, title: &str) -> Track {
+        let mut t = track(title, &[], None, None);
+        t.id.provider = ProviderId(provider.into());
+        t
     }
 
     #[test]
-    fn library_details_end_with_the_source() {
-        assert_eq!(
-            details(Some("Playlist"), "spotify"),
-            "Playlist \u{b7} Spotify"
-        );
-        assert_eq!(details(None, "ytmusic"), "YouTube Music");
-        assert_eq!(details(Some(""), "ytmusic"), "YouTube Music");
+    fn rows_badge_each_tracks_service_only_in_a_mixed_list() {
+        let mixed = rows(&[from("spotify", "One"), from("ytmusic", "Two")]);
+        assert_eq!(mixed[0].badge, Some(Service::Spotify));
+        assert_eq!(mixed[1].badge, Some(Service::YouTubeMusic));
+        let one = rows(&[from("spotify", "One"), from("spotify", "Two")]);
+        assert!(one.iter().all(|r| r.badge.is_none()));
+        // A provider with no service gets no badge, though it makes the list mixed.
+        let odd = rows(&[from("spotify", "One"), from("other", "Two")]);
+        assert_eq!(odd[0].badge, Some(Service::Spotify));
+        assert_eq!(odd[1].badge, None);
     }
 
     #[test]
-    fn the_source_column_comes_out_of_the_text_columns() {
-        let w = column_widths(800.0, true, true);
-        assert_eq!(
-            w.title + w.artists + w.album.unwrap() + SOURCE_W + ADD_W + DURATION_W,
-            800.0
+    fn library_rows_show_the_subtitle_and_badge_a_mixed_library() {
+        let collection = |provider: &str, subtitle: Option<&str>| Collection {
+            id: requiem_core::CollectionId {
+                provider: ProviderId(provider.into()),
+                id: "c".into(),
+            },
+            kind: requiem_core::CollectionKind::Playlist,
+            title: "Mix".into(),
+            subtitle: subtitle.map(Into::into),
+            artwork_url: None,
+        };
+        let (s, y) = (
+            collection("spotify", Some("Playlist")),
+            collection("ytmusic", None),
         );
+        let mixed = collection_rows(&[&s, &y]);
+        assert_eq!(mixed[0].artists, "Playlist");
+        assert_eq!(mixed[1].artists, "");
+        assert_eq!(mixed[0].badge, Some(Service::Spotify));
+        assert_eq!(mixed[1].badge, Some(Service::YouTubeMusic));
+        assert_eq!(collection_rows(&[&s, &s])[0].badge, None);
     }
 
     #[test]

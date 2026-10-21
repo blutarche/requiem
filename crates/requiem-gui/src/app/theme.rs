@@ -148,6 +148,13 @@ pub fn white() -> Retained<NSColor> {
 pub fn on_accent() -> Retained<NSColor> {
     rgb(0x0A0A0C)
 }
+/// The service badges' fills, the services' own colours.
+pub fn spotify_green() -> Retained<NSColor> {
+    rgb(0x1ED760)
+}
+pub fn youtube_red() -> Retained<NSColor> {
+    rgb(0xFF0033)
+}
 
 pub const RADIUS: CGFloat = 6.0;
 pub const RADIUS_MODAL: CGFloat = 8.0;

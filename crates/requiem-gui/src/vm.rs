@@ -480,6 +480,14 @@ impl UiState {
         }
     }
 
+    /// The playing track's badge, which the player bar and Now Playing show while the queue
+    /// mixes services.
+    pub fn now_playing_badge(&self) -> Option<Service> {
+        let track = self.now_playing.as_ref()?;
+        let queue = self.queue.iter().map(|t| &t.id.provider);
+        badge(&track.id.provider, mixed(queue))
+    }
+
     /// The seek bar's value as VoiceOver reads it, "1:23 of 3:45"; empty with nothing loaded.
     pub fn seek_spoken(&self) -> String {
         if self.now_playing.is_none() {
@@ -1872,8 +1880,30 @@ pub fn provider_name(id: &str) -> &str {
     }
 }
 
+/// Whether `providers` holds more than one provider. Only a list that mixes them marks its
+/// items with their service's badge.
+pub fn mixed<'a>(providers: impl IntoIterator<Item = &'a ProviderId>) -> bool {
+    let mut providers = providers.into_iter();
+    providers
+        .next()
+        .is_some_and(|first| providers.any(|p| p != first))
+}
+
+/// The badge of an item from `provider` in a list that is `mixed` or not; a provider with no
+/// service has none.
+pub fn badge(provider: &ProviderId, mixed: bool) -> Option<Service> {
+    Service::of(provider).filter(|_| mixed)
+}
+
+pub fn item_provider(item: &Item) -> &ProviderId {
+    match item {
+        Item::Track(t) => &t.id.provider,
+        Item::Collection(c) => &c.id.provider,
+    }
+}
+
 /// A provider the menus and palette have sign-in items for.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Service {
     Spotify,
     YouTubeMusic,
@@ -4791,6 +4821,53 @@ mod tests {
     fn provider_names_are_the_services_names() {
         assert_eq!(provider_name("spotify"), "Spotify");
         assert_eq!(provider_name("ytmusic"), "YouTube Music");
+    }
+
+    #[test]
+    fn only_a_list_of_two_or_more_providers_is_mixed() {
+        let (s, y) = (spotify(), provider());
+        assert!(!mixed([]));
+        assert!(!mixed([&s]));
+        assert!(!mixed([&s, &s, &s]));
+        assert!(mixed([&s, &s, &y]));
+        assert!(mixed([&y, &s]));
+    }
+
+    #[test]
+    fn badges_mark_the_known_services_of_a_mixed_list() {
+        let other = ProviderId("other".into());
+        assert_eq!(badge(&spotify(), true), Some(Service::Spotify));
+        assert_eq!(badge(&provider(), true), Some(Service::YouTubeMusic));
+        assert_eq!(badge(&other, true), None);
+        assert_eq!(badge(&spotify(), false), None);
+    }
+
+    #[test]
+    fn the_playing_track_has_a_badge_while_the_queue_mixes_services() {
+        let from = |p: ProviderId, id: &str| {
+            let mut t = track(id, 200);
+            t.id.provider = p;
+            t
+        };
+        let mut vm = connected();
+        let (a, b) = (from(spotify(), "a"), from(provider(), "b"));
+        vm.apply(Event::QueueChanged {
+            tracks: vec![a.clone(), from(spotify(), "c")],
+            current: Some(0),
+        });
+        vm.apply(Event::NowPlaying {
+            track: a.clone(),
+            duration: None,
+        });
+        vm.apply(Event::State(PlayState::Playing));
+        assert_eq!(vm.ui().now_playing_badge(), None);
+        vm.apply(Event::QueueChanged {
+            tracks: vec![a, b],
+            current: Some(0),
+        });
+        assert_eq!(vm.ui().now_playing_badge(), Some(Service::Spotify));
+        vm.apply(Event::State(PlayState::Stopped));
+        assert_eq!(vm.ui().now_playing_badge(), None);
     }
 
     fn status(state: UpdateState) -> UpdateStatus {

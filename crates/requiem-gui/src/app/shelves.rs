@@ -23,10 +23,11 @@ use objc2_foundation::{
 use requiem_core::{Item, Shelf};
 use requiem_macos::artwork::Cover;
 
+use super::badge::{self, Badge};
 use super::theme::{self, Icon, Weight};
 use super::ui;
 use super::widgets::{self, FLEX_W, HoverButton, PIN_RIGHT, rect};
-use crate::vm;
+use crate::vm::{self, Service};
 
 const PAD: CGFloat = 24.0;
 const TOP_PAD: CGFloat = 8.0;
@@ -230,6 +231,7 @@ impl ShelfCard {
         menu
     }
 
+    /// `badge` is the item's service, on a page that mixes services.
     fn new(
         mtm: MainThreadMarker,
         frame: NSRect,
@@ -237,6 +239,7 @@ impl ShelfCard {
         index: usize,
         item: &Item,
         compact: bool,
+        badge: Option<Service>,
     ) -> Retained<Self> {
         let this = Self::alloc(mtm).set_ivars(CardIvars {
             shelf,
@@ -254,7 +257,18 @@ impl ShelfCard {
         } else {
             this.fill_card(mtm, title, &subtitle, art);
         }
-        widgets::as_button(&this, &spoken(title, &subtitle));
+        if badge.is_some() {
+            let (cover, room) = if compact {
+                let pad = (GRID_ROW_H - GRID_COVER) / 2.0;
+                (rect(pad, pad, GRID_COVER, GRID_COVER), pad)
+            } else {
+                (rect(INSET, INSET, CARD_W, CARD_W), INSET)
+            };
+            let b = Badge::new(mtm, badge::frame(cover, room, true));
+            b.set(badge);
+            this.addSubview(&b);
+        }
+        widgets::as_button(&this, &spoken(title, &subtitle, badge));
         widgets::track_hover(&this, NSTrackingAreaOptions::empty());
         this
     }
@@ -347,13 +361,14 @@ fn parts(item: &Item) -> (&str, String, Option<&str>) {
     }
 }
 
-/// What VoiceOver reads for a card: "title, subtitle".
-fn spoken(title: &str, subtitle: &str) -> String {
-    if subtitle.is_empty() {
-        title.to_owned()
-    } else {
-        format!("{title}, {subtitle}")
-    }
+/// What VoiceOver reads for a card: "title, subtitle", then the service its badge shows.
+fn spoken(title: &str, subtitle: &str, badge: Option<Service>) -> String {
+    [Some(title), Some(subtitle), badge.map(Service::name)]
+        .into_iter()
+        .flatten()
+        .filter(|s| !s.is_empty())
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 /// Whether a shelf is a grid of tracks, YouTube Music's compact "Quick picks" layout.
@@ -415,6 +430,8 @@ struct ShelfRow {
     forward: Retained<HoverButton>,
     items: Vec<Item>,
     grid: bool,
+    /// Whether the page mixes services, so its cards show their service's badge.
+    mixed: bool,
     /// Top and bottom of the row, title included, in the page's document.
     top: CGFloat,
     bottom: CGFloat,
@@ -478,7 +495,9 @@ impl ShelfRow {
                     card_h(),
                 )
             };
-            let card = ShelfCard::new(mtm, frame, self.shelf, i, &self.items[i], self.grid);
+            let item = &self.items[i];
+            let badge = vm::badge(vm::item_provider(item), self.mixed);
+            let card = ShelfCard::new(mtm, frame, self.shelf, i, item, self.grid, badge);
             self.doc.addSubview(&card);
             cards.insert(i, card);
         }
@@ -549,6 +568,11 @@ impl Shelves {
         let title_font = theme::font(17.0, Weight::SemiBold);
         let mut y = TOP_PAD;
         let mut rows = Vec::new();
+        let mixed = vm::mixed(
+            shelves
+                .iter()
+                .flat_map(|s| s.items.iter().map(vm::item_provider)),
+        );
         for (si, shelf) in shelves.iter().enumerate() {
             if shelf.items.is_empty() {
                 continue;
@@ -627,6 +651,7 @@ impl Shelves {
                 forward,
                 items: shelf.items.clone(),
                 grid,
+                mixed,
                 top,
                 bottom: y,
                 cards: RefCell::new(HashMap::new()),
@@ -864,7 +889,10 @@ mod tests {
             title: String::new(),
             items: Vec::new()
         }));
-        assert_eq!(spoken("Title", "Sub"), "Title, Sub");
-        assert_eq!(spoken("Title", ""), "Title");
+        assert_eq!(spoken("Title", "Sub", None), "Title, Sub");
+        assert_eq!(spoken("Title", "", None), "Title");
+        let spotify = Some(Service::Spotify);
+        assert_eq!(spoken("Title", "Sub", spotify), "Title, Sub, Spotify");
+        assert_eq!(spoken("Title", "", spotify), "Title, Spotify");
     }
 }
