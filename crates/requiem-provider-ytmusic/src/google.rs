@@ -275,12 +275,17 @@ fn write_private(path: &Path, bytes: &[u8]) -> io::Result<()> {
     commit(&tmp, path)
 }
 
+/// The temp file `stage_private` writes for `path`, which a crash can leave behind.
+pub(crate) fn staged_path(path: &Path) -> PathBuf {
+    let mut tmp = path.as_os_str().to_owned();
+    tmp.push(".tmp");
+    PathBuf::from(tmp)
+}
+
 /// Writes `bytes` to a temp file beside `path`, which only the user can read, for `commit` to
 /// put in its place.
 pub(crate) fn stage_private(path: &Path, bytes: &[u8]) -> io::Result<PathBuf> {
-    let mut tmp = path.as_os_str().to_owned();
-    tmp.push(".tmp");
-    let tmp = PathBuf::from(tmp);
+    let tmp = staged_path(path);
     // A leftover from a crash would make `create_new` fail.
     let _ = fs::remove_file(&tmp);
     let result = OpenOptions::new()

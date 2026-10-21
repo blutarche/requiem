@@ -18,7 +18,7 @@ use serde_json::{Value, json};
 use crate::IpFamily;
 use crate::browser::{self, BrowserHeaders};
 use crate::clients::{MUSIC_CLIENT_ID, MUSIC_CLIENT_VERSION, MUSIC_ORIGIN, MUSIC_UA};
-use crate::google::{Clock, commit, private_dir, read_capped, stage_private, tighten};
+use crate::google::{Clock, commit, private_dir, read_capped, stage_private, staged_path, tighten};
 use crate::innertube::{InnertubeClient, status_error};
 use crate::log::debug;
 use crate::parse::{
@@ -201,12 +201,16 @@ pub(crate) fn exclude_from_backups(path: &Path) {
 #[cfg(not(target_os = "macos"))]
 pub(crate) fn exclude_from_backups(_: &Path) {}
 
-/// Deletes the session file; a missing one is no error.
+/// Deletes the session file and any copy a save left behind; a missing one is no error. The
+/// copy goes first, so on an error the file is still there.
 fn remove(path: &Path) -> io::Result<()> {
-    match fs::remove_file(path) {
-        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
-        other => other,
+    for p in [staged_path(path), path.to_owned()] {
+        match fs::remove_file(p) {
+            Err(e) if e.kind() != io::ErrorKind::NotFound => return Err(e),
+            _ => {}
+        }
     }
+    Ok(())
 }
 
 /// A continuation token as a query value.
@@ -885,6 +889,23 @@ mod tests {
         assert_eq!(s.account(), None);
         assert!(!rig.path().exists());
         assert!(!s.sign_out().unwrap());
+    }
+
+    #[test]
+    fn sign_out_deletes_a_copy_a_save_left_behind() {
+        let rig = Rig::new();
+        let s = rig.signed_in();
+        let leftover = staged_path(&rig.path());
+        fs::write(&leftover, fs::read(rig.path()).unwrap()).unwrap();
+        assert!(s.sign_out().unwrap());
+        assert!(!leftover.exists());
+        assert!(!rig.path().exists());
+
+        // Nothing reads the copy, but it holds the cookie.
+        fs::write(&leftover, COOKIE).unwrap();
+        assert_eq!(rig.session().account(), None);
+        assert!(!s.sign_out().unwrap());
+        assert!(!leftover.exists());
     }
 
     #[test]
