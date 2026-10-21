@@ -246,14 +246,15 @@ fn sign_in_error(e: &ProviderError) -> String {
     }
 }
 
-/// Runs `call` on every provider in parallel and waits for all. Results are concatenated in
-/// provider order; a sign-in failure is skipped silently and any other is logged. It fails only
-/// when none succeeded, with the first error that isn't a sign-in error, else a sign-in error.
+/// Runs `call` on every provider in parallel and waits for all. Returns the answer of each
+/// provider that succeeded, in provider order; a sign-in failure is skipped silently and any
+/// other is logged. It fails only when none succeeded, with the first error that isn't a
+/// sign-in error, else a sign-in error.
 fn fan_out<T: Send + 'static>(
     what: &'static str,
     providers: Vec<Arc<dyn Provider>>,
     call: impl Fn(&dyn Provider) -> Result<Vec<T>, ProviderError> + Send + Sync + 'static,
-) -> Result<Vec<T>, ProviderError> {
+) -> Result<Vec<Vec<T>>, ProviderError> {
     let call = Arc::new(call);
     let workers: Vec<_> = providers
         .into_iter()
@@ -262,8 +263,7 @@ fn fan_out<T: Send + 'static>(
             thread::spawn(move || (p.id(), call(p.as_ref())))
         })
         .collect();
-    let mut merged = Vec::new();
-    let mut succeeded = false;
+    let mut answers = Vec::new();
     let mut hard = None;
     let mut sign_in = None;
     for worker in workers {
@@ -272,10 +272,7 @@ fn fan_out<T: Send + 'static>(
             continue;
         };
         match result {
-            Ok(items) => {
-                succeeded = true;
-                merged.extend(items);
-            }
+            Ok(items) => answers.push(items),
             Err(e @ ProviderError::SignInRequired(_)) => {
                 sign_in.get_or_insert(e);
             }
@@ -285,12 +282,28 @@ fn fan_out<T: Send + 'static>(
             }
         }
     }
-    if succeeded {
-        return Ok(merged);
+    if !answers.is_empty() {
+        return Ok(answers);
     }
     Err(hard
         .or(sign_in)
         .unwrap_or_else(|| ProviderError::Unplayable("no provider answered".into())))
+}
+
+/// The first of each list, then the second of each, and so on; a list that runs out drops
+/// out.
+fn interleave<T>(lists: Vec<Vec<T>>) -> Vec<T> {
+    let mut lists: Vec<_> = lists.into_iter().map(Vec::into_iter).collect();
+    let mut items = Vec::new();
+    loop {
+        let before = items.len();
+        for list in &mut lists {
+            items.extend(list.next());
+        }
+        if items.len() == before {
+            return items;
+        }
+    }
 }
 
 /// Shelves that share a title become one, where the title first appears, with their items
@@ -305,21 +318,32 @@ fn merge_home(shelves: Vec<Shelf>) -> Vec<Shelf> {
     }
     titles
         .into_iter()
-        .map(|(title, lists)| {
-            let mut lists: Vec<_> = lists.into_iter().map(Vec::into_iter).collect();
-            let mut items = Vec::new();
-            loop {
-                let before = items.len();
-                for list in &mut lists {
-                    items.extend(list.next());
-                }
-                if items.len() == before {
-                    break;
-                }
-            }
-            Shelf { title, items }
+        .map(|(title, lists)| Shelf {
+            title,
+            items: interleave(lists),
         })
         .collect()
+}
+
+/// With items from two or more providers, one "Library" shelf of their items taken in turn,
+/// in provider order; else each provider's shelves as they are. `answers` are each
+/// provider's shelves, in provider order.
+fn merge_library(answers: Vec<Vec<Shelf>>) -> Vec<Shelf> {
+    let stocked = answers
+        .iter()
+        .filter(|shelves| shelves.iter().any(|s| !s.items.is_empty()))
+        .count();
+    if stocked < 2 {
+        return answers.into_iter().flatten().collect();
+    }
+    let lists = answers
+        .into_iter()
+        .map(|shelves| shelves.into_iter().flat_map(|s| s.items).collect())
+        .collect();
+    vec![Shelf {
+        title: "Library".into(),
+        items: interleave(lists),
+    }]
 }
 
 fn resolve_with_retry(
@@ -691,7 +715,8 @@ impl Actor {
         let tx = self.tx.clone();
         let limit = self.config.search_limit;
         thread::spawn(move || {
-            let result = fan_out("search", providers, move |p| p.search(&query, limit));
+            let result =
+                fan_out("search", providers, move |p| p.search(&query, limit)).map(interleave);
             let _ = tx.send(Msg::Searched { req, result });
         });
     }
@@ -747,11 +772,11 @@ impl Actor {
                 let page = page.clone();
                 move |p| p.browse(&page)
             });
-            let result = if page == Page::Home {
-                result.map(merge_home)
-            } else {
-                result
-            };
+            let result = result.map(|answers| match page {
+                Page::Home => merge_home(answers.into_iter().flatten().collect()),
+                Page::Library => merge_library(answers),
+                Page::Collection(_) => answers.into_iter().flatten().collect(),
+            });
             let accounts = targets.iter().map(|p| (p.id(), p.account())).collect();
             let _ = tx.send(Msg::Browsed {
                 req,

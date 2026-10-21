@@ -1876,10 +1876,10 @@ impl Ui {
         if let Some(now) = p.now_playing {
             let track = now.track.as_ref().map(|(t, a)| (t.as_str(), a.as_str()));
             self.bar
-                .set_track(track, &now.total, now.artwork.as_deref());
+                .set_track(track, &now.total, now.artwork.as_deref(), now.badge);
         }
-        if let Some((track, next)) = p.now_page {
-            self.now_playing.set(track, &next);
+        if let Some((track, next, badge)) = p.now_page {
+            self.now_playing.set(track, &next, badge);
         }
         if let Some(e) = p.elapsed {
             self.bar.set_elapsed(&e);
@@ -2543,6 +2543,7 @@ struct NowPlaying {
     track: Option<(String, String)>,
     total: String,
     artwork: Option<String>,
+    badge: Option<Service>,
 }
 
 /// Owned copies of the dirty regions, taken so the view-model borrow ends before AppKit
@@ -2557,8 +2558,8 @@ struct Patch {
     library: Option<(LibraryView, Vec<table::RowText>)>,
     collection: Option<Option<CollectionPatch>>,
     now_playing: Option<NowPlaying>,
-    /// Now Playing's track and the tracks after it.
-    now_page: Option<(Option<Track>, Vec<Track>)>,
+    /// Now Playing's track, the tracks after it, and the track's badge.
+    now_page: Option<(Option<Track>, Vec<Track>, Option<Service>)>,
     elapsed: Option<String>,
     seek_spoken: Option<String>,
     progress: Option<f64>,
@@ -2592,18 +2593,23 @@ impl Patch {
                     rows: table::rows(&c.tracks),
                 })
             }),
-            now_playing: (any(Dirty::NOW_PLAYING) || any(Dirty::STATE)).then(|| NowPlaying {
-                track: s
-                    .now_playing
-                    .as_ref()
-                    .map(|t| (t.title.clone(), vm::artists(t))),
-                total: s.total_text(),
-                artwork: s.now_playing.as_ref().and_then(|t| t.artwork_url.clone()),
-            }),
+            // The queue says whether the badge shows.
+            now_playing: d
+                .intersects(Dirty::NOW_PLAYING | Dirty::STATE | Dirty::QUEUE)
+                .then(|| NowPlaying {
+                    track: s
+                        .now_playing
+                        .as_ref()
+                        .map(|t| (t.title.clone(), vm::artists(t))),
+                    total: s.total_text(),
+                    artwork: s.now_playing.as_ref().and_then(|t| t.artwork_url.clone()),
+                    badge: s.now_playing_badge(),
+                }),
             now_page: d.intersects(Dirty::NOW_PLAYING | Dirty::QUEUE).then(|| {
                 (
                     s.now_playing.clone(),
                     vm::up_next(&s.queue, s.current).to_vec(),
+                    s.now_playing_badge(),
                 )
             }),
             elapsed: (any(Dirty::ELAPSED) || any(Dirty::STATE) || any(Dirty::NOW_PLAYING))
@@ -2681,9 +2687,12 @@ mod tests {
         );
         assert_eq!(now.total, "3:45");
         assert_eq!(now.artwork, demo::artwork_url(0));
-        let (track, next) = p.now_page.unwrap();
+        let (track, next, badge) = p.now_page.unwrap();
         assert_eq!(track.unwrap().title, "Night Drive Home");
         assert_eq!(next, vm.ui().queue[3..8]);
+        // The demo's queue mixes services.
+        let spotify = Some(Service::Spotify);
+        assert_eq!((now.badge, badge), (spotify, spotify));
         assert_eq!(p.elapsed.as_deref(), Some("1:23"));
         assert!((p.progress.unwrap() - 83.0 / 225.0).abs() < 1e-9);
         assert_eq!(p.playing, Some(true));

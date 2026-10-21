@@ -2,6 +2,7 @@
 //! their messages over through the main dispatch queue.
 
 mod backend;
+mod badge;
 mod bar;
 mod now_playing;
 mod palette;

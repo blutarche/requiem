@@ -11,16 +11,18 @@ use objc2_core_foundation::CGFloat;
 use objc2_foundation::{MainThreadMarker, NSPoint};
 use requiem_macos::artwork::Cover;
 
+use super::badge::{self, Badge};
 use super::theme::{self, Icon, Weight};
 use super::widgets::{
     self, FLEX_W, FadeLabel, HoverButton, PIN_BOTTOM, PIN_LEFT, PIN_RIGHT, PIN_TOP, Slider,
     SliderKind, rect,
 };
-use crate::vm::Controls;
+use crate::vm::{Controls, Service};
 
 pub struct PlayerBar {
     pub view: Retained<NSView>,
     cover: Retained<Cover>,
+    badge: Retained<Badge>,
     title: FadeLabel,
     artists: FadeLabel,
     prev: Retained<HoverButton>,
@@ -80,6 +82,12 @@ impl PlayerBar {
         );
         cover.setAutoresizingMask(PIN_LEFT);
         view.addSubview(&cover);
+        let badge = Badge::new(
+            mtm,
+            badge::frame(cover.frame(), (h - Self::COVER) / 2.0, false),
+        );
+        badge.setAutoresizingMask(PIN_LEFT);
+        view.addSubview(&badge);
 
         // Width and the free space on each side shrink in proportion, so the left block and
         // the centred transport never overlap down to the window's minimum width.
@@ -246,6 +254,7 @@ impl PlayerBar {
         PlayerBar {
             view,
             cover,
+            badge,
             title: FadeLabel::new(title),
             artists: FadeLabel::new(artists),
             prev,
@@ -260,9 +269,17 @@ impl PlayerBar {
         }
     }
 
-    /// `None` when nothing is loaded.
-    pub fn set_track(&self, track: Option<(&str, &str)>, total: &str, artwork: Option<&str>) {
+    /// `None` when nothing is loaded. `badge` is the track's service, while the queue mixes
+    /// services.
+    pub fn set_track(
+        &self,
+        track: Option<(&str, &str)>,
+        total: &str,
+        artwork: Option<&str>,
+        badge: Option<Service>,
+    ) {
         self.cover.set_url(artwork);
+        self.badge.set(badge);
         let (title, artists, color) = match track {
             Some((title, artists)) => (title, artists, theme::ink()),
             None => ("Nothing playing", "", theme::muted()),

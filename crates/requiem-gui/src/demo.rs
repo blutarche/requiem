@@ -218,10 +218,10 @@ pub fn covers() -> Vec<(String, usize)> {
     out
 }
 
-/// The first this many results, and Library entries, come from Spotify, which the merged
-/// lists put before YouTube Music.
-const SPOTIFY_RESULTS: usize = 6;
-const SPOTIFY_LIBRARY: usize = 4;
+/// Spotify has 6 of the results and 4 of the Library's entries, which the merged lists take
+/// in turn with YouTube Music's, Spotify first: the even ones of the first this many.
+const MIXED_RESULTS: usize = 12;
+const MIXED_LIBRARY: usize = 8;
 
 fn spotify() -> ProviderId {
     ProviderId("spotify".into())
@@ -231,12 +231,22 @@ fn ytmusic() -> ProviderId {
     ProviderId("ytmusic".into())
 }
 
+/// The provider of entry `i` of a merged list whose first `mixed` entries alternate.
+fn taken_in_turn(i: usize, mixed: usize) -> ProviderId {
+    if i < mixed && i.is_multiple_of(2) {
+        spotify()
+    } else {
+        ytmusic()
+    }
+}
+
+/// Home's Made for you is Spotify's; its other shelves alternate, as both services have them.
 fn collection_id(kind: &str, i: usize) -> CollectionId {
     CollectionId {
-        provider: if kind == "lib" && i < SPOTIFY_LIBRARY {
-            spotify()
-        } else {
-            ytmusic()
+        provider: match kind {
+            "lib" => taken_in_turn(i, MIXED_LIBRARY),
+            "mix" => spotify(),
+            _ => taken_in_turn(i, usize::MAX),
         },
         id: format!("demo-{kind}-{i:02}"),
     }
@@ -247,6 +257,7 @@ fn home_tracks() -> Vec<Track> {
     tracks.drain(..12);
     tracks.truncate(12);
     for (k, t) in tracks.iter_mut().enumerate() {
+        t.id.provider = taken_in_turn(k, usize::MAX);
         t.artwork_url = (k % 5 != 4).then(|| demo_url(HOME_TRACK_ART + k));
     }
     tracks
@@ -317,7 +328,7 @@ pub fn library() -> Vec<Shelf> {
                     "Liked Songs".to_owned(),
                     "Auto playlist · 312 songs".to_owned(),
                 )
-            } else if i < SPOTIFY_LIBRARY {
+            } else if taken_in_turn(i, MIXED_LIBRARY) == spotify() {
                 (
                     format!(
                         "{} {}",
@@ -346,7 +357,7 @@ pub fn library() -> Vec<Shelf> {
         })
         .collect();
     vec![Shelf {
-        title: "Playlists".into(),
+        title: "Library".into(),
         items,
     }]
 }
@@ -359,9 +370,13 @@ pub fn collection() -> Collection {
     }
 }
 
-fn collection_tracks() -> Vec<Track> {
+/// A collection's tracks, all from its own `provider`.
+fn collection_tracks(provider: &ProviderId) -> Vec<Track> {
     let mut tracks = results();
     tracks.truncate(COLLECTION_LEN);
+    for t in &mut tracks {
+        t.id.provider = provider.clone();
+    }
     tracks
 }
 
@@ -395,11 +410,7 @@ pub fn results() -> Vec<Track> {
         .enumerate()
         .map(|(i, (title, artists, album, secs))| Track {
             id: TrackId {
-                provider: if i < SPOTIFY_RESULTS {
-                    spotify()
-                } else {
-                    ytmusic()
-                },
+                provider: taken_in_turn(i, MIXED_RESULTS),
                 id: format!("demo-{i:02}"),
             },
             title: (*title).to_owned(),
@@ -547,12 +558,15 @@ impl Daemon {
                 }]
             }
             Command::Browse { req, page } => {
-                let shelves = match page {
+                let shelves = match &page {
                     Page::Home => home(),
                     Page::Library => library(),
-                    Page::Collection(_) => vec![Shelf {
+                    Page::Collection(id) => vec![Shelf {
                         title: String::new(),
-                        items: collection_tracks().into_iter().map(Item::Track).collect(),
+                        items: collection_tracks(&id.provider)
+                            .into_iter()
+                            .map(Item::Track)
+                            .collect(),
                     }],
                 };
                 vec![Event::BrowseResults { req, page, shelves }]
@@ -816,7 +830,7 @@ fn update(state: UpdateState) -> UpdateStatus {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::vm::{Connection, HomeView, List, PageView, QueueEdit, SearchStatus};
+    use crate::vm::{self, Connection, HomeView, List, PageView, QueueEdit, SearchStatus};
 
     fn run(vm: &mut Vm, daemon: &mut Daemon, intent: Intent) {
         for cmd in vm.intent(intent) {
@@ -855,6 +869,28 @@ mod tests {
         assert_eq!(
             vm.ui().home_view(),
             HomeView::SignedOut(vec![spotify(), ytmusic()])
+        );
+    }
+
+    #[test]
+    fn results_and_the_library_take_the_services_in_turn() {
+        let providers: Vec<_> = results().into_iter().map(|t| t.id.provider).collect();
+        assert_eq!(providers[..3], [spotify(), ytmusic(), spotify()]);
+        assert_eq!(providers.iter().filter(|p| **p == spotify()).count(), 6);
+        assert!(providers[MIXED_RESULTS..].iter().all(|p| *p == ytmusic()));
+        let library = library().remove(0).items;
+        let spotify_entries = library
+            .iter()
+            .filter(|i| *vm::item_provider(i) == spotify())
+            .count();
+        assert_eq!(spotify_entries, 4);
+        assert_eq!(*vm::item_provider(&library[1]), ytmusic());
+        // A collection's tracks are all its own provider's.
+        let c = collection();
+        assert!(
+            collection_tracks(&c.id.provider)
+                .iter()
+                .all(|t| t.id.provider == c.id.provider)
         );
     }
 

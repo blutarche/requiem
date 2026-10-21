@@ -12,11 +12,12 @@ use objc2_quartz_core::kCAGravityResizeAspectFill;
 use requiem_core::Track;
 use requiem_macos::artwork::{self, Cover};
 
+use super::badge::{self, Badge};
 use super::shelves::FlippedView;
 use super::theme::{self, Icon, Weight};
 use super::ui;
 use super::widgets::{self, EmptyState, FLEX_H, FLEX_W, HoverButton, rect};
-use crate::vm;
+use crate::vm::{self, Service};
 
 /// The cover's distance from the page's top and left edges.
 const MARGIN: CGFloat = 40.0;
@@ -199,6 +200,7 @@ pub struct NowPlayingPage {
     content: Retained<FlippedView>,
     placeholder: Retained<Cover>,
     art: Retained<NowArt>,
+    badge: Retained<Badge>,
     title: Retained<NSTextField>,
     artists: Retained<NSTextField>,
     album: Retained<NSTextField>,
@@ -233,6 +235,7 @@ impl NowPlayingPage {
         content.setAutoresizingMask(FLEX_W | FLEX_H);
         let placeholder = widgets::cover(mtm, rect(0.0, 0.0, 200.0, 200.0), COVER_RADIUS, 48.0);
         let art = NowArt::new(mtm);
+        let badge = Badge::new(mtm, badge::frame(placeholder.frame(), MARGIN, true));
         let title = widgets::label(mtm, "", &theme::font(20.0, Weight::SemiBold), &theme::ink());
         let artists = widgets::label(
             mtm,
@@ -266,6 +269,7 @@ impl NowPlayingPage {
         for v in [
             &*placeholder as &NSView,
             &art,
+            &badge,
             &title,
             &artists,
             &album,
@@ -293,6 +297,7 @@ impl NowPlayingPage {
             content,
             placeholder,
             art,
+            badge,
             title,
             artists,
             album,
@@ -305,12 +310,13 @@ impl NowPlayingPage {
             next_count: Cell::new(0),
             loaded: RefCell::new(None),
         };
-        page.set(None, &[]);
+        page.set(None, &[], None);
         page
     }
 
-    /// Shows `track` and the `next` tracks after it; the empty state for no track.
-    pub fn set(&self, track: Option<Track>, next: &[Track]) {
+    /// Shows `track` and the `next` tracks after it; the empty state for no track. `badge` is
+    /// the track's service, while the queue mixes services.
+    pub fn set(&self, track: Option<Track>, next: &[Track], badge: Option<Service>) {
         let playing = track.is_some();
         self.content.setHidden(!playing);
         self.empty.view.setHidden(playing);
@@ -329,6 +335,7 @@ impl NowPlayingPage {
         self.next_count.set(next.len());
         self.track.replace(track);
         self.layout();
+        self.badge.set(badge);
     }
 
     /// Shows or hides the page. Only a shown page loads its cover's image.
@@ -353,6 +360,9 @@ impl NowPlayingPage {
         let cover = rect(MARGIN, MARGIN, side, side);
         self.placeholder.setFrame(cover);
         self.art.setFrame(cover);
+        // Covers this page allows are all big enough for the largest badge, so the image
+        // drawn for its old frame still fits.
+        self.badge.setFrame(badge::frame(cover, MARGIN, true));
         let x = MARGIN + side + DETAILS_GAP;
         let w = (b.size.width - x - MARGIN).max(0.0);
         let mut y = MARGIN;
