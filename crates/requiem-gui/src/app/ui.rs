@@ -177,7 +177,7 @@ const SETUP_W: CGFloat = 560.0;
 const SETUP_H: CGFloat = 374.0;
 const SETUP_HEADING: &str = "Set up YouTube Music sign-in";
 const SETUP_INTRO: &str =
-    "Use a session from your browser, or set up your own Google Cloud client:";
+    "Use Browser Session\u{2026} needs no setup. To use your own Google Cloud client:";
 const SETUP_STEPS: &str = "\
 1. Create a Google Cloud project and enable the YouTube Data API v3.
 2. Set up the OAuth consent screen and publish the app, or sign-in expires after 7 days.
