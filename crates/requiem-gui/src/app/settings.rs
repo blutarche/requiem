@@ -1,6 +1,6 @@
 //! Settings: each account, its state, and what can be done about it there.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
 use objc2::rc::Retained;
@@ -332,6 +332,8 @@ struct AccountView {
     status: Retained<NSTextField>,
     /// Sign In… or Sign Out….
     action: Retained<HoverButton>,
+    /// The action's label, whose padded image is rebuilt only when it changes.
+    labelled: Cell<Option<(&'static str, Icon)>>,
     change: Retained<HoverButton>,
     code: CodeView,
     form: FormView,
@@ -389,6 +391,7 @@ impl AccountView {
             name,
             status,
             action,
+            labelled: Cell::new(None),
             change,
             code,
             form,
@@ -418,7 +421,9 @@ impl AccountView {
             _ => None,
         };
         if let Some((title, icon, sel)) = action {
-            relabel(&self.action, title, Some(icon), ACTION_H);
+            if self.labelled.replace(Some((title, icon))) != Some((title, icon)) {
+                relabel(&self.action, title, Some(icon), ACTION_H);
+            }
             // SAFETY: the target `new` gave the button implements both actions.
             unsafe { self.action.setAction(Some(sel)) };
         }
