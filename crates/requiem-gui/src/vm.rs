@@ -5634,7 +5634,7 @@ mod tests {
 
     #[test]
     fn a_refused_session_keeps_its_form_and_says_why() {
-        let refused = "Google didn't accept that session";
+        let refused = "Google didn't accept that session; copy it again from a browser where you're signed in to YouTube Music";
         let mut vm = pasting();
         vm.intent(Intent::ImportSession(session_json(PASTE)));
         vm.apply(Event::AccountError {

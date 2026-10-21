@@ -37,7 +37,7 @@ const HOME_SHELVES: usize = 6;
 const LIKED: &str = "LM";
 
 const ENDED: &str = "Your YouTube Music browser session ended; paste a new one in Settings";
-const NOT_ACCEPTED: &str = "Google didn't accept that session";
+const NOT_ACCEPTED: &str = "Google didn't accept that session; copy it again from a browser where you're signed in to YouTube Music";
 const WEB_PAGE: &str =
     "YouTube answered with a web page, not data; the session may need consent or a fresh sign-in";
 const REDIRECTED: &str = "YouTube redirected a signed-in request";
