@@ -36,6 +36,7 @@ this index first, then follow the feature file that matches what you're checking
 - [palette.md](palette.md): the command palette (⌘K), filtering and running actions.
 - [now-playing.md](now-playing.md): the Now Playing page (⌘L).
 - [update.md](update.md): checking for updates against the real release feed.
+- [settings.md](settings.md): the accounts page (⌘,), the browser-session and Google client forms.
 
 Not mapped yet: the menu-bar mini player (the daemon's status item), Raycast and the CLI. Report
 them as skipped until they are mapped.

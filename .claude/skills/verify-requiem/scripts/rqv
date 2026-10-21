@@ -9,7 +9,7 @@ repo=$(git -C "$here" rev-parse --show-toplevel)
 EVIDENCE_ROOT=${RQV_EVIDENCE:-${TMPDIR:-/tmp}/requiem-verify}
 ORCA=${ORCA_CLI_COMMAND:-orca}
 REAL_SUPPORT="$HOME/Library/Application Support/requiem"
-REAL_FILES=(spotify-credentials.json google-token.json google-client.json state.json)
+REAL_FILES=(spotify-credentials.json google-token.json google-client.json ytmusic-session.json state.json)
 
 die() { echo "rqv: $*" >&2; exit 1; }
 
