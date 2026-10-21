@@ -16,10 +16,11 @@ use requiem_core::ProviderId;
 use super::Delegate;
 use super::badge::Badge;
 use super::shelves::FlippedView;
-use super::theme::{self, Weight};
+use super::theme::{self, Icon, Weight};
 use super::ui;
 use super::widgets::{
-    self, FLEX_H, FLEX_W, Field, HoverButton, Mask, PIN_LEFT, PIN_RIGHT, PIN_TOP, SecretField, rect,
+    self, FLEX_H, FLEX_W, Field, HoverButton, LABEL_ICON, Mask, PIN_LEFT, PIN_RIGHT, PIN_TOP,
+    SecretField, rect,
 };
 use crate::vm::{self, AccountRow, AccountRowState, Service};
 
@@ -90,6 +91,7 @@ fn button(
     mtm: MainThreadMarker,
     primary: bool,
     title: &str,
+    icon: Option<Icon>,
     target: &AnyObject,
     action: Sel,
     tag: isize,
@@ -100,15 +102,16 @@ fn button(
     } else {
         HoverButton::secondary(mtm, frame)
     };
-    relabel(&b, title, BUTTON_H);
+    relabel(&b, title, icon, BUTTON_H);
     b.set_action(target, action);
     b.setTag(tag);
     b.setAutoresizingMask(PIN_LEFT);
     b
 }
 
-fn relabel(b: &HoverButton, title: &str, h: CGFloat) {
-    let w = b.set_label(title);
+fn relabel(b: &HoverButton, title: &str, icon: Option<Icon>, h: CGFloat) {
+    let image = icon.and_then(|i| i.image(LABEL_ICON));
+    let w = b.set_label_image(title, image.as_deref());
     b.setFrameSize(NSSize::new(w, h));
 }
 
@@ -355,11 +358,12 @@ impl AccountView {
         // The group's name says both.
         widgets::hide_from_accessibility(&name);
         widgets::hide_from_accessibility(&status);
-        let action = button(mtm, false, "", target, sel!(settingsSignIn:), tag);
+        let action = button(mtm, false, "", None, target, sel!(settingsSignIn:), tag);
         let change = button(
             mtm,
             false,
             "Change Google Client\u{2026}",
+            Some(Icon::KeyRound),
             target,
             sel!(changeClient:),
             tag,
@@ -402,12 +406,16 @@ impl AccountView {
             widgets::announce(mtm, &format!("{name}, {}", row.status));
         }
         let action = match &row.state {
-            AccountRowState::SignedIn { .. } => Some(("Sign Out\u{2026}", sel!(settingsSignOut:))),
-            AccountRowState::SignedOut => Some(("Sign In\u{2026}", sel!(settingsSignIn:))),
+            AccountRowState::SignedIn { .. } => {
+                Some(("Sign Out\u{2026}", Icon::LogOut, sel!(settingsSignOut:)))
+            }
+            AccountRowState::SignedOut => {
+                Some(("Sign In\u{2026}", Icon::LogIn, sel!(settingsSignIn:)))
+            }
             _ => None,
         };
-        if let Some((title, sel)) = action {
-            relabel(&self.action, title, ACTION_H);
+        if let Some((title, icon, sel)) = action {
+            relabel(&self.action, title, Some(icon), ACTION_H);
             // SAFETY: the target `new` gave the button implements both actions.
             unsafe { self.action.setAction(Some(sel)) };
         }
@@ -513,11 +521,20 @@ impl CodeView {
         for l in [&hint, &code] {
             l.setSelectable(true);
         }
-        let copy = button(mtm, true, "Copy Code", target, sel!(settingsCopyCode:), tag);
+        let copy = button(
+            mtm,
+            true,
+            "Copy Code",
+            Some(Icon::Copy),
+            target,
+            sel!(settingsCopyCode:),
+            tag,
+        );
         let open = button(
             mtm,
             false,
             "Open in Browser",
+            Some(Icon::ExternalLink),
             target,
             sel!(settingsOpenHost:),
             tag,
@@ -526,6 +543,7 @@ impl CodeView {
             mtm,
             false,
             "Cancel",
+            None,
             target,
             sel!(settingsCancelSignIn:),
             tag,
@@ -630,11 +648,12 @@ impl FormView {
         }
         widgets::accessibility_label(&id.text, "Client ID");
         widgets::accessibility_label(&secret.text, "Client secret");
-        let save = button(mtm, true, "Save", target, sel!(saveClient:), tag);
+        let save = button(mtm, true, "Save", None, target, sel!(saveClient:), tag);
         let choose = button(
             mtm,
             false,
             "Choose Client File\u{2026}",
+            Some(Icon::FolderOpen),
             target,
             sel!(settingsChooseClientFile:),
             tag,
@@ -643,11 +662,12 @@ impl FormView {
             mtm,
             false,
             "Setup Guide",
+            Some(Icon::BookOpen),
             target,
             sel!(openSetupGuide:),
             tag,
         );
-        let cancel = button(mtm, false, "Cancel", target, sel!(cancelSetup:), tag);
+        let cancel = button(mtm, false, "Cancel", None, target, sel!(cancelSetup:), tag);
         for v in [&note, &id_label, &secret_label] {
             view.addSubview(v);
         }

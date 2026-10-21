@@ -8,7 +8,7 @@ use std::time::{Duration, Instant};
 
 use block2::{RcBlock, StackBlock};
 use objc2::rc::{Retained, Weak};
-use objc2::runtime::{AnyObject, Sel};
+use objc2::runtime::{AnyObject, Bool, Sel};
 use objc2::{AnyThread, DefinedClass, MainThreadOnly, Message, define_class, msg_send};
 use objc2_app_kit::{
     NSAccessibility, NSAccessibilityAnnouncementKey,
@@ -18,9 +18,9 @@ use objc2_app_kit::{
     NSAnimationContext, NSApplication, NSAttributedStringNSStringDrawing,
     NSAutoresizingMaskOptions, NSBezierPath, NSButton, NSCellImagePosition, NSColor, NSControl,
     NSEvent, NSEventMask, NSEventTrackingRunLoopMode, NSEventType, NSFocusRingType, NSFont,
-    NSImageScaling, NSImageView, NSLineBreakMode, NSResponder, NSSecureTextField, NSTextAlignment,
-    NSTextField, NSTrackingArea, NSTrackingAreaOptions, NSView, NSWindow, NSWindowOcclusionState,
-    NSWorkspace,
+    NSImage, NSImageScaling, NSImageView, NSLineBreakMode, NSResponder, NSSecureTextField,
+    NSTextAlignment, NSTextField, NSTrackingArea, NSTrackingAreaOptions, NSView, NSWindow,
+    NSWindowOcclusionState, NSWorkspace,
 };
 use objc2_core_foundation::CGFloat;
 use objc2_foundation::{
@@ -40,6 +40,12 @@ use crate::vm::{Intent, SEEK_STEP_SECS, VOLUME_STEP};
 pub const DIMMED: CGFloat = 0.4;
 /// The keyboard focus ring's width.
 const RING_W: CGFloat = 2.0;
+/// The side of an icon before a text button's title.
+pub const LABEL_ICON: CGFloat = 14.0;
+/// Between a text button's icon and its title.
+const LABEL_GAP: CGFloat = 6.0;
+/// About what NSButtonCell leaves between an image and a title, as measured.
+const CELL_GAP: CGFloat = 2.0;
 
 /// Cubic Bézier control points of a timing curve.
 pub type Curve = [f32; 4];
@@ -708,6 +714,23 @@ impl HoverButton {
         s.size().width.ceil() + 24.0
     }
 
+    /// As `set_label`, with `image`, if any, before the title. A template image takes the
+    /// title's colour.
+    pub fn set_label_image(&self, title: &str, image: Option<&NSImage>) -> CGFloat {
+        let w = self.set_label(title);
+        let Some(image) = image else {
+            self.setImage(None);
+            self.setImagePosition(NSCellImagePosition::NoImage);
+            return w;
+        };
+        // The cell's own gap is tighter than ours; the image carries the rest.
+        self.setImage(Some(&padded(image, LABEL_GAP - CELL_GAP)));
+        self.setImagePosition(NSCellImagePosition::ImageLeading);
+        self.setImageHugsTitle(true);
+        self.setContentTintColor(Some(&self.ivars().title_color));
+        w + image.size().width + LABEL_GAP
+    }
+
     pub fn set_icon(&self, icon: Icon, size: CGFloat) {
         self.setImage(icon.image(size).as_deref());
     }
@@ -763,6 +786,23 @@ impl HoverButton {
             layer.setBorderWidth(0.0);
         }
     }
+}
+
+/// `image` with `right` points of clear space after it; a template if `image` is one.
+fn padded(image: &NSImage, right: CGFloat) -> Retained<NSImage> {
+    let size = image.size();
+    let src = image.retain();
+    let draw = RcBlock::new(move |r: NSRect| -> Bool {
+        src.drawInRect(rect(r.origin.x, r.origin.y, size.width, size.height));
+        Bool::YES
+    });
+    let out = NSImage::imageWithSize_flipped_drawingHandler(
+        NSSize::new(size.width + right, size.height),
+        false,
+        &draw,
+    );
+    out.setTemplate(image.isTemplate());
+    out
 }
 
 pub struct NavIvars {
@@ -1612,11 +1652,19 @@ impl EmptyState {
 
     /// With no `action`, the button hides.
     pub fn set(&self, icon: Icon, heading: &str, sub: &str, action: Option<&str>) {
+        let action = action.map(|a| (a, None));
         self.set_actions(icon, heading, sub, action.as_slice());
     }
 
-    /// One button per label, up to `MAX_ACTIONS`, centred side by side; none hides them all.
-    pub fn set_actions(&self, icon: Icon, heading: &str, sub: &str, labels: &[&str]) {
+    /// One button per label, each with its image if any, up to `MAX_ACTIONS`, centred side by
+    /// side; none hides them all.
+    pub fn set_actions(
+        &self,
+        icon: Icon,
+        heading: &str,
+        sub: &str,
+        labels: &[(&str, Option<&NSImage>)],
+    ) {
         self.icon.setImage(icon.image(32.0).as_deref());
         set_text(&self.heading, heading);
         set_text(&self.sub, sub);
@@ -1636,7 +1684,7 @@ impl EmptyState {
         let widths: Vec<CGFloat> = labels
             .iter()
             .zip(&self.actions)
-            .map(|(l, b)| b.set_label(l))
+            .map(|((l, image), b)| b.set_label_image(l, *image))
             .collect();
         let total = widths.iter().sum::<CGFloat>()
             + Self::ACTION_GAP * widths.len().saturating_sub(1) as CGFloat;

@@ -14,7 +14,7 @@ use objc2::{MainThreadOnly, Message, define_class, msg_send, sel};
 use objc2_app_kit::{
     NSAlert, NSAlertFirstButtonReturn, NSAnimatablePropertyContainer, NSApplication,
     NSAttributedStringNSStringDrawing, NSColor, NSControl, NSEvent, NSFont, NSFontAttributeName,
-    NSForegroundColorAttributeName, NSLineBreakMode, NSMenu, NSMenuItem, NSModalResponse,
+    NSForegroundColorAttributeName, NSImage, NSLineBreakMode, NSMenu, NSMenuItem, NSModalResponse,
     NSModalResponseOK, NSMutableParagraphStyle, NSOpenPanel, NSParagraphStyleAttributeName,
     NSPasteboard, NSPasteboardTypeString, NSResponder, NSTextAlignment, NSTextField,
     NSTextFieldDelegate, NSTrackingAreaOptions, NSView, NSWindow, NSWindowStyleMask,
@@ -31,6 +31,7 @@ use requiem_ipc::UpdateRequest;
 use requiem_macos::artwork::Cover;
 
 use super::backend::{Backend, Msg};
+use super::badge;
 use super::bar::PlayerBar;
 use super::now_playing::NowPlayingPage;
 use super::palette::Palette;
@@ -39,8 +40,8 @@ use super::shelves::Shelves;
 use super::table::{self, Kind, Table};
 use super::theme::{self, Icon, Weight};
 use super::widgets::{
-    self, EmptyState, FLEX_H, FLEX_W, Field, HoverButton, NavItem, PIN_BOTTOM, PIN_LEFT, PIN_RIGHT,
-    PIN_TOP, rect,
+    self, EmptyState, FLEX_H, FLEX_W, Field, HoverButton, LABEL_ICON, NavItem, PIN_BOTTOM,
+    PIN_LEFT, PIN_RIGHT, PIN_TOP, rect,
 };
 use super::{Delegate, MainWindow};
 use crate::vm::{
@@ -809,12 +810,27 @@ impl Ui {
         wrapped(&note, &note_font, SETUP_H - 200.0, 3.0);
         note.setSelectable(true);
         let buttons = [
-            ("Choose Client File\u{2026}", sel!(chooseClientFile:), true),
-            ("Enter Client ID\u{2026}", sel!(enterClientID:), false),
-            ("Setup Guide", sel!(openSetupGuide:), false),
-            ("Cancel", sel!(cancelSetup:), false),
+            (
+                "Choose Client File\u{2026}",
+                Some(Icon::FolderOpen),
+                sel!(chooseClientFile:),
+                true,
+            ),
+            (
+                "Enter Client ID\u{2026}",
+                Some(Icon::KeyRound),
+                sel!(enterClientID:),
+                false,
+            ),
+            (
+                "Setup Guide",
+                Some(Icon::BookOpen),
+                sel!(openSetupGuide:),
+                false,
+            ),
+            ("Cancel", None, sel!(cancelSetup:), false),
         ]
-        .map(|(title, action, primary)| {
+        .map(|(title, icon, action, primary)| {
             let frame = rect(0.0, 0.0, 0.0, BUTTON_H);
             let b = if primary {
                 HoverButton::primary(mtm, frame)
@@ -822,7 +838,8 @@ impl Ui {
                 HoverButton::secondary(mtm, frame)
             };
             b.set_action(target, action);
-            let w = b.set_label(title);
+            let image = icon.and_then(|i| i.image(LABEL_ICON));
+            let w = b.set_label_image(title, image.as_deref());
             (b, w)
         });
         let total = buttons.iter().map(|(_, w)| w).sum::<CGFloat>()
@@ -2122,13 +2139,12 @@ impl Ui {
         match view {
             _ if ready => {}
             HomeView::SignedOut(providers) => {
-                let labels = sign_in_labels(providers);
-                let labels: Vec<&str> = labels.iter().map(String::as_str).collect();
+                let actions = sign_in_actions(providers);
                 self.home_state.set_actions(
                     Icon::Home,
                     "Sign in to see your music",
                     "Search works without signing in.",
-                    &labels,
+                    &labelled(&actions),
                 );
             }
             HomeView::Page(page) => Self::page_state(&self.home_state, Icon::Home, page, "Home"),
@@ -2169,13 +2185,12 @@ impl Ui {
                 state.set(Icon::Library, "Sign-in isn't set up", text, None);
             }
             LibraryView::SignedOut(providers) => {
-                let labels = sign_in_labels(providers);
-                let labels: Vec<&str> = labels.iter().map(String::as_str).collect();
+                let actions = sign_in_actions(providers);
                 state.set_actions(
                     Icon::Library,
                     "Sign in to see your Library",
                     "Your playlists and albums appear here.",
-                    &labels,
+                    &labelled(&actions),
                 );
             }
             LibraryView::Pending {
@@ -2235,14 +2250,20 @@ impl Ui {
         widgets::set_text(&p.code, code);
         widgets::set_text(&p.expiry, &vm::expires_text(expires_at_unix, unix_now()));
         let buttons = [
-            (&p.copy, "Copy Code".to_owned()),
-            (&p.open, "Open in Browser".to_owned()),
-            (&p.cancel, "Cancel".to_owned()),
+            (&p.copy, "Copy Code", Some(Icon::Copy)),
+            (&p.open, "Open in Browser", Some(Icon::ExternalLink)),
+            (&p.cancel, "Cancel", None),
         ];
-        let widths: Vec<CGFloat> = buttons.iter().map(|(b, t)| b.set_label(t)).collect();
+        let widths: Vec<CGFloat> = buttons
+            .iter()
+            .map(|(b, t, icon)| {
+                let image = icon.and_then(|i| i.image(LABEL_ICON));
+                b.set_label_image(t, image.as_deref())
+            })
+            .collect();
         let total = widths.iter().sum::<CGFloat>() + 8.0 * (widths.len() as CGFloat - 1.0);
         let mut x = ((SIGN_IN_W - total) / 2.0).round();
-        for ((b, _), w) in buttons.iter().zip(widths) {
+        for ((b, ..), w) in buttons.iter().zip(widths) {
             b.setFrame(rect(x, 20.0, w, BUTTON_H));
             x += w + 8.0;
         }
@@ -2723,11 +2744,22 @@ struct CollectionPatch {
     rows: Vec<table::RowText>,
 }
 
-/// The sign-in panels' buttons, one per provider.
-fn sign_in_labels(providers: &[ProviderId]) -> Vec<String> {
+/// The sign-in panels' buttons, one per provider: a title and the provider's badge.
+fn sign_in_actions(providers: &[ProviderId]) -> Vec<(String, Option<Retained<NSImage>>)> {
     providers
         .iter()
-        .map(|p| format!("Sign in to {}", vm::provider_name(&p.0)))
+        .map(|p| {
+            let title = format!("Sign in to {}", vm::provider_name(&p.0));
+            (title, Service::of(p).map(|s| badge::mark(s, LABEL_ICON)))
+        })
+        .collect()
+}
+
+/// `actions` as `EmptyState::set_actions` takes them.
+fn labelled(actions: &[(String, Option<Retained<NSImage>>)]) -> Vec<(&str, Option<&NSImage>)> {
+    actions
+        .iter()
+        .map(|(title, image)| (title.as_str(), image.as_deref()))
         .collect()
 }
 

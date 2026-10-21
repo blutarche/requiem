@@ -71,38 +71,50 @@ impl Badge {
 
     /// Shows `service`'s badge at the view's size, or hides it for `None`.
     pub fn set(&self, service: Option<Service>) {
-        let image = service.map(|s| image(s, self.frame().size.width));
+        let image = service.map(|s| image(s, self.frame().size.width, true));
         self.setImage(image.as_deref());
         self.setHidden(image.is_none());
     }
 }
 
-/// `service`'s badge, `side` points square with its ring; drawn once per service and side.
-fn image(service: Service, side: CGFloat) -> Retained<NSImage> {
+/// `service`'s mark alone, `side` points square, as a button shows it before its title.
+pub fn mark(service: Service, side: CGFloat) -> Retained<NSImage> {
+    image(service, side, false)
+}
+
+/// `service`'s badge, `side` points square, with or without its `ring`; drawn once per
+/// service, side and ring.
+fn image(service: Service, side: CGFloat, ring: bool) -> Retained<NSImage> {
+    type Images = HashMap<(Service, u64, bool), Retained<NSImage>>;
     thread_local! {
-        static IMAGES: RefCell<HashMap<(Service, u64), Retained<NSImage>>> =
-            RefCell::new(HashMap::new());
+        static IMAGES: RefCell<Images> = RefCell::new(HashMap::new());
     }
     IMAGES.with(|images| {
         images
             .borrow_mut()
-            .entry((service, side.to_bits()))
-            .or_insert_with(|| draw(service, side))
+            .entry((service, side.to_bits(), ring))
+            .or_insert_with(|| draw(service, side, ring))
             .clone()
     })
 }
 
-fn draw(service: Service, side: CGFloat) -> Retained<NSImage> {
-    let ring = theme::bg();
+fn draw(service: Service, side: CGFloat, ring: bool) -> Retained<NSImage> {
+    let ring = ring.then(theme::bg);
     let fill = match service {
         Service::Spotify => theme::spotify_green(),
         Service::YouTubeMusic => theme::youtube_red(),
     };
     let draw = RcBlock::new(move |r: NSRect| -> Bool {
-        ring.setFill();
-        NSBezierPath::bezierPathWithOvalInRect(r).fill();
-        let d = r.size.width - 2.0 * RING;
-        let disc = rect(r.origin.x + RING, r.origin.y + RING, d, d);
+        let inset = match &ring {
+            Some(ring) => {
+                ring.setFill();
+                NSBezierPath::bezierPathWithOvalInRect(r).fill();
+                RING
+            }
+            None => 0.0,
+        };
+        let d = r.size.width - 2.0 * inset;
+        let disc = rect(r.origin.x + inset, r.origin.y + inset, d, d);
         fill.setFill();
         NSBezierPath::bezierPathWithOvalInRect(disc).fill();
         let centre = NSPoint::new(disc.origin.x + d / 2.0, disc.origin.y + d / 2.0);

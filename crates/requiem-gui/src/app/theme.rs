@@ -283,6 +283,13 @@ pub enum Icon {
     ChevronLeft,
     ChevronRight,
     Settings,
+    LogIn,
+    LogOut,
+    Copy,
+    ExternalLink,
+    FolderOpen,
+    BookOpen,
+    KeyRound,
 }
 
 impl Icon {
@@ -304,6 +311,13 @@ impl Icon {
             Icon::ChevronLeft => include_bytes!("../../assets/icons/chevron-left.svg"),
             Icon::ChevronRight => include_bytes!("../../assets/icons/chevron-right.svg"),
             Icon::Settings => include_bytes!("../../assets/icons/settings.svg"),
+            Icon::LogIn => include_bytes!("../../assets/icons/log-in.svg"),
+            Icon::LogOut => include_bytes!("../../assets/icons/log-out.svg"),
+            Icon::Copy => include_bytes!("../../assets/icons/copy.svg"),
+            Icon::ExternalLink => include_bytes!("../../assets/icons/external-link.svg"),
+            Icon::FolderOpen => include_bytes!("../../assets/icons/folder-open.svg"),
+            Icon::BookOpen => include_bytes!("../../assets/icons/book-open.svg"),
+            Icon::KeyRound => include_bytes!("../../assets/icons/key-round.svg"),
         }
     }
 
@@ -361,6 +375,13 @@ mod tests {
             Icon::ChevronLeft,
             Icon::ChevronRight,
             Icon::Settings,
+            Icon::LogIn,
+            Icon::LogOut,
+            Icon::Copy,
+            Icon::ExternalLink,
+            Icon::FolderOpen,
+            Icon::BookOpen,
+            Icon::KeyRound,
         ] {
             assert!(icon.image(16.0).is_some(), "{icon:?}");
         }
