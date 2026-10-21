@@ -1522,7 +1522,9 @@ impl Ui {
     }
 
     pub fn copy_code(&self) {
-        if let LibraryView::Pending { user_code, .. } = self.vm.borrow().ui().library_view() {
+        // Bound first, as in `cancel_sign_in`: `announce` can re-enter the run loop.
+        let view = self.vm.borrow().ui().library_view();
+        if let LibraryView::Pending { user_code, .. } = view {
             self.put_code(&user_code);
         }
     }
@@ -1536,9 +1538,10 @@ impl Ui {
     }
 
     pub fn open_host(&self) {
+        let view = self.vm.borrow().ui().library_view();
         if let LibraryView::Pending {
             verification_url, ..
-        } = self.vm.borrow().ui().library_view()
+        } = view
             && let Some(url) = NSURL::URLWithString(&NSString::from_str(&verification_url))
         {
             NSWorkspace::sharedWorkspace().openURL(&url);
