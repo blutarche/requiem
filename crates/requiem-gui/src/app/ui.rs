@@ -1506,19 +1506,16 @@ impl Ui {
 
     /// Asks before signing out; the provider's part of the Library goes with the account.
     pub fn confirm_sign_out(&self, provider: ProviderId) {
-        let alert = NSAlert::new(self.mtm);
-        alert.setMessageText(&NSString::from_str(&format!(
-            "Sign out of {}?",
-            vm::provider_name(&provider.0)
-        )));
-        alert.setInformativeText(&NSString::from_str(
-            "Its playlists and albums leave your Library until you sign in again.",
-        ));
-        alert.addButtonWithTitle(&NSString::from_str("Sign Out"));
-        alert.addButtonWithTitle(&NSString::from_str("Cancel"));
-        if alert.runModal() == NSAlertFirstButtonReturn {
-            self.intent(Intent::SignOut(provider));
-        }
+        let service = vm::provider_name(&provider.0).to_owned();
+        self.ask(
+            &format!("Sign out of {service}?"),
+            &format!(
+                "Your {service} playlists, albums and Home shelves leave Requiem until you sign in again."
+            ),
+            "Sign Out",
+            true,
+            move |ui| ui.intent(Intent::SignOut(provider.clone())),
+        );
     }
 
     pub fn copy_code(&self) {
@@ -1601,20 +1598,9 @@ impl Ui {
 
     /// Settings' Sign Out… on row `i`, which asks first.
     pub fn settings_sign_out(&self, i: usize) {
-        let Some(row) = self.settings.row(i) else {
-            return;
-        };
-        let provider = row.provider;
-        let service = vm::provider_name(&provider.0).to_owned();
-        self.ask(
-            &format!("Sign out of {service}?"),
-            &format!(
-                "Your {service} playlists, albums and Home shelves leave Requiem until you sign in again."
-            ),
-            "Sign Out",
-            true,
-            move |ui| ui.intent(Intent::SignOut(provider.clone())),
-        );
+        if let Some(row) = self.settings.row(i) {
+            self.confirm_sign_out(row.provider);
+        }
     }
 
     pub fn settings_copy_code(&self, i: usize) {
