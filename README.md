@@ -41,7 +41,7 @@ The bundle embeds Homebrew's libopus. Its minimum macOS version is whatever that
 
 - **Window:** type a query and press Enter; Return or a double-click plays a result, Cmd+Return (or the row's +) adds it to the queue. In the queue, Delete removes the selected track and Option+Cmd+Up / Option+Cmd+Down move it; right-click a queue row for Remove from Queue, Move Up, Move Down or Clear Queue (its toast offers Undo). Cmd+Z undoes a replaced or cleared queue until the queue changes again. Space toggles play/pause, Left / Right seek 5 s, Cmd+Left / Cmd+Right skip, Cmd+Up / Cmd+Down change the volume, Cmd+F focuses search, Cmd+1 to Cmd+4 switch between Home, Search, Library and Queue, Cmd+R refreshes the page, Cmd+K opens the palette. Cmd+Q closes the window and the music keeps playing; Option+Cmd+Q ("Quit and Stop Music") stops the player too.
 - **Home and Library:** the window opens on Home, your own music from every service you are signed in to: your most recently liked songs, the playlists Spotify made for you, and your playlists. A shelf that both services have takes from each in turn, and so do search results and the Library. Where a list, or Home, holds music from both services, each cover carries a small badge for its service, and so does the playing track's while the queue mixes them. Signed out, Home offers a sign-in to each service. A track card plays its shelf from that track and offers Undo like a search result; a playlist or album card opens its tracks (Play, Add to Queue, and Cmd+[ or the back control to return where you were). Library lists your playlists once you sign in: the Library page shows the device code with Copy Code, Open and Cancel while a sign-in waits, and "Sign Out" asks first. The palette and the View menu have Sign in and Sign out for each service while they apply.
-- **CLI:** `requiem --connect`, then `help`. Commands: `search <query>`, `home`, `library`, `open <n>`, `play <n>`, `add <n>`, `play-track <json>`, `add-track <json>`, `queue`, `jump <n>`, `remove <n>`, `move <from> <to>`, `clear`, `next`, `prev`, `pause`, `resume`, `toggle`, `seek <secs|+secs|-secs>`, `vol <0-100>`, `status`, `signin`, `signout`, `signin-client <provider> <path>`, `account`, `update`, `update check`, `update install`, `shutdown-daemon`, `quit`. `home` and `library` print numbered items under each shelf, numbered across shelves; `open <n>` lists the tracks of playlist or album n. `play <n>`, `add <n>` and `open <n>` take n from whichever listing printed last: search results, a browse page or an opened playlist. `--script <file>` runs commands from a file; `--script -` reads them from stdin. `requiem update`, `requiem update check` and `requiem update install` run one update command against the player (see [Updates](#updates)).
+- **CLI:** `requiem --connect`, then `help`. Commands: `search <query>`, `home`, `library`, `open <n>`, `play <n>`, `add <n>`, `play-track <json>`, `add-track <json>`, `queue`, `jump <n>`, `remove <n>`, `move <from> <to>`, `clear`, `next`, `prev`, `pause`, `resume`, `toggle`, `seek <secs|+secs|-secs>`, `vol <0-100>`, `status`, `signin`, `signout`, `signin-client <provider> <path>`, `account`, `update`, `update check`, `update install`, `shutdown-daemon`, `quit`. `home` and `library` print numbered items under each shelf, numbered across shelves; `open <n>` lists the tracks of playlist or album n. `play <n>`, `add <n>` and `open <n>` take n from whichever listing printed last: search results, a browse page or an opened playlist. `--script <file>` runs commands from a file; `--script -` reads them from stdin. `requiem update`, `requiem update check` and `requiem update install` run one update command against the player (see [Updates](#updates)). `requiem signin-browser <provider> <file|->` signs the player in with a browser session (see [Sign in with your browser session](#sign-in-with-your-browser-session)).
 
 ### JSON output
 
@@ -68,7 +68,7 @@ The bundle embeds Homebrew's libopus. Its minimum macOS version is whatever that
 | `provider_broken` | `detail` |
 | `update` | `current`, `auto` (bool), `state`: `idle`, `checking`, `up_to_date`, `downloading` (with `version`), `ready` (with `version`), `failed` (with `version`, `reason`), `error` (with `reason`: a failed check, or a failed install that is tried again), `not_updatable` (with `reason`) or `unsupported` |
 | `update_downloading`, `update_restarting` | `version` |
-| `ack` | `command`: a command was sent (search, home, library, open, play, add, play-track, add-track, jump, remove, move, clear, next, prev, pause, resume, toggle, seek, vol, signin, signout, signin-client, update check, update install, shutdown-daemon); `signout` acks only once the provider reports it signed out, and `signin-client` once the provider has taken the client; a failed sign-out or client import prints `account_error` instead and exits 2 in script mode |
+| `ack` | `command`: a command was sent (search, home, library, open, play, add, play-track, add-track, jump, remove, move, clear, next, prev, pause, resume, toggle, seek, vol, signin, signout, signin-client, signin-browser, update check, update install, shutdown-daemon); `signout` acks only once the provider reports it signed out, and `signin-client` and `signin-browser` once the provider has taken the client or session; a failed sign-out or client import prints `account_error` instead and exits 2 in script mode |
 | `mark` | `name`, `unix_millis` |
 | `help` | `text` |
 | `error` | `message` |
@@ -77,12 +77,12 @@ The bundle embeds Homebrew's libopus. Its minimum macOS version is whatever that
 
 Signing in to Google adds YouTube Music to `home` and `library`: your playlists and your liked videos.
 
-Sign-in uses your own Google Cloud OAuth client, set up once in the [Google Cloud console](https://console.cloud.google.com/). Until there is one, **Sign in to YouTube Music** in the app shows these steps:
+Sign-in uses your own Google Cloud OAuth client, set up once in the [Google Cloud console](https://console.cloud.google.com/), or the session of a browser where you are signed in (see [Sign in with your browser session](#sign-in-with-your-browser-session)). Until there is one, **Sign in to YouTube Music** in the app shows these steps for the client:
 
 1. **Create a Google Cloud project and enable the YouTube Data API v3.** Create the project from the project picker at the top of the console. Then, in **APIs & Services → Library**, find **YouTube Data API v3** and click **Enable**.
 2. **Set up the OAuth consent screen and publish the app.** In **Google Auth Platform**, choose an **External** audience, and under **Data Access** add the scope `https://www.googleapis.com/auth/youtube.readonly`. Then, under **Audience**, publish the app so its status is **In production**: while it is in **Testing**, Google expires the sign-in after 7 days. Before Google lets you publish, the **Branding** page needs a home page and a privacy policy link, and their domain under **Authorized domains**. `https://github.com/blutarche/requiem`, `https://github.com/blutarche/requiem/blob/main/PRIVACY.md` and `github.com` work. Google may then warn that the app is unverified; as its only user, you can continue past the warning (**Advanced**, then **Go to … (unsafe)**).
 3. **Create an OAuth client of type "TVs and Limited Input devices" and download its JSON.** Under **Clients**, create a client of that type, then download the JSON from the dialog that shows the new client.
-4. **Choose that file, or type in the client.** In the app, click **Choose Client File…** under the steps and pick the JSON. Or, with no file on this Mac, open **Settings** (**Requiem → Settings…**, or **Enter Client ID…** under the steps) and, under YouTube Music, enter the **Client ID** (it ends in `.apps.googleusercontent.com`) and the **Client secret** from the same dialog, then click **Save**. Either way, the sign-in starts as soon as Requiem takes the client. In the CLI, run `signin-client ytmusic <path>`, then `signin`.
+4. **Choose that file, or type in the client.** In the app, click **Choose Client File…** under the steps and pick the JSON. Or, with no file on this Mac, click **Enter Client ID…** under the steps, or open **Settings** (**Requiem → Settings…**) and click **Use Google Client…** under YouTube Music. Then enter the **Client ID** (it ends in `.apps.googleusercontent.com`) and the **Client secret** from the same dialog, then click **Save**. Either way, the sign-in starts as soon as Requiem takes the client. In the CLI, run `signin-client ytmusic <path>`, then `signin`.
 
 Requiem keeps its own copy of the client, readable only by you, as `~/Library/Application Support/requiem/google-client.json` on macOS, or `$XDG_CONFIG_HOME/requiem/google-client.json` (default `~/.config/requiem/google-client.json`) on Linux. `REQUIEM_GOOGLE_CLIENT_FILE` overrides the path. Saving the JSON there yourself also works: `signin` reads it, and the app sees it once the player restarts. Choosing a client with another client ID ends the current sign-in, so you sign in again with the new client; in the app, **Change Google Client…** in Settings does that.
 
@@ -95,6 +95,45 @@ What a sign-in gets you:
 
 Playback stays anonymous whether or not you are signed in.
 
+### Sign in with your browser session
+
+Instead of a Google client, Requiem can use the sign-in of a browser where you are signed in to YouTube Music. That needs no Google Cloud project, and it gets what the client can't: Home shows the first 6 shelves of YouTube Music's own Home, Library shows your Liked music and your playlists, and your private playlists and mixes open. Requiem sends the session only to YouTube Music's own API, for Home, Library, the playlists you open and your account's name. Search and playback stay anonymous, and plays aren't reported to Google.
+
+1. In a browser where you are signed in, open [music.youtube.com](https://music.youtube.com).
+2. Open the browser's developer tools on the **Network** tab, then reload the page.
+   - **Chrome** (and Edge or Brave): **View → Developer → Developer Tools**, or Option+Cmd+I.
+   - **Firefox:** **Tools → Browser Tools → Web Developer Tools**, or Option+Cmd+I.
+   - **Safari:** first turn on **Show features for web developers** in **Safari → Settings… → Advanced**. Then **Develop → Show Web Inspector**, or Option+Cmd+I.
+3. Type `browse` in the Network tab's filter and right-click a request named `browse`.
+   - **Chrome:** choose **Copy → Copy request headers**, or **Copy → Copy as cURL**.
+   - **Firefox:** choose **Copy Value → Copy Request Headers**, or **Copy Value → Copy as cURL**.
+   - **Safari:** choose **Copy as cURL**.
+4. In Requiem, open **Settings** and click **Use Browser Session…** under YouTube Music (the Library's setup sheet has it too), then **Paste from Clipboard**, or press Cmd+V.
+
+Requiem checks the session with YouTube Music before it keeps it. Once it does, it clears this Mac's clipboard, unless you copied something else since. Clear the clipboard yourself on a computer you copied from.
+
+**What Requiem keeps:** the request's cookie and its `X-Goog-AuthUser`, `X-Goog-PageId` and `X-Goog-Visitor-Id` headers, with your account's name, in `ytmusic-session.json` next to `google-token.json` (on macOS, `~/Library/Application Support/requiem/`). The rest of the paste is dropped. The file is readable only by you and, on macOS, excluded from Time Machine backups. A new session replaces it and leaves a Google client and its sign-in alone; while there is a session, Home and Library use it.
+
+**The risks:** the cookie is your Google sign-in, not just YouTube Music's. Anyone who has the file, or the copied text, can use your Google account until that browser signs out. Using it is against YouTube's terms, and Google could flag the account.
+
+**Signing out:** **Sign Out…** in Settings, or `signout ytmusic` in the CLI, deletes the file, and also ends the Google client's sign-in if there is one. Requiem can't sign your browser out: the copied cookie keeps working until you sign out of Google in that browser profile, which ends it. When Google ends a session, Requiem signs YouTube Music out and asks for a new one in Settings.
+
+**From another computer:** over ssh, the CLI reads the paste from stdin with `-`, or from a file. Copy the headers on the computer with the browser, then either run this on the Mac and paste them in place of the placeholder line:
+
+```sh
+requiem signin-browser ytmusic - <<'EOF'
+<paste the request headers here>
+EOF
+```
+
+or save them to a file and send it from that computer, so it never lands on the Mac's disk:
+
+```sh
+ssh my-mac 'requiem signin-browser ytmusic -' < headers.txt
+```
+
+The quoted `'EOF'` keeps the shell from changing the paste. In the app bundle the CLI is `/Applications/Requiem.app/Contents/MacOS/requiem`. It returns once YouTube Music has taken the session; if YouTube Music refuses it, it prints why and exits 2. With `--json` it prints an `ack` or an `account_error`, as `signin-client` does. Delete the copied file afterwards.
+
 ## Spotify
 
 Spotify is off until you sign in: `signin spotify` in the CLI, or **Sign in to Spotify** in the app. Enter the code it shows at <https://www.spotify.com/pair>. Playback needs Spotify Premium.
@@ -105,7 +144,7 @@ Once signed in, search lists Spotify results first, Home shows your 20 most rece
 
 ## Snapshots
 
-`requiem-gui --demo --snapshot out.png --view <view>` renders a view from fixed fake data without showing a window: `home`, `home-signed-out`, `search`, `library`, `queue`, `settings`, `palette`, `collection`, `library-signed-out`, `library-unavailable`, `signin`, `signin-setup`, `empty`, `disconnected`, `toast`, `out-of-date`, `update-ready`, `update-failed`, `not-updatable` or `up-to-date`. For `home` and `library`, `--snapshot` also works without `--demo`: it asks the running player (starting one if needed), waits up to 20 s for the page and its covers, then writes the PNG, exiting 1 if the page fails to load.
+`requiem-gui --demo --snapshot out.png --view <view>` renders a view from fixed fake data without showing a window: `home`, `home-signed-out`, `search`, `library`, `queue`, `settings`, `palette`, `collection`, `library-signed-out`, `library-unavailable`, `signin`, `signin-setup`, `settings-setup`, `settings-session`, `empty`, `disconnected`, `toast`, `out-of-date`, `update-ready`, `update-failed`, `not-updatable` or `up-to-date`. For `home` and `library`, `--snapshot` also works without `--demo`: it asks the running player (starting one if needed), waits up to 20 s for the page and its covers, then writes the PNG, exiting 1 if the page fails to load.
 
 ## Footprint
 
