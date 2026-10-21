@@ -448,6 +448,93 @@ fn version_mismatch_gets_incompatible() {
     assert_eq!(rig.server.clients(), ClientCounts::default());
 }
 
+/// One handshake over a socket pair, with `parent` standing in for this process's spawner.
+fn handshake_with(protocol: u32, role: Role, parent: i32) -> (Option<Role>, Option<ServerMsg>) {
+    let (client, server) = UnixStream::pair().unwrap();
+    client.set_read_timeout(Some(WAIT)).unwrap();
+    hello(&client, protocol, role);
+    let got = server::handshake_as(&server, parent);
+    drop(server);
+    (got, frame::read(&mut &client).unwrap())
+}
+
+#[test]
+fn an_older_cli_from_our_spawner_gets_a_welcome_in_its_protocol() {
+    let me = process::id() as i32;
+    let (role, reply) = handshake_with(PROTOCOL - 1, Role::Cli, me);
+    assert_eq!(role, None);
+    assert_eq!(
+        reply,
+        Some(ServerMsg::Welcome {
+            protocol: PROTOCOL - 1,
+            version: env!("CARGO_PKG_VERSION").into(),
+        })
+    );
+
+    // The exact JSON the older daemons' restart check reads, and the connection is closed.
+    let (client, server) = UnixStream::pair().unwrap();
+    client.set_read_timeout(Some(WAIT)).unwrap();
+    let old = serde_json::json!({"Hello": {"protocol": 4, "role": "Cli", "version": "0.3.0"}});
+    frame::write(&mut &client, &old).unwrap();
+    assert_eq!(server::handshake_as(&server, me), None);
+    drop(server);
+    let welcome: serde_json::Value = frame::read(&mut &client).unwrap().unwrap();
+    assert_eq!(
+        welcome,
+        serde_json::json!({"Welcome": {"protocol": 4, "version": env!("CARGO_PKG_VERSION")}})
+    );
+    assert_eq!(frame::read::<_, ServerMsg>(&mut &client).unwrap(), None);
+}
+
+#[test]
+fn an_older_cli_from_anyone_else_gets_incompatible() {
+    let other = process::id() as i32 + 1;
+    let (role, reply) = handshake_with(PROTOCOL - 1, Role::Cli, other);
+    assert_eq!(role, None);
+    assert_eq!(
+        reply,
+        Some(ServerMsg::Incompatible {
+            supported: PROTOCOL
+        })
+    );
+}
+
+#[test]
+fn an_older_gui_from_our_spawner_gets_incompatible() {
+    let me = process::id() as i32;
+    let (role, reply) = handshake_with(PROTOCOL - 1, Role::Gui, me);
+    assert_eq!(role, None);
+    assert_eq!(
+        reply,
+        Some(ServerMsg::Incompatible {
+            supported: PROTOCOL
+        })
+    );
+
+    // A role that no longer decodes is not a `Cli`.
+    let (client, server) = UnixStream::pair().unwrap();
+    client.set_read_timeout(Some(WAIT)).unwrap();
+    let odd = serde_json::json!({"Hello": {"protocol": PROTOCOL - 1, "role": "Tray"}});
+    frame::write(&mut &client, &odd).unwrap();
+    assert_eq!(server::handshake_as(&server, me), None);
+    assert_eq!(
+        read_msg(&client),
+        ServerMsg::Incompatible {
+            supported: PROTOCOL
+        }
+    );
+}
+
+#[test]
+fn a_current_hello_is_unchanged_whoever_spawned_us() {
+    let me = process::id() as i32;
+    for parent in [me, me + 1] {
+        let (client, server) = UnixStream::pair().unwrap();
+        hello(&client, PROTOCOL, Role::Cli);
+        assert_eq!(server::handshake_as(&server, parent), Some(Role::Cli));
+    }
+}
+
 #[test]
 fn client_reports_incompatible_daemon_as_unsupported() {
     let (ours, theirs) = UnixStream::pair().unwrap();

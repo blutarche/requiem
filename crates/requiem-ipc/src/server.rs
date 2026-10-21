@@ -17,7 +17,7 @@ use requiem_core::{Command, Event, Session};
 use crate::frame::{self, Deadline};
 use crate::hub::{self, ClientId, Frame, HubMsg, QUEUE_CAP};
 use crate::path::{LOCK_NAME, socket_dir, socket_path_in};
-use crate::proto::{ClientMsg, HelloProbe, PROTOCOL, Role, ServerMsg, UpdateStatus};
+use crate::proto::{ClientMsg, HelloProbe, PROTOCOL, Role, ServerMsg, UpdateStatus, VERSION};
 use crate::sys;
 
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
@@ -326,12 +326,16 @@ fn forward(id: ClientId, stream: &UnixStream, hub: &Sender<HubMsg>) {
 /// Reads the client's `Hello` and answers a protocol mismatch with `Incompatible`.
 /// `Welcome` comes from the hub, ahead of the snapshot.
 fn handshake(stream: &UnixStream) -> Option<Role> {
+    // SAFETY: getppid has no preconditions.
+    handshake_as(stream, unsafe { libc::getppid() })
+}
+
+pub(crate) fn handshake_as(stream: &UnixStream, parent: i32) -> Option<Role> {
     let body = frame::read_body(&mut Deadline::new(stream, HANDSHAKE_TIMEOUT)).ok()??;
-    let HelloProbe::Hello { protocol } = frame::decode(&body).ok()?;
+    let HelloProbe::Hello { protocol, role } = frame::decode(&body).ok()?;
     if protocol != PROTOCOL {
-        let reply = ServerMsg::Incompatible {
-            supported: PROTOCOL,
-        };
+        let peer = sys::peer_pid(stream).ok();
+        let reply = mismatch_reply(protocol, role, peer, parent);
         let _ = frame::write(&mut &*stream, &reply);
         return None;
     }
@@ -340,6 +344,28 @@ fn handshake(stream: &UnixStream) -> Option<Role> {
     };
     stream.set_read_timeout(None).ok()?;
     Some(role)
+}
+
+/// The answer to a `Hello` from another protocol. A `Cli` that is this process's spawner is
+/// the restart check of the older player that started us; it only needs a `Welcome` in its own
+/// protocol carrying our version, and must keep getting one. Anyone else gets `Incompatible`.
+fn mismatch_reply(
+    protocol: u32,
+    role: Option<serde_json::Value>,
+    peer: Option<i32>,
+    parent: i32,
+) -> ServerMsg {
+    let is_cli = role.and_then(|r| serde_json::from_value::<Role>(r).ok()) == Some(Role::Cli);
+    if is_cli && peer == Some(parent) {
+        ServerMsg::Welcome {
+            protocol,
+            version: VERSION.into(),
+        }
+    } else {
+        ServerMsg::Incompatible {
+            supported: PROTOCOL,
+        }
+    }
 }
 
 fn write_loop(stream: &UnixStream, outbound: &Receiver<Frame>) {
