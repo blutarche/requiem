@@ -21,8 +21,12 @@ pub(crate) const DATA_PREFIX: &str = "data:";
 const PER_PAGE: usize = 50;
 const MAX_PLAYLISTS: usize = 200;
 const MAX_TRACKS: usize = 1000;
-/// Home's most recently liked videos.
+/// Home's most recently liked music videos.
 const HOME_LIKED: usize = 20;
+/// Likes pages Home reads while looking for `HOME_LIKED` music videos.
+const HOME_MAX_PAGES: usize = 4;
+/// `snippet.categoryId` of Music.
+const MUSIC_CATEGORY: &str = "10";
 const LIKED: &str = "Liked videos";
 
 /// Authorized Data API calls.
@@ -153,14 +157,22 @@ fn parse_playlist_items(body: &[u8]) -> ApiPage<Track> {
     Ok((found, next_page(&v)))
 }
 
-/// `videos.list?part=contentDetails`: video id to duration.
-fn parse_durations(body: &[u8]) -> Result<HashMap<String, Duration>, ProviderError> {
+struct VideoInfo {
+    duration: Option<Duration>,
+    category: Option<String>,
+}
+
+/// `videos.list?part=contentDetails,snippet`: video id to duration and category.
+fn parse_video_info(body: &[u8]) -> Result<HashMap<String, VideoInfo>, ProviderError> {
     let v = json(body, "videos")?;
     Ok(items(&v)
         .iter()
         .filter_map(|it| {
-            let d = iso8601_duration(&text(it, "/contentDetails/duration")?)?;
-            Some((text(it, "/id")?, d))
+            let info = VideoInfo {
+                duration: text(it, "/contentDetails/duration").and_then(|d| iso8601_duration(&d)),
+                category: text(it, "/snippet/categoryId"),
+            };
+            Some((text(it, "/id")?, info))
         })
         .collect())
 }
@@ -265,22 +277,12 @@ pub(crate) fn library(api: &dyn DataApi) -> Result<Vec<Shelf>, ProviderError> {
     }])
 }
 
-/// "Liked songs", the 20 most recently liked videos, then "Your playlists", the Library's
-/// collections; empty shelves are left out.
+/// "Liked songs", the 20 most recently liked music videos, then "Your playlists", the
+/// Library's collections; empty shelves are left out.
 pub(crate) fn home(api: &dyn DataApi) -> Result<Vec<Shelf>, ProviderError> {
     let likes = likes(api)?;
     let liked = match &likes {
-        Some(l) => {
-            let mut tracks = paginate(
-                api,
-                PLAYLIST_ITEMS_URL,
-                &[("part", "snippet,contentDetails"), ("playlistId", l)],
-                HOME_LIKED,
-                parse_playlist_items,
-            )?;
-            add_durations(api, &mut tracks)?;
-            tracks
-        }
+        Some(l) => liked_music(api, l)?,
         None => Vec::new(),
     };
     let own = collections(api, likes.as_deref())?;
@@ -298,6 +300,41 @@ pub(crate) fn home(api: &dyn DataApi) -> Result<Vec<Shelf>, ProviderError> {
         items,
     })
     .collect())
+}
+
+/// Walks the liked-videos playlist a page at a time, keeping music videos, until `HOME_LIKED`
+/// are in, the likes run out or `HOME_MAX_PAGES` pages are read.
+fn liked_music(api: &dyn DataApi, likes: &str) -> Result<Vec<Track>, ProviderError> {
+    let per_page = PER_PAGE.to_string();
+    let mut out = Vec::new();
+    let mut token: Option<String> = None;
+    for _ in 0..HOME_MAX_PAGES {
+        let mut q = vec![
+            ("part", "snippet,contentDetails"),
+            ("playlistId", likes),
+            ("maxResults", per_page.as_str()),
+        ];
+        if let Some(t) = &token {
+            q.push(("pageToken", t));
+        }
+        let (page, next) = parse_playlist_items(&api.get(PLAYLIST_ITEMS_URL, &q)?)?;
+        let mut info = video_info(api, &page)?;
+        out.extend(page.into_iter().filter_map(|mut t| {
+            let i = info.remove(&t.id.id)?;
+            (i.category.as_deref() == Some(MUSIC_CATEGORY)).then(|| {
+                t.duration = i.duration;
+                t
+            })
+        }));
+        match next {
+            Some(n) if out.len() < HOME_LIKED && token.as_deref() != Some(n.as_str()) => {
+                token = Some(n);
+            }
+            _ => break,
+        }
+    }
+    out.truncate(HOME_LIKED);
+    Ok(out)
 }
 
 fn playlist_title(api: &dyn DataApi, id: &str) -> Result<String, ProviderError> {
@@ -335,23 +372,31 @@ pub(crate) fn playlist(api: &dyn DataApi, id: &str) -> Result<Vec<Shelf>, Provid
 }
 
 /// One `videos.list` call per 50 tracks.
-fn add_durations(api: &dyn DataApi, tracks: &mut [Track]) -> Result<(), ProviderError> {
-    let ids: Vec<String> = tracks.iter().map(|t| t.id.id.clone()).collect();
-    let mut durations = HashMap::new();
+fn video_info(
+    api: &dyn DataApi,
+    tracks: &[Track],
+) -> Result<HashMap<String, VideoInfo>, ProviderError> {
+    let ids: Vec<&str> = tracks.iter().map(|t| t.id.id.as_str()).collect();
+    let mut info = HashMap::new();
     for chunk in ids.chunks(PER_PAGE) {
         let joined = chunk.join(",");
         let body = api.get(
             VIDEOS_URL,
             &[
-                ("part", "contentDetails"),
+                ("part", "contentDetails,snippet"),
                 ("id", &joined),
                 ("maxResults", "50"),
             ],
         )?;
-        durations.extend(parse_durations(&body)?);
+        info.extend(parse_video_info(&body)?);
     }
+    Ok(info)
+}
+
+fn add_durations(api: &dyn DataApi, tracks: &mut [Track]) -> Result<(), ProviderError> {
+    let info = video_info(api, tracks)?;
     for t in tracks {
-        t.duration = durations.get(&t.id.id).copied();
+        t.duration = info.get(&t.id.id).and_then(|i| i.duration);
     }
     Ok(())
 }
@@ -592,10 +637,16 @@ mod tests {
         json!({"items": items, "nextPageToken": token}).to_string()
     }
 
+    fn video(i: usize, category: &str) -> Value {
+        json!({
+            "id": format!("v{i}"),
+            "contentDetails": {"duration": "PT1M"},
+            "snippet": {"categoryId": category},
+        })
+    }
+
     fn videos_for(ids: std::ops::Range<usize>) -> String {
-        let items: Vec<Value> = ids
-            .map(|i| json!({"id": format!("v{i}"), "contentDetails": {"duration": "PT1M"}}))
-            .collect();
+        let items: Vec<Value> = ids.map(|i| video(i, "10")).collect();
         json!({ "items": items }).to_string()
     }
 
@@ -657,6 +708,80 @@ mod tests {
         let q = &f.api.queries(PLAYLIST_ITEMS_URL)[0];
         assert!(q.contains(&("playlistId".into(), "LLme".into())), "{q:?}");
         assert_eq!(f.api.calls().len(), 3);
+    }
+
+    fn liked_ids(shelf: &Shelf) -> Vec<String> {
+        track_ids(shelf).into_iter().map(str::to_owned).collect()
+    }
+
+    #[test]
+    fn home_keeps_only_music_in_like_order() {
+        let f = Fake::new();
+        f.api
+            .script(PLAYLIST_ITEMS_URL, 200, &items_page(0, 6, "next"));
+        let mut videos: Vec<Value> = ["10", "20", "10", "22", "10"]
+            .iter()
+            .enumerate()
+            .map(|(i, c)| video(i, c))
+            .collect();
+        // v5 has no entry in videos.list, v4 has no category.
+        videos[4] = json!({"id": "v4", "contentDetails": {"duration": "PT1M"}});
+        f.api
+            .script(VIDEOS_URL, 200, &json!({ "items": videos }).to_string());
+        f.api.script(PLAYLIST_ITEMS_URL, 200, r#"{"items": []}"#);
+        f.api.script(PLAYLISTS_URL, 200, r#"{"items": []}"#);
+        let shelves = home(&f).unwrap();
+        assert_eq!(liked_ids(&shelves[0]), ["v0", "v2"]);
+        let q = &f.api.queries(VIDEOS_URL)[0];
+        assert!(q.contains(&("part".into(), "contentDetails,snippet".into())));
+    }
+
+    #[test]
+    fn home_reads_on_until_it_has_20_music_videos() {
+        let f = Fake::new();
+        f.api
+            .script(PLAYLIST_ITEMS_URL, 200, &items_page(0, 50, "p2"));
+        let first: Vec<Value> = (0..50)
+            .map(|i| video(i, if i % 5 == 0 { "10" } else { "20" }))
+            .collect();
+        f.api
+            .script(VIDEOS_URL, 200, &json!({ "items": first }).to_string());
+        f.api
+            .script(PLAYLIST_ITEMS_URL, 200, &items_page(50, 50, "p3"));
+        f.api.script(VIDEOS_URL, 200, &videos_for(50..100));
+        f.api.script(PLAYLISTS_URL, 200, ONE_PLAYLIST);
+        let shelves = home(&f).unwrap();
+        let ids = liked_ids(&shelves[0]);
+        assert_eq!(ids.len(), 20);
+        assert_eq!(
+            &ids[..10],
+            [
+                "v0", "v5", "v10", "v15", "v20", "v25", "v30", "v35", "v40", "v45"
+            ]
+        );
+        assert_eq!(&ids[10..13], ["v50", "v51", "v52"]);
+        assert_eq!(f.page_tokens(PLAYLIST_ITEMS_URL), [None, Some("p2".into())]);
+    }
+
+    #[test]
+    fn home_gives_up_after_4_pages_of_likes() {
+        let f = Fake::new();
+        for p in 0..6 {
+            f.api.script(
+                PLAYLIST_ITEMS_URL,
+                200,
+                &items_page(p * 50, 50, &format!("t{p}")),
+            );
+            let none: Vec<Value> = (p * 50..p * 50 + 50).map(|i| video(i, "20")).collect();
+            f.api
+                .script(VIDEOS_URL, 200, &json!({ "items": none }).to_string());
+        }
+        f.api.script(PLAYLISTS_URL, 200, r#"{"items": []}"#);
+        let shelves = home(&f).unwrap();
+        assert_eq!(shelves.len(), 1);
+        assert_eq!(shelves[0].title, "Your playlists");
+        assert_eq!(f.api.queries(PLAYLIST_ITEMS_URL).len(), 4);
+        assert_eq!(f.api.queries(VIDEOS_URL).len(), 4);
     }
 
     #[test]
