@@ -42,7 +42,6 @@ const TOKEN_NAME: &str = "google-token.json";
 pub(crate) struct Secret(String);
 
 impl Secret {
-    #[cfg(test)]
     pub(crate) fn new(s: impl Into<String>) -> Self {
         Self(s.into())
     }

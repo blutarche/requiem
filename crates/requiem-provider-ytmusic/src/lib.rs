@@ -1,6 +1,7 @@
 //! YouTube Music provider: Innertube client, parsers and ranged byte source, and the
 //! signed-in library through Google sign-in and the YouTube Data API.
 
+mod browser;
 mod clients;
 mod dataapi;
 mod google;
