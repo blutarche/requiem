@@ -483,10 +483,16 @@ impl Actor {
                 } => match result {
                     // Announced even when unchanged, so a client waiting on its import hears it.
                     Ok(()) => self.set_account(provider, state, true),
-                    Err(e) => self.emit(Event::AccountError {
-                        provider,
-                        error: sign_in_error(&e),
-                    }),
+                    // A refused import changes nothing. One that stood but could not finish
+                    // announces its new state first: the error then qualifies an answered
+                    // import rather than refusing one.
+                    Err(e) => {
+                        self.set_account(provider.clone(), state, false);
+                        self.emit(Event::AccountError {
+                            provider,
+                            error: sign_in_error(&e),
+                        });
+                    }
                 },
             }
         }

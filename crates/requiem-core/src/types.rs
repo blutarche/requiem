@@ -171,7 +171,8 @@ pub trait Provider: Send + Sync {
     }
 
     /// Keeps `json`, the user's own OAuth client, for sign-in, so that `account` no longer
-    /// reports it missing. Blocking; called on a worker thread. Errors never quote `json`.
+    /// reports it missing. Blocking; called on a worker thread. An `Err` that leaves `account`
+    /// changed says what an import that stood could not finish. Errors never quote `json`.
     fn import_client(&self, _json: &str) -> Result<(), ProviderError> {
         Err(ProviderError::SignInRequired(
             "this provider has no client to import".into(),
@@ -367,7 +368,9 @@ pub enum Event {
         state: AccountState,
     },
     /// Why a sign-in ended without `SignedIn`, unless a sign-out ended it, or what a sign-out
-    /// could not finish. The `Account` that follows has the new state.
+    /// could not finish; the `Account` that follows has the new state. Also why an import was
+    /// refused, or, after the `Account` with its new state, what one that stood could not
+    /// finish.
     AccountError {
         provider: ProviderId,
         error: String,

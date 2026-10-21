@@ -4733,6 +4733,31 @@ mod tests {
     }
 
     #[test]
+    fn an_import_that_stood_still_signs_in_and_says_what_it_could_not_finish() {
+        let mut vm = connected();
+        vm.apply(signed_in());
+        vm.take_commands();
+        vm.intent(Intent::ChangeClient(provider()));
+        assert_eq!(import(&mut vm).len(), 1);
+        // The player's order: the new state, then the error.
+        let error = "signed out on this computer, but Google did not confirm; remove requiem's access at https://myaccount.google.com/permissions";
+        vm.apply(account(AccountState::SignedOut));
+        vm.apply(Event::AccountError {
+            provider: provider(),
+            error: error.into(),
+        });
+        assert_eq!(
+            vm.take_commands(),
+            [Command::SignIn {
+                provider: provider()
+            }]
+        );
+        assert_eq!(vm.ui().setup, None);
+        let toast = vm.ui().toast.as_ref().unwrap();
+        assert!(toast.error && toast.text == error, "{toast:?}");
+    }
+
+    #[test]
     fn a_refused_client_shows_on_the_sheet() {
         let mut vm = setting_up();
         import(&mut vm);

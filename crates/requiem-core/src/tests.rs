@@ -1503,6 +1503,33 @@ fn a_failed_import_says_why() {
     assert_eq!(after, [Event::Volume(55)]);
 }
 
+#[test]
+fn an_import_that_stood_but_could_not_finish_announces_its_state_then_why() {
+    let provider = FakeProvider::new("fake");
+    provider.set_account(AccountState::SignedIn { name: None });
+    let r = rig_with(provider, vec![], config());
+    // As a provider that kept the new client and signed out, but whose revoke went unconfirmed.
+    r.provider.set_account(AccountState::SignedOut);
+    let unconfirmed = "signed out on this computer, but Google did not confirm";
+    r.provider
+        .fail_import(ProviderError::ClientBroken(unconfirmed.into()));
+    import(&r);
+    let seen = r.events_until(1, |e| matches!(e, Event::AccountError { .. }));
+    assert_eq!(
+        seen[seen.len() - 2..],
+        [
+            Event::Account {
+                provider: fake_id(),
+                state: AccountState::SignedOut,
+            },
+            Event::AccountError {
+                provider: fake_id(),
+                error: unconfirmed.into(),
+            },
+        ]
+    );
+}
+
 struct NoAccounts;
 
 impl Provider for NoAccounts {
