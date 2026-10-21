@@ -1,6 +1,7 @@
 //! Settings: each account, its state, and what can be done about it there.
 
 use std::cell::RefCell;
+use std::rc::Rc;
 
 use objc2::rc::Retained;
 use objc2::runtime::{AnyObject, ProtocolObject, Sel};
@@ -138,7 +139,8 @@ pub struct SettingsPage {
     heading: Retained<NSTextField>,
     /// Closes the last row.
     end: Retained<NSView>,
-    rows: RefCell<Vec<AccountView>>,
+    /// Cloned out before use: no borrow is held across AppKit, which can re-enter the page.
+    rows: RefCell<Vec<Rc<AccountView>>>,
     /// What the rows show; their buttons' tags index it.
     shown: RefCell<Vec<AccountRow>>,
     /// The buttons' target and the fields' delegate.
@@ -208,18 +210,16 @@ impl SettingsPage {
     /// refused client. True while a row shows a sign-in code, whose expiry needs redrawing.
     pub fn set(&self, rows: Vec<AccountRow>, speak: bool) -> bool {
         let mtm = self.view.mtm();
-        {
-            let mut views = self.rows.borrow_mut();
-            while views.len() < rows.len() {
-                let v = AccountView::new(mtm, views.len(), &self.target);
-                self.doc.addSubview(&v.view);
-                views.push(v);
-            }
-            for (i, v) in views.iter().enumerate() {
-                match rows.get(i) {
-                    Some(row) => v.show(row, speak),
-                    None => v.hide(),
-                }
+        let made = self.rows.borrow().len();
+        for i in made..rows.len() {
+            let v = Rc::new(AccountView::new(mtm, i, &self.target));
+            self.rows.borrow_mut().push(v.clone());
+            self.doc.addSubview(&v.view);
+        }
+        for (i, v) in self.views().iter().enumerate() {
+            match rows.get(i) {
+                Some(row) => v.show(row, speak),
+                None => v.hide(),
             }
         }
         let pending = rows
@@ -235,14 +235,21 @@ impl SettingsPage {
         let w = self.scroll.contentSize().width;
         let mut y = GAP;
         y = line_at(&self.heading, PAD, y, w - 2.0 * PAD) + GAP;
-        let views = self.rows.borrow();
-        let shown = self.shown.borrow();
-        for (v, row) in views.iter().zip(shown.iter()) {
+        let shown = self.shown.borrow().clone();
+        for (v, row) in self.views().iter().zip(shown.iter()) {
             y += v.place(row, y, w);
         }
         self.end.setFrame(rect(PAD, y, w - 2.0 * PAD, 1.0));
         self.end.setHidden(shown.is_empty());
         self.doc.setFrame(rect(0.0, 0.0, w, y + PAD));
+    }
+
+    fn views(&self) -> Vec<Rc<AccountView>> {
+        self.rows.borrow().clone()
+    }
+
+    fn view_at(&self, i: usize) -> Option<Rc<AccountView>> {
+        self.rows.borrow().get(i).cloned()
     }
 
     /// Row `i` as shown.
@@ -256,13 +263,12 @@ impl SettingsPage {
         if !matches!(row.state, AccountRowState::Setup(_)) {
             return None;
         }
-        let views = self.rows.borrow();
-        let form = &views.get(i)?.form;
-        Some((row.provider, form.id.value(), form.secret.value()))
+        let v = self.view_at(i)?;
+        Some((row.provider, v.form.id.value(), v.form.secret.value()))
     }
 
     pub fn clear_secret(&self, i: usize) {
-        if let Some(v) = self.rows.borrow().get(i) {
+        if let Some(v) = self.view_at(i) {
             v.form.secret.clear();
             v.form.update_save();
         }
@@ -270,15 +276,14 @@ impl SettingsPage {
 
     /// The row whose client form `control` is a field of.
     pub fn form_row(&self, control: &NSControl) -> Option<usize> {
-        self.rows
-            .borrow()
+        self.views()
             .iter()
             .position(|v| v.form.id.is(control) || v.form.secret.is(control))
     }
 
     /// Enables Save once both of row `i`'s fields hold something.
     pub fn fields_changed(&self, i: usize) {
-        if let Some(v) = self.rows.borrow().get(i) {
+        if let Some(v) = self.view_at(i) {
             v.form.update_save();
         }
     }
@@ -286,8 +291,7 @@ impl SettingsPage {
     /// Puts the cursor in the first shown client form's Client ID field.
     pub fn focus_form(&self) {
         let field = self
-            .rows
-            .borrow()
+            .views()
             .iter()
             .find(|v| !v.view.isHidden() && !v.form.view.isHidden())
             .map(|v| v.form.id.text.retain());
@@ -302,10 +306,9 @@ impl SettingsPage {
 
     /// Redraws the sign-in codes' expiry; true while any shows.
     pub fn refresh_expiry(&self, now_unix: u64) -> bool {
-        let views = self.rows.borrow();
-        let shown = self.shown.borrow();
+        let shown = self.shown.borrow().clone();
         let mut any = false;
-        for (v, row) in views.iter().zip(shown.iter()) {
+        for (v, row) in self.views().iter().zip(shown.iter()) {
             if let AccountRowState::Pending {
                 expires_at_unix, ..
             } = row.state
