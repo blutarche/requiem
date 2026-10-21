@@ -156,6 +156,7 @@ pub(crate) fn load_client(files: &GoogleFiles) -> Result<ClientConfig, String> {
         ));
     }
     let shown = path.display();
+    tighten(path);
     let bytes = match read_capped(path) {
         Ok(b) => b,
         Err(e) if e.kind() == io::ErrorKind::NotFound => {
@@ -202,14 +203,18 @@ impl fmt::Debug for TokenFile {
     }
 }
 
-fn load_token(path: &Path) -> Option<TokenFile> {
-    // A file left readable by others (an older build, a copy, a restore) is tightened first.
+/// Makes a file left readable by others (an older build, a copy, a restore) the user's only.
+fn tighten(path: &Path) {
     if let Ok(meta) = fs::metadata(path)
         && meta.permissions().mode() & 0o077 != 0
         && let Err(e) = fs::set_permissions(path, fs::Permissions::from_mode(0o600))
     {
-        debug!("cannot tighten the token file's mode: {e}");
+        debug!("cannot tighten {}'s mode: {e}", path.display());
     }
+}
+
+fn load_token(path: &Path) -> Option<TokenFile> {
+    tighten(path);
     let bytes = match read_capped(path) {
         Ok(b) => b,
         Err(e) if e.kind() == io::ErrorKind::NotFound => return None,
@@ -300,8 +305,8 @@ fn commit(tmp: &Path, path: &Path) -> io::Result<()> {
     result
 }
 
-/// Unlike the token's, the client's directory may be one the user named through
-/// `REQUIEM_GOOGLE_CLIENT_FILE`, so only a directory created here is made private.
+/// As `save_token` does its directory, makes the client's private, even one the user named
+/// through `REQUIEM_GOOGLE_CLIENT_FILE`.
 fn stage_client(path: &Path, bytes: &[u8]) -> io::Result<PathBuf> {
     let dir = path
         .parent()
@@ -310,6 +315,8 @@ fn stage_client(path: &Path, bytes: &[u8]) -> io::Result<PathBuf> {
         .recursive(true)
         .mode(0o700)
         .create(dir)?;
+    // `create` leaves an existing directory as it was.
+    fs::set_permissions(dir, fs::Permissions::from_mode(0o700))?;
     stage_private(path, bytes)
 }
 
@@ -1887,7 +1894,7 @@ mod tests {
     }
 
     #[test]
-    fn an_import_leaves_an_existing_directory_as_it_was() {
+    fn an_import_tightens_an_existing_directory_and_a_load_an_existing_file() {
         let tmp = TempDir::new();
         let dir = tmp.path().join("shared");
         fs::create_dir(&dir).unwrap();
@@ -1897,7 +1904,15 @@ mod tests {
         g.import_client(r#"{"client_id":"id","client_secret":"s"}"#)
             .unwrap();
         let mode = |p: &Path| fs::metadata(p).unwrap().permissions().mode() & 0o777;
-        assert_eq!(mode(&dir), 0o755);
+        assert_eq!(mode(&dir), 0o700);
+        assert_eq!(mode(&path), 0o600);
+
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
+        let files = GoogleFiles {
+            client: Some(path.clone()),
+            token: Some(tmp.path().join("google-token.json")),
+        };
+        assert_eq!(load_client(&files).unwrap().client_id, "id");
         assert_eq!(mode(&path), 0o600);
     }
 
