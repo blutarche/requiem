@@ -134,6 +134,8 @@ fn load(path: &Path) -> Option<Signed> {
             return None;
         }
     };
+    // A file put back by a failed Restart to Update is a new file, without the exclusion.
+    exclude_from_backups(path);
     // serde's errors can quote the file, so none is logged.
     let Ok(file) = serde_json::from_slice::<SessionFile>(&bytes) else {
         debug!("browser session unparsable; treating as signed out");
@@ -589,20 +591,31 @@ mod tests {
         let rig = Rig::new();
         rig.signed_in();
         let path = std::ffi::CString::new(rig.path().as_os_str().as_bytes()).unwrap();
-        let mut value = [0u8; 128];
-        // SAFETY: both strings are NUL-terminated and `value` is a live buffer of its length.
-        let n = unsafe {
-            libc::getxattr(
-                path.as_ptr(),
-                BACKUP_EXCLUDE_NAME.as_ptr(),
-                value.as_mut_ptr().cast(),
-                value.len(),
-                0,
-                0,
-            )
+        let exclusion = || {
+            let mut value = [0u8; 128];
+            // SAFETY: both strings are NUL-terminated and `value` is a live buffer of its
+            // length.
+            let n = unsafe {
+                libc::getxattr(
+                    path.as_ptr(),
+                    BACKUP_EXCLUDE_NAME.as_ptr(),
+                    value.as_mut_ptr().cast(),
+                    value.len(),
+                    0,
+                    0,
+                )
+            };
+            usize::try_from(n).ok().map(|n| value[..n].to_vec())
         };
-        assert_eq!(n, 61, "{}", io::Error::last_os_error());
-        assert_eq!(value[..61], BACKUP_EXCLUDE);
+        assert_eq!(exclusion().as_deref(), Some(&BACKUP_EXCLUDE[..]));
+
+        // Put back as a failed Restart to Update does, as a new file; loading excludes it again.
+        let bytes = fs::read(rig.path()).unwrap();
+        fs::remove_file(rig.path()).unwrap();
+        fs::write(rig.path(), bytes).unwrap();
+        assert_eq!(exclusion(), None);
+        assert!(rig.session().current().is_some());
+        assert_eq!(exclusion().as_deref(), Some(&BACKUP_EXCLUDE[..]));
     }
 
     #[test]
