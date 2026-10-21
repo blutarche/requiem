@@ -138,17 +138,19 @@ fn header_lines(text: &str) -> Fields {
 /// Chrome's copy of the headers pane: each name on its own line, with or without a colon, and
 /// its value on the next. Only a header that is kept starts a pair: headings such as
 /// "General", the other headers and their values are each skipped alone, so a stray line
-/// can't shift the pairing.
+/// can't shift the pairing. A kept name followed by another has no value.
 fn separate_lines(text: &str) -> Fields {
+    let kept = |line: &str| {
+        let n = line.strip_suffix(':').unwrap_or(line);
+        KEPT.into_iter().find(|k| k.eq_ignore_ascii_case(n))
+    };
     let mut fields = Vec::new();
     let mut name: Option<&str> = None;
     for line in text.lines().map(str::trim).filter(|l| !l.is_empty()) {
-        match name.take() {
-            Some(n) => fields.push((n.to_owned(), line.to_owned())),
-            None => {
-                let n = line.strip_suffix(':').unwrap_or(line);
-                name = KEPT.into_iter().find(|k| k.eq_ignore_ascii_case(n));
-            }
+        match (name.take(), kept(line)) {
+            (_, Some(k)) => name = Some(k),
+            (Some(n), None) => fields.push((n.to_owned(), line.to_owned())),
+            (None, None) => {}
         }
     }
     fields
@@ -442,6 +444,15 @@ mod tests {
         assert_eq!(h.page_id.as_deref(), Some("42"));
         // A kept name on the last line has no value.
         assert_eq!(h.visitor_id, None);
+    }
+
+    #[test]
+    fn chrome_separate_lines_with_an_empty_value_take_no_name_for_it() {
+        let pane = format!("x-goog-pageid\nx-goog-visitor-id\nCgtWSVNJVE9S\ncookie\n{COOKIE}\n");
+        let h = ok(&pane);
+        assert_eq!(h.cookie.expose(), COOKIE);
+        assert_eq!(h.page_id, None);
+        assert_eq!(h.visitor_id.as_deref(), Some("CgtWSVNJVE9S"));
     }
 
     #[test]
