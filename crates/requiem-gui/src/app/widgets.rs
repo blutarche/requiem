@@ -8,7 +8,7 @@ use std::time::{Duration, Instant};
 
 use block2::{RcBlock, StackBlock};
 use objc2::rc::{Retained, Weak};
-use objc2::runtime::{AnyObject, Sel};
+use objc2::runtime::{AnyObject, Bool, Sel};
 use objc2::{AnyThread, DefinedClass, MainThreadOnly, Message, define_class, msg_send};
 use objc2_app_kit::{
     NSAccessibility, NSAccessibilityAnnouncementKey,
@@ -18,8 +18,9 @@ use objc2_app_kit::{
     NSAnimationContext, NSApplication, NSAttributedStringNSStringDrawing,
     NSAutoresizingMaskOptions, NSBezierPath, NSButton, NSCellImagePosition, NSColor, NSControl,
     NSEvent, NSEventMask, NSEventTrackingRunLoopMode, NSEventType, NSFocusRingType, NSFont,
-    NSImageScaling, NSImageView, NSLineBreakMode, NSResponder, NSTextAlignment, NSTextField,
-    NSTrackingArea, NSTrackingAreaOptions, NSView, NSWindow, NSWindowOcclusionState, NSWorkspace,
+    NSImage, NSImageScaling, NSImageView, NSLineBreakMode, NSResponder, NSSecureTextField,
+    NSTextAlignment, NSTextField, NSTrackingArea, NSTrackingAreaOptions, NSView, NSWindow,
+    NSWindowOcclusionState, NSWorkspace,
 };
 use objc2_core_foundation::CGFloat;
 use objc2_foundation::{
@@ -39,6 +40,12 @@ use crate::vm::{Intent, SEEK_STEP_SECS, VOLUME_STEP};
 pub const DIMMED: CGFloat = 0.4;
 /// The keyboard focus ring's width.
 const RING_W: CGFloat = 2.0;
+/// The side of an icon before a text button's title.
+pub const LABEL_ICON: CGFloat = 14.0;
+/// Between a text button's icon and its title.
+const LABEL_GAP: CGFloat = 6.0;
+/// About what NSButtonCell leaves between an image and a title, as measured.
+const CELL_GAP: CGFloat = 2.0;
 
 /// Cubic Bézier control points of a timing curve.
 pub type Curve = [f32; 4];
@@ -707,6 +714,23 @@ impl HoverButton {
         s.size().width.ceil() + 24.0
     }
 
+    /// As `set_label`, with `image`, if any, before the title. A template image takes the
+    /// title's colour.
+    pub fn set_label_image(&self, title: &str, image: Option<&NSImage>) -> CGFloat {
+        let w = self.set_label(title);
+        let Some(image) = image else {
+            self.setImage(None);
+            self.setImagePosition(NSCellImagePosition::NoImage);
+            return w;
+        };
+        // The cell's own gap is tighter than ours; the image carries the rest.
+        self.setImage(Some(&padded(image, LABEL_GAP - CELL_GAP)));
+        self.setImagePosition(NSCellImagePosition::ImageLeading);
+        self.setImageHugsTitle(true);
+        self.setContentTintColor(Some(&self.ivars().title_color));
+        w + image.size().width + LABEL_GAP
+    }
+
     pub fn set_icon(&self, icon: Icon, size: CGFloat) {
         self.setImage(icon.image(size).as_deref());
     }
@@ -762,6 +786,23 @@ impl HoverButton {
             layer.setBorderWidth(0.0);
         }
     }
+}
+
+/// `image` with `right` points of clear space after it; a template if `image` is one.
+fn padded(image: &NSImage, right: CGFloat) -> Retained<NSImage> {
+    let size = image.size();
+    let src = image.retain();
+    let draw = RcBlock::new(move |r: NSRect| -> Bool {
+        src.drawInRect(rect(r.origin.x, r.origin.y, size.width, size.height));
+        Bool::YES
+    });
+    let out = NSImage::imageWithSize_flipped_drawingHandler(
+        NSSize::new(size.width + right, size.height),
+        false,
+        &draw,
+    );
+    out.setTemplate(image.isTemplate());
+    out
 }
 
 pub struct NavIvars {
@@ -950,6 +991,7 @@ impl NavItem {
     }
 }
 
+#[derive(Default)]
 pub struct FieldIvars {
     ring: OnceCell<Weak<NSView>>,
     boxv: OnceCell<Weak<NSView>>,
@@ -971,7 +1013,7 @@ define_class!(
             // SAFETY: forwards to the superclass implementation.
             let ok: bool = unsafe { msg_send![super(self), becomeFirstResponder] };
             if ok {
-                self.set_focused(true);
+                set_focused(self.ivars(), true);
             }
             ok
         }
@@ -980,29 +1022,62 @@ define_class!(
         fn text_did_end_editing(&self, notification: &NSNotification) {
             // SAFETY: forwards to the superclass implementation.
             let _: () = unsafe { msg_send![super(self), textDidEndEditing: notification] };
-            self.set_focused(false);
+            set_focused(self.ivars(), false);
         }
     }
 );
 
-impl FieldText {
-    fn set_focused(&self, focused: bool) {
-        let iv = self.ivars();
-        if iv.focused.replace(focused) == focused {
-            return;
+define_class!(
+    /// The editable part of a `SecretField`: a `FieldText` that shows dots, which VoiceOver
+    /// doesn't read out.
+    // SAFETY: NSSecureTextField has no subclassing requirements; no Drop impl.
+    #[unsafe(super(
+        NSSecureTextField,
+        NSTextField,
+        NSControl,
+        NSView,
+        NSResponder,
+        objc2_foundation::NSObject
+    ))]
+    #[thread_kind = MainThreadOnly]
+    #[ivars = FieldIvars]
+    pub struct SecretText;
+
+    impl SecretText {
+        #[unsafe(method(becomeFirstResponder))]
+        fn become_first_responder(&self) -> bool {
+            // SAFETY: forwards to the superclass implementation.
+            let ok: bool = unsafe { msg_send![super(self), becomeFirstResponder] };
+            if ok {
+                set_focused(self.ivars(), true);
+            }
+            ok
         }
-        if let Some(ring) = iv.ring.get().and_then(Weak::load) {
-            let c = focused.then(theme::accent_ring);
-            fill(&ring, c.as_deref());
+
+        #[unsafe(method(textDidEndEditing:))]
+        fn text_did_end_editing(&self, notification: &NSNotification) {
+            // SAFETY: forwards to the superclass implementation.
+            let _: () = unsafe { msg_send![super(self), textDidEndEditing: notification] };
+            set_focused(self.ivars(), false);
         }
-        if let Some(b) = iv.boxv.get().and_then(Weak::load) {
-            let line = if focused {
-                theme::accent()
-            } else {
-                theme::line()
-            };
-            border(&b, &line, 1.0);
-        }
+    }
+);
+
+fn set_focused(iv: &FieldIvars, focused: bool) {
+    if iv.focused.replace(focused) == focused {
+        return;
+    }
+    if let Some(ring) = iv.ring.get().and_then(Weak::load) {
+        let c = focused.then(theme::accent_ring);
+        fill(&ring, c.as_deref());
+    }
+    if let Some(b) = iv.boxv.get().and_then(Weak::load) {
+        let line = if focused {
+            theme::accent()
+        } else {
+            theme::line()
+        };
+        border(&b, &line, 1.0);
     }
 }
 
@@ -1026,6 +1101,21 @@ impl Field {
         placeholder: &str,
         icon: Option<Icon>,
     ) -> Field {
+        let (ring, boxv, tframe) = Self::parts(mtm, frame, mask, icon);
+        let text = FieldText::alloc(mtm).set_ivars(FieldIvars::default());
+        // SAFETY: `initWithFrame:` is NSTextField's designated initializer.
+        let text: Retained<FieldText> = unsafe { msg_send![super(text), initWithFrame: tframe] };
+        Self::fit(&text, text.ivars(), &ring, &boxv, placeholder);
+        Field { ring, text }
+    }
+
+    /// A field's ring and box for `frame`, and the frame its text takes in the box.
+    fn parts(
+        mtm: MainThreadMarker,
+        frame: NSRect,
+        mask: Mask,
+        icon: Option<Icon>,
+    ) -> (Retained<NSView>, Retained<NSView>, NSRect) {
         let r = Self::RING;
         let ring = view(
             mtm,
@@ -1062,18 +1152,26 @@ impl Field {
             boxv.addSubview(&iv);
             x = 36.0;
         }
-        let font = theme::font(14.0, Weight::Regular);
-        let text = FieldText::alloc(mtm).set_ivars(FieldIvars {
-            ring: OnceCell::new(),
-            boxv: OnceCell::new(),
-            focused: Cell::new(false),
-        });
-        let th = line_height(&font);
+        let th = line_height(&Self::font());
         let tframe = rect(x, ((h - th) / 2.0).round(), w - x - 12.0, th);
-        // SAFETY: `initWithFrame:` is NSTextField's designated initializer.
-        let text: Retained<FieldText> = unsafe { msg_send![super(text), initWithFrame: tframe] };
-        let _ = text.ivars().ring.set(Weak::from_retained(&ring));
-        let _ = text.ivars().boxv.set(Weak::from_retained(&boxv));
+        (ring, boxv, tframe)
+    }
+
+    fn font() -> Retained<NSFont> {
+        theme::font(14.0, Weight::Regular)
+    }
+
+    /// Makes `text`, made at the frame `parts` gave, the editable part of `boxv`.
+    fn fit(
+        text: &NSTextField,
+        iv: &FieldIvars,
+        ring: &Retained<NSView>,
+        boxv: &Retained<NSView>,
+        placeholder: &str,
+    ) {
+        let _ = iv.ring.set(Weak::from_retained(ring));
+        let _ = iv.boxv.set(Weak::from_retained(boxv));
+        let font = Self::font();
         text.setBezeled(false);
         text.setBordered(false);
         text.setDrawsBackground(false);
@@ -1090,8 +1188,7 @@ impl Field {
         }
         text.setPlaceholderAttributedString(Some(&attributed(placeholder, &font, &theme::muted())));
         text.setAutoresizingMask(FLEX_W);
-        boxv.addSubview(&text);
-        Field { ring, text }
+        boxv.addSubview(text);
     }
 
     pub fn is(&self, control: &NSControl) -> bool {
@@ -1104,6 +1201,35 @@ impl Field {
 
     pub fn set_value(&self, v: &str) {
         self.text.setStringValue(&NSString::from_str(v));
+    }
+}
+
+/// A `Field` for a secret.
+pub struct SecretField {
+    pub ring: Retained<NSView>,
+    pub text: Retained<SecretText>,
+}
+
+impl SecretField {
+    pub fn new(mtm: MainThreadMarker, frame: NSRect, mask: Mask, placeholder: &str) -> SecretField {
+        let (ring, boxv, tframe) = Field::parts(mtm, frame, mask, None);
+        let text = SecretText::alloc(mtm).set_ivars(FieldIvars::default());
+        // SAFETY: `initWithFrame:` is NSTextField's designated initializer.
+        let text: Retained<SecretText> = unsafe { msg_send![super(text), initWithFrame: tframe] };
+        Field::fit(&text, text.ivars(), &ring, &boxv, placeholder);
+        SecretField { ring, text }
+    }
+
+    pub fn is(&self, control: &NSControl) -> bool {
+        std::ptr::eq::<NSControl>(control, &****self.text)
+    }
+
+    pub fn value(&self) -> String {
+        self.text.stringValue().to_string()
+    }
+
+    pub fn clear(&self) {
+        self.text.setStringValue(&NSString::new());
     }
 }
 
@@ -1526,11 +1652,19 @@ impl EmptyState {
 
     /// With no `action`, the button hides.
     pub fn set(&self, icon: Icon, heading: &str, sub: &str, action: Option<&str>) {
+        let action = action.map(|a| (a, None));
         self.set_actions(icon, heading, sub, action.as_slice());
     }
 
-    /// One button per label, up to `MAX_ACTIONS`, centred side by side; none hides them all.
-    pub fn set_actions(&self, icon: Icon, heading: &str, sub: &str, labels: &[&str]) {
+    /// One button per label, each with its image if any, up to `MAX_ACTIONS`, centred side by
+    /// side; none hides them all.
+    pub fn set_actions(
+        &self,
+        icon: Icon,
+        heading: &str,
+        sub: &str,
+        labels: &[(&str, Option<&NSImage>)],
+    ) {
         self.icon.setImage(icon.image(32.0).as_deref());
         set_text(&self.heading, heading);
         set_text(&self.sub, sub);
@@ -1550,7 +1684,7 @@ impl EmptyState {
         let widths: Vec<CGFloat> = labels
             .iter()
             .zip(&self.actions)
-            .map(|(l, b)| b.set_label(l))
+            .map(|((l, image), b)| b.set_label_image(l, *image))
             .collect();
         let total = widths.iter().sum::<CGFloat>()
             + Self::ACTION_GAP * widths.len().saturating_sub(1) as CGFloat;

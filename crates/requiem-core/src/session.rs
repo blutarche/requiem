@@ -480,14 +480,18 @@ impl Actor {
                     provider,
                     result,
                     state,
-                } => match result {
-                    // Announced even when unchanged, so a client waiting on its import hears it.
-                    Ok(()) => self.set_account(provider, state, true),
-                    Err(e) => self.emit(Event::AccountError {
-                        provider,
-                        error: sign_in_error(&e),
-                    }),
-                },
+                } => {
+                    // As after a sign-in: the error first, then the state, announced even when
+                    // unchanged, so a client waiting on its import hears it. Only the state
+                    // tells a refused import from one that stood but could not finish.
+                    if let Err(e) = result {
+                        self.emit(Event::AccountError {
+                            provider: provider.clone(),
+                            error: sign_in_error(&e),
+                        });
+                    }
+                    self.set_account(provider, state, true);
+                }
             }
         }
     }

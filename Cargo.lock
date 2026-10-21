@@ -2591,6 +2591,7 @@ dependencies = [
  "requiem-core",
  "requiem-ipc",
  "requiem-macos",
+ "serde_json",
 ]
 
 [[package]]

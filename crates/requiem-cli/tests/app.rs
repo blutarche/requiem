@@ -1223,6 +1223,96 @@ fn a_failed_signin_client_says_why_and_exits_2_without_an_ack() {
     assert_eq!(r.provider.imported().len(), 2);
 }
 
+/// A daemon that answers an import with `answer`, each event a moment after the one before,
+/// as frames come over its socket.
+struct ImportAnswer {
+    answer: Vec<Event>,
+    tx: Mutex<Option<crossbeam_channel::Sender<Event>>>,
+}
+
+impl app::Player for ImportAnswer {
+    fn send(&self, cmd: Command) {
+        let Command::ImportSignInClient { .. } = cmd else {
+            return;
+        };
+        let tx = self.tx.lock().unwrap().clone().expect("subscribed");
+        let answer = self.answer.clone();
+        thread::spawn(move || {
+            for ev in answer {
+                thread::sleep(Duration::from_millis(50));
+                let _ = tx.send(ev);
+            }
+            // Holds the channel open, as a daemon would, until the script has its answer.
+            thread::sleep(Duration::from_secs(5));
+        });
+    }
+
+    fn subscribe(&self) -> crossbeam_channel::Receiver<Event> {
+        let (tx, rx) = crossbeam_channel::unbounded();
+        tx.send(Event::Account {
+            provider: ProviderId("fake".into()),
+            state: AccountState::SignedIn { name: None },
+        })
+        .unwrap();
+        // The join snapshot's last event.
+        tx.send(Event::Volume(50)).unwrap();
+        *self.tx.lock().unwrap() = Some(tx);
+        rx
+    }
+
+    fn remote(&self) -> bool {
+        true
+    }
+}
+
+/// Runs `signin-client` as a script against a daemon that answers with `answer`.
+fn import_answered(file: &str, answer: Vec<Event>) -> (u8, String) {
+    let file = TempFile::new(file, CLIENT.as_bytes());
+    let player = ImportAnswer {
+        answer,
+        tx: Mutex::new(None),
+    };
+    let out = Buf::default();
+    let script = format!("signin-client fake {}\n", file.0.display());
+    let code = app::run(&player, Cursor::new(script), out.clone(), true).unwrap();
+    (code, out.text())
+}
+
+#[test]
+fn signin_client_answered_with_an_error_then_the_state_exits_2() {
+    let (code, text) = import_answered(
+        "stood.json",
+        vec![
+            Event::AccountError {
+                provider: ProviderId("fake".into()),
+                error: UNCONFIRMED.into(),
+            },
+            Event::Account {
+                provider: ProviderId("fake".into()),
+                state: AccountState::SignedOut,
+            },
+        ],
+    );
+    assert_eq!(code, 2, "{text}");
+    assert!(
+        text.contains(&format!("account error: {UNCONFIRMED}\n")),
+        "{text}"
+    );
+}
+
+#[test]
+fn signin_client_answered_with_the_state_alone_exits_0() {
+    let (code, text) = import_answered(
+        "taken.json",
+        vec![Event::Account {
+            provider: ProviderId("fake".into()),
+            state: AccountState::SignedOut,
+        }],
+    );
+    assert_eq!(code, 0, "{text}");
+    assert!(!text.contains("error"), "{text}");
+}
+
 #[test]
 fn signin_client_waits_past_another_signins_code() {
     let r = rig();
