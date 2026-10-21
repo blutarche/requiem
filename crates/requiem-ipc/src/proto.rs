@@ -29,6 +29,8 @@ pub enum ClientMsg {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum ServerMsg {
+    /// Every older daemon's restart check reads this as
+    /// `{"Welcome":{"protocol":..,"version":..}}`; the shape must never change.
     Welcome {
         protocol: u32,
         version: String,
@@ -82,8 +84,13 @@ pub enum UpdateState {
 }
 
 /// Reads only the protocol number, so a `Hello` from another protocol version still gets
-/// `Incompatible` even if the rest of its shape has changed.
+/// `Incompatible` even if the rest of its shape has changed. `role` stays raw so a role that
+/// no longer decodes doesn't fail the probe.
 #[derive(Deserialize)]
 pub(crate) enum HelloProbe {
-    Hello { protocol: u32 },
+    Hello {
+        protocol: u32,
+        #[serde(default)]
+        role: Option<serde_json::Value>,
+    },
 }
