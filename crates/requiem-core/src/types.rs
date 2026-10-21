@@ -70,6 +70,10 @@ pub enum Page {
     Collection(CollectionId),
 }
 
+/// How an [`AccountState::Unavailable`] text starts when all that is missing is the user's own
+/// Google OAuth client, which a front end may ask for in its own words.
+pub const NO_OAUTH_CLIENT: &str = "no Google OAuth client";
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum AccountState {
     /// Sign-in can't start; the text says what to set up.

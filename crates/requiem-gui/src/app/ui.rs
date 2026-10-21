@@ -2285,7 +2285,9 @@ impl Ui {
                 user_code,
                 expires_at_unix,
             } => self.show_sign_in(provider, verification_url, user_code, *expires_at_unix),
-            LibraryView::Setup { reason, error, .. } => self.show_setup(reason, error.as_deref()),
+            LibraryView::Setup { reason, error, .. } => {
+                self.show_setup(reason.as_deref(), error.as_deref())
+            }
             LibraryView::SignedIn { name, page } => {
                 widgets::set_text(
                     &self.library_who,
@@ -2307,7 +2309,7 @@ impl Ui {
         }
     }
 
-    fn show_setup(&self, reason: &str, error: Option<&str>) {
+    fn show_setup(&self, reason: Option<&str>, error: Option<&str>) {
         let note = &self.setup.note;
         match error {
             Some(e) => {
@@ -2319,7 +2321,7 @@ impl Ui {
                 note.setTextColor(Some(&theme::bad()));
             }
             None => {
-                widgets::set_text(note, reason);
+                widgets::set_text(note, reason.unwrap_or_default());
                 note.setTextColor(Some(&theme::muted()));
             }
         }
