@@ -1284,7 +1284,7 @@ pub struct SliderIvars {
 }
 
 define_class!(
-    /// A thin custom-drawn slider: line-2 track, accent-2 fill, knob on hover or drag.
+    /// A thin custom-drawn slider: line-2 track, accent fill, knob on hover or drag.
     // SAFETY: NSView has no subclassing requirements; no Drop impl.
     #[unsafe(super(NSView, NSResponder, objc2_foundation::NSObject))]
     #[thread_kind = MainThreadOnly]
@@ -1301,7 +1301,7 @@ define_class!(
             theme::line_2().setFill();
             NSBezierPath::bezierPathWithRoundedRect_xRadius_yRadius(rect(x0, mid - 2.0, w, 4.0), 2.0, 2.0)
                 .fill();
-            let fill = theme::accent_2();
+            let fill = theme::accent();
             if v > 0.0 {
                 fill.setFill();
                 NSBezierPath::bezierPathWithRoundedRect_xRadius_yRadius(

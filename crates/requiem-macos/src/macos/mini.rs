@@ -298,6 +298,9 @@ impl MiniPlayer {
             action,
             row(W / 2.0 + gap),
         );
+        prev.setContentTintColor(Some(&NSColor::secondaryLabelColor()));
+        next.setContentTintColor(Some(&NSColor::secondaryLabelColor()));
+        toggle.setContentTintColor(Some(&accent()));
         for b in [&prev, &toggle, &next] {
             player.addSubview(b);
         }
