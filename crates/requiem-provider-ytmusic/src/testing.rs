@@ -1,4 +1,4 @@
-//! Test doubles for Google's endpoints.
+//! Test doubles for Google's and YouTube Music's endpoints.
 
 use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
@@ -8,7 +8,9 @@ use std::{fs, process};
 
 use requiem_core::ProviderError;
 
-use crate::transport::{ApiHttp, HttpResponse};
+use crate::IpFamily;
+use crate::range::{FetchError, RangeResponse};
+use crate::transport::{ApiHttp, HttpResponse, Transport};
 
 type Pairs = Vec<(String, String)>;
 
@@ -114,6 +116,93 @@ impl ApiHttp for FakeApi {
             form: owned(form),
         })
     }
+}
+
+pub(crate) struct MusicCall {
+    pub url: String,
+    pub headers: Pairs,
+    pub body: String,
+    /// Sent through `post_json_signed`.
+    pub signed: bool,
+}
+
+/// Innertube's endpoints: replies are scripted per URL without its query and served in order;
+/// an unscripted call is a network error.
+#[derive(Default)]
+pub(crate) struct FakeMusic {
+    replies: Mutex<HashMap<String, VecDeque<(u16, String)>>>,
+    pub calls: Mutex<Vec<MusicCall>>,
+}
+
+impl FakeMusic {
+    pub(crate) fn script(&self, path: &str, status: u16, body: &str) {
+        self.replies
+            .lock()
+            .unwrap()
+            .entry(path.to_owned())
+            .or_default()
+            .push_back((status, body.to_owned()));
+    }
+
+    fn reply(&self, call: MusicCall) -> Result<HttpResponse, ProviderError> {
+        let path = call.url.split('?').next().unwrap_or_default().to_owned();
+        self.calls.lock().unwrap().push(call);
+        let (status, body) = self
+            .replies
+            .lock()
+            .unwrap()
+            .get_mut(&path)
+            .and_then(VecDeque::pop_front)
+            .ok_or_else(|| ProviderError::Network(format!("unscripted {path}")))?;
+        Ok(HttpResponse {
+            status,
+            body: body.into_bytes(),
+        })
+    }
+}
+
+impl Transport for FakeMusic {
+    fn post_json(
+        &self,
+        _: IpFamily,
+        url: &str,
+        headers: &[(&str, &str)],
+        body: &str,
+    ) -> Result<HttpResponse, ProviderError> {
+        self.reply(MusicCall {
+            url: url.to_owned(),
+            headers: owned(headers),
+            body: body.to_owned(),
+            signed: false,
+        })
+    }
+
+    fn post_json_signed(
+        &self,
+        _: IpFamily,
+        url: &str,
+        headers: &[(&str, &str)],
+        body: &str,
+    ) -> Result<HttpResponse, ProviderError> {
+        self.reply(MusicCall {
+            url: url.to_owned(),
+            headers: owned(headers),
+            body: body.to_owned(),
+            signed: true,
+        })
+    }
+
+    fn fetch_on(
+        &self,
+        _: IpFamily,
+        url: &str,
+        _: u64,
+        _: u64,
+    ) -> Result<RangeResponse, FetchError> {
+        Err(FetchError::Transient(format!("unscripted fetch of {url}")))
+    }
+
+    fn reset(&self) {}
 }
 
 /// A fresh directory under the system temp dir, removed on drop.

@@ -80,7 +80,7 @@ pub(crate) struct InnertubeClient {
     visitor: Mutex<Option<String>>,
 }
 
-fn status_error(what: &str, status: u16) -> ProviderError {
+pub(crate) fn status_error(what: &str, status: u16) -> ProviderError {
     if status == 429 || status >= 500 {
         ProviderError::Network(format!("{what}: http {status}"))
     } else {

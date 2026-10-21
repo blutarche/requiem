@@ -130,7 +130,7 @@ impl fmt::Debug for ClientConfig {
     }
 }
 
-fn read_capped(path: &Path) -> io::Result<Vec<u8>> {
+pub(crate) fn read_capped(path: &Path) -> io::Result<Vec<u8>> {
     let mut bytes = Vec::new();
     fs::File::open(path)?
         .take(MAX_FILE_BYTES + 1)
@@ -203,7 +203,7 @@ impl fmt::Debug for TokenFile {
 }
 
 /// Makes a file left readable by others (an older build, a copy, a restore) the user's only.
-fn tighten(path: &Path) {
+pub(crate) fn tighten(path: &Path) {
     if let Ok(meta) = fs::metadata(path)
         && meta.permissions().mode() & 0o077 != 0
         && let Err(e) = fs::set_permissions(path, fs::Permissions::from_mode(0o600))
@@ -250,17 +250,22 @@ pub(crate) fn check_token(path: &Path) -> Result<(), String> {
 /// watches (Secret Service unlock prompts are as hostile to a headless Linux daemon).
 /// TODO: move the refresh token to the Keychain once the app has a stable Developer ID.
 fn save_token(path: &Path, token: &TokenFile) -> io::Result<()> {
+    private_dir(path)?;
+    let json = serde_json::to_vec(token).map_err(io::Error::other)?;
+    write_private(path, &json)
+}
+
+/// Makes the directory of `path`, the sign-ins' own, only the user's.
+pub(crate) fn private_dir(path: &Path) -> io::Result<()> {
     let dir = path
         .parent()
-        .ok_or_else(|| io::Error::other("token path has no parent"))?;
+        .ok_or_else(|| io::Error::other("sign-in path has no parent"))?;
     fs::DirBuilder::new()
         .recursive(true)
         .mode(0o700)
         .create(dir)?;
     // `create` leaves an existing directory as it was.
-    fs::set_permissions(dir, fs::Permissions::from_mode(0o700))?;
-    let json = serde_json::to_vec(token).map_err(io::Error::other)?;
-    write_private(path, &json)
+    fs::set_permissions(dir, fs::Permissions::from_mode(0o700))
 }
 
 /// Replaces `path` through a temp file and a rename, so a reader never sees half of it. Only
@@ -272,7 +277,7 @@ fn write_private(path: &Path, bytes: &[u8]) -> io::Result<()> {
 
 /// Writes `bytes` to a temp file beside `path`, which only the user can read, for `commit` to
 /// put in its place.
-fn stage_private(path: &Path, bytes: &[u8]) -> io::Result<PathBuf> {
+pub(crate) fn stage_private(path: &Path, bytes: &[u8]) -> io::Result<PathBuf> {
     let mut tmp = path.as_os_str().to_owned();
     tmp.push(".tmp");
     let tmp = PathBuf::from(tmp);
@@ -296,7 +301,7 @@ fn stage_private(path: &Path, bytes: &[u8]) -> io::Result<PathBuf> {
     }
 }
 
-fn commit(tmp: &Path, path: &Path) -> io::Result<()> {
+pub(crate) fn commit(tmp: &Path, path: &Path) -> io::Result<()> {
     let result = fs::rename(tmp, path);
     if result.is_err() {
         let _ = fs::remove_file(tmp);

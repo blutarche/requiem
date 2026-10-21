@@ -57,7 +57,7 @@ pub(crate) fn parse_paste(text: &str) -> Result<BrowserHeaders, String> {
         [header_lines, separate_lines, bare_cookie]
             .into_iter()
             .map(|read| read(text))
-            .find(|f| has_cookie(f))
+            .find(has_cookie)
             .unwrap_or_default()
     };
     keep(&fields)
@@ -71,6 +71,25 @@ pub(crate) fn sapisid(cookie: &str) -> Option<&str> {
         .find(|(name, _)| *name == SAPISID)
         .map(|(_, value)| value.trim())
         .filter(|v| !v.is_empty())
+}
+
+/// Checks headers read back from a saved session as a paste's are checked.
+pub(crate) fn from_parts(
+    cookie: &str,
+    authuser: &str,
+    page_id: Option<&str>,
+    visitor_id: Option<&str>,
+) -> Result<BrowserHeaders, String> {
+    let fields = [
+        ("cookie", Some(cookie)),
+        ("x-goog-authuser", Some(authuser)),
+        ("x-goog-pageid", page_id),
+        ("x-goog-visitor-id", visitor_id),
+    ]
+    .into_iter()
+    .filter_map(|(k, v)| Some((k.to_owned(), v?.to_owned())))
+    .collect();
+    keep(&fields)
 }
 
 /// `SAPISIDHASH <unix>_<sha1 of "<unix> <sapisid> <origin>">`, as music.youtube.com computes it.

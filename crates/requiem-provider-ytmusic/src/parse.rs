@@ -11,7 +11,7 @@ use serde_json::Value;
 mod browse;
 
 pub(crate) use browse::{
-    BROWSE_PREFIX, HomePage, collection_kind, parse_collection, parse_home, parse_library_playlists,
+    BROWSE_PREFIX, collection_kind, parse_collection, parse_home, parse_library_playlists,
 };
 
 pub(crate) const PROVIDER: &str = "ytmusic";
