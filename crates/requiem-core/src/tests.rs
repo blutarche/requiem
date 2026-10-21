@@ -1558,21 +1558,25 @@ fn search_event(r: &Rig) -> Event {
     r.wait_event(|e| matches!(e, Event::SearchResults { .. } | Event::SearchFailed { .. }))
 }
 
+fn named_tracks(provider: &str, ids: &[&str]) -> Vec<Track> {
+    ids.iter().map(|id| named_track(provider, id)).collect()
+}
+
 #[test]
-fn search_merges_providers_in_provider_order() {
+fn search_takes_the_providers_in_turn_in_provider_order() {
     let (a, b) = pair();
     let gate = Gate::new();
     a.script_search(
         "q",
-        vec![Step::ok(vec![named_track("first", "a1"), named_track("first", "a2")]).gated(&gate)],
+        vec![Step::ok(named_tracks("first", &["a1", "a2"])).gated(&gate)],
     );
-    b.script_search("q", vec![Step::ok(vec![named_track("second", "b1")])]);
+    b.script_search("q", vec![Step::ok(named_tracks("second", &["b1", "b2"]))]);
     let r = rig_with(a, vec![b.clone()], config());
     r.send(Command::Search {
         req: 1,
         query: "q".into(),
     });
-    // The second provider answers first, yet its tracks still come last.
+    // The second provider answers first, yet the first provider's tracks still lead.
     b.wait_search_calls(1);
     gate.release();
     let ev = r.wait_event(|e| matches!(e, Event::SearchResults { .. }));
@@ -1582,8 +1586,54 @@ fn search_merges_providers_in_provider_order() {
             req: 1,
             tracks: vec![
                 named_track("first", "a1"),
+                named_track("second", "b1"),
                 named_track("first", "a2"),
-                named_track("second", "b1")
+                named_track("second", "b2")
+            ],
+        }
+    );
+}
+
+#[test]
+fn search_follows_the_shorter_list_with_the_rest_of_the_longer() {
+    let (a, b) = pair();
+    a.script_search(
+        "q",
+        vec![Step::ok(named_tracks("first", &["a1", "a2", "a3"]))],
+    );
+    b.script_search("q", vec![Step::ok(named_tracks("second", &["b1"]))]);
+    let r = rig_with(a, vec![b], config());
+    assert_eq!(
+        search_event(&r),
+        Event::SearchResults {
+            req: 1,
+            tracks: vec![
+                named_track("first", "a1"),
+                named_track("second", "b1"),
+                named_track("first", "a2"),
+                named_track("first", "a3")
+            ],
+        }
+    );
+}
+
+#[test]
+fn search_takes_the_others_in_turn_when_one_fails() {
+    let (a, b) = pair();
+    let c = FakeProvider::new("third");
+    a.script_search("q", vec![Step::ok(named_tracks("first", &["a1", "a2"]))]);
+    b.script_search("q", vec![Step::err(ProviderError::Network("down".into()))]);
+    c.script_search("q", vec![Step::ok(named_tracks("third", &["c1", "c2"]))]);
+    let r = rig_with(a, vec![b, c], config());
+    assert_eq!(
+        search_event(&r),
+        Event::SearchResults {
+            req: 1,
+            tracks: vec![
+                named_track("first", "a1"),
+                named_track("third", "c1"),
+                named_track("first", "a2"),
+                named_track("third", "c2")
             ],
         }
     );
@@ -1723,6 +1773,141 @@ fn track_shelf(title: &str, provider: &str, ids: &[&str]) -> Shelf {
             .map(|id| Item::Track(named_track(provider, id)))
             .collect(),
     }
+}
+
+fn library_event(r: &Rig) -> Event {
+    r.send(Command::Browse {
+        req: 1,
+        page: Page::Library,
+    });
+    r.wait_event(|e| matches!(e, Event::BrowseResults { .. } | Event::BrowseFailed { .. }))
+}
+
+fn mixed_shelf(title: &str, items: &[(&str, &str)]) -> Shelf {
+    Shelf {
+        title: title.into(),
+        items: items
+            .iter()
+            .map(|(p, id)| Item::Track(named_track(p, id)))
+            .collect(),
+    }
+}
+
+#[test]
+fn library_takes_the_providers_entries_in_turn_in_one_shelf() {
+    let (a, b) = pair();
+    for p in [&a, &b] {
+        p.set_account(signed_in());
+    }
+    // Each provider's shelves count as one list, in their order; the longer list's rest
+    // follows.
+    a.script_browse(
+        Page::Library,
+        vec![Step::ok(vec![
+            track_shelf("Liked", "first", &["a1"]),
+            track_shelf("Playlists", "first", &["a2"]),
+        ])],
+    );
+    b.script_browse(
+        Page::Library,
+        vec![Step::ok(vec![track_shelf(
+            "Playlists",
+            "second",
+            &["b1", "b2", "b3"],
+        )])],
+    );
+    let r = rig_with(a, vec![b], config());
+    assert_eq!(
+        library_event(&r),
+        Event::BrowseResults {
+            req: 1,
+            page: Page::Library,
+            shelves: vec![mixed_shelf(
+                "Library",
+                &[
+                    ("first", "a1"),
+                    ("second", "b1"),
+                    ("first", "a2"),
+                    ("second", "b2"),
+                    ("second", "b3")
+                ]
+            )],
+        }
+    );
+}
+
+#[test]
+fn library_keeps_the_shelves_of_the_only_provider_with_entries() {
+    let (a, b) = pair();
+    let c = FakeProvider::new("third");
+    for p in [&a, &b, &c] {
+        p.set_account(signed_in());
+    }
+    a.script_browse(
+        Page::Library,
+        vec![Step::err(ProviderError::Network("down".into()))],
+    );
+    b.script_browse(
+        Page::Library,
+        vec![Step::ok(vec![track_shelf(
+            "Spotify",
+            "second",
+            &["b1", "b2"],
+        )])],
+    );
+    c.script_browse(
+        Page::Library,
+        vec![Step::ok(vec![track_shelf("Playlists", "third", &[])])],
+    );
+    let r = rig_with(a, vec![b, c], config());
+    assert_eq!(
+        library_event(&r),
+        Event::BrowseResults {
+            req: 1,
+            page: Page::Library,
+            shelves: vec![
+                track_shelf("Spotify", "second", &["b1", "b2"]),
+                track_shelf("Playlists", "third", &[])
+            ],
+        }
+    );
+}
+
+#[test]
+fn library_takes_the_others_in_turn_when_one_fails() {
+    let (a, b) = pair();
+    let c = FakeProvider::new("third");
+    for p in [&a, &b, &c] {
+        p.set_account(signed_in());
+    }
+    a.script_browse(
+        Page::Library,
+        vec![Step::ok(vec![track_shelf(
+            "Spotify",
+            "first",
+            &["a1", "a2"],
+        )])],
+    );
+    b.script_browse(
+        Page::Library,
+        vec![Step::err(ProviderError::Network("down".into()))],
+    );
+    c.script_browse(
+        Page::Library,
+        vec![Step::ok(vec![track_shelf("Playlists", "third", &["c1"])])],
+    );
+    let r = rig_with(a, vec![b, c], config());
+    assert_eq!(
+        library_event(&r),
+        Event::BrowseResults {
+            req: 1,
+            page: Page::Library,
+            shelves: vec![mixed_shelf(
+                "Library",
+                &[("first", "a1"), ("third", "c1"), ("first", "a2")]
+            )],
+        }
+    );
 }
 
 fn home_event(r: &Rig) -> Event {

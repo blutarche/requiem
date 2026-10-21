@@ -61,8 +61,8 @@ pub struct Shelf {
 
 /// `Home` goes to every signed-in provider with `has_home()`, merged in provider order, with
 /// shelves that share a title made one whose items alternate between providers; `Library` to
-/// every signed-in provider, merged in provider order; a collection to the provider that
-/// issued it.
+/// every signed-in provider, whose items, when more than one has any, alternate in one shelf;
+/// a collection to the provider that issued it.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum Page {
     Home,
