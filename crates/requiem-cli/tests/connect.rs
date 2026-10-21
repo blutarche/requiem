@@ -298,8 +298,15 @@ fn disconnect_mid_script_exits_2() {
 #[test]
 fn update_prints_the_status() {
     let _g = serial();
-    let (code, text) = run_update(daemon(), "update\n", |d| d.server.shutdown());
+    // The daemon stays up until the script ends: shutting it down sooner races the status
+    // frame the client reads after `Welcome`.
+    let d = daemon();
+    let player = connect();
+    let out = Buf::default();
+    let code = app::run(&player, Cursor::new("update\n"), out.clone(), true).unwrap();
+    d.server.shutdown();
     assert_eq!(code, 0);
+    let text = out.text();
     assert!(
         text.contains("Requiem 0.1.0\nautomatic checks: on\n"),
         "{text}"
