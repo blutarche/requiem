@@ -199,9 +199,10 @@ impl Provider for YtMusicProvider {
         self.google.sign_in(on_state)
     }
 
-    /// Forgets the browser session, which tells Google nothing, and signs out of Google.
+    /// Forgets the browser session, which tells Google nothing, and signs out of Google. A
+    /// session that can't be deleted leaves both signed in.
     fn sign_out(&self) -> Result<(), ProviderError> {
-        self.session.sign_out();
+        self.session.sign_out()?;
         self.google.sign_out()
     }
 

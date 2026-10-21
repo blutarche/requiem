@@ -199,11 +199,11 @@ fn exclude_from_backups(path: &Path) {
 #[cfg(not(target_os = "macos"))]
 fn exclude_from_backups(_: &Path) {}
 
-fn remove(path: &Path) {
+/// Deletes the session file; a missing one is no error.
+fn remove(path: &Path) -> io::Result<()> {
     match fs::remove_file(path) {
-        Ok(()) => {}
-        Err(e) if e.kind() == io::ErrorKind::NotFound => {}
-        Err(e) => debug!("cannot delete the browser session: {e}"),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
+        other => other,
     }
 }
 
@@ -386,14 +386,20 @@ impl BrowserSession {
     }
 
     /// Forgets the session on this computer; the browser it came from stays signed in.
-    /// Whether there was one.
-    pub(crate) fn sign_out(&self) -> bool {
+    /// Whether there was one. A file that can't be deleted keeps the session, as the next
+    /// start would read it again.
+    pub(crate) fn sign_out(&self) -> Result<bool, ProviderError> {
         let mut slot = locked(&self.slot);
-        slot.r#gen += 1;
         if let Some(path) = &self.path {
-            remove(path);
+            remove(path).map_err(|e| {
+                ProviderError::ClientBroken(format!(
+                    "cannot delete the browser session in {}: {e}; still signed in",
+                    path.display()
+                ))
+            })?;
         }
-        slot.current.take().is_some()
+        slot.r#gen += 1;
+        Ok(slot.current.take().is_some())
     }
 
     /// Forgets `s`, unless an import or sign-out came first, and says the session ended.
@@ -402,8 +408,11 @@ impl BrowserSession {
         if slot.r#gen == s.r#gen && slot.current.is_some() {
             slot.r#gen += 1;
             slot.current = None;
-            if let Some(path) = &self.path {
-                remove(path);
+            // Google no longer takes it, so a file left behind only fails again.
+            if let Some(path) = &self.path
+                && let Err(e) = remove(path)
+            {
+                debug!("cannot delete the ended browser session: {e}");
             }
         }
         ProviderError::SignInRequired(ENDED.into())
@@ -857,7 +866,7 @@ mod tests {
         let s = Arc::new(rig.session());
         let during = Arc::downgrade(&s);
         rig.music.during(BROWSE_URL, move || {
-            during.upgrade().unwrap().sign_out();
+            during.upgrade().unwrap().sign_out().unwrap();
         });
         let e = s.import(&paste()).unwrap_err().to_string();
         assert!(e.contains("signed out while"), "{e}");
@@ -870,10 +879,29 @@ mod tests {
     fn sign_out_deletes_the_session() {
         let rig = Rig::new();
         let s = rig.signed_in();
-        assert!(s.sign_out());
+        assert!(s.sign_out().unwrap());
         assert_eq!(s.account(), None);
         assert!(!rig.path().exists());
-        assert!(!s.sign_out());
+        assert!(!s.sign_out().unwrap());
+    }
+
+    #[test]
+    fn a_session_that_cannot_be_deleted_stays_signed_in() {
+        let rig = Rig::new();
+        let s = rig.signed_in();
+        let dir = rig.path().parent().unwrap().to_owned();
+        fs::set_permissions(&dir, fs::Permissions::from_mode(0o500)).unwrap();
+        let out = s.sign_out();
+        let restarted = rig.session().account();
+        fs::set_permissions(&dir, fs::Permissions::from_mode(0o700)).unwrap();
+        let e = out.unwrap_err().to_string();
+        assert!(e.contains("cannot delete the browser session"), "{e}");
+        assert!(!e.contains(SECRET), "{e}");
+        assert!(s.account().is_some());
+        assert!(restarted.is_some());
+        // Once it can be, it goes.
+        assert!(s.sign_out().unwrap());
+        assert!(!rig.path().exists());
     }
 
     #[test]
