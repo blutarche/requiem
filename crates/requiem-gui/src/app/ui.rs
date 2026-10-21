@@ -6,6 +6,7 @@ use std::fs::File;
 use std::rc::Rc;
 use std::time::{Duration, Instant};
 
+use block2::RcBlock;
 use dispatch2::{DispatchQueue, DispatchTime};
 use objc2::rc::Retained;
 use objc2::runtime::{AnyObject, NSObject, ProtocolObject};
@@ -13,11 +14,11 @@ use objc2::{MainThreadOnly, Message, define_class, msg_send, sel};
 use objc2_app_kit::{
     NSAlert, NSAlertFirstButtonReturn, NSAnimatablePropertyContainer, NSApplication,
     NSAttributedStringNSStringDrawing, NSColor, NSControl, NSEvent, NSFont, NSFontAttributeName,
-    NSForegroundColorAttributeName, NSLineBreakMode, NSMenu, NSMenuItem, NSModalResponseOK,
-    NSMutableParagraphStyle, NSOpenPanel, NSParagraphStyleAttributeName, NSPasteboard,
-    NSPasteboardTypeString, NSResponder, NSTextAlignment, NSTextField, NSTextFieldDelegate,
-    NSTrackingAreaOptions, NSView, NSWindow, NSWindowStyleMask, NSWindowTitleVisibility,
-    NSWorkspace,
+    NSForegroundColorAttributeName, NSLineBreakMode, NSMenu, NSMenuItem, NSModalResponse,
+    NSModalResponseOK, NSMutableParagraphStyle, NSOpenPanel, NSParagraphStyleAttributeName,
+    NSPasteboard, NSPasteboardTypeString, NSResponder, NSTextAlignment, NSTextField,
+    NSTextFieldDelegate, NSTrackingAreaOptions, NSView, NSWindow, NSWindowStyleMask,
+    NSWindowTitleVisibility, NSWorkspace,
 };
 use objc2_core_foundation::CGFloat;
 use objc2_foundation::{
@@ -33,6 +34,7 @@ use super::backend::{Backend, Msg};
 use super::bar::PlayerBar;
 use super::now_playing::NowPlayingPage;
 use super::palette::Palette;
+use super::settings::SettingsPage;
 use super::shelves::Shelves;
 use super::table::{self, Kind, Table};
 use super::theme::{self, Icon, Weight};
@@ -42,8 +44,9 @@ use super::widgets::{
 };
 use super::{Delegate, MainWindow};
 use crate::vm::{
-    self, Banner, Controls, Dirty, EmptyText, HomeView, Intent, LibraryView, List, PageView,
-    PaletteAction, Place, QueueEdit, Selection, Service, Toast, UiState, Vm,
+    self, AccountRow, AccountRowState, Banner, Controls, Dirty, EmptyText, HomeView, Intent,
+    LibraryView, List, PageView, PaletteAction, Place, QueueEdit, Selection, Service, Toast,
+    UiState, Vm,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -56,6 +59,8 @@ pub enum AppView {
     Collection,
     /// The playing track's page; not in the sidebar.
     NowPlaying,
+    /// The accounts; at the foot of the sidebar.
+    Settings,
 }
 
 impl AppView {
@@ -67,6 +72,7 @@ impl AppView {
             AppView::Queue => Place::Queue,
             AppView::Collection => Place::Collection,
             AppView::NowPlaying => Place::NowPlaying,
+            AppView::Settings => Place::Settings,
         }
     }
 
@@ -78,6 +84,7 @@ impl AppView {
             Place::Queue => AppView::Queue,
             Place::Collection => AppView::Collection,
             Place::NowPlaying => AppView::NowPlaying,
+            Place::Settings => AppView::Settings,
         }
     }
 }
@@ -107,9 +114,9 @@ fn setup_steps(font: &NSFont) -> Retained<NSAttributedString> {
     }
 }
 
-/// Where Back leaves Now Playing for: the view it was opened `from`, or Home for a collection
-/// that is no longer open.
-fn back_from_now_playing(from: AppView, collection_open: bool) -> AppView {
+/// Where Back leaves Now Playing or Settings for: the view it was opened `from`, or Home for a
+/// collection that is no longer open.
+fn back_to(from: AppView, collection_open: bool) -> AppView {
     match from {
         AppView::Collection if !collection_open => AppView::Home,
         view => view,
@@ -171,7 +178,7 @@ const SETUP_STEPS: &str = "\
 1. Create a Google Cloud project and enable the YouTube Data API v3.
 2. Set up the OAuth consent screen and publish the app, or sign-in expires after 7 days.
 3. Create an OAuth client of type \"TVs and Limited Input devices\" and download its JSON.
-4. Choose that file.";
+4. Choose that file, or enter the client's ID and secret in Settings.";
 const SETUP_GUIDE: &str = "https://github.com/blutarche/requiem#youtube-music";
 /// How often the sign-in panel's countdown is redrawn.
 const EXPIRY_TICK: Duration = Duration::from_secs(30);
@@ -313,6 +320,7 @@ pub struct Ui {
     nav_search: Retained<NavItem>,
     nav_library: Retained<NavItem>,
     nav_queue: Retained<NavItem>,
+    nav_settings: Retained<NavItem>,
     main: Retained<NSView>,
     banner: Retained<NSView>,
     banner_label: Retained<NSTextField>,
@@ -349,6 +357,9 @@ pub struct Ui {
     pub now_playing: NowPlayingPage,
     /// Where Back and Esc leave Now Playing for: the view it was opened from.
     now_playing_from: Cell<AppView>,
+    pub settings: SettingsPage,
+    /// Where Back leaves Settings for: the view it was opened from.
+    settings_from: Cell<AppView>,
     bar: PlayerBar,
     toast: ToastView,
     pub palette: Palette,
@@ -359,6 +370,7 @@ pub struct Ui {
 impl Ui {
     /// `target` receives the buttons' actions and is the text fields' delegate.
     pub fn new(mtm: MainThreadMarker, vm: Vm, backend: Backend, target: &Delegate) -> Rc<Ui> {
+        let app_delegate = target;
         let delegate = ProtocolObject::<dyn NSTextFieldDelegate>::from_ref(target);
         let target: &AnyObject = target.as_ref();
         let style = NSWindowStyleMask::Titled
@@ -433,6 +445,15 @@ impl Ui {
         sidebar.addSubview(&nav_search);
         sidebar.addSubview(&nav_library);
         sidebar.addSubview(&nav_queue);
+        let nav_settings = NavItem::new(
+            mtm,
+            rect(12.0, 12.0, SIDEBAR_W - 24.0, 36.0),
+            AppView::Settings,
+            Icon::Settings,
+            "Settings",
+        );
+        nav_settings.setAutoresizingMask(PIN_BOTTOM);
+        sidebar.addSubview(&nav_settings);
         root.addSubview(&sidebar);
 
         let mw = WIN_W - SIDEBAR_W;
@@ -626,6 +647,9 @@ impl Ui {
             NowPlayingPage::new(mtm, rect(0.0, 0.0, mw, mh), target, sel!(showQueue:));
         main.addSubview(&now_playing.view);
 
+        let settings = SettingsPage::new(mtm, rect(0.0, 0.0, mw, mh), app_delegate);
+        main.addSubview(&settings.view);
+
         let banner = widgets::panel(
             mtm,
             rect(0.0, mh - BANNER_H, mw, BANNER_H),
@@ -677,6 +701,7 @@ impl Ui {
             nav_search,
             nav_library,
             nav_queue,
+            nav_settings,
             main,
             banner,
             banner_label,
@@ -709,6 +734,8 @@ impl Ui {
             queue_empty,
             now_playing,
             now_playing_from: Cell::new(AppView::Home),
+            settings,
+            settings_from: Cell::new(AppView::Home),
             bar,
             toast,
             palette,
@@ -783,6 +810,7 @@ impl Ui {
         note.setSelectable(true);
         let buttons = [
             ("Choose Client File\u{2026}", sel!(chooseClientFile:), true),
+            ("Enter Client ID\u{2026}", sel!(enterClientID:), false),
             ("Setup Guide", sel!(openSetupGuide:), false),
             ("Cancel", sel!(cancelSetup:), false),
         ]
@@ -1063,7 +1091,7 @@ impl Ui {
             AppView::Queue => &self.queue,
             AppView::Library => &self.library_table,
             AppView::Collection => &self.collection_table,
-            AppView::Home | AppView::NowPlaying => {
+            AppView::Home | AppView::NowPlaying | AppView::Settings => {
                 // Keeps Space and the arrow keys from landing in a hidden text field.
                 self.window.makeFirstResponder(None);
                 return;
@@ -1084,13 +1112,17 @@ impl Ui {
 
     /// Shows `view`'s page and marks its nav item, leaving focus where it is.
     fn switch_to(&self, view: AppView) {
-        self.view.set(view);
+        let from = self.view.replace(view);
+        if view == AppView::Settings && from != AppView::Settings {
+            self.settings_from.set(from);
+        }
         self.home_page.setHidden(view != AppView::Home);
         self.search_page.setHidden(view != AppView::Search);
         self.library_page.setHidden(view != AppView::Library);
         self.queue_page.setHidden(view != AppView::Queue);
         self.collection_page.setHidden(view != AppView::Collection);
         self.now_playing.set_shown(view == AppView::NowPlaying);
+        self.settings.view.setHidden(view != AppView::Settings);
         // An open collection keeps the nav item of the page it was opened from lit; Now
         // Playing lights none.
         let lit = match view {
@@ -1107,6 +1139,7 @@ impl Ui {
         self.nav_search.set_active(lit == AppView::Search);
         self.nav_library.set_active(lit == AppView::Library);
         self.nav_queue.set_active(lit == AppView::Queue);
+        self.nav_settings.set_active(lit == AppView::Settings);
     }
 
     /// The results table has focus with its first row selected.
@@ -1137,7 +1170,7 @@ impl Ui {
                 row: self.queue.selected_row().is_some(),
                 result: false,
             },
-            AppView::Home | AppView::NowPlaying => Selection::default(),
+            AppView::Home | AppView::NowPlaying | AppView::Settings => Selection::default(),
         }
     }
 
@@ -1204,6 +1237,7 @@ impl Ui {
         // Not `show`, which would select a result for a table that focus passes straight
         // through.
         self.switch_to(AppView::Search);
+        self.visit(Place::Search);
         self.window.makeFirstResponder(Some(&self.search.text));
     }
 
@@ -1250,6 +1284,7 @@ impl Ui {
             PaletteAction::ShowLibrary => self.show(AppView::Library),
             PaletteAction::ShowQueue => self.show(AppView::Queue),
             PaletteAction::ShowNowPlaying => self.show_now_playing(),
+            PaletteAction::ShowSettings => self.show(AppView::Settings),
             PaletteAction::Refresh => self.intent(Intent::Refresh),
             PaletteAction::SignIn(service) => self.sign_in(service.provider()),
             PaletteAction::SignOut(service) => self.confirm_sign_out(service.provider()),
@@ -1320,7 +1355,7 @@ impl Ui {
     }
 
     /// Back from an open collection to the page it was opened from, which kept its scroll, or
-    /// from Now Playing to the view it was opened from.
+    /// from Now Playing or Settings to the view it was opened from.
     pub fn go_back(&self) {
         match self.view.get() {
             AppView::Collection => {
@@ -1335,14 +1370,21 @@ impl Ui {
             }
             AppView::NowPlaying => {
                 let open = self.vm.borrow().ui().collection.is_some();
-                self.show(back_from_now_playing(self.now_playing_from.get(), open));
+                self.show(back_to(self.now_playing_from.get(), open));
+            }
+            AppView::Settings => {
+                let open = self.vm.borrow().ui().collection.is_some();
+                self.show(back_to(self.settings_from.get(), open));
             }
             _ => {}
         }
     }
 
     pub fn can_go_back(&self) -> bool {
-        matches!(self.view.get(), AppView::Collection | AppView::NowPlaying)
+        matches!(
+            self.view.get(),
+            AppView::Collection | AppView::NowPlaying | AppView::Settings
+        )
     }
 
     pub fn refresh(&self) {
@@ -1376,10 +1418,13 @@ impl Ui {
     }
 
     /// Starts a sign-in, or opens the setup sheet for a provider that needs it first, and
-    /// shows the Library, where the code or the sheet appears.
+    /// shows where the code or the sheet appears.
     pub fn sign_in(&self, provider: ProviderId) {
+        let to = self.vm.borrow().ui().sign_in_place();
         self.intent(Intent::SignIn(provider));
-        self.show(AppView::Library);
+        if let Some(place) = to {
+            self.show(AppView::of(place));
+        }
     }
 
     pub fn play_collection(&self) {
@@ -1461,14 +1506,16 @@ impl Ui {
 
     pub fn copy_code(&self) {
         if let LibraryView::Pending { user_code, .. } = self.vm.borrow().ui().library_view() {
-            let pb = NSPasteboard::generalPasteboard();
-            pb.clearContents();
-            // SAFETY: the type static is an immutable framework constant.
-            pb.setString_forType(&NSString::from_str(&user_code), unsafe {
-                NSPasteboardTypeString
-            });
-            widgets::announce(self.mtm, "Code copied");
+            self.put_code(&user_code);
         }
+    }
+
+    fn put_code(&self, code: &str) {
+        let pb = NSPasteboard::generalPasteboard();
+        pb.clearContents();
+        // SAFETY: the type static is an immutable framework constant.
+        pb.setString_forType(&NSString::from_str(code), unsafe { NSPasteboardTypeString });
+        widgets::announce(self.mtm, "Code copied");
     }
 
     pub fn open_host(&self) {
@@ -1517,6 +1564,141 @@ impl Ui {
 
     pub fn cancel_setup(&self) {
         self.intent(Intent::CancelSetup);
+    }
+
+    /// The setup sheet's Enter Client ID…: Settings, with the cursor in the client form.
+    pub fn enter_client_id(&self) {
+        self.show(AppView::Settings);
+        self.settings.focus_form();
+    }
+
+    /// Settings' Sign In… on row `i`.
+    pub fn settings_sign_in(&self, i: usize) {
+        if let Some(row) = self.settings.row(i) {
+            self.sign_in(row.provider);
+        }
+    }
+
+    /// Settings' Sign Out… on row `i`, which asks first.
+    pub fn settings_sign_out(&self, i: usize) {
+        let Some(row) = self.settings.row(i) else {
+            return;
+        };
+        let provider = row.provider;
+        let service = vm::provider_name(&provider.0).to_owned();
+        self.ask(
+            &format!("Sign out of {service}?"),
+            &format!(
+                "Your {service} playlists, albums and Home shelves leave Requiem until you sign in again."
+            ),
+            "Sign Out",
+            true,
+            move |ui| ui.intent(Intent::SignOut(provider.clone())),
+        );
+    }
+
+    pub fn settings_copy_code(&self, i: usize) {
+        if let Some(AccountRowState::Pending { user_code, .. }) =
+            self.settings.row(i).map(|r| r.state)
+        {
+            self.put_code(&user_code);
+        }
+    }
+
+    pub fn settings_open_host(&self, i: usize) {
+        if let Some(AccountRowState::Pending {
+            verification_url, ..
+        }) = self.settings.row(i).map(|r| r.state)
+            && let Some(url) = NSURL::URLWithString(&NSString::from_str(&verification_url))
+        {
+            NSWorkspace::sharedWorkspace().openURL(&url);
+        }
+    }
+
+    /// The Cancel under a sign-in code in Settings, as the Library panel's.
+    pub fn settings_cancel_sign_in(&self, i: usize) {
+        if let Some(row) = self.settings.row(i) {
+            self.intent(Intent::SignOut(row.provider));
+        }
+    }
+
+    /// Change Google Client… on row `i`: opens its client form, asking first while the
+    /// account is signed in, which a new client ends.
+    pub fn change_client(&self, i: usize) {
+        let Some(row) = self.settings.row(i) else {
+            return;
+        };
+        let provider = row.provider;
+        let asks = self.vm.borrow().ui().change_client_asks(&provider);
+        if !asks {
+            self.open_client_form(provider);
+            return;
+        }
+        let service = vm::provider_name(&provider.0).to_owned();
+        self.ask(
+            "Change the Google client?",
+            &format!(
+                "You'll be signed out of {service} and need to sign in again with the new client."
+            ),
+            "Change",
+            false,
+            move |ui| ui.open_client_form(provider.clone()),
+        );
+    }
+
+    fn open_client_form(&self, provider: ProviderId) {
+        self.intent(Intent::ChangeClient(provider));
+        self.settings.focus_form();
+    }
+
+    /// The client form's Save on row `i`, or Return in its fields: sends the typed client,
+    /// which the provider takes as it takes a file, and empties the secret field once it is
+    /// sent.
+    pub fn save_client(&self, i: usize) {
+        let Some((provider, id, secret)) = self.settings.client(i) else {
+            return;
+        };
+        if !vm::client_filled(&id, &secret) {
+            return;
+        }
+        let client = vm::client_json(&id, &secret);
+        self.intent(Intent::ChangeClient(provider));
+        if self.run(Intent::ImportClient(client)) {
+            self.settings.clear_secret(i);
+        }
+    }
+
+    /// The client form's Choose Client File… on row `i`.
+    pub fn settings_choose_client_file(&self, i: usize) {
+        if let Some(row) = self.settings.row(i) {
+            self.intent(Intent::ChangeClient(row.provider));
+            self.choose_client_file();
+        }
+    }
+
+    /// Asks `message` in a sheet, with `confirm` as the default button and Cancel; `then`
+    /// runs on `confirm`. The sheet leaves the run loop running, delivering the player's
+    /// events, so nothing may hold the view model while it shows.
+    fn ask(
+        &self,
+        message: &str,
+        info: &str,
+        confirm: &str,
+        destructive: bool,
+        then: impl Fn(&Ui) + 'static,
+    ) {
+        let alert = NSAlert::new(self.mtm);
+        alert.setMessageText(&NSString::from_str(message));
+        alert.setInformativeText(&NSString::from_str(info));
+        let button = alert.addButtonWithTitle(&NSString::from_str(confirm));
+        button.setHasDestructiveAction(destructive);
+        alert.addButtonWithTitle(&NSString::from_str("Cancel"));
+        let done = RcBlock::new(move |response: NSModalResponse| {
+            if response == NSAlertFirstButtonReturn {
+                with(&then);
+            }
+        });
+        alert.beginSheetModalForWindow_completionHandler(&self.window, Some(&done));
     }
 
     /// `intent`; true when it sent anything.
@@ -1577,7 +1759,7 @@ impl Ui {
                     self.open_library_row(i);
                 }
             }
-            AppView::Home | AppView::NowPlaying => {}
+            AppView::Home | AppView::NowPlaying | AppView::Settings => {}
             AppView::Queue => {
                 if let Some(i) = self.queue.selected_row().filter(|_| !append) {
                     self.play_queue(i);
@@ -1853,6 +2035,12 @@ impl Ui {
         if let Some((view, rows)) = p.library {
             self.show_library(&view, rows);
         }
+        if let Some(rows) = p.settings {
+            let speak = self.view.get() == AppView::Settings;
+            if self.settings.set(rows, speak) {
+                self.schedule_expiry();
+            }
+        }
         if let Some(c) = p.collection {
             self.show_collection(c);
         }
@@ -1913,7 +2101,7 @@ impl Ui {
         }
     }
 
-    fn pages(&self) -> [&NSView; 6] {
+    fn pages(&self) -> [&NSView; 7] {
         [
             &self.home_page,
             &self.search_page,
@@ -1921,6 +2109,7 @@ impl Ui {
             &self.queue_page,
             &self.collection_page,
             &self.now_playing.view,
+            &self.settings.view,
         ]
     }
 
@@ -2021,7 +2210,8 @@ impl Ui {
         let note = &self.setup.note;
         match error {
             Some(e) => {
-                if note.stringValue().to_string() != e {
+                // Settings' form, showing the same error, says it there.
+                if note.stringValue().to_string() != e && self.view.get() != AppView::Settings {
                     widgets::announce(self.mtm, e);
                 }
                 widgets::set_text(note, e);
@@ -2059,7 +2249,8 @@ impl Ui {
         self.schedule_expiry();
     }
 
-    /// Redraws the countdown while the panel shows; "Code expires in N min" moves each minute.
+    /// Redraws the countdown while the panel or a Settings row shows; "Code expires in N min"
+    /// moves each minute.
     fn schedule_expiry(&self) {
         if self.expiry_scheduled.replace(true) {
             return;
@@ -2073,14 +2264,20 @@ impl Ui {
 
     fn expiry_tick(&self) {
         self.expiry_scheduled.set(false);
+        let now = unix_now();
+        let view = self.vm.borrow().ui().library_view();
+        let mut showing = self.settings.refresh_expiry(now);
         if let LibraryView::Pending {
             expires_at_unix, ..
-        } = self.vm.borrow().ui().library_view()
+        } = view
         {
             widgets::set_text(
                 &self.sign_in.expiry,
-                &vm::expires_text(expires_at_unix, unix_now()),
+                &vm::expires_text(expires_at_unix, now),
             );
+            showing = true;
+        }
+        if showing {
             self.schedule_expiry();
         }
     }
@@ -2220,6 +2417,7 @@ impl Ui {
             self.palette.layout();
         }
         self.shelves.update_paging();
+        self.settings.layout();
         if !self.banner_shown.get() {
             return;
         }
@@ -2533,7 +2731,7 @@ fn sign_in_labels(providers: &[ProviderId]) -> Vec<String> {
         .collect()
 }
 
-fn unix_now() -> u64 {
+pub(super) fn unix_now() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |d| d.as_secs())
@@ -2556,6 +2754,7 @@ struct Patch {
     queue_badge: Option<Option<String>>,
     home: Option<(HomeView, Vec<Shelf>)>,
     library: Option<(LibraryView, Vec<table::RowText>)>,
+    settings: Option<Vec<AccountRow>>,
     collection: Option<Option<CollectionPatch>>,
     now_playing: Option<NowPlaying>,
     /// Now Playing's track, the tracks after it, and the track's badge.
@@ -2585,6 +2784,7 @@ impl Patch {
                     table::collection_rows(&s.library_collections()),
                 )
             }),
+            settings: (any(Dirty::LIBRARY) || any(Dirty::ACCOUNT)).then(|| s.settings_view()),
             collection: any(Dirty::COLLECTION).then(|| {
                 s.collection.as_ref().map(|c| CollectionPatch {
                     collection: c.collection.clone(),
@@ -2637,22 +2837,16 @@ mod tests {
 
     #[test]
     fn back_from_now_playing_skips_a_collection_that_closed() {
-        assert_eq!(
-            back_from_now_playing(AppView::Collection, true),
-            AppView::Collection
-        );
-        assert_eq!(
-            back_from_now_playing(AppView::Collection, false),
-            AppView::Home
-        );
+        assert_eq!(back_to(AppView::Collection, true), AppView::Collection);
+        assert_eq!(back_to(AppView::Collection, false), AppView::Home);
         for view in [
             AppView::Home,
             AppView::Search,
             AppView::Library,
             AppView::Queue,
         ] {
-            assert_eq!(back_from_now_playing(view, false), view);
-            assert_eq!(back_from_now_playing(view, true), view);
+            assert_eq!(back_to(view, false), view);
+            assert_eq!(back_to(view, true), view);
         }
     }
 
@@ -2666,7 +2860,7 @@ mod tests {
         assert!(p.home.is_none() && p.library.is_none() && p.collection.is_none());
         assert!(p.now_playing.is_none() && p.elapsed.is_none() && p.progress.is_none());
         assert!(p.playing.is_none() && p.toast.is_none() && p.banner.is_none());
-        assert!(p.controls.is_none() && p.now_page.is_none());
+        assert!(p.controls.is_none() && p.now_page.is_none() && p.settings.is_none());
     }
 
     #[test]

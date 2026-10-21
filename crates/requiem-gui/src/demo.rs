@@ -814,7 +814,12 @@ pub fn start_in(view: View) -> (Vm, Daemon) {
             let last = daemon.queue.len() - 1;
             run_intent(&mut vm, &mut daemon, Intent::PlayQueue(last));
         }
-        View::Search | View::Queue | View::Palette | View::Empty | View::NowPlaying => {}
+        View::Search
+        | View::Queue
+        | View::Settings
+        | View::Palette
+        | View::Empty
+        | View::NowPlaying => {}
     }
     (vm, daemon)
 }

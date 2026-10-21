@@ -6,6 +6,7 @@ mod badge;
 mod bar;
 mod now_playing;
 mod palette;
+mod settings;
 mod shelves;
 mod snapshot;
 mod table;
@@ -85,12 +86,16 @@ define_class!(
         #[unsafe(method(controlTextDidChange:))]
         fn control_text_did_change(&self, notification: &NSNotification) {
             ui::with(|ui| {
-                let palette = notification
+                let Some(control) = notification
                     .object()
                     .and_then(|o| o.downcast::<NSControl>().ok())
-                    .is_some_and(|c| ui.palette.field.is(&c));
-                if palette {
+                else {
+                    return;
+                };
+                if ui.palette.field.is(&control) {
                     ui.palette.filter();
+                } else if let Some(row) = ui.settings.form_row(&control) {
+                    ui.settings.fields_changed(row);
                 }
             });
         }
@@ -215,6 +220,75 @@ define_class!(
         #[unsafe(method(cancelSetup:))]
         fn cancel_setup(&self, _sender: Option<&AnyObject>) {
             ui::with(|ui| ui.cancel_setup());
+        }
+
+        #[unsafe(method(enterClientID:))]
+        fn enter_client_id(&self, _sender: Option<&AnyObject>) {
+            ui::with(|ui| ui.enter_client_id());
+        }
+
+        #[unsafe(method(showSettings:))]
+        fn show_settings(&self, _sender: Option<&AnyObject>) {
+            ui::with(|ui| {
+                ui.close_palette();
+                ui.show(AppView::Settings);
+            });
+        }
+
+        #[unsafe(method(settingsSignIn:))]
+        fn settings_sign_in(&self, sender: Option<&AnyObject>) {
+            if let Some(row) = sender_row(sender) {
+                ui::with(|ui| ui.settings_sign_in(row));
+            }
+        }
+
+        #[unsafe(method(settingsSignOut:))]
+        fn settings_sign_out(&self, sender: Option<&AnyObject>) {
+            if let Some(row) = sender_row(sender) {
+                ui::with(|ui| ui.settings_sign_out(row));
+            }
+        }
+
+        #[unsafe(method(settingsCopyCode:))]
+        fn settings_copy_code(&self, sender: Option<&AnyObject>) {
+            if let Some(row) = sender_row(sender) {
+                ui::with(|ui| ui.settings_copy_code(row));
+            }
+        }
+
+        #[unsafe(method(settingsOpenHost:))]
+        fn settings_open_host(&self, sender: Option<&AnyObject>) {
+            if let Some(row) = sender_row(sender) {
+                ui::with(|ui| ui.settings_open_host(row));
+            }
+        }
+
+        #[unsafe(method(settingsCancelSignIn:))]
+        fn settings_cancel_sign_in(&self, sender: Option<&AnyObject>) {
+            if let Some(row) = sender_row(sender) {
+                ui::with(|ui| ui.settings_cancel_sign_in(row));
+            }
+        }
+
+        #[unsafe(method(changeClient:))]
+        fn change_client(&self, sender: Option<&AnyObject>) {
+            if let Some(row) = sender_row(sender) {
+                ui::with(|ui| ui.change_client(row));
+            }
+        }
+
+        #[unsafe(method(saveClient:))]
+        fn save_client(&self, sender: Option<&AnyObject>) {
+            if let Some(row) = sender_row(sender) {
+                ui::with(|ui| ui.save_client(row));
+            }
+        }
+
+        #[unsafe(method(settingsChooseClientFile:))]
+        fn settings_choose_client_file(&self, sender: Option<&AnyObject>) {
+            if let Some(row) = sender_row(sender) {
+                ui::with(|ui| ui.settings_choose_client_file(row));
+            }
         }
 
         #[unsafe(method(playCollection:))]
@@ -480,6 +554,11 @@ fn sender_tag(sender: Option<&AnyObject>) -> Option<isize> {
     }
 }
 
+/// The Settings row a button is tagged with.
+fn sender_row(sender: Option<&AnyObject>) -> Option<usize> {
+    sender_tag(sender).and_then(|t| usize::try_from(t).ok())
+}
+
 /// The service a sign-in or sign-out item is tagged with.
 fn sender_service(sender: Option<&AnyObject>) -> Option<Service> {
     sender_tag(sender)
@@ -512,6 +591,7 @@ fn palette_action(item: &NSMenuItem) -> Option<PaletteAction> {
         (sel!(showLibrary:), PaletteAction::ShowLibrary),
         (sel!(showQueue:), PaletteAction::ShowQueue),
         (sel!(showNowPlaying:), PaletteAction::ShowNowPlaying),
+        (sel!(showSettings:), PaletteAction::ShowSettings),
         (sel!(refresh:), PaletteAction::Refresh),
         (sel!(volumeUp:), PaletteAction::VolumeUp),
         (sel!(volumeDown:), PaletteAction::VolumeDown),
@@ -533,7 +613,7 @@ fn row_edit(action: Sel) -> Option<fn(usize) -> QueueEdit> {
     }
 }
 
-/// Keys the search and palette fields handle themselves; true when handled.
+/// Keys the search, palette and client fields handle themselves; true when handled.
 fn field_command(ui: &Ui, control: &NSControl, text: &NSTextView, command: Sel) -> bool {
     if ui.search.is(control) {
         if command == sel!(insertNewline:) {
@@ -568,6 +648,13 @@ fn field_command(ui: &Ui, control: &NSControl, text: &NSTextView, command: Sel) 
         } else {
             return false;
         }
+        return true;
+    }
+    // Save is the client form's default button.
+    if let Some(row) = ui.settings.form_row(control)
+        && command == sel!(insertNewline:)
+    {
+        ui.save_client(row);
         return true;
     }
     false
@@ -939,6 +1026,7 @@ pub fn run(args: Args) {
         | View::SignInSetup => ui.show(AppView::Library),
         View::Collection => ui.show(AppView::Collection),
         View::Queue => ui.show(AppView::Queue),
+        View::Settings => ui.show(AppView::Settings),
         View::NowPlaying | View::NowPlayingEmpty | View::NowPlayingLast => ui.show_now_playing(),
         View::Palette => ui.open_palette(),
         View::Search

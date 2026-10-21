@@ -282,6 +282,7 @@ pub enum Icon {
     Library,
     ChevronLeft,
     ChevronRight,
+    Settings,
 }
 
 impl Icon {
@@ -302,6 +303,7 @@ impl Icon {
             Icon::Library => include_bytes!("../../assets/icons/library.svg"),
             Icon::ChevronLeft => include_bytes!("../../assets/icons/chevron-left.svg"),
             Icon::ChevronRight => include_bytes!("../../assets/icons/chevron-right.svg"),
+            Icon::Settings => include_bytes!("../../assets/icons/settings.svg"),
         }
     }
 
@@ -358,6 +360,7 @@ mod tests {
             Icon::Library,
             Icon::ChevronLeft,
             Icon::ChevronRight,
+            Icon::Settings,
         ] {
             assert!(icon.image(16.0).is_some(), "{icon:?}");
         }

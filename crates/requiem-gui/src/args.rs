@@ -10,8 +10,8 @@ usage: requiem-gui [--demo] [--smoke] [--snapshot <png>] [--view <view>]
   --snapshot <png>   render the window to a PNG and exit 0. With --demo, from fake data;
                      without it, for home or library, from the running player once the page
                      and its covers have loaded (20 s at most); exits 1 if the page fails
-  --view <view>      the view shown at start: home (default), search, library, queue or
-                     palette; with --demo also home-scrolled, home-shelf-paged,
+  --view <view>      the view shown at start: home (default), search, library, queue,
+                     settings or palette; with --demo also home-scrolled, home-shelf-paged,
                      home-signed-out, collection, now-playing, now-playing-empty,
                      now-playing-last, library-signed-out, library-unavailable, signin,
                      signin-setup, empty, disconnected, toast, out-of-date, update-ready,
@@ -24,6 +24,7 @@ pub enum View {
     Search,
     Library,
     Queue,
+    Settings,
     /// The search view with the command palette open.
     Palette,
     /// Demo only: Home scrolled down to its last shelf.
@@ -67,11 +68,12 @@ pub enum View {
 }
 
 impl View {
-    const NAMES: [(&str, View); 24] = [
+    const NAMES: [(&str, View); 25] = [
         ("home", View::Home),
         ("search", View::Search),
         ("library", View::Library),
         ("queue", View::Queue),
+        ("settings", View::Settings),
         ("palette", View::Palette),
         ("home-scrolled", View::HomeScrolled),
         ("home-shelf-paged", View::HomeShelfPaged),
@@ -98,7 +100,12 @@ impl View {
     pub fn is_demo_only(self) -> bool {
         !matches!(
             self,
-            View::Home | View::Search | View::Library | View::Queue | View::Palette
+            View::Home
+                | View::Search
+                | View::Library
+                | View::Queue
+                | View::Settings
+                | View::Palette
         )
     }
 
@@ -204,6 +211,7 @@ mod tests {
             p(&["--view", "palette", "--demo"]).unwrap().view,
             View::Palette
         );
+        assert_eq!(p(&["--view", "settings"]).unwrap().view, View::Settings);
     }
 
     #[test]

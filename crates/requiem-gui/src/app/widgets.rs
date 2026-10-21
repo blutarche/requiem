@@ -18,8 +18,9 @@ use objc2_app_kit::{
     NSAnimationContext, NSApplication, NSAttributedStringNSStringDrawing,
     NSAutoresizingMaskOptions, NSBezierPath, NSButton, NSCellImagePosition, NSColor, NSControl,
     NSEvent, NSEventMask, NSEventTrackingRunLoopMode, NSEventType, NSFocusRingType, NSFont,
-    NSImageScaling, NSImageView, NSLineBreakMode, NSResponder, NSTextAlignment, NSTextField,
-    NSTrackingArea, NSTrackingAreaOptions, NSView, NSWindow, NSWindowOcclusionState, NSWorkspace,
+    NSImageScaling, NSImageView, NSLineBreakMode, NSResponder, NSSecureTextField, NSTextAlignment,
+    NSTextField, NSTrackingArea, NSTrackingAreaOptions, NSView, NSWindow, NSWindowOcclusionState,
+    NSWorkspace,
 };
 use objc2_core_foundation::CGFloat;
 use objc2_foundation::{
@@ -950,6 +951,7 @@ impl NavItem {
     }
 }
 
+#[derive(Default)]
 pub struct FieldIvars {
     ring: OnceCell<Weak<NSView>>,
     boxv: OnceCell<Weak<NSView>>,
@@ -971,7 +973,7 @@ define_class!(
             // SAFETY: forwards to the superclass implementation.
             let ok: bool = unsafe { msg_send![super(self), becomeFirstResponder] };
             if ok {
-                self.set_focused(true);
+                set_focused(self.ivars(), true);
             }
             ok
         }
@@ -980,29 +982,62 @@ define_class!(
         fn text_did_end_editing(&self, notification: &NSNotification) {
             // SAFETY: forwards to the superclass implementation.
             let _: () = unsafe { msg_send![super(self), textDidEndEditing: notification] };
-            self.set_focused(false);
+            set_focused(self.ivars(), false);
         }
     }
 );
 
-impl FieldText {
-    fn set_focused(&self, focused: bool) {
-        let iv = self.ivars();
-        if iv.focused.replace(focused) == focused {
-            return;
+define_class!(
+    /// The editable part of a `SecretField`: a `FieldText` that shows dots, which VoiceOver
+    /// doesn't read out.
+    // SAFETY: NSSecureTextField has no subclassing requirements; no Drop impl.
+    #[unsafe(super(
+        NSSecureTextField,
+        NSTextField,
+        NSControl,
+        NSView,
+        NSResponder,
+        objc2_foundation::NSObject
+    ))]
+    #[thread_kind = MainThreadOnly]
+    #[ivars = FieldIvars]
+    pub struct SecretText;
+
+    impl SecretText {
+        #[unsafe(method(becomeFirstResponder))]
+        fn become_first_responder(&self) -> bool {
+            // SAFETY: forwards to the superclass implementation.
+            let ok: bool = unsafe { msg_send![super(self), becomeFirstResponder] };
+            if ok {
+                set_focused(self.ivars(), true);
+            }
+            ok
         }
-        if let Some(ring) = iv.ring.get().and_then(Weak::load) {
-            let c = focused.then(theme::accent_ring);
-            fill(&ring, c.as_deref());
+
+        #[unsafe(method(textDidEndEditing:))]
+        fn text_did_end_editing(&self, notification: &NSNotification) {
+            // SAFETY: forwards to the superclass implementation.
+            let _: () = unsafe { msg_send![super(self), textDidEndEditing: notification] };
+            set_focused(self.ivars(), false);
         }
-        if let Some(b) = iv.boxv.get().and_then(Weak::load) {
-            let line = if focused {
-                theme::accent()
-            } else {
-                theme::line()
-            };
-            border(&b, &line, 1.0);
-        }
+    }
+);
+
+fn set_focused(iv: &FieldIvars, focused: bool) {
+    if iv.focused.replace(focused) == focused {
+        return;
+    }
+    if let Some(ring) = iv.ring.get().and_then(Weak::load) {
+        let c = focused.then(theme::accent_ring);
+        fill(&ring, c.as_deref());
+    }
+    if let Some(b) = iv.boxv.get().and_then(Weak::load) {
+        let line = if focused {
+            theme::accent()
+        } else {
+            theme::line()
+        };
+        border(&b, &line, 1.0);
     }
 }
 
@@ -1026,6 +1061,21 @@ impl Field {
         placeholder: &str,
         icon: Option<Icon>,
     ) -> Field {
+        let (ring, boxv, tframe) = Self::parts(mtm, frame, mask, icon);
+        let text = FieldText::alloc(mtm).set_ivars(FieldIvars::default());
+        // SAFETY: `initWithFrame:` is NSTextField's designated initializer.
+        let text: Retained<FieldText> = unsafe { msg_send![super(text), initWithFrame: tframe] };
+        Self::fit(&text, text.ivars(), &ring, &boxv, placeholder);
+        Field { ring, text }
+    }
+
+    /// A field's ring and box for `frame`, and the frame its text takes in the box.
+    fn parts(
+        mtm: MainThreadMarker,
+        frame: NSRect,
+        mask: Mask,
+        icon: Option<Icon>,
+    ) -> (Retained<NSView>, Retained<NSView>, NSRect) {
         let r = Self::RING;
         let ring = view(
             mtm,
@@ -1062,18 +1112,26 @@ impl Field {
             boxv.addSubview(&iv);
             x = 36.0;
         }
-        let font = theme::font(14.0, Weight::Regular);
-        let text = FieldText::alloc(mtm).set_ivars(FieldIvars {
-            ring: OnceCell::new(),
-            boxv: OnceCell::new(),
-            focused: Cell::new(false),
-        });
-        let th = line_height(&font);
+        let th = line_height(&Self::font());
         let tframe = rect(x, ((h - th) / 2.0).round(), w - x - 12.0, th);
-        // SAFETY: `initWithFrame:` is NSTextField's designated initializer.
-        let text: Retained<FieldText> = unsafe { msg_send![super(text), initWithFrame: tframe] };
-        let _ = text.ivars().ring.set(Weak::from_retained(&ring));
-        let _ = text.ivars().boxv.set(Weak::from_retained(&boxv));
+        (ring, boxv, tframe)
+    }
+
+    fn font() -> Retained<NSFont> {
+        theme::font(14.0, Weight::Regular)
+    }
+
+    /// Makes `text`, made at the frame `parts` gave, the editable part of `boxv`.
+    fn fit(
+        text: &NSTextField,
+        iv: &FieldIvars,
+        ring: &Retained<NSView>,
+        boxv: &Retained<NSView>,
+        placeholder: &str,
+    ) {
+        let _ = iv.ring.set(Weak::from_retained(ring));
+        let _ = iv.boxv.set(Weak::from_retained(boxv));
+        let font = Self::font();
         text.setBezeled(false);
         text.setBordered(false);
         text.setDrawsBackground(false);
@@ -1090,8 +1148,7 @@ impl Field {
         }
         text.setPlaceholderAttributedString(Some(&attributed(placeholder, &font, &theme::muted())));
         text.setAutoresizingMask(FLEX_W);
-        boxv.addSubview(&text);
-        Field { ring, text }
+        boxv.addSubview(text);
     }
 
     pub fn is(&self, control: &NSControl) -> bool {
@@ -1104,6 +1161,35 @@ impl Field {
 
     pub fn set_value(&self, v: &str) {
         self.text.setStringValue(&NSString::from_str(v));
+    }
+}
+
+/// A `Field` for a secret.
+pub struct SecretField {
+    pub ring: Retained<NSView>,
+    pub text: Retained<SecretText>,
+}
+
+impl SecretField {
+    pub fn new(mtm: MainThreadMarker, frame: NSRect, mask: Mask, placeholder: &str) -> SecretField {
+        let (ring, boxv, tframe) = Field::parts(mtm, frame, mask, None);
+        let text = SecretText::alloc(mtm).set_ivars(FieldIvars::default());
+        // SAFETY: `initWithFrame:` is NSTextField's designated initializer.
+        let text: Retained<SecretText> = unsafe { msg_send![super(text), initWithFrame: tframe] };
+        Field::fit(&text, text.ivars(), &ring, &boxv, placeholder);
+        SecretField { ring, text }
+    }
+
+    pub fn is(&self, control: &NSControl) -> bool {
+        std::ptr::eq::<NSControl>(control, &****self.text)
+    }
+
+    pub fn value(&self) -> String {
+        self.text.stringValue().to_string()
+    }
+
+    pub fn clear(&self) {
+        self.text.setStringValue(&NSString::new());
     }
 }
 
