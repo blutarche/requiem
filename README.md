@@ -113,7 +113,7 @@ Requiem checks the session with YouTube Music before it keeps it. Once it does, 
 
 **The risks:** the cookie is your Google sign-in, not just YouTube Music's. Anyone who has the file, or the copied text, can use your Google account until that browser signs out. Using it is against YouTube's terms, and Google could flag the account.
 
-**Signing out:** **Sign Out…** in Settings, or `signout ytmusic` in the CLI, deletes the file (if it can't, YouTube Music stays signed in and says why), and also ends the Google client's sign-in if there is one. Requiem can't sign your browser out: the copied cookie keeps working until you sign out of Google in that browser profile, which ends it. When Google ends a session, Requiem signs YouTube Music out and asks for a new one in Settings.
+**Signing out:** **Sign Out…** in Settings, or `signout ytmusic` in the CLI, deletes the file and also ends the Google client's sign-in if there is one. If the file can't be deleted, it says why, and both the session and the Google client's sign-in stay until you sign out again. Requiem can't sign your browser out: the copied cookie keeps working until you sign out of Google in that browser profile, which ends it. When Google ends a session, Requiem signs YouTube Music out and asks for a new one in Settings.
 
 **From another computer:** over ssh, the CLI reads the paste from stdin with `-`, or from a file. Copy the headers on the computer with the browser, then send them from that computer's clipboard, so they never land on the Mac's disk or in a shell history:
 
@@ -121,13 +121,13 @@ Requiem checks the session with YouTube Music before it keeps it. Once it does, 
 pbpaste | ssh my-mac 'requiem signin-browser ytmusic -'
 ```
 
-On Linux, use `wl-paste` or `xclip -o -selection clipboard` in place of `pbpaste`. Or save them to a file and send that:
+On Linux, use `wl-paste` or `xclip -o -selection clipboard` in place of `pbpaste`. Or save them to a file, send that, and delete it afterwards:
 
 ```sh
 ssh my-mac 'requiem signin-browser ytmusic -' < headers.txt
 ```
 
-Pasting into `requiem signin-browser ytmusic -` at a prompt on the Mac doesn't work: macOS passes a program at most 1023 characters of a typed or pasted line, and the cookie line is longer. In the app bundle the CLI is `/Applications/Requiem.app/Contents/MacOS/requiem`. It returns once YouTube Music has taken the session; if YouTube Music refuses it, it prints why and exits 2. With `--json` it prints an `ack` or an `account_error`, as `signin-client` does. Delete the copied file afterwards.
+Pasting into `requiem signin-browser ytmusic -` at a prompt on the Mac doesn't work: macOS passes a program at most 1023 characters of a typed or pasted line, and the cookie line is longer. In the app bundle the CLI is `/Applications/Requiem.app/Contents/MacOS/requiem`. It returns once YouTube Music has taken the session; if YouTube Music refuses it, it prints why and exits 2. With `--json` it prints an `ack` or an `account_error`, as `signin-client` does.
 
 ## Spotify
 
