@@ -728,7 +728,8 @@ fn run_intent(vm: &mut Vm, daemon: &mut Daemon, intent: Intent) {
 
 /// `start`, staged for a demo-only `view`: `Empty` skips the search; `Disconnected`,
 /// `OutOfDate`, `Toast` and the update views add their banner or toast; the Library views and
-/// `HomeSignedOut` set the account, and `SignInSetup` opens the setup sheet; `NowPlayingEmpty`
+/// `HomeSignedOut` set the account, and `SignInSetup` opens the setup sheet; `SettingsSetup`
+/// shows Settings with no Google client, and `SettingsSession` opens its session form; `NowPlayingEmpty`
 /// stops playback; `NowPlayingLast` plays the queue's last track. Other views get the plain start.
 pub fn start_in(view: View) -> (Vm, Daemon) {
     let t0 = Instant::now();
@@ -741,7 +742,10 @@ pub fn start_in(view: View) -> (Vm, Daemon) {
                 (ytmusic(), AccountState::SignedOut),
             ];
         }
-        View::LibraryUnavailable | View::SignInSetup => {
+        View::LibraryUnavailable
+        | View::SignInSetup
+        | View::SettingsSetup
+        | View::SettingsSession => {
             daemon.accounts = vec![(ytmusic(), unavailable())];
         }
         View::SignIn => {
@@ -795,6 +799,11 @@ pub fn start_in(view: View) -> (Vm, Daemon) {
         View::SignInSetup => {
             run_intent(&mut vm, &mut daemon, Intent::Visit(Place::Library));
             run_intent(&mut vm, &mut daemon, Intent::SignIn(ytmusic()));
+        }
+        View::SettingsSetup => run_intent(&mut vm, &mut daemon, Intent::Visit(Place::Settings)),
+        View::SettingsSession => {
+            run_intent(&mut vm, &mut daemon, Intent::Visit(Place::Settings));
+            run_intent(&mut vm, &mut daemon, Intent::UseBrowserSession(ytmusic()));
         }
         View::Collection => {
             run_intent(&mut vm, &mut daemon, Intent::Visit(Place::Library));

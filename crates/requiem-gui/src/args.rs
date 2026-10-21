@@ -14,8 +14,9 @@ usage: requiem-gui [--demo] [--smoke] [--snapshot <png>] [--view <view>]
                      settings or palette; with --demo also home-scrolled, home-shelf-paged,
                      home-signed-out, collection, now-playing, now-playing-empty,
                      now-playing-last, library-signed-out, library-unavailable, signin,
-                     signin-setup, empty, disconnected, toast, out-of-date, update-ready,
-                     update-failed, not-updatable or up-to-date";
+                     signin-setup, settings-setup, settings-session, empty, disconnected,
+                     toast, out-of-date, update-ready, update-failed, not-updatable or
+                     up-to-date";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum View {
@@ -49,6 +50,10 @@ pub enum View {
     SignIn,
     /// Demo only: the Library's YouTube Music setup sheet.
     SignInSetup,
+    /// Demo only: Settings with YouTube Music offering its ways to sign in.
+    SettingsSetup,
+    /// Demo only: Settings with YouTube Music's browser-session form open.
+    SettingsSession,
     /// Demo only: the search view before any query.
     Empty,
     /// Demo only: the reconnecting banner.
@@ -68,7 +73,7 @@ pub enum View {
 }
 
 impl View {
-    const NAMES: [(&str, View); 25] = [
+    const NAMES: [(&str, View); 27] = [
         ("home", View::Home),
         ("search", View::Search),
         ("library", View::Library),
@@ -86,6 +91,8 @@ impl View {
         ("library-unavailable", View::LibraryUnavailable),
         ("signin", View::SignIn),
         ("signin-setup", View::SignInSetup),
+        ("settings-setup", View::SettingsSetup),
+        ("settings-session", View::SettingsSession),
         ("empty", View::Empty),
         ("disconnected", View::Disconnected),
         ("toast", View::Toast),
@@ -265,6 +272,8 @@ mod tests {
             ("library-unavailable", View::LibraryUnavailable),
             ("signin", View::SignIn),
             ("signin-setup", View::SignInSetup),
+            ("settings-setup", View::SettingsSetup),
+            ("settings-session", View::SettingsSession),
             ("empty", View::Empty),
             ("disconnected", View::Disconnected),
             ("toast", View::Toast),

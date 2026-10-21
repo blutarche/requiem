@@ -257,6 +257,14 @@ impl SettingsPage {
         self.shown.borrow().get(i).cloned()
     }
 
+    /// The provider whose session form shows and waits for a paste.
+    pub fn session_form(&self) -> Option<ProviderId> {
+        self.shown.borrow().iter().find_map(|r| match &r.state {
+            AccountRowState::Session(f) if !f.checking => Some(r.provider.clone()),
+            _ => None,
+        })
+    }
+
     /// Row `i`'s provider, and what its client form holds while it shows one.
     pub fn client(&self, i: usize) -> Option<(ProviderId, String, String)> {
         let row = self.row(i)?;
@@ -321,8 +329,8 @@ impl SettingsPage {
     }
 }
 
-/// An account's row: the service's badge, name and state, its buttons, and below them the
-/// sign-in code or the client form.
+/// An account's row: the service's badge, name and state, its button, and below them the
+/// sign-in code, the ways to sign in, or the chosen form.
 struct AccountView {
     /// A VoiceOver group named for the service and its state.
     view: Retained<FlippedView>,
@@ -334,12 +342,23 @@ struct AccountView {
     action: Retained<HoverButton>,
     /// The action's label, whose padded image is rebuilt only when it changes.
     labelled: Cell<Option<(&'static str, Icon)>>,
+    /// Use Browser Session…: the default while nothing can sign in, else `session`.
+    session_default: Retained<HoverButton>,
+    session: Retained<HoverButton>,
+    /// Change Google Client…, or Use Google Client… while nothing can sign in.
     change: Retained<HoverButton>,
+    /// The title `change` shows.
+    change_title: Cell<&'static str>,
     code: CodeView,
     form: FormView,
+    session_form: SessionFormView,
     /// The status last shown, which a change is announced against.
     said: RefCell<String>,
 }
+
+const CHANGE_CLIENT: &str = "Change Google Client\u{2026}";
+const USE_CLIENT: &str = "Use Google Client\u{2026}";
+const USE_SESSION: &str = "Use Browser Session\u{2026}";
 
 impl AccountView {
     /// Row `i`; its buttons are tagged with `i`.
@@ -364,26 +383,47 @@ impl AccountView {
         widgets::hide_from_accessibility(&name);
         widgets::hide_from_accessibility(&status);
         let action = button(mtm, false, "", None, target, sel!(settingsSignIn:), tag);
+        action.setAutoresizingMask(PIN_RIGHT);
+        action.setFrameSize(NSSize::new(action.frame().size.width, ACTION_H));
+        let use_session = |primary| {
+            button(
+                mtm,
+                primary,
+                USE_SESSION,
+                Some(Icon::ClipboardPaste),
+                target,
+                sel!(useBrowserSession:),
+                tag,
+            )
+        };
+        let (session_default, session) = (use_session(true), use_session(false));
         let change = button(
             mtm,
             false,
-            "Change Google Client\u{2026}",
+            CHANGE_CLIENT,
             Some(Icon::KeyRound),
             target,
             sel!(changeClient:),
             tag,
         );
-        for b in [&action, &change] {
-            b.setAutoresizingMask(PIN_RIGHT);
-            b.setFrameSize(NSSize::new(b.frame().size.width, ACTION_H));
-        }
         let code = CodeView::new(mtm, target, tag);
         let form = FormView::new(mtm, target, delegate, tag);
-        for v in [&rule, &badge as &NSView, &name, &status, &action, &change] {
+        let session_form = SessionFormView::new(mtm, target, tag);
+        for v in [
+            &rule,
+            &badge as &NSView,
+            &name,
+            &status,
+            &action,
+            &session_default,
+            &session,
+            &change,
+        ] {
             view.addSubview(v);
         }
         view.addSubview(&code.view);
         view.addSubview(&form.view);
+        view.addSubview(&session_form.view);
         AccountView {
             view,
             rule,
@@ -392,9 +432,13 @@ impl AccountView {
             status,
             action,
             labelled: Cell::new(None),
+            session_default,
+            session,
             change,
+            change_title: Cell::new(CHANGE_CLIENT),
             code,
             form,
+            session_form,
             said: RefCell::new(String::new()),
         }
     }
@@ -428,7 +472,14 @@ impl AccountView {
             unsafe { self.action.setAction(Some(sel)) };
         }
         self.action.set_shown(action.is_some());
-        self.change.set_shown(row.change_client);
+        let first = row.state == AccountRowState::NeedsSetup;
+        self.session_default.set_shown(row.methods && first);
+        self.session.set_shown(row.methods && !first);
+        self.change.set_shown(row.methods);
+        let title = if first { USE_CLIENT } else { CHANGE_CLIENT };
+        if self.change_title.replace(title) != title {
+            relabel(&self.change, title, Some(Icon::KeyRound), BUTTON_H);
+        }
         match &row.state {
             AccountRowState::Pending {
                 verification_url,
@@ -443,10 +494,15 @@ impl AccountView {
             AccountRowState::Setup(form) => self.form.show(form, speak),
             _ => self.form.hide(),
         }
+        match &row.state {
+            AccountRowState::Session(form) => self.session_form.show(form, speak),
+            _ => self.session_form.hide(),
+        }
     }
 
     fn hide(&self) {
         self.form.hide();
+        self.session_form.hide();
         self.view.setHidden(true);
         self.said.borrow_mut().clear();
     }
@@ -457,14 +513,11 @@ impl AccountView {
         self.view.setFrame(rect(0.0, y, w, ROW_H));
         self.rule.setFrame(rect(PAD, 0.0, w - 2.0 * PAD, 1.0));
         let mut right = w - PAD;
-        for b in [&self.action, &self.change] {
-            if b.isHidden() {
-                continue;
-            }
-            let bw = b.frame().size.width;
-            right -= bw;
-            b.setFrame(rect(right, (ROW_H - ACTION_H) / 2.0, bw, ACTION_H));
-            right -= GAP;
+        if !self.action.isHidden() {
+            let bw = self.action.frame().size.width;
+            right -= bw + GAP;
+            self.action
+                .setFrame(rect(w - PAD - bw, (ROW_H - ACTION_H) / 2.0, bw, ACTION_H));
         }
         let text_w = (right - 4.0 - TEXT_X).max(0.0);
         let name_h = widgets::line_height(&theme::font(14.0, Weight::Medium));
@@ -473,29 +526,38 @@ impl AccountView {
         line_at(&self.name, TEXT_X, top, text_w);
         line_at(&self.status, TEXT_X, top + name_h, text_w);
         let detail_w = w - TEXT_X - PAD;
-        let detail = match row.state {
-            AccountRowState::Pending { .. } => {
-                let v = &self.code.view;
-                v.setFrame(rect(TEXT_X, ROW_H, detail_w, 0.0));
-                let h = self.code.place(detail_w);
-                v.setFrameSize(NSSize::new(detail_w, h));
-                h
-            }
+        // The parts below the line, each `y` down and 16 below the one before.
+        let mut y = ROW_H;
+        if let AccountRowState::Pending { .. } = row.state {
+            let v = &self.code.view;
+            v.setFrame(rect(TEXT_X, y, detail_w, 0.0));
+            let h = self.code.place(detail_w);
+            v.setFrameSize(NSSize::new(detail_w, h));
+            y += h + 16.0;
+        }
+        if row.methods {
+            let buttons = [&self.session_default, &self.session, &self.change];
+            y = flow(&buttons.map(|b| &**b), TEXT_X, y, w - PAD) + 16.0;
+        }
+        match row.state {
             AccountRowState::Setup(_) => {
                 // The fields' focus rings reach past the form's left edge.
                 let (v, form_w) = (&self.form.view, detail_w + RING);
-                v.setFrame(rect(TEXT_X - RING, ROW_H, form_w, 0.0));
+                v.setFrame(rect(TEXT_X - RING, y, form_w, 0.0));
                 let h = self.form.place(form_w);
                 v.setFrameSize(NSSize::new(form_w, h));
-                h
+                y += h + 16.0;
             }
-            _ => 0.0,
-        };
-        let h = if detail > 0.0 {
-            ROW_H + detail + PAD
-        } else {
-            ROW_H
-        };
+            AccountRowState::Session(_) => {
+                let v = &self.session_form.view;
+                v.setFrame(rect(TEXT_X, y, detail_w, 0.0));
+                let h = self.session_form.place(detail_w);
+                v.setFrameSize(NSSize::new(detail_w, h));
+                y += h + 16.0;
+            }
+            _ => {}
+        }
+        let h = if y > ROW_H { y - 16.0 + PAD } else { ROW_H };
         self.view.setFrameSize(NSSize::new(w, h));
         h
     }
@@ -715,7 +777,6 @@ impl FormView {
                 self.note.setTextColor(Some(&theme::muted()));
             }
         }
-        self.cancel.set_shown(form.cancellable);
         self.view.setHidden(false);
         self.update_save();
     }
@@ -761,5 +822,101 @@ impl FormView {
         ));
         let buttons = [&self.save, &self.choose, &self.guide, &self.cancel];
         flow(&buttons.map(|b| &**b), x, y + Field::H + 16.0, w)
+    }
+}
+
+const SESSION_STEPS: &str = "1. Open music.youtube.com in a browser where you're signed in.\n\
+2. Open the browser's developer tools on the Network tab, then reload the page.\n\
+3. Select a request named browse and copy its request headers, or choose Copy as cURL.";
+const DISCLOSURE: &str = "This copies your Google sign-in from your browser. Anyone who has it \
+can use your Google account, so Requiem keeps it only on this Mac, out of backups. Using it is \
+against YouTube's terms and could get the account flagged.";
+
+/// The form for a session copied from a signed-in browser tab. The paste goes from the
+/// pasteboard to the player; no view shows it.
+struct SessionFormView {
+    view: Retained<FlippedView>,
+    steps: Retained<NSTextField>,
+    disclosure: Retained<NSTextField>,
+    /// Why the last paste was refused.
+    error: Retained<NSTextField>,
+    paste: Retained<HoverButton>,
+    guide: Retained<HoverButton>,
+    cancel: Retained<HoverButton>,
+}
+
+impl SessionFormView {
+    fn new(mtm: MainThreadMarker, target: &AnyObject, tag: isize) -> SessionFormView {
+        let view = flipped(mtm, FLEX_W);
+        let steps = wrapping(mtm, 13.0);
+        let font = theme::font(13.0, Weight::Regular);
+        steps.setAttributedStringValue(&ui::numbered(SESSION_STEPS, &font));
+        let disclosure = wrapping(mtm, 12.0);
+        widgets::set_text(&disclosure, DISCLOSURE);
+        let error = wrapping(mtm, 12.0);
+        error.setTextColor(Some(&theme::bad()));
+        error.setSelectable(true);
+        let paste = button(
+            mtm,
+            true,
+            "Paste from Clipboard",
+            Some(Icon::ClipboardPaste),
+            target,
+            sel!(pasteSession:),
+            tag,
+        );
+        let guide = button(
+            mtm,
+            false,
+            "How to Copy",
+            Some(Icon::BookOpen),
+            target,
+            sel!(howToCopy:),
+            tag,
+        );
+        let cancel = button(mtm, false, "Cancel", None, target, sel!(cancelSetup:), tag);
+        for v in [&steps, &disclosure, &error] {
+            view.addSubview(v);
+        }
+        for b in [&paste, &guide, &cancel] {
+            view.addSubview(b);
+        }
+        view.setHidden(true);
+        SessionFormView {
+            view,
+            steps,
+            disclosure,
+            error,
+            paste,
+            guide,
+            cancel,
+        }
+    }
+
+    fn show(&self, form: &vm::SessionForm, speak: bool) {
+        let error = form.error.as_deref().unwrap_or("");
+        if speak && !error.is_empty() && self.error.stringValue().to_string() != error {
+            widgets::announce(self.view.mtm(), error);
+        }
+        widgets::set_text(&self.error, error);
+        self.error.setHidden(error.is_empty());
+        self.paste.set_enabled(!form.checking);
+        self.view.setHidden(false);
+    }
+
+    fn hide(&self) {
+        self.view.setHidden(true);
+    }
+
+    /// Lays the form out `w` wide; returns its height.
+    fn place(&self, w: CGFloat) -> CGFloat {
+        let note_w = w.min(NOTE_W);
+        let mut y = wrap_at(&self.steps, 0.0, 0.0, note_w);
+        y = wrap_at(&self.disclosure, 0.0, y + 12.0, note_w);
+        if !self.error.isHidden() {
+            y = wrap_at(&self.error, 0.0, y + GAP, note_w);
+        }
+        let buttons = [&self.paste, &self.guide, &self.cancel];
+        flow(&buttons.map(|b| &**b), 0.0, y + 16.0, w)
     }
 }
