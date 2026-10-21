@@ -2657,7 +2657,9 @@ dependencies = [
 name = "requiem-provider-ytmusic"
 version = "0.3.2"
 dependencies = [
+ "libc",
  "requiem-core",
+ "ring",
  "serde",
  "serde_json",
  "ureq",

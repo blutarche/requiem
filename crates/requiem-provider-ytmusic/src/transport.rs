@@ -32,6 +32,16 @@ pub(crate) trait Transport: Send + Sync {
         body: &str,
     ) -> Result<HttpResponse, ProviderError>;
 
+    /// `post_json` for a request that carries the browser session: a redirect comes back as its
+    /// status instead of being followed, so the session goes nowhere but `url`.
+    fn post_json_signed(
+        &self,
+        family: IpFamily,
+        url: &str,
+        headers: &[(&str, &str)],
+        body: &str,
+    ) -> Result<HttpResponse, ProviderError>;
+
     /// GET `url` with `Range: bytes=start-end_inclusive` on `family`.
     fn fetch_on(
         &self,
@@ -104,6 +114,33 @@ impl UreqTransport {
             .get_or_insert_with(|| build_agent(family))
             .clone()
     }
+
+    fn post(
+        &self,
+        family: IpFamily,
+        url: &str,
+        headers: &[(&str, &str)],
+        body: &str,
+        follow_redirects: bool,
+    ) -> Result<HttpResponse, ProviderError> {
+        let mut req = self
+            .agent(family)
+            .post(url)
+            .header("Content-Type", "application/json");
+        if !follow_redirects {
+            req = req.config().max_redirects(0).build();
+        }
+        for (k, v) in headers {
+            req = req.header(*k, *v);
+        }
+        let resp = req
+            .send(body)
+            .map_err(|e| ProviderError::Network(e.to_string()))?;
+        let status = resp.status().as_u16();
+        let body = read_limited(resp.into_body(), MAX_API_BODY)
+            .map_err(|e| ProviderError::Network(e.to_string()))?;
+        Ok(HttpResponse { status, body })
+    }
 }
 
 fn read_limited(body: ureq::Body, limit: u64) -> std::io::Result<Vec<u8>> {
@@ -120,20 +157,17 @@ impl Transport for UreqTransport {
         headers: &[(&str, &str)],
         body: &str,
     ) -> Result<HttpResponse, ProviderError> {
-        let mut req = self
-            .agent(family)
-            .post(url)
-            .header("Content-Type", "application/json");
-        for (k, v) in headers {
-            req = req.header(*k, *v);
-        }
-        let resp = req
-            .send(body)
-            .map_err(|e| ProviderError::Network(e.to_string()))?;
-        let status = resp.status().as_u16();
-        let body = read_limited(resp.into_body(), MAX_API_BODY)
-            .map_err(|e| ProviderError::Network(e.to_string()))?;
-        Ok(HttpResponse { status, body })
+        self.post(family, url, headers, body, true)
+    }
+
+    fn post_json_signed(
+        &self,
+        family: IpFamily,
+        url: &str,
+        headers: &[(&str, &str)],
+        body: &str,
+    ) -> Result<HttpResponse, ProviderError> {
+        self.post(family, url, headers, body, false)
     }
 
     fn fetch_on(
@@ -205,5 +239,75 @@ impl ApiHttp for UreqTransport {
                 .post(url)
                 .send_form(form.iter().copied()),
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::io::{BufRead, BufReader, Write};
+    use std::net::TcpListener;
+    use std::sync::Arc;
+    use std::thread;
+
+    use super::*;
+
+    /// A server on loopback that answers `/start` with a redirect to `/next`, and `/next` with
+    /// 200; returns its address and the paths it was asked for.
+    fn redirecting() -> (String, Arc<Mutex<Vec<String>>>) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let asked = Arc::new(Mutex::new(Vec::new()));
+        let seen = asked.clone();
+        let next = format!("{base}/next");
+        thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut stream) = stream else { return };
+                let mut reader = BufReader::new(stream.try_clone().unwrap());
+                let mut line = String::new();
+                reader.read_line(&mut line).unwrap();
+                let path = line.split_whitespace().nth(1).unwrap_or("").to_owned();
+                let mut length = 0;
+                loop {
+                    let mut h = String::new();
+                    reader.read_line(&mut h).unwrap();
+                    if h.trim().is_empty() {
+                        break;
+                    }
+                    if let Some((k, v)) = h.split_once(':')
+                        && k.eq_ignore_ascii_case("content-length")
+                    {
+                        length = v.trim().parse().unwrap();
+                    }
+                }
+                let mut body = vec![0; length];
+                std::io::Read::read_exact(&mut reader, &mut body).unwrap();
+                let reply = if path == "/start" {
+                    format!(
+                        "HTTP/1.1 302 Found\r\nLocation: {next}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                    )
+                } else {
+                    "HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}".to_owned()
+                };
+                seen.lock().unwrap().push(path);
+                stream.write_all(reply.as_bytes()).unwrap();
+            }
+        });
+        (base, asked)
+    }
+
+    #[test]
+    fn a_signed_request_does_not_follow_a_redirect() {
+        let (base, asked) = redirecting();
+        let t = UreqTransport::new();
+        let url = format!("{base}/start");
+        let signed = t
+            .post_json_signed(IpFamily::Any, &url, &[("Cookie", "a=b")], "{}")
+            .unwrap();
+        assert_eq!(signed.status, 302);
+        assert_eq!(*asked.lock().unwrap(), ["/start"]);
+        // An anonymous request follows it, as before.
+        let anonymous = t.post_json(IpFamily::Any, &url, &[], "{}").unwrap();
+        assert_eq!(anonymous.status, 200);
+        assert_eq!(*asked.lock().unwrap(), ["/start", "/start", "/next"]);
     }
 }

@@ -1,0 +1,69 @@
+{
+  "responseContext": {
+    "serviceTrackingParams": [
+      { "service": "GFEEDBACK", "params": [{ "key": "logged_in", "value": "1" }] }
+    ]
+  },
+  "continuationContents": {
+    "sectionListContinuation": {
+      "contents": [
+        {
+          "musicCarouselShelfRenderer": {
+            "header": { "musicCarouselShelfBasicHeaderRenderer": { "title": { "runs": [{ "text": "Your favorites" }] } } },
+            "contents": [
+              {
+                "musicTwoRowItemRenderer": {
+                  "title": { "runs": [{ "text": "Favorites Mix" }] },
+                  "navigationEndpoint": { "browseEndpoint": { "browseId": "VLRDTMAKfakeFavorites" } }
+                }
+              }
+            ]
+          }
+        },
+        {
+          "musicCarouselShelfRenderer": {
+            "header": { "musicCarouselShelfBasicHeaderRenderer": { "title": { "runs": [{ "text": "Forgotten favorites" }] } } },
+            "contents": [
+              {
+                "musicTwoRowItemRenderer": {
+                  "title": { "runs": [{ "text": "Fake Song Four" }] },
+                  "subtitle": { "runs": [{ "text": "Song" }, { "text": " • " }, { "text": "Fake Artist" }] },
+                  "navigationEndpoint": { "watchEndpoint": { "videoId": "fakeVid0004" } }
+                }
+              }
+            ]
+          }
+        },
+        {
+          "musicCarouselShelfRenderer": {
+            "header": { "musicCarouselShelfBasicHeaderRenderer": { "title": { "runs": [{ "text": "Recommended albums" }] } } },
+            "contents": [
+              {
+                "musicTwoRowItemRenderer": {
+                  "title": { "runs": [{ "text": "Another Fake Album" }] },
+                  "navigationEndpoint": { "browseEndpoint": { "browseId": "MPREb_fakeAlbum02" } }
+                }
+              }
+            ]
+          }
+        },
+        {
+          "musicCarouselShelfRenderer": {
+            "header": { "musicCarouselShelfBasicHeaderRenderer": { "title": { "runs": [{ "text": "From the community" }] } } },
+            "contents": [
+              {
+                "musicTwoRowItemRenderer": {
+                  "title": { "runs": [{ "text": "Community Playlist" }] },
+                  "navigationEndpoint": { "browseEndpoint": { "browseId": "VLPLfakeCommunity01" } }
+                }
+              }
+            ]
+          }
+        }
+      ],
+      "continuations": [
+        { "nextContinuationData": { "continuation": "FAKE-CONTINUATION-2" } }
+      ]
+    }
+  }
+}

@@ -290,6 +290,7 @@ pub enum Icon {
     FolderOpen,
     BookOpen,
     KeyRound,
+    ClipboardPaste,
 }
 
 impl Icon {
@@ -318,6 +319,7 @@ impl Icon {
             Icon::FolderOpen => include_bytes!("../../assets/icons/folder-open.svg"),
             Icon::BookOpen => include_bytes!("../../assets/icons/book-open.svg"),
             Icon::KeyRound => include_bytes!("../../assets/icons/key-round.svg"),
+            Icon::ClipboardPaste => include_bytes!("../../assets/icons/clipboard-paste.svg"),
         }
     }
 
@@ -382,6 +384,7 @@ mod tests {
             Icon::FolderOpen,
             Icon::BookOpen,
             Icon::KeyRound,
+            Icon::ClipboardPaste,
         ] {
             assert!(icon.image(16.0).is_some(), "{icon:?}");
         }

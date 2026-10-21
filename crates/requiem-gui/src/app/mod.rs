@@ -291,6 +291,34 @@ define_class!(
             }
         }
 
+        #[unsafe(method(useBrowserSession:))]
+        fn use_browser_session(&self, sender: Option<&AnyObject>) {
+            if let Some(row) = sender_row(sender) {
+                ui::with(|ui| ui.use_browser_session(row));
+            }
+        }
+
+        #[unsafe(method(sheetUseBrowserSession:))]
+        fn sheet_use_browser_session(&self, _sender: Option<&AnyObject>) {
+            ui::with(|ui| ui.sheet_use_browser_session());
+        }
+
+        #[unsafe(method(pasteSession:))]
+        fn paste_session(&self, _sender: Option<&AnyObject>) {
+            ui::with(|ui| ui.paste_session());
+        }
+
+        /// Cmd+V outside a text field, whose field editor takes it first.
+        #[unsafe(method(paste:))]
+        fn paste(&self, _sender: Option<&AnyObject>) {
+            ui::with(|ui| ui.paste_session());
+        }
+
+        #[unsafe(method(howToCopy:))]
+        fn how_to_copy(&self, _sender: Option<&AnyObject>) {
+            ui::with(|ui| ui.how_to_copy());
+        }
+
         #[unsafe(method(playCollection:))]
         fn play_collection(&self, _sender: Option<&AnyObject>) {
             ui::with(|ui| ui.play_collection());
@@ -531,6 +559,8 @@ fn validate(ui: &Ui, item: &NSMenuItem) -> bool {
         ui.can_stop_player()
     } else if action == sel!(checkForUpdates:) {
         ui.can_check_for_updates()
+    } else if action == sel!(paste:) {
+        !in_text && ui.can_paste_session()
     } else if action == sel!(toggleAutoUpdate:) {
         let auto = ui.auto_update();
         item.setState(if auto == Some(true) {
@@ -1028,7 +1058,7 @@ pub fn run(args: Args) {
         | View::SignInSetup => ui.show(AppView::Library),
         View::Collection => ui.show(AppView::Collection),
         View::Queue => ui.show(AppView::Queue),
-        View::Settings => ui.show(AppView::Settings),
+        View::Settings | View::SettingsSetup | View::SettingsSession => ui.show(AppView::Settings),
         View::NowPlaying | View::NowPlayingEmpty | View::NowPlayingLast => ui.show_now_playing(),
         View::Palette => ui.open_palette(),
         View::Search

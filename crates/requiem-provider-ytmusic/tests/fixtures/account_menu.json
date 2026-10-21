@@ -1,0 +1,28 @@
+{
+  "responseContext": {
+    "serviceTrackingParams": [
+      { "service": "GFEEDBACK", "params": [{ "key": "logged_in", "value": "1" }] }
+    ]
+  },
+  "actions": [
+    {
+      "openPopupAction": {
+        "popup": {
+          "multiPageMenuRenderer": {
+            "header": {
+              "activeAccountHeaderRenderer": {
+                "accountName": { "runs": [{ "text": "Requiem Tester" }] },
+                "accountPhoto": {
+                  "thumbnails": [{ "url": "https://yt3.ggpht.com/fake-photo=s88", "width": 88, "height": 88 }]
+                },
+                "channelHandle": { "runs": [{ "text": "@requiemtester" }] }
+              }
+            },
+            "sections": []
+          }
+        },
+        "popupType": "DROPDOWN"
+      }
+    }
+  ]
+}

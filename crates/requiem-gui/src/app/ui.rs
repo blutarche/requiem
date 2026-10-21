@@ -90,8 +90,9 @@ impl AppView {
     }
 }
 
-/// `SETUP_STEPS`, with a line that wraps indented under the text after its number.
-fn setup_steps(font: &NSFont) -> Retained<NSAttributedString> {
+/// `text`, numbered steps a line each, with a line that wraps indented under the text after
+/// its number.
+pub(super) fn numbered(text: &str, font: &NSFont) -> Retained<NSAttributedString> {
     let ink = theme::ink();
     let style = NSMutableParagraphStyle::new();
     style.setHeadIndent(widgets::attributed("0. ", font, &ink).size().width.ceil());
@@ -111,7 +112,7 @@ fn setup_steps(font: &NSFont) -> Retained<NSAttributedString> {
                 Retained::into_super(Retained::into_super(Retained::into_super(style))),
             ],
         );
-        NSAttributedString::new_with_attributes(&NSString::from_str(SETUP_STEPS), &attrs)
+        NSAttributedString::new_with_attributes(&NSString::from_str(text), &attrs)
     }
 }
 
@@ -172,15 +173,18 @@ const BUTTON_H: CGFloat = 36.0;
 const SIGN_IN_W: CGFloat = 560.0;
 const SIGN_IN_H: CGFloat = 280.0;
 const SETUP_W: CGFloat = 560.0;
-const SETUP_H: CGFloat = 330.0;
+/// With two lines of buttons.
+const SETUP_H: CGFloat = 374.0;
 const SETUP_HEADING: &str = "Set up YouTube Music sign-in";
-const SETUP_INTRO: &str = "YouTube Music sign-in uses your own Google Cloud client.";
+const SETUP_INTRO: &str =
+    "Use a session from your browser, or set up your own Google Cloud client:";
 const SETUP_STEPS: &str = "\
 1. Create a Google Cloud project and enable the YouTube Data API v3.
 2. Set up the OAuth consent screen and publish the app, or sign-in expires after 7 days.
 3. Create an OAuth client of type \"TVs and Limited Input devices\" and download its JSON.
 4. Choose that file, or enter the client's ID and secret in Settings.";
 const SETUP_GUIDE: &str = "https://github.com/blutarche/requiem#youtube-music";
+const HOW_TO_COPY: &str = "https://github.com/blutarche/requiem#sign-in-with-your-browser-session";
 /// How often the sign-in panel's countdown is redrawn.
 const EXPIRY_TICK: Duration = Duration::from_secs(30);
 const TOAST_H: CGFloat = 40.0;
@@ -366,6 +370,8 @@ pub struct Ui {
     pub palette: Palette,
     /// The banner deadline a `tick` is already scheduled for.
     tick_at: Cell<Option<Instant>>,
+    /// The general pasteboard's change count when a session was last read from it.
+    pasted: Cell<Option<isize>>,
 }
 
 impl Ui {
@@ -741,6 +747,7 @@ impl Ui {
             toast,
             palette,
             tick_at: Cell::new(None),
+            pasted: Cell::new(None),
         });
         let query = ui.vm.borrow().ui().query.clone();
         ui.search.set_value(&query);
@@ -803,13 +810,19 @@ impl Ui {
             SETUP_W - 40.0,
             FLEX_W,
         );
-        steps.setAttributedStringValue(&setup_steps(&steps_font));
+        steps.setAttributedStringValue(&numbered(SETUP_STEPS, &steps_font));
         wrapped(&steps, &steps_font, SETUP_H - 66.0, 6.75);
         let note_font = theme::font(12.0, Weight::Regular);
         let note = centred("", &note_font, &theme::muted(), 0.0);
         wrapped(&note, &note_font, SETUP_H - 200.0, 3.0);
         note.setSelectable(true);
         let buttons = [
+            (
+                "Use Browser Session\u{2026}",
+                Some(Icon::ClipboardPaste),
+                sel!(sheetUseBrowserSession:),
+                false,
+            ),
             (
                 "Choose Client File\u{2026}",
                 Some(Icon::FolderOpen),
@@ -842,13 +855,28 @@ impl Ui {
             let w = b.set_label_image(title, image.as_deref());
             (b, w)
         });
-        let total = buttons.iter().map(|(_, w)| w).sum::<CGFloat>()
-            + 8.0 * (buttons.len() as CGFloat - 1.0);
-        let mut x = ((SETUP_W - total) / 2.0).round();
-        for (b, w) in &buttons {
-            b.setFrame(rect(x, 20.0, *w, BUTTON_H));
-            x += w + 8.0;
-            view.addSubview(b);
+        // Centred lines as wide as the text, the last 20 above the bottom.
+        let mut lines: Vec<Vec<&(Retained<HoverButton>, CGFloat)>> = vec![Vec::new()];
+        let mut line_w = 0.0;
+        for button in &buttons {
+            let w = button.1;
+            if line_w > 0.0 && line_w + 8.0 + w > SETUP_W - 40.0 {
+                lines.push(Vec::new());
+                line_w = 0.0;
+            }
+            line_w += if line_w > 0.0 { 8.0 + w } else { w };
+            lines.last_mut().unwrap().push(button);
+        }
+        for (i, line) in lines.iter().rev().enumerate() {
+            let y = 20.0 + i as CGFloat * (BUTTON_H + 8.0);
+            let total =
+                line.iter().map(|(_, w)| w).sum::<CGFloat>() + 8.0 * (line.len() as CGFloat - 1.0);
+            let mut x = ((SETUP_W - total) / 2.0).round();
+            for (b, w) in line {
+                b.setFrame(rect(x, y, *w, BUTTON_H));
+                x += w + 8.0;
+                view.addSubview(b);
+            }
         }
         for v in [&heading, &intro, &steps, &note] {
             view.addSubview(v);
@@ -1509,9 +1537,7 @@ impl Ui {
         let service = vm::provider_name(&provider.0).to_owned();
         self.ask(
             &format!("Sign out of {service}?"),
-            &format!(
-                "Your {service} playlists, albums and Home shelves leave Requiem until you sign in again."
-            ),
+            &vm::sign_out_info(&provider),
             "Sign Out",
             true,
             move |ui| ui.intent(Intent::SignOut(provider.clone())),
@@ -1579,12 +1605,79 @@ impl Ui {
         }
     }
 
+    /// The session form's How to Copy: the README's steps for each browser.
+    pub fn how_to_copy(&self) {
+        if let Some(url) = NSURL::URLWithString(&NSString::from_str(HOW_TO_COPY)) {
+            NSWorkspace::sharedWorkspace().openURL(&url);
+        }
+    }
+
+    /// The setup sheet's Use Browser Session…: Settings, with the session form open.
+    pub fn sheet_use_browser_session(&self) {
+        let view = self.vm.borrow().ui().library_view();
+        if let LibraryView::Setup { provider, .. } = view {
+            self.intent(Intent::UseBrowserSession(provider));
+            self.show(AppView::Settings);
+        }
+    }
+
+    /// Settings' Use Browser Session… on row `i`.
+    pub fn use_browser_session(&self, i: usize) {
+        if let Some(row) = self.settings.row(i) {
+            self.intent(Intent::UseBrowserSession(row.provider));
+        }
+    }
+
+    /// Whether Paste from Clipboard, or Cmd+V, would send a session now.
+    pub fn can_paste_session(&self) -> bool {
+        self.view.get() == AppView::Settings && self.settings.session_form().is_some()
+    }
+
+    /// Paste from Clipboard, or Cmd+V outside a text field: sends the pasteboard's text as
+    /// the open session form's session. The text goes into the import and nowhere else.
+    pub fn paste_session(&self) {
+        if !self.can_paste_session() {
+            return;
+        }
+        let pb = NSPasteboard::generalPasteboard();
+        let count = pb.changeCount();
+        // SAFETY: the type static is an immutable framework constant.
+        let text = pb.stringForType(unsafe { NSPasteboardTypeString });
+        let paste = vm::session_json(&text.map(|t| t.to_string()).unwrap_or_default());
+        // Set first: a backend that answers at once has taken the session by the time `run`
+        // returns.
+        self.pasted.set(Some(count));
+        if !self.run(Intent::ImportSession(paste)) {
+            self.pasted.set(None);
+        }
+    }
+
+    /// Once a pasted session is taken, clears the pasteboard it came from, unless something
+    /// was copied since.
+    fn clear_paste(&self) {
+        let saved = self.vm.borrow_mut().take_session_saved();
+        if !saved {
+            return;
+        }
+        let Some(count) = self.pasted.take() else {
+            return;
+        };
+        let pb = NSPasteboard::generalPasteboard();
+        if pb.changeCount() == count {
+            pb.clearContents();
+        }
+    }
+
     pub fn cancel_setup(&self) {
         self.intent(Intent::CancelSetup);
     }
 
     /// The setup sheet's Enter Client ID…: Settings, with the cursor in the client form.
     pub fn enter_client_id(&self) {
+        let view = self.vm.borrow().ui().library_view();
+        if let LibraryView::Setup { provider, .. } = view {
+            self.intent(Intent::ChangeClient(provider));
+        }
         self.show(AppView::Settings);
         self.settings.focus_form();
     }
@@ -1730,6 +1823,7 @@ impl Ui {
             }
             cmds = self.vm.borrow_mut().take_commands();
         }
+        self.clear_paste();
     }
 
     /// The results empty state's button, "Edit search".
@@ -1741,7 +1835,8 @@ impl Ui {
         self.intent(Intent::Search(self.search.value()));
     }
 
-    /// Plays (or with `append`, appends) the keyboard-selected row of the visible table.
+    /// Plays (or with `append`, appends) the keyboard-selected row of the visible table; in
+    /// Settings, presses the session form's Paste from Clipboard.
     pub fn activate_selection(&self, append: bool) {
         match self.view.get() {
             AppView::Search => match self.results.selected_row() {
@@ -1765,6 +1860,8 @@ impl Ui {
                     self.open_library_row(i);
                 }
             }
+            // Paste from Clipboard is the session form's default button.
+            AppView::Settings if !append => self.paste_session(),
             AppView::Home | AppView::NowPlaying | AppView::Settings => {}
             AppView::Queue => {
                 if let Some(i) = self.queue.selected_row().filter(|_| !append) {

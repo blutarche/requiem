@@ -462,14 +462,7 @@ impl Updater {
             return;
         };
         let version = ready.version.to_string();
-        let files: Vec<PathBuf> = [
-            persist::state_path(),
-            requiem_provider_ytmusic::token_file(),
-            requiem_provider_spotify::credentials_file(),
-        ]
-        .into_iter()
-        .flatten()
-        .collect();
+        let files = restart_files();
         let files: Vec<&Path> = files.iter().map(PathBuf::as_path).collect();
         let saved = match save_files(inner.path.as_deref(), &files) {
             Ok(s) => s,
@@ -589,6 +582,20 @@ fn newer_player(app: &Path, current: &Version, reexeced: bool) -> Option<Version
             None
         }
     }
+}
+
+/// The files a restart saves, to put back if the new player fails: the player's state and
+/// every sign-in.
+fn restart_files() -> Vec<PathBuf> {
+    [
+        persist::state_path(),
+        requiem_provider_ytmusic::token_file(),
+        requiem_provider_ytmusic::session_file(),
+        requiem_provider_spotify::credentials_file(),
+    ]
+    .into_iter()
+    .flatten()
+    .collect()
 }
 
 fn saved_dir(state: &Path) -> Option<PathBuf> {
@@ -948,6 +955,17 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
         assert!(handed.unwrap_err().contains("not listening"));
         assert!(!left, "the new player {pid} still runs");
+    }
+
+    #[test]
+    fn a_restart_saves_every_sign_in() {
+        let files = restart_files();
+        let token = requiem_provider_ytmusic::token_file().expect("a home folder");
+        let session = requiem_provider_ytmusic::session_file().expect("a home folder");
+        assert_eq!(session.parent(), token.parent());
+        for f in [&token, &session] {
+            assert!(files.contains(f), "{} isn't saved", f.display());
+        }
     }
 
     #[test]

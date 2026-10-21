@@ -80,7 +80,7 @@ pub(crate) struct InnertubeClient {
     visitor: Mutex<Option<String>>,
 }
 
-fn status_error(what: &str, status: u16) -> ProviderError {
+pub(crate) fn status_error(what: &str, status: u16) -> ProviderError {
     if status == 429 || status >= 500 {
         ProviderError::Network(format!("{what}: http {status}"))
     } else {
@@ -144,7 +144,7 @@ impl InnertubeClient {
         Ok(resp)
     }
 
-    fn music_context() -> Value {
+    pub(crate) fn music_context() -> Value {
         json!({"client": {
             "clientName": MUSIC_CLIENT_NAME,
             "clientVersion": MUSIC_CLIENT_VERSION,
@@ -468,6 +468,15 @@ mod tests {
                 status,
                 body: body.into_bytes(),
             })
+        }
+        fn post_json_signed(
+            &self,
+            _: IpFamily,
+            _: &str,
+            _: &[(&str, &str)],
+            _: &str,
+        ) -> Result<HttpResponse, ProviderError> {
+            unreachable!("the anonymous client never signs a request")
         }
         fn fetch_on(
             &self,
