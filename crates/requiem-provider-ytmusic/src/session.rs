@@ -171,8 +171,9 @@ fn save(path: &Path, file: &SessionFile) -> io::Result<()> {
     commit(&tmp, path)
 }
 
+/// Marks `path` so Time Machine skips it, as `tmutil addexclusion` does; a failure is only logged.
 #[cfg(target_os = "macos")]
-fn exclude_from_backups(path: &Path) {
+pub(crate) fn exclude_from_backups(path: &Path) {
     use std::os::unix::ffi::OsStrExt;
     let Ok(c_path) = std::ffi::CString::new(path.as_os_str().as_bytes()) else {
         return;
@@ -190,14 +191,15 @@ fn exclude_from_backups(path: &Path) {
     };
     if rc != 0 {
         debug!(
-            "cannot keep the browser session out of backups: {}",
+            "cannot keep {} out of backups: {}",
+            path.display(),
             io::Error::last_os_error()
         );
     }
 }
 
 #[cfg(not(target_os = "macos"))]
-fn exclude_from_backups(_: &Path) {}
+pub(crate) fn exclude_from_backups(_: &Path) {}
 
 /// Deletes the session file; a missing one is no error.
 fn remove(path: &Path) -> io::Result<()> {
