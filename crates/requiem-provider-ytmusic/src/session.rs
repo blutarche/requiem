@@ -97,6 +97,9 @@ struct Slot {
     /// Bumped by every import, sign-out and expiry, so a request made with one session never
     /// ends another.
     r#gen: u64,
+    /// Bumped by every sign-out only: an import checked across one isn't kept, while one
+    /// checked across an expiry or another import is.
+    sign_outs: u64,
 }
 
 /// Why a signed request failed.
@@ -261,7 +264,11 @@ impl BrowserSession {
             clock,
             family,
             path,
-            slot: Mutex::new(Slot { current, r#gen: 0 }),
+            slot: Mutex::new(Slot {
+                current,
+                r#gen: 0,
+                sign_outs: 0,
+            }),
         }
     }
 
@@ -345,7 +352,7 @@ impl BrowserSession {
             Failure::Other(e) => e,
         };
         // The checks run unlocked; a sign-out meanwhile must not be undone by the save.
-        let started = locked(&self.slot).r#gen;
+        let sign_outs = locked(&self.slot).sign_outs;
         let menu = self
             .call(
                 &headers,
@@ -373,7 +380,7 @@ impl BrowserSession {
             saved_at_unix: self.clock.unix(),
         };
         let mut slot = locked(&self.slot);
-        if slot.r#gen != started {
+        if slot.sign_outs != sign_outs {
             return Err(ProviderError::SignInRequired(CHANGED.into()));
         }
         save(&path, &file).map_err(|e| {
@@ -405,6 +412,7 @@ impl BrowserSession {
             })?;
         }
         slot.r#gen += 1;
+        slot.sign_outs += 1;
         Ok(slot.current.take().is_some())
     }
 
@@ -879,6 +887,25 @@ mod tests {
         assert_eq!(s.account(), None);
         assert!(!rig.path().exists());
         assert_eq!(rig.session().account(), None);
+    }
+
+    #[test]
+    fn an_old_session_ending_while_a_new_one_is_checked_keeps_the_new_one() {
+        let rig = Rig::new();
+        let s = Arc::new(rig.signed_in());
+        rig.music.script(MENU_URL, 200, MENU);
+        rig.music.script(BROWSE_URL, 200, HOME);
+        let during = Arc::downgrade(&s);
+        rig.music.during(BROWSE_URL, move || {
+            // A refresh with the old session got a 401 meanwhile.
+            let s = during.upgrade().unwrap();
+            s.expire(&s.current().unwrap());
+            assert!(s.current().is_none());
+        });
+        s.import(&paste()).unwrap();
+        assert!(s.current().is_some());
+        assert!(rig.path().exists());
+        assert!(rig.session().current().is_some());
     }
 
     #[test]
