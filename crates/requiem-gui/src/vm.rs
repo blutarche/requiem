@@ -329,6 +329,9 @@ pub struct Setup {
     pub error: Option<String>,
     /// A client was sent and not answered yet; a `SignedOut` answer starts the sign-in.
     pub importing: bool,
+    /// The account's state when the last client was sent. After an error answers it, the
+    /// `Account` that follows tells a refusal, unchanged, from an import that stood.
+    sent_from: Option<AccountState>,
 }
 
 /// An account's row in Settings.
@@ -1164,6 +1167,14 @@ impl Vm {
         // The session follows a `TrackFailed` at once with the outcome: the next track's
         // `QueueChanged`, or a stop.
         let failed = self.failed_toast.take();
+        // An import's error comes just before the `Account` that says whether it stood; any
+        // other event first means the error came alone, as older players send a refusal.
+        let answered = self
+            .ui
+            .setup
+            .as_mut()
+            .filter(|s| !s.importing)
+            .and_then(|s| s.sent_from.take());
         match ev {
             Event::SearchResults { req, tracks } => {
                 if self.pending_req == Some(req) {
@@ -1256,7 +1267,15 @@ impl Vm {
                     );
                 }
             }
-            Event::Account { provider, state } => self.set_account(provider, state),
+            Event::Account { provider, state } => {
+                let answered = answered.filter(|_| {
+                    self.ui
+                        .setup
+                        .as_ref()
+                        .is_some_and(|s| s.provider == provider)
+                });
+                self.set_account(provider, state, answered);
+            }
             Event::AccountError { provider, error } => match &mut self.ui.setup {
                 Some(setup) if setup.provider == provider => {
                     setup.error = Some(error);
@@ -1494,6 +1513,12 @@ impl Vm {
                 Vec::new()
             }
             Intent::ImportClient(file) => {
+                let from = self
+                    .ui
+                    .setup
+                    .as_ref()
+                    .and_then(|s| self.ui.account_state(&s.provider))
+                    .cloned();
                 let Some(setup) = &mut self.ui.setup else {
                     return Vec::new();
                 };
@@ -1513,6 +1538,7 @@ impl Vm {
                 };
                 setup.error = None;
                 setup.importing = true;
+                setup.sent_from = from;
                 self.dirty |= Dirty::LIBRARY;
                 vec![Command::ImportSignInClient {
                     provider: setup.provider.clone(),
@@ -1592,6 +1618,7 @@ impl Vm {
                 provider,
                 error: None,
                 importing: false,
+                sent_from: None,
             });
             self.dirty |= Dirty::LIBRARY;
         }
@@ -1708,19 +1735,31 @@ impl Vm {
         self.dirty |= Dirty::HOME | Dirty::LIBRARY | Dirty::COLLECTION | Dirty::ACCOUNT;
     }
 
-    fn set_account(&mut self, provider: ProviderId, state: AccountState) {
+    /// `answered` is the state an import was sent from, when this follows its error.
+    fn set_account(
+        &mut self,
+        provider: ProviderId,
+        state: AccountState,
+        answered: Option<AccountState>,
+    ) {
+        // Unchanged after its error, the import was refused, and the form keeps the error.
+        let refused = answered.as_ref() == Some(&state);
         // The sheet closes once its provider is set up, and an import it sent goes on to the
-        // sign-in it was for.
-        if let Some(setup) = self
-            .ui
-            .setup
-            .take_if(|s| s.provider == provider && !matches!(state, AccountState::Unavailable(_)))
-            && setup.importing
-            && state == AccountState::SignedOut
+        // sign-in it was for. One that stood despite its error says what it could not finish.
+        if !refused
+            && let Some(setup) = self.ui.setup.take_if(|s| {
+                s.provider == provider && !matches!(state, AccountState::Unavailable(_))
+            })
         {
-            self.outbox.push(Command::SignIn {
-                provider: provider.clone(),
-            });
+            let stood = answered.is_some();
+            if (setup.importing || stood) && state == AccountState::SignedOut {
+                self.outbox.push(Command::SignIn {
+                    provider: provider.clone(),
+                });
+            }
+            if stood && let Some(error) = setup.error {
+                self.toast(error, true);
+            }
         }
         let signed_in = |ui: &UiState| ui.signed_in().cloned().collect::<Vec<_>>();
         let was = signed_in(&self.ui);
@@ -4732,6 +4771,15 @@ mod tests {
         assert_eq!(vm.ui().setup, None);
     }
 
+    const UNCONFIRMED: &str = "signed out on this computer, but Google did not confirm; remove requiem's access at https://myaccount.google.com/permissions";
+
+    fn form_error(vm: &Vm) -> Option<String> {
+        match first_row(vm).state {
+            AccountRowState::Setup(f) => f.error,
+            other => panic!("{other:?}"),
+        }
+    }
+
     #[test]
     fn an_import_that_stood_still_signs_in_and_says_what_it_could_not_finish() {
         let mut vm = connected();
@@ -4739,13 +4787,15 @@ mod tests {
         vm.take_commands();
         vm.intent(Intent::ChangeClient(provider()));
         assert_eq!(import(&mut vm).len(), 1);
-        // The player's order: the new state, then the error.
-        let error = "signed out on this computer, but Google did not confirm; remove requiem's access at https://myaccount.google.com/permissions";
-        vm.apply(account(AccountState::SignedOut));
+        // The player's order: the error, then the new state.
         vm.apply(Event::AccountError {
             provider: provider(),
-            error: error.into(),
+            error: UNCONFIRMED.into(),
         });
+        // Alone, it reads as a refusal: an older player sends nothing more.
+        assert_eq!(form_error(&vm).as_deref(), Some(UNCONFIRMED));
+        assert!(!vm.ui().setup.as_ref().unwrap().importing);
+        vm.apply(account(AccountState::SignedOut));
         assert_eq!(
             vm.take_commands(),
             [Command::SignIn {
@@ -4754,7 +4804,48 @@ mod tests {
         );
         assert_eq!(vm.ui().setup, None);
         let toast = vm.ui().toast.as_ref().unwrap();
-        assert!(toast.error && toast.text == error, "{toast:?}");
+        assert!(toast.error && toast.text == UNCONFIRMED, "{toast:?}");
+    }
+
+    #[test]
+    fn a_refused_import_keeps_its_form_through_the_unchanged_state() {
+        let refused = "not a Google OAuth client";
+        let refuse = |vm: &mut Vm| {
+            assert_eq!(import(vm).len(), 1);
+            vm.apply(Event::AccountError {
+                provider: provider(),
+                error: refused.into(),
+            });
+        };
+        let mut vm = connected();
+        vm.apply(signed_in());
+        vm.take_commands();
+        vm.intent(Intent::ChangeClient(provider()));
+        refuse(&mut vm);
+        vm.apply(signed_in());
+        assert_eq!(form_error(&vm).as_deref(), Some(refused));
+        assert!(vm.take_commands().is_empty());
+        assert_eq!(vm.ui().toast, None);
+        // So does one that needs setting up.
+        let mut vm = setting_up();
+        refuse(&mut vm);
+        vm.apply(account(AccountState::Unavailable("no client".into())));
+        assert_eq!(form_error(&vm).as_deref(), Some(refused));
+        // From an older player, the error comes alone, and a later change answers nothing.
+        let mut vm = connected();
+        vm.apply(signed_in());
+        vm.take_commands();
+        vm.intent(Intent::ChangeClient(provider()));
+        refuse(&mut vm);
+        vm.apply(Event::Volume(50));
+        vm.apply(account(AccountState::SignedOut));
+        assert_eq!(vm.ui().setup, None);
+        assert!(
+            !vm.take_commands()
+                .iter()
+                .any(|c| matches!(c, Command::SignIn { .. }))
+        );
+        assert_eq!(vm.ui().toast, None);
     }
 
     #[test]

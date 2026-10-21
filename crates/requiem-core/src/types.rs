@@ -367,10 +367,9 @@ pub enum Event {
         provider: ProviderId,
         state: AccountState,
     },
-    /// Why a sign-in ended without `SignedIn`, unless a sign-out ended it, or what a sign-out
-    /// could not finish; the `Account` that follows has the new state. Also why an import was
-    /// refused, or, after the `Account` with its new state, what one that stood could not
-    /// finish.
+    /// Why a sign-in ended without `SignedIn`, unless a sign-out ended it; what a sign-out
+    /// could not finish; or why an import was refused, or what one that stood could not
+    /// finish. The `Account` that follows has the new state.
     AccountError {
         provider: ProviderId,
         error: String,

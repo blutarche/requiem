@@ -1497,14 +1497,19 @@ fn a_failed_import_says_why() {
             error: "not a Google OAuth client".into(),
         })
     );
-    // The error is the whole answer.
-    r.send(Command::SetVolume(55));
-    let after = r.events_until(1, |e| *e == Event::Volume(55));
-    assert_eq!(after, [Event::Volume(55)]);
+    // The state follows, unchanged.
+    let next = r.wait_event(|_| true);
+    assert_eq!(
+        next,
+        Event::Account {
+            provider: fake_id(),
+            state: AccountState::Unavailable("no client".into()),
+        }
+    );
 }
 
 #[test]
-fn an_import_that_stood_but_could_not_finish_announces_its_state_then_why() {
+fn an_import_that_stood_but_could_not_finish_says_why_then_its_state() {
     let provider = FakeProvider::new("fake");
     provider.set_account(AccountState::SignedIn { name: None });
     let r = rig_with(provider, vec![], config());
@@ -1514,17 +1519,18 @@ fn an_import_that_stood_but_could_not_finish_announces_its_state_then_why() {
     r.provider
         .fail_import(ProviderError::ClientBroken(unconfirmed.into()));
     import(&r);
-    let seen = r.events_until(1, |e| matches!(e, Event::AccountError { .. }));
+    let mut seen = r.events_until(1, |e| matches!(e, Event::AccountError { .. }));
+    seen.push(r.wait_event(|_| true));
     assert_eq!(
         seen[seen.len() - 2..],
         [
-            Event::Account {
-                provider: fake_id(),
-                state: AccountState::SignedOut,
-            },
             Event::AccountError {
                 provider: fake_id(),
                 error: unconfirmed.into(),
+            },
+            Event::Account {
+                provider: fake_id(),
+                state: AccountState::SignedOut,
             },
         ]
     );
