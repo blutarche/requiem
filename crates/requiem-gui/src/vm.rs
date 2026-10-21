@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 
 use requiem_core::{
     AccountState, Collection, Command, EnqueueMode, Event, Item, Page, PlayState, ProviderId,
-    SeekTarget, Shelf, Track, TrackId,
+    Redacted, SeekTarget, Shelf, Track, TrackId,
 };
 use requiem_ipc::{UpdateState, UpdateStatus};
 
@@ -205,7 +205,7 @@ pub enum Intent {
     SignOut(ProviderId),
     /// The setup sheet's chosen client file, or the client Settings' form built: its text, or
     /// why it couldn't be read or was refused.
-    ImportClient(Result<String, String>),
+    ImportClient(Result<Redacted, String>),
     /// The setup sheet's Cancel, and the client form's.
     CancelSetup,
     /// Opens `provider`'s client form, as the setup sheet does, whatever its account's state:
@@ -380,7 +380,7 @@ const CHANGE_CLIENT: &str = "Enter the new client's ID and secret, or choose its
 
 /// The client JSON Settings' Save sends for a typed client ID and secret, which the provider
 /// reads as it reads a downloaded file's "installed" part; or why they were refused.
-pub fn client_json(id: &str, secret: &str) -> Result<String, String> {
+pub fn client_json(id: &str, secret: &str) -> Result<Redacted, String> {
     let (id, secret) = (id.trim(), secret.trim());
     if !client_filled(id, secret) {
         return Err("Enter the client ID and the client secret.".to_owned());
@@ -390,7 +390,9 @@ pub fn client_json(id: &str, secret: &str) -> Result<String, String> {
             "That isn't a Google client ID. It ends in {GOOGLE_CLIENT_ID_END}."
         ));
     }
-    Ok(serde_json::json!({ "client_id": id, "client_secret": secret }).to_string())
+    Ok(Redacted(
+        serde_json::json!({ "client_id": id, "client_secret": secret }).to_string(),
+    ))
 }
 
 /// Whether both of the client form's fields hold more than whitespace; Save waits for that.
@@ -433,7 +435,7 @@ pub fn expires_text(expires_at_unix: u64, now_unix: u64) -> String {
 
 /// The text of the client file the setup sheet's file panel chose, opened or not; the error
 /// is the sheet's.
-pub fn read_client_file(file: io::Result<impl Read>) -> Result<String, String> {
+pub fn read_client_file(file: io::Result<impl Read>) -> Result<Redacted, String> {
     let mut bytes = Vec::new();
     file.and_then(|f| f.take(MAX_CLIENT_FILE + 1).read_to_end(&mut bytes))
         .map_err(|e| format!("Couldn’t read that file: {e}"))?;
@@ -444,6 +446,7 @@ pub fn read_client_file(file: io::Result<impl Read>) -> Result<String, String> {
         ));
     }
     String::from_utf8(bytes)
+        .map(Redacted)
         .map_err(|_| "That file isn’t text; choose the client JSON you downloaded.".to_owned())
 }
 
@@ -1513,7 +1516,7 @@ impl Vm {
                 self.dirty |= Dirty::LIBRARY;
                 vec![Command::ImportSignInClient {
                     provider: setup.provider.clone(),
-                    json: json.into(),
+                    json,
                 }]
             }
             Intent::CancelSetup => {
@@ -5055,7 +5058,7 @@ mod tests {
     #[test]
     fn a_typed_client_reads_as_a_client_file_does() {
         let json = client_json(&format!("  {CLIENT_ID}\n"), &format!(" {SECRET} ")).unwrap();
-        let root: serde_json::Value = serde_json::from_str(&json).unwrap();
+        let root: serde_json::Value = serde_json::from_str(&json.0).unwrap();
         // As the provider reads it: an "installed" part if there is one, else the top level.
         let client = root.get("installed").unwrap_or(&root);
         let keys: Vec<&str> = client
@@ -5073,7 +5076,7 @@ mod tests {
         // Quotes and backslashes are escaped, not spliced in.
         let odd = r#"a"b\c"#;
         let json = client_json(CLIENT_ID, odd).unwrap();
-        let root: serde_json::Value = serde_json::from_str(&json).unwrap();
+        let root: serde_json::Value = serde_json::from_str(&json.0).unwrap();
         assert!(
             root["client_secret"].as_str() == Some(odd),
             "the secret didn't round-trip"
@@ -5113,6 +5116,11 @@ mod tests {
 
     #[test]
     fn the_secret_is_sent_but_neither_kept_nor_printed_by_the_vm() {
+        let typed = Intent::ImportClient(client_json(CLIENT_ID, SECRET));
+        assert!(
+            !format!("{typed:?}").contains(SECRET),
+            "the intent printed the secret"
+        );
         let mut vm = setting_up();
         let cmds = vm.intent(Intent::ImportClient(client_json(CLIENT_ID, SECRET)));
         let [Command::ImportSignInClient { provider: p, json }] = cmds.as_slice() else {
@@ -5199,8 +5207,11 @@ mod tests {
     #[test]
     fn a_client_file_is_read_up_to_64_kib_of_text() {
         let read = |bytes: Vec<u8>| read_client_file(Ok(io::Cursor::new(bytes)));
-        assert_eq!(read(CLIENT.into()), Ok(CLIENT.to_owned()));
-        assert_eq!(read(vec![b' '; 64 * 1024]).map(|s| s.len()), Ok(64 * 1024));
+        assert_eq!(read(CLIENT.into()), Ok(Redacted::from(CLIENT)));
+        assert_eq!(
+            read(vec![b' '; 64 * 1024]).map(|s| s.0.len()),
+            Ok(64 * 1024)
+        );
         let big = read(vec![b' '; 64 * 1024 + 1]).unwrap_err();
         assert!(big.contains("larger than 64 KiB"), "{big}");
         let binary = read(vec![0xff, 0xfe]).unwrap_err();
