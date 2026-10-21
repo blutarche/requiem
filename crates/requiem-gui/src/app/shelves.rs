@@ -11,7 +11,7 @@ use objc2::rc::Retained;
 use objc2::runtime::{AnyObject, NSObject, Sel};
 use objc2::{DefinedClass, MainThreadOnly, define_class, msg_send, sel};
 use objc2_app_kit::{
-    NSAnimatablePropertyContainer, NSBorderType, NSControl, NSEvent, NSFocusRingType,
+    NSAnimatablePropertyContainer, NSBorderType, NSControl, NSEvent, NSEventPhase, NSFocusRingType,
     NSLineBreakMode, NSMenu, NSMenuItem, NSResponder, NSScrollView, NSTextField,
     NSTrackingAreaOptions, NSView, NSViewBoundsDidChangeNotification,
 };
@@ -95,6 +95,116 @@ define_class!(
         }
     }
 );
+
+/// Which way a scroll gesture moves: along the shelf, or down the page.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Axis {
+    Horizontal,
+    Vertical,
+}
+
+/// Who gets a scroll-wheel event.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Route {
+    Shelf,
+    Page,
+    /// A touch that has not picked a direction yet: both views see it.
+    Both,
+}
+
+fn dominant(dx: CGFloat, dy: CGFloat) -> Axis {
+    if dy.abs() > dx.abs() {
+        Axis::Vertical
+    } else {
+        Axis::Horizontal
+    }
+}
+
+fn route_of(axis: Axis) -> Route {
+    match axis {
+        Axis::Vertical => Route::Page,
+        Axis::Horizontal => Route::Shelf,
+    }
+}
+
+/// Routes one scroll event by the larger of its deltas. A trackpad gesture and its momentum
+/// keep the axis their first moving event chose, so they cannot flip between page and shelf
+/// part-way; `locked` is that axis, and the second value is what to keep for the next event.
+/// A mouse wheel has no phases and is decided event by event.
+fn scroll_axis(
+    phase: NSEventPhase,
+    momentum: NSEventPhase,
+    dx: CGFloat,
+    dy: CGFloat,
+    locked: Option<Axis>,
+) -> (Route, Option<Axis>) {
+    if phase.is_empty() && momentum.is_empty() {
+        return (route_of(dominant(dx, dy)), None);
+    }
+    if phase.contains(NSEventPhase::MayBegin) {
+        return (Route::Both, None);
+    }
+    let held = if phase.contains(NSEventPhase::Began) {
+        None
+    } else {
+        locked
+    };
+    let axis = held.or_else(|| (dx != 0.0 || dy != 0.0).then(|| dominant(dx, dy)));
+    let route = axis.map_or(Route::Both, route_of);
+    let over = NSEventPhase::Ended | NSEventPhase::Cancelled;
+    let done = phase.intersects(over) || momentum.intersects(over);
+    (route, if done { None } else { axis })
+}
+
+pub struct RowScrollIvars {
+    locked: Cell<Option<Axis>>,
+}
+
+define_class!(
+    /// A shelf's scroll view. It scrolls sideways only; a mostly vertical gesture goes on to
+    /// the page behind it, which a plain scroll view would swallow.
+    // SAFETY: NSScrollView has no subclassing requirements for `scrollWheel:`; no Drop impl.
+    #[unsafe(super(NSScrollView, NSView, NSResponder, NSObject))]
+    #[thread_kind = MainThreadOnly]
+    #[ivars = RowScrollIvars]
+    pub struct RowScroll;
+
+    impl RowScroll {
+        #[unsafe(method(scrollWheel:))]
+        fn scroll_wheel(&self, event: &NSEvent) {
+            let iv = self.ivars();
+            let (route, locked) = scroll_axis(
+                event.phase(),
+                event.momentumPhase(),
+                event.scrollingDeltaX(),
+                event.scrollingDeltaY(),
+                iv.locked.get(),
+            );
+            // Settled before either call: both re-enter through bounds notifications.
+            iv.locked.set(locked);
+            if route != Route::Page {
+                // SAFETY: `scrollWheel:` is NSScrollView's, called on its superclass.
+                let _: () = unsafe { msg_send![super(self), scrollWheel: event] };
+            }
+            if route != Route::Shelf {
+                // SAFETY: the next responder is a live responder or nil.
+                if let Some(next) = unsafe { self.nextResponder() } {
+                    next.scrollWheel(event);
+                }
+            }
+        }
+    }
+);
+
+impl RowScroll {
+    fn new(mtm: MainThreadMarker, frame: NSRect) -> Retained<Self> {
+        let this = Self::alloc(mtm).set_ivars(RowScrollIvars {
+            locked: Cell::new(None),
+        });
+        // SAFETY: `initWithFrame:` is NSView's designated initializer.
+        unsafe { msg_send![super(this), initWithFrame: frame] }
+    }
+}
 
 pub struct CardIvars {
     shelf: usize,
@@ -409,7 +519,7 @@ struct ShelfRow {
     /// The shelf's index in the page's list, which `Intent`s name.
     shelf: usize,
     title: Retained<NSTextField>,
-    scroll: Retained<NSScrollView>,
+    scroll: Retained<RowScroll>,
     doc: Retained<FlippedView>,
     back: Retained<HoverButton>,
     forward: Retained<HoverButton>,
@@ -596,10 +706,7 @@ impl Shelves {
                 let n = shelf.items.len() as CGFloat;
                 (card_h(), 2.0 * PAD + n * CARD_W + (n - 1.0) * CARD_GAP)
             };
-            let scroll = NSScrollView::initWithFrame(
-                NSScrollView::alloc(self.mtm),
-                rect(0.0, y, width, row_h),
-            );
+            let scroll = RowScroll::new(self.mtm, rect(0.0, y, width, row_h));
             scroll.setAutoresizingMask(FLEX_W);
             scroll.setHasHorizontalScroller(true);
             scroll.setHasVerticalScroller(false);
@@ -784,6 +891,93 @@ fn observe(watcher: &ScrollWatcher, clip: &NSView) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn gesture(
+        phase: NSEventPhase,
+        momentum: NSEventPhase,
+        dx: CGFloat,
+        dy: CGFloat,
+        locked: &mut Option<Axis>,
+    ) -> Route {
+        let (route, next) = scroll_axis(phase, momentum, dx, dy, *locked);
+        *locked = next;
+        route
+    }
+
+    #[test]
+    fn a_mouse_wheel_goes_by_its_larger_delta() {
+        let none = NSEventPhase::None;
+        assert_eq!(scroll_axis(none, none, 0.0, -3.0, None).0, Route::Page);
+        assert_eq!(scroll_axis(none, none, 3.0, 0.0, None).0, Route::Shelf);
+        assert_eq!(scroll_axis(none, none, 2.0, -3.0, None).0, Route::Page);
+        assert_eq!(scroll_axis(none, none, -4.0, 3.0, None).0, Route::Shelf);
+        // A stale lock does not hold a wheel.
+        let stale = Some(Axis::Horizontal);
+        assert_eq!(
+            scroll_axis(none, none, 0.0, 3.0, stale),
+            (Route::Page, None)
+        );
+    }
+
+    #[test]
+    fn a_gesture_keeps_the_axis_it_started_on() {
+        let (none, began, changed) = (
+            NSEventPhase::None,
+            NSEventPhase::Began,
+            NSEventPhase::Changed,
+        );
+        let mut lock = None;
+        assert_eq!(gesture(began, none, 1.0, -5.0, &mut lock), Route::Page);
+        assert_eq!(lock, Some(Axis::Vertical));
+        // One event with a larger dx stays on the page, as does the momentum after.
+        assert_eq!(gesture(changed, none, 9.0, -2.0, &mut lock), Route::Page);
+        assert_eq!(gesture(none, changed, 8.0, -1.0, &mut lock), Route::Page);
+        assert_eq!(lock, Some(Axis::Vertical));
+
+        let mut lock = None;
+        assert_eq!(gesture(began, none, 5.0, -1.0, &mut lock), Route::Shelf);
+        assert_eq!(gesture(changed, none, 1.0, -9.0, &mut lock), Route::Shelf);
+    }
+
+    #[test]
+    fn the_lock_clears_when_a_gesture_or_its_momentum_ends() {
+        let (none, changed, began) = (
+            NSEventPhase::None,
+            NSEventPhase::Changed,
+            NSEventPhase::Began,
+        );
+        for end in [NSEventPhase::Ended, NSEventPhase::Cancelled] {
+            let mut lock = Some(Axis::Vertical);
+            assert_eq!(gesture(end, none, 0.0, 0.0, &mut lock), Route::Page);
+            assert_eq!(lock, None);
+            let mut lock = Some(Axis::Vertical);
+            assert_eq!(gesture(none, end, 0.0, 0.0, &mut lock), Route::Page);
+            assert_eq!(lock, None);
+        }
+        // Momentum after a cleared gesture picks its axis from its own first delta.
+        let mut lock = None;
+        assert_eq!(gesture(none, changed, 0.0, -4.0, &mut lock), Route::Page);
+        assert_eq!(lock, Some(Axis::Vertical));
+        // A new gesture starts afresh even over an old lock.
+        let mut lock = Some(Axis::Vertical);
+        assert_eq!(gesture(began, none, 4.0, 0.0, &mut lock), Route::Shelf);
+        assert_eq!(lock, Some(Axis::Horizontal));
+    }
+
+    #[test]
+    fn a_touch_with_no_movement_reaches_both_and_locks_nothing() {
+        let none = NSEventPhase::None;
+        let mut lock = None;
+        let may = NSEventPhase::MayBegin;
+        assert_eq!(gesture(may, none, 0.0, 0.0, &mut lock), Route::Both);
+        assert_eq!(lock, None);
+        let began = NSEventPhase::Began;
+        assert_eq!(gesture(began, none, 0.0, 0.0, &mut lock), Route::Both);
+        assert_eq!(lock, None);
+        let changed = NSEventPhase::Changed;
+        assert_eq!(gesture(changed, none, 0.0, -2.0, &mut lock), Route::Page);
+        assert_eq!(lock, Some(Axis::Vertical));
+    }
 
     #[test]
     fn cards_exist_only_near_the_visible_span() {
