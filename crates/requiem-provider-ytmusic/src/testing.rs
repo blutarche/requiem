@@ -126,12 +126,16 @@ pub(crate) struct MusicCall {
     pub signed: bool,
 }
 
+type Hook = Box<dyn Fn() + Send + Sync>;
+
 /// Innertube's endpoints: replies are scripted per URL without its query and served in order;
 /// an unscripted call is a network error.
 #[derive(Default)]
 pub(crate) struct FakeMusic {
     replies: Mutex<HashMap<String, VecDeque<(u16, String)>>>,
     pub calls: Mutex<Vec<MusicCall>>,
+    /// Run once by the next call to their URL, before it is answered.
+    hooks: Mutex<HashMap<String, Hook>>,
 }
 
 impl FakeMusic {
@@ -144,9 +148,21 @@ impl FakeMusic {
             .push_back((status, body.to_owned()));
     }
 
+    /// Runs `f` while the next call to `path` is in flight.
+    pub(crate) fn during(&self, path: &str, f: impl Fn() + Send + Sync + 'static) {
+        self.hooks
+            .lock()
+            .unwrap()
+            .insert(path.to_owned(), Box::new(f));
+    }
+
     fn reply(&self, call: MusicCall) -> Result<HttpResponse, ProviderError> {
         let path = call.url.split('?').next().unwrap_or_default().to_owned();
         self.calls.lock().unwrap().push(call);
+        let hook = self.hooks.lock().unwrap().remove(&path);
+        if let Some(hook) = hook {
+            hook();
+        }
         let (status, body) = self
             .replies
             .lock()

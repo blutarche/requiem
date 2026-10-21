@@ -43,6 +43,8 @@ const WEB_PAGE: &str =
 const REDIRECTED: &str = "YouTube redirected a signed-in request";
 const NO_NAME: &str = "YouTube Music named no account for that session";
 const NO_HOME: &str = "YouTube Music showed no Home for that session";
+const CHANGED: &str =
+    "YouTube Music was signed out while that session was checked, so it wasn't kept";
 
 /// The plist `tmutil addexclusion` writes, read back on macOS 26: Time Machine skips the file.
 #[cfg(target_os = "macos")]
@@ -336,6 +338,8 @@ impl BrowserSession {
             }
             Failure::Other(e) => e,
         };
+        // The checks run unlocked; a sign-out meanwhile must not be undone by the save.
+        let started = locked(&self.slot).r#gen;
         let menu = self
             .call(
                 &headers,
@@ -363,6 +367,9 @@ impl BrowserSession {
             saved_at_unix: self.clock.unix(),
         };
         let mut slot = locked(&self.slot);
+        if slot.r#gen != started {
+            return Err(ProviderError::SignInRequired(CHANGED.into()));
+        }
         save(&path, &file).map_err(|e| {
             ProviderError::ClientBroken(format!(
                 "cannot keep the session in {}: {e}",
@@ -840,6 +847,23 @@ mod tests {
         assert!(calls[0].signed);
         let body: Value = serde_json::from_str(&calls[0].body).unwrap();
         assert_eq!(body["browseId"], "VLLM");
+    }
+
+    #[test]
+    fn a_sign_out_while_a_session_is_checked_keeps_nothing() {
+        let rig = Rig::new();
+        rig.music.script(MENU_URL, 200, MENU);
+        rig.music.script(BROWSE_URL, 200, HOME);
+        let s = Arc::new(rig.session());
+        let during = Arc::downgrade(&s);
+        rig.music.during(BROWSE_URL, move || {
+            during.upgrade().unwrap().sign_out();
+        });
+        let e = s.import(&paste()).unwrap_err().to_string();
+        assert!(e.contains("signed out while"), "{e}");
+        assert_eq!(s.account(), None);
+        assert!(!rig.path().exists());
+        assert_eq!(rig.session().account(), None);
     }
 
     #[test]
