@@ -1472,8 +1472,13 @@ impl Vm {
             }
             Intent::SignIn(provider) if can.player && self.knows(&provider) => {
                 if self.ui.needs_setup(&provider).is_none() {
-                    // The sheet would cover the code this sign-in shows.
-                    if self.ui.setup.take().is_some() {
+                    // The Library's sheet would cover the code this sign-in shows. Another
+                    // provider's change of client, which only Settings shows, stays open.
+                    let covers = self.ui.setup.as_ref().is_some_and(|s| {
+                        s.provider == provider || self.ui.needs_setup(&s.provider).is_some()
+                    });
+                    if covers {
+                        self.ui.setup = None;
                         self.dirty |= Dirty::LIBRARY;
                     }
                     return vec![Command::SignIn { provider }];
@@ -5001,6 +5006,33 @@ mod tests {
         vm.intent(Intent::SignOut(spotify()));
         assert_eq!(vm.ui().place, Place::Settings);
         assert_eq!(vm.ui().sign_in_place(), None);
+    }
+
+    #[test]
+    fn a_sign_in_to_another_service_keeps_a_client_form_open() {
+        let mut vm = connected();
+        vm.apply(account(AccountState::SignedOut));
+        vm.apply(spotify_account(AccountState::SignedOut));
+        vm.intent(Intent::Visit(Place::Settings));
+        vm.intent(Intent::ChangeClient(provider()));
+        let form = first_row(&vm).state;
+        assert!(matches!(form, AccountRowState::Setup(_)), "{form:?}");
+        assert_eq!(
+            vm.intent(Intent::SignIn(spotify())),
+            [Command::SignIn {
+                provider: spotify()
+            }]
+        );
+        assert_eq!(first_row(&vm).state, form);
+        // Signing in to its own account closes it.
+        assert_eq!(
+            vm.intent(Intent::SignIn(provider())),
+            [Command::SignIn {
+                provider: provider()
+            }]
+        );
+        assert_eq!(vm.ui().setup, None);
+        assert_eq!(first_row(&vm).state, AccountRowState::SignedOut);
     }
 
     const CLIENT_ID: &str = "123-abc.apps.googleusercontent.com";
