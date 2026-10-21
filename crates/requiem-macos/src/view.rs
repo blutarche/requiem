@@ -106,6 +106,18 @@ impl ViewTracker {
     }
 }
 
+/// How long the session stays Paused before the status item reads as nothing playing.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+pub(crate) const PAUSED_IDLE_AFTER: Duration = Duration::from_secs(10);
+
+/// Whether the status item reads as idle: Paused since `paused_since` for at least
+/// [`PAUSED_IDLE_AFTER`].
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+pub(crate) fn status_idle(state: PlayState, paused_since: Option<Instant>, now: Instant) -> bool {
+    state == PlayState::Paused
+        && paused_since.is_some_and(|at| now.saturating_duration_since(at) >= PAUSED_IDLE_AFTER)
+}
+
 /// Whether `next` shows differently from `shown`, a view applied at the paired instant
 /// whose position has advanced since at the rate its state implies.
 pub(crate) fn changed(
@@ -640,5 +652,23 @@ mod tests {
         let title = "音".repeat(45);
         let shown = menu_title(&view(&title, ""));
         assert_eq!(shown, format!("{}…", "音".repeat(39)));
+    }
+
+    #[test]
+    fn status_idle_after_the_pause_threshold() {
+        let now = Instant::now();
+        let since = |d: Duration| Some(now - d);
+        let paused = PlayState::Paused;
+        assert!(!status_idle(paused, since(PAUSED_IDLE_AFTER - ms(1)), now));
+        assert!(status_idle(paused, since(PAUSED_IDLE_AFTER), now));
+        assert!(status_idle(
+            paused,
+            since(PAUSED_IDLE_AFTER + secs(3600)),
+            now
+        ));
+        assert!(!status_idle(paused, None, now));
+        for state in [PlayState::Playing, PlayState::Buffering, PlayState::Stopped] {
+            assert!(!status_idle(state, since(secs(3600)), now), "{state:?}");
+        }
     }
 }

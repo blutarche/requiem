@@ -143,7 +143,7 @@ impl StatusMenu {
                 idle: symbol(ns_string!("music.note"), ns_string!("Requiem")),
             },
         };
-        status.show(None);
+        status.show(None, false);
         status.show_updates(false, None);
         status
     }
@@ -183,9 +183,11 @@ impl StatusMenu {
         self.item.setMenu(None);
     }
 
-    pub(super) fn show(&self, view: Option<&PlayerView>) {
+    /// `idle` makes the button read as nothing playing; the menu still shows `view`.
+    pub(super) fn show(&self, view: Option<&PlayerView>, idle: bool) {
         let state = view.map_or(PlayState::Stopped, |v| v.state);
-        let icon = match state {
+        let button_state = if idle { PlayState::Stopped } else { state };
+        let icon = match button_state {
             PlayState::Playing | PlayState::Buffering => &self.icons.playing,
             PlayState::Paused => &self.icons.paused,
             PlayState::Stopped => &self.icons.idle,
@@ -193,7 +195,7 @@ impl StatusMenu {
         if let Some(button) = self.button() {
             button.setImage(icon.as_deref());
             let title = match view {
-                Some(view) if state != PlayState::Stopped => status_title(view),
+                Some(view) if button_state != PlayState::Stopped => status_title(view),
                 _ if icon.is_none() => "Requiem".to_owned(),
                 _ => String::new(),
             };

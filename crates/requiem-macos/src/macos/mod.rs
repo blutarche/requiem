@@ -11,7 +11,7 @@ use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
 use crossbeam_channel::{Receiver, Sender, TryRecvError};
-use dispatch2::DispatchQueue;
+use dispatch2::{DispatchQueue, DispatchTime};
 use objc2::rc::Retained;
 use objc2::runtime::{AnyObject, NSObjectProtocol, ProtocolObject};
 use objc2::{DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send, sel};
@@ -27,7 +27,7 @@ use requiem_core::PlayState;
 use self::mini::MiniPlayer;
 use self::now_playing::NowPlaying;
 use self::status::{StatusMenu, menu_action};
-use crate::view::{changed, position_now};
+use crate::view::{PAUSED_IDLE_AFTER, changed, position_now, status_idle};
 use crate::{PlayerView, UiAction, UiUpdate, WANTS_POSITIONS};
 
 /// Below the tracker's 2 s, so a seek it reported still applies after up to 1 s of main-queue
@@ -60,6 +60,11 @@ struct Ivars {
     volume: Cell<Option<u8>>,
     mini: OnceCell<MiniPlayer>,
     mini_closed_at: Cell<Option<Instant>>,
+    /// When the session last entered Paused; unaffected by views that change while paused.
+    paused_since: Cell<Option<Instant>>,
+    /// Bumped on every transition into or out of Paused, so a pending idle wake can tell it is
+    /// stale.
+    paused_gen: Cell<u64>,
 }
 
 define_class!(
@@ -203,13 +208,51 @@ impl Controller {
             if !changed(shown.as_ref(), view.as_ref(), now, APPLY_TOLERANCE) {
                 return;
             }
+            let was_paused = shown
+                .as_ref()
+                .is_some_and(|(v, _)| v.state == PlayState::Paused);
             *shown = view.clone().map(|v| (v, now));
+            drop(shown);
+            self.track_pause(view.as_ref(), was_paused, now);
         }
-        ivars.status.show(view.as_ref());
+        let state = view.as_ref().map_or(PlayState::Stopped, |v| v.state);
+        let idle = status_idle(state, ivars.paused_since.get(), now);
+        ivars.status.show(view.as_ref(), idle);
         ivars.now_playing.show(view.as_ref());
         if let Some(mini) = self.open_mini() {
             mini.show(view.as_ref(), now);
         }
+    }
+
+    /// Starts the pause clock on entering Paused and schedules the wake that idles the status
+    /// item, since an unchanged view is not rendered again.
+    fn track_pause(&self, view: Option<&PlayerView>, was_paused: bool, now: Instant) {
+        let ivars = self.ivars();
+        let paused = view.is_some_and(|v| v.state == PlayState::Paused);
+        if paused == was_paused {
+            return;
+        }
+        let generation = ivars.paused_gen.get().wrapping_add(1);
+        ivars.paused_gen.set(generation);
+        ivars.paused_since.set(paused.then_some(now));
+        if paused && let Ok(when) = DispatchTime::try_from(PAUSED_IDLE_AFTER) {
+            let _ = DispatchQueue::main().after(when, move || {
+                CONTROLLER.with_borrow(|controller| {
+                    if let Some(controller) = controller {
+                        controller.paused_idle(generation);
+                    }
+                });
+            });
+        }
+    }
+
+    fn paused_idle(&self, generation: u64) {
+        let ivars = self.ivars();
+        if ivars.paused_gen.get() != generation || ivars.paused_since.get().is_none() {
+            return;
+        }
+        let view = ivars.shown.borrow().as_ref().map(|(v, _)| v.clone());
+        ivars.status.show(view.as_ref(), true);
     }
 
     /// The mini player while it is open. Closed, it is not kept up to date.
@@ -338,6 +381,8 @@ pub(crate) fn run(updates: Receiver<UiUpdate>, actions: Sender<UiAction>, stop: 
             volume: Cell::new(None),
             mini: OnceCell::new(),
             mini_closed_at: Cell::new(None),
+            paused_since: Cell::new(None),
+            paused_gen: Cell::new(0),
         },
     );
     controller
