@@ -181,8 +181,11 @@ pub struct Saved {
 
 impl Saved {
     /// Copies each existing file in `files` into `dir`, a new `0700` folder, as `0600` files.
-    pub fn new(dir: &Path, files: &[&Path]) -> io::Result<Saved> {
+    /// `prepare` gets the folder before anything is copied into it, e.g. to keep it out of
+    /// backups.
+    pub fn new(dir: &Path, files: &[&Path], prepare: fn(&Path)) -> io::Result<Saved> {
         fs::DirBuilder::new().mode(0o700).create(dir)?;
+        prepare(dir);
         let copied = DirLock::try_new(dir).and_then(|lock| {
             let lock =
                 lock.ok_or_else(|| io::Error::other(format!("{} is in use", dir.display())))?;
@@ -447,7 +450,7 @@ mod tests {
         let state = dir.path().join("state.json");
         let token = dir.path().join("google-token.json");
         fs::write(&state, b"old state").unwrap();
-        let saved = Saved::new(&folder, &[&state, &token]).unwrap();
+        let saved = Saved::new(&folder, &[&state, &token], |_| {}).unwrap();
         let copy = folder.join("0");
         assert_eq!(fs::read(&copy).unwrap(), b"old state");
         let mode = |p: &Path| fs::metadata(p).unwrap().permissions().mode() & 0o777;

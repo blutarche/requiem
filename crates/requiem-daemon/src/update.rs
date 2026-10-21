@@ -609,7 +609,8 @@ fn save_files(state: Option<&Path>, files: &[&Path]) -> Result<Saved, String> {
         .and_then(saved_dir)
         .ok_or("there is no folder for the update state")?;
     remove_stale_saved(&dir)?;
-    Saved::new(&dir, files).map_err(|e| format!("{}: {e}", dir.display()))
+    Saved::new(&dir, files, requiem_provider_ytmusic::exclude_from_backups)
+        .map_err(|e| format!("{}: {e}", dir.display()))
 }
 
 /// Deletes copies a restarting player left behind, after the same checks as a stale staging
@@ -746,6 +747,25 @@ mod tests {
     fn alive(pid: i32) -> bool {
         // SAFETY: signal 0 only checks that the process exists.
         unsafe { libc::kill(pid, 0) == 0 }
+    }
+
+    /// The Time Machine exclusion `tmutil addexclusion` sets on `path`, if any.
+    fn backup_exclusion(path: &Path) -> Option<Vec<u8>> {
+        use std::os::unix::ffi::OsStrExt;
+        let path = std::ffi::CString::new(path.as_os_str().as_bytes()).unwrap();
+        let mut value = [0u8; 128];
+        // SAFETY: both strings are NUL-terminated and `value` is a live buffer of its length.
+        let n = unsafe {
+            libc::getxattr(
+                path.as_ptr(),
+                c"com.apple.metadata:com_apple_backup_excludeItem".as_ptr(),
+                value.as_mut_ptr().cast(),
+                value.len(),
+                0,
+                0,
+            )
+        };
+        usize::try_from(n).ok().map(|n| value[..n].to_vec())
     }
 
     fn inner() -> Inner {
@@ -990,11 +1010,16 @@ mod tests {
         let copy = fs::read(folder.join("0"));
         let again = save_files(Some(&update_state), &[&player_state]);
         let mode = fs::metadata(&folder).unwrap().permissions().mode() & 0o777;
+        let exclusion = backup_exclusion(&folder);
         saved.remove().unwrap();
         let left = folder.exists();
         let _ = fs::remove_dir_all(&dir);
         assert_eq!(copy.unwrap(), b"queue");
         assert_eq!(mode, 0o700);
+        assert!(
+            exclusion.is_some_and(|v| v.windows(17).any(|w| w == b"com.apple.backupd")),
+            "the copies of sign-ins are kept out of Time Machine"
+        );
         assert!(
             again.unwrap_err().contains("using it"),
             "kept copies are left alone"

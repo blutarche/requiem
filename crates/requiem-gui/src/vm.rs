@@ -6,8 +6,8 @@ use std::ops::{BitOr, BitOrAssign};
 use std::time::{Duration, Instant};
 
 use requiem_core::{
-    AccountState, Collection, Command, EnqueueMode, Event, Item, Page, PlayState, ProviderId,
-    Redacted, SeekTarget, Shelf, Track, TrackId,
+    AccountState, Collection, Command, EnqueueMode, Event, Item, NO_OAUTH_CLIENT, Page, PlayState,
+    ProviderId, Redacted, SeekTarget, Shelf, Track, TrackId,
 };
 use requiem_ipc::{UpdateState, UpdateStatus};
 
@@ -315,8 +315,9 @@ pub enum LibraryView {
     /// The setup sheet: `provider` needs its client before it can sign in.
     Setup {
         provider: ProviderId,
-        /// Why, as the provider puts it.
-        reason: String,
+        /// Why, as the provider puts it; `None` when it only says there is no client yet,
+        /// which the sheet's steps already say.
+        reason: Option<String>,
         /// Why the last client file was refused; shown instead of `reason`.
         error: Option<String>,
     },
@@ -397,7 +398,8 @@ pub enum AccountRowState {
 /// Settings' form for the user's own Google client: an ID, a secret, or the downloaded file.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ClientForm {
-    /// Why the form shows, as the provider puts it, or what changing the client takes.
+    /// Why the form shows, as the provider puts it, or what setting up or changing the client
+    /// takes.
     pub reason: String,
     /// Why the last client was refused; shown instead of `reason`.
     pub error: Option<String>,
@@ -416,6 +418,14 @@ pub struct SessionForm {
 const GOOGLE_CLIENT_ID_END: &str = ".apps.googleusercontent.com";
 /// The client form's note while it changes a client.
 const CHANGE_CLIENT: &str = "Enter the new client's ID and secret, or choose its file.";
+/// The client form's note while there is no client yet.
+const NEW_CLIENT: &str = "Enter your Google Cloud client's ID and secret, or choose its JSON file.";
+
+/// Why a provider needs setting up, as the provider puts it, unless it only says there is no
+/// client yet: the provider's text for that names a file path, and the GUI asks its own way.
+fn shown_reason(reason: &str) -> Option<&str> {
+    (!reason.starts_with(NO_OAUTH_CLIENT)).then_some(reason)
+}
 
 /// The client JSON Settings' Save sends for a typed client ID and secret, which the provider
 /// reads as it reads a downloaded file's "installed" part; or why they were refused.
@@ -795,7 +805,7 @@ impl UiState {
         {
             return LibraryView::Setup {
                 provider: setup.provider.clone(),
-                reason: reason.to_owned(),
+                reason: shown_reason(reason).map(str::to_owned),
                 error: setup.error.clone(),
             };
         }
@@ -883,7 +893,11 @@ impl UiState {
                         AccountRowState::Session(SessionForm { error, checking })
                     }
                     (Some(Form::Client), reason, _) => AccountRowState::Setup(ClientForm {
-                        reason: reason.unwrap_or(CHANGE_CLIENT).to_owned(),
+                        reason: match reason {
+                            Some(r) => shown_reason(r).unwrap_or(NEW_CLIENT),
+                            None => CHANGE_CLIENT,
+                        }
+                        .to_owned(),
                         error,
                     }),
                     (None, Some(_), _) => AccountRowState::NeedsSetup,
@@ -4812,7 +4826,7 @@ mod tests {
     fn sheet(error: Option<&str>) -> LibraryView {
         LibraryView::Setup {
             provider: provider(),
-            reason: "no client".into(),
+            reason: Some("no client".into()),
             error: error.map(str::to_owned),
         }
     }
@@ -4821,6 +4835,55 @@ mod tests {
 
     fn import(vm: &mut Vm) -> Vec<Command> {
         vm.intent(Intent::ImportClient(Ok(CLIENT.into())))
+    }
+
+    #[test]
+    fn no_client_yet_is_asked_for_in_the_guis_words() {
+        let mut vm = connected();
+        vm.apply(account(AccountState::Unavailable(format!(
+            "{NO_OAUTH_CLIENT}: save the JSON of a \"TVs and Limited Input devices\" client to \
+             /Users/x/Library/Application Support/requiem/google-client.json"
+        ))));
+        vm.intent(Intent::SignIn(provider()));
+        assert_eq!(
+            vm.ui().library_view(),
+            LibraryView::Setup {
+                provider: provider(),
+                reason: None,
+                error: None,
+            }
+        );
+        vm.intent(Intent::ChangeClient(provider()));
+        assert_eq!(
+            first_row(&vm).state,
+            AccountRowState::Setup(ClientForm {
+                reason: NEW_CLIENT.into(),
+                error: None,
+            })
+        );
+        // Any other reason still shows, as does a refused client.
+        vm.apply(account(AccountState::Unavailable(
+            "no usable HOME: set REQUIEM_GOOGLE_CLIENT_FILE".into(),
+        )));
+        vm.apply(Event::AccountError {
+            provider: provider(),
+            error: "not a Google OAuth client".into(),
+        });
+        assert_eq!(
+            first_row(&vm).state,
+            AccountRowState::Setup(ClientForm {
+                reason: "no usable HOME: set REQUIEM_GOOGLE_CLIENT_FILE".into(),
+                error: Some("not a Google OAuth client".into()),
+            })
+        );
+        assert_eq!(
+            vm.ui().library_view(),
+            LibraryView::Setup {
+                provider: provider(),
+                reason: Some("no usable HOME: set REQUIEM_GOOGLE_CLIENT_FILE".into()),
+                error: Some("not a Google OAuth client".into()),
+            }
+        );
     }
 
     #[test]
@@ -5571,7 +5634,7 @@ mod tests {
 
     #[test]
     fn a_refused_session_keeps_its_form_and_says_why() {
-        let refused = "Google didn't accept that session";
+        let refused = "Google didn't accept that session; copy it again from a browser where you're signed in to YouTube Music";
         let mut vm = pasting();
         vm.intent(Intent::ImportSession(session_json(PASTE)));
         vm.apply(Event::AccountError {

@@ -11,7 +11,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use requiem_core::{AccountState, ProviderError};
+use requiem_core::{AccountState, NO_OAUTH_CLIENT, ProviderError};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -160,7 +160,7 @@ pub(crate) fn load_client(files: &GoogleFiles) -> Result<ClientConfig, String> {
         Ok(b) => b,
         Err(e) if e.kind() == io::ErrorKind::NotFound => {
             return Err(format!(
-                "no Google OAuth client: save the JSON of a \"TVs and Limited Input devices\" client to {shown}"
+                "{NO_OAUTH_CLIENT}: save the JSON of a \"TVs and Limited Input devices\" client to {shown}"
             ));
         }
         Err(e) => return Err(format!("cannot read the Google OAuth client {shown}: {e}")),
@@ -275,12 +275,17 @@ fn write_private(path: &Path, bytes: &[u8]) -> io::Result<()> {
     commit(&tmp, path)
 }
 
+/// The temp file `stage_private` writes for `path`, which a crash can leave behind.
+pub(crate) fn staged_path(path: &Path) -> PathBuf {
+    let mut tmp = path.as_os_str().to_owned();
+    tmp.push(".tmp");
+    PathBuf::from(tmp)
+}
+
 /// Writes `bytes` to a temp file beside `path`, which only the user can read, for `commit` to
 /// put in its place.
 pub(crate) fn stage_private(path: &Path, bytes: &[u8]) -> io::Result<PathBuf> {
-    let mut tmp = path.as_os_str().to_owned();
-    tmp.push(".tmp");
-    let tmp = PathBuf::from(tmp);
+    let tmp = staged_path(path);
     // A leftover from a crash would make `create_new` fail.
     let _ = fs::remove_file(&tmp);
     let result = OpenOptions::new()

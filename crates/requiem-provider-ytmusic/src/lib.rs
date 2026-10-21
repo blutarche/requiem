@@ -68,6 +68,12 @@ pub fn session_file() -> Option<PathBuf> {
     session::path_beside(token_file().as_deref())
 }
 
+/// Keeps `path` out of Time Machine backups, as the browser session is; elsewhere, or on a
+/// failure, it does nothing.
+pub fn exclude_from_backups(path: &Path) {
+    session::exclude_from_backups(path);
+}
+
 /// Parses the Google sign-in file at `path` without changing it; a missing file passes.
 pub fn check_token_file(path: &Path) -> Result<(), String> {
     google::check_token(path)
@@ -199,9 +205,10 @@ impl Provider for YtMusicProvider {
         self.google.sign_in(on_state)
     }
 
-    /// Forgets the browser session, which tells Google nothing, and signs out of Google.
+    /// Forgets the browser session, which tells Google nothing, and signs out of Google. A
+    /// session that can't be deleted leaves both signed in.
     fn sign_out(&self) -> Result<(), ProviderError> {
-        self.session.sign_out();
+        self.session.sign_out()?;
         self.google.sign_out()
     }
 

@@ -18,7 +18,7 @@ use serde_json::{Value, json};
 use crate::IpFamily;
 use crate::browser::{self, BrowserHeaders};
 use crate::clients::{MUSIC_CLIENT_ID, MUSIC_CLIENT_VERSION, MUSIC_ORIGIN, MUSIC_UA};
-use crate::google::{Clock, commit, private_dir, read_capped, stage_private, tighten};
+use crate::google::{Clock, commit, private_dir, read_capped, stage_private, staged_path, tighten};
 use crate::innertube::{InnertubeClient, status_error};
 use crate::log::debug;
 use crate::parse::{
@@ -37,12 +37,14 @@ const HOME_SHELVES: usize = 6;
 const LIKED: &str = "LM";
 
 const ENDED: &str = "Your YouTube Music browser session ended; paste a new one in Settings";
-const NOT_ACCEPTED: &str = "Google didn't accept that session";
+const NOT_ACCEPTED: &str = "Google didn't accept that session; copy it again from a browser where you're signed in to YouTube Music";
 const WEB_PAGE: &str =
     "YouTube answered with a web page, not data; the session may need consent or a fresh sign-in";
 const REDIRECTED: &str = "YouTube redirected a signed-in request";
 const NO_NAME: &str = "YouTube Music named no account for that session";
 const NO_HOME: &str = "YouTube Music showed no Home for that session";
+const CHANGED: &str =
+    "YouTube Music was signed out while that session was checked, so it wasn't kept";
 
 /// The plist `tmutil addexclusion` writes, read back on macOS 26: Time Machine skips the file.
 #[cfg(target_os = "macos")]
@@ -95,6 +97,9 @@ struct Slot {
     /// Bumped by every import, sign-out and expiry, so a request made with one session never
     /// ends another.
     r#gen: u64,
+    /// Bumped by every sign-out only: an import checked across one isn't kept, while one
+    /// checked across an expiry or another import is.
+    sign_outs: u64,
 }
 
 /// Why a signed request failed.
@@ -169,8 +174,9 @@ fn save(path: &Path, file: &SessionFile) -> io::Result<()> {
     commit(&tmp, path)
 }
 
+/// Marks `path` so Time Machine skips it, as `tmutil addexclusion` does; a failure is only logged.
 #[cfg(target_os = "macos")]
-fn exclude_from_backups(path: &Path) {
+pub(crate) fn exclude_from_backups(path: &Path) {
     use std::os::unix::ffi::OsStrExt;
     let Ok(c_path) = std::ffi::CString::new(path.as_os_str().as_bytes()) else {
         return;
@@ -188,21 +194,26 @@ fn exclude_from_backups(path: &Path) {
     };
     if rc != 0 {
         debug!(
-            "cannot keep the browser session out of backups: {}",
+            "cannot keep {} out of backups: {}",
+            path.display(),
             io::Error::last_os_error()
         );
     }
 }
 
 #[cfg(not(target_os = "macos"))]
-fn exclude_from_backups(_: &Path) {}
+pub(crate) fn exclude_from_backups(_: &Path) {}
 
-fn remove(path: &Path) {
-    match fs::remove_file(path) {
-        Ok(()) => {}
-        Err(e) if e.kind() == io::ErrorKind::NotFound => {}
-        Err(e) => debug!("cannot delete the browser session: {e}"),
+/// Deletes the session file and any copy a save left behind; a missing one is no error. The
+/// copy goes first, so on an error the file is still there.
+fn remove(path: &Path) -> io::Result<()> {
+    for p in [staged_path(path), path.to_owned()] {
+        match fs::remove_file(p) {
+            Err(e) if e.kind() != io::ErrorKind::NotFound => return Err(e),
+            _ => {}
+        }
     }
+    Ok(())
 }
 
 /// A continuation token as a query value.
@@ -253,7 +264,11 @@ impl BrowserSession {
             clock,
             family,
             path,
-            slot: Mutex::new(Slot { current, r#gen: 0 }),
+            slot: Mutex::new(Slot {
+                current,
+                r#gen: 0,
+                sign_outs: 0,
+            }),
         }
     }
 
@@ -336,6 +351,8 @@ impl BrowserSession {
             }
             Failure::Other(e) => e,
         };
+        // The checks run unlocked; a sign-out meanwhile must not be undone by the save.
+        let sign_outs = locked(&self.slot).sign_outs;
         let menu = self
             .call(
                 &headers,
@@ -363,6 +380,9 @@ impl BrowserSession {
             saved_at_unix: self.clock.unix(),
         };
         let mut slot = locked(&self.slot);
+        if slot.sign_outs != sign_outs {
+            return Err(ProviderError::SignInRequired(CHANGED.into()));
+        }
         save(&path, &file).map_err(|e| {
             ProviderError::ClientBroken(format!(
                 "cannot keep the session in {}: {e}",
@@ -379,14 +399,21 @@ impl BrowserSession {
     }
 
     /// Forgets the session on this computer; the browser it came from stays signed in.
-    /// Whether there was one.
-    pub(crate) fn sign_out(&self) -> bool {
+    /// Whether there was one. A file that can't be deleted keeps the session, as the next
+    /// start would read it again.
+    pub(crate) fn sign_out(&self) -> Result<bool, ProviderError> {
         let mut slot = locked(&self.slot);
-        slot.r#gen += 1;
         if let Some(path) = &self.path {
-            remove(path);
+            remove(path).map_err(|e| {
+                ProviderError::ClientBroken(format!(
+                    "cannot delete the browser session in {}: {e}; still signed in",
+                    path.display()
+                ))
+            })?;
         }
-        slot.current.take().is_some()
+        slot.r#gen += 1;
+        slot.sign_outs += 1;
+        Ok(slot.current.take().is_some())
     }
 
     /// Forgets `s`, unless an import or sign-out came first, and says the session ended.
@@ -395,8 +422,11 @@ impl BrowserSession {
         if slot.r#gen == s.r#gen && slot.current.is_some() {
             slot.r#gen += 1;
             slot.current = None;
-            if let Some(path) = &self.path {
-                remove(path);
+            // Google no longer takes it, so a file left behind only fails again.
+            if let Some(path) = &self.path
+                && let Err(e) = remove(path)
+            {
+                debug!("cannot delete the ended browser session: {e}");
             }
         }
         ProviderError::SignInRequired(ENDED.into())
@@ -843,13 +873,85 @@ mod tests {
     }
 
     #[test]
+    fn a_sign_out_while_a_session_is_checked_keeps_nothing() {
+        let rig = Rig::new();
+        rig.music.script(MENU_URL, 200, MENU);
+        rig.music.script(BROWSE_URL, 200, HOME);
+        let s = Arc::new(rig.session());
+        let during = Arc::downgrade(&s);
+        rig.music.during(BROWSE_URL, move || {
+            during.upgrade().unwrap().sign_out().unwrap();
+        });
+        let e = s.import(&paste()).unwrap_err().to_string();
+        assert!(e.contains("signed out while"), "{e}");
+        assert_eq!(s.account(), None);
+        assert!(!rig.path().exists());
+        assert_eq!(rig.session().account(), None);
+    }
+
+    #[test]
+    fn an_old_session_ending_while_a_new_one_is_checked_keeps_the_new_one() {
+        let rig = Rig::new();
+        let s = Arc::new(rig.signed_in());
+        rig.music.script(MENU_URL, 200, MENU);
+        rig.music.script(BROWSE_URL, 200, HOME);
+        let during = Arc::downgrade(&s);
+        rig.music.during(BROWSE_URL, move || {
+            // A refresh with the old session got a 401 meanwhile.
+            let s = during.upgrade().unwrap();
+            s.expire(&s.current().unwrap());
+            assert!(s.current().is_none());
+        });
+        s.import(&paste()).unwrap();
+        assert!(s.current().is_some());
+        assert!(rig.path().exists());
+        assert!(rig.session().current().is_some());
+    }
+
+    #[test]
     fn sign_out_deletes_the_session() {
         let rig = Rig::new();
         let s = rig.signed_in();
-        assert!(s.sign_out());
+        assert!(s.sign_out().unwrap());
         assert_eq!(s.account(), None);
         assert!(!rig.path().exists());
-        assert!(!s.sign_out());
+        assert!(!s.sign_out().unwrap());
+    }
+
+    #[test]
+    fn sign_out_deletes_a_copy_a_save_left_behind() {
+        let rig = Rig::new();
+        let s = rig.signed_in();
+        let leftover = staged_path(&rig.path());
+        fs::write(&leftover, fs::read(rig.path()).unwrap()).unwrap();
+        assert!(s.sign_out().unwrap());
+        assert!(!leftover.exists());
+        assert!(!rig.path().exists());
+
+        // Nothing reads the copy, but it holds the cookie.
+        fs::write(&leftover, COOKIE).unwrap();
+        assert_eq!(rig.session().account(), None);
+        assert!(!s.sign_out().unwrap());
+        assert!(!leftover.exists());
+    }
+
+    #[test]
+    fn a_session_that_cannot_be_deleted_stays_signed_in() {
+        let rig = Rig::new();
+        let s = rig.signed_in();
+        let dir = rig.path().parent().unwrap().to_owned();
+        fs::set_permissions(&dir, fs::Permissions::from_mode(0o500)).unwrap();
+        let out = s.sign_out();
+        let restarted = rig.session().account();
+        fs::set_permissions(&dir, fs::Permissions::from_mode(0o700)).unwrap();
+        let e = out.unwrap_err().to_string();
+        assert!(e.contains("cannot delete the browser session"), "{e}");
+        assert!(!e.contains(SECRET), "{e}");
+        assert!(s.account().is_some());
+        assert!(restarted.is_some());
+        // Once it can be, it goes.
+        assert!(s.sign_out().unwrap());
+        assert!(!rig.path().exists());
     }
 
     #[test]
