@@ -1,17 +1,29 @@
-//! Innertube browse pages: playlists (`VL…`) and albums (`MPREb_…`).
-//! Only the first page is read; continuations are not followed.
+//! Innertube browse pages: the home feed, the Library's playlists, playlists (`VL…`) and
+//! albums (`MPREb_…`). Only Home's continuations are followed.
 
-use requiem_core::{CollectionKind, Item, ProviderError, ProviderId, Shelf, Track, TrackId};
+use requiem_core::{
+    Collection, CollectionId, CollectionKind, Item, ProviderError, ProviderId, Shelf, Track,
+    TrackId,
+};
 use serde::Deserialize;
 use serde_json::Value;
 
 use super::{
-    ListItem, PROVIDER, Run, Runs, SEPARATOR, Thumbnail, collect_items, column_runs, largest,
-    largest_thumbnail, parse_duration, parse_err, parse_subtitle,
+    ListItem, NavEndpoint, PROVIDER, Run, Runs, SEPARATOR, Thumbnail, collect_items, column_runs,
+    largest, largest_thumbnail, parse_duration, parse_err, parse_subtitle,
 };
 
 /// Prefix of collection ids that are Innertube browse ids.
 pub(crate) const BROWSE_PREFIX: &str = "browse:";
+
+#[derive(Deserialize, Default)]
+#[serde(default, rename_all = "camelCase")]
+struct TwoRowItem {
+    title: Option<Runs>,
+    subtitle: Option<Runs>,
+    navigation_endpoint: Option<NavEndpoint>,
+    thumbnail_renderer: Option<Thumbnail>,
+}
 
 #[derive(Deserialize, Default)]
 #[serde(default, rename_all = "camelCase")]
@@ -38,6 +50,17 @@ fn root(body: &[u8], what: &str) -> Result<Value, ProviderError> {
     let root: Value =
         serde_json::from_slice(body).map_err(|e| parse_err(format!("{what} json: {e}")))?;
     if root.get("contents").is_none() {
+        return Err(parse_err(format!("{what} response has no contents")));
+    }
+    Ok(root)
+}
+
+/// A first page carries `contents`; a page fetched by its continuation token,
+/// `continuationContents`.
+fn page_root(body: &[u8], what: &str) -> Result<Value, ProviderError> {
+    let root: Value =
+        serde_json::from_slice(body).map_err(|e| parse_err(format!("{what} json: {e}")))?;
+    if root.get("contents").is_none() && root.get("continuationContents").is_none() {
         return Err(parse_err(format!("{what} response has no contents")));
     }
     Ok(root)
@@ -118,6 +141,150 @@ fn list_item_track(item: &ListItem) -> Option<Track> {
     })
 }
 
+/// A carousel card: a playlist, an album, or a song. Artists and other pages are skipped.
+fn two_row_item(item: &TwoRowItem) -> Option<Item> {
+    let title = joined(item.title.as_ref());
+    let first_run = item.title.as_ref().and_then(|t| t.runs.first());
+    let nav = item
+        .navigation_endpoint
+        .as_ref()
+        .or_else(|| first_run?.navigation_endpoint.as_ref())?;
+    let artwork_url = largest(item.thumbnail_renderer.as_ref());
+    let browse_id = nav
+        .browse_endpoint
+        .as_ref()
+        .and_then(|b| b.browse_id.clone());
+    // A mix opens as the playlist it plays.
+    let mix = || {
+        let id = nav
+            .watch_playlist_endpoint
+            .as_ref()?
+            .playlist_id
+            .as_deref()?;
+        (!id.is_empty()).then(|| format!("VL{id}"))
+    };
+    if let Some(browse_id) = browse_id.or_else(mix) {
+        if !(browse_id.starts_with("VL") || browse_id.starts_with("MPREb_")) {
+            return None;
+        }
+        let subtitle = joined(item.subtitle.as_ref());
+        return Some(Item::Collection(Collection {
+            id: CollectionId {
+                provider: ProviderId(PROVIDER.to_owned()),
+                id: format!("{BROWSE_PREFIX}{browse_id}"),
+            },
+            kind: collection_kind(&browse_id),
+            title,
+            subtitle: Some(subtitle.trim().to_owned()).filter(|s| !s.is_empty()),
+            artwork_url,
+        }));
+    }
+    let id = nav.watch_endpoint.as_ref()?.video_id.clone()?;
+    let runs = item
+        .subtitle
+        .as_ref()
+        .map_or(&[][..], |s| s.runs.as_slice());
+    // "Song • Artist • Album": the leading type label is not an artist.
+    let runs = match runs {
+        [label, sep, rest @ ..]
+            if matches!(label.text.as_deref(), Some("Song" | "Video"))
+                && sep.text.as_deref() == Some(SEPARATOR) =>
+        {
+            rest
+        }
+        _ => runs,
+    };
+    let sub = parse_subtitle(runs);
+    Some(Item::Track(Track {
+        id: TrackId {
+            provider: ProviderId(PROVIDER.to_owned()),
+            id,
+        },
+        title,
+        artists: sub.artists,
+        album: sub.album,
+        duration: sub.duration,
+        artwork_url,
+    }))
+}
+
+/// One page of the home feed.
+#[derive(Debug, Default, PartialEq)]
+pub(crate) struct HomePage {
+    pub shelves: Vec<Shelf>,
+    /// The token that fetches the next page.
+    pub next: Option<String>,
+}
+
+/// A page of the home feed, the first or a continuation: its carousels, empty ones left out,
+/// and the next page's token. Songs here may carry no duration.
+pub(crate) fn parse_home(body: &[u8]) -> Result<HomePage, ProviderError> {
+    let root = page_root(body, "home")?;
+    let mut carousels = Vec::new();
+    find_all(&root, &["musicCarouselShelfRenderer"], &mut carousels);
+    let shelves = carousels
+        .into_iter()
+        .filter_map(|c| {
+            let title = c
+                .pointer("/header/musicCarouselShelfBasicHeaderRenderer/title")
+                .and_then(|t| Runs::deserialize(t).ok());
+            let items: Vec<Item> = c
+                .get("contents")
+                .and_then(Value::as_array)?
+                .iter()
+                .filter_map(|entry| {
+                    if let Some(v) = entry.get("musicTwoRowItemRenderer") {
+                        two_row_item(&TwoRowItem::deserialize(v).ok()?)
+                    } else {
+                        let v = entry.get("musicResponsiveListItemRenderer")?;
+                        list_item_track(&ListItem::deserialize(v).ok()?).map(Item::Track)
+                    }
+                })
+                .collect();
+            (!items.is_empty()).then(|| Shelf {
+                title: joined(title.as_ref()),
+                items,
+            })
+        })
+        .collect();
+    let mut lists = Vec::new();
+    find_all(
+        &root,
+        &["sectionListRenderer", "sectionListContinuation"],
+        &mut lists,
+    );
+    let next = lists.first().and_then(|l| {
+        l.get("continuations")?
+            .as_array()?
+            .iter()
+            .find_map(|c| c.pointer("/nextContinuationData/continuation")?.as_str())
+            .filter(|t| !t.is_empty())
+            .map(str::to_owned)
+    });
+    Ok(HomePage { shelves, next })
+}
+
+/// The playlists on the Library's Playlists tab. Its first tile makes a new playlist and opens
+/// nothing, so it is left out with any other card that is not a collection.
+pub(crate) fn parse_library_playlists(body: &[u8]) -> Result<Vec<Collection>, ProviderError> {
+    let root = root(body, "library")?;
+    let mut grids = Vec::new();
+    find_all(&root, &["gridRenderer"], &mut grids);
+    let collections = grids
+        .iter()
+        .filter_map(|g| g.get("items")?.as_array())
+        .flatten()
+        .filter_map(|entry| {
+            let v = entry.get("musicTwoRowItemRenderer")?;
+            match two_row_item(&TwoRowItem::deserialize(v).ok()?)? {
+                Item::Collection(c) => Some(c),
+                Item::Track(_) => None,
+            }
+        })
+        .collect();
+    Ok(collections)
+}
+
 /// A playlist or album page as one shelf named after it. Album rows leave out the artist
 /// and artwork, which come from the page header.
 pub(crate) fn parse_collection(body: &[u8], kind: CollectionKind) -> Result<Shelf, ProviderError> {
@@ -183,6 +350,7 @@ mod tests {
 
     use super::*;
 
+    const HOME: &str = include_str!("../../tests/fixtures/browse_home.json");
     const PLAYLIST: &str = include_str!("../../tests/fixtures/browse_playlist.json");
     const ALBUM: &str = include_str!("../../tests/fixtures/browse_album.json");
 
@@ -191,6 +359,195 @@ mod tests {
             Item::Track(t) => t,
             Item::Collection(c) => panic!("not a track: {c:?}"),
         }
+    }
+
+    fn collection(item: &Item) -> &Collection {
+        match item {
+            Item::Collection(c) => c,
+            Item::Track(t) => panic!("not a collection: {t:?}"),
+        }
+    }
+
+    #[test]
+    fn home_fixture_shelves() {
+        let page = parse_home(HOME.as_bytes()).unwrap();
+        assert!(
+            page.next
+                .as_deref()
+                .unwrap()
+                .starts_with("4qmFsgKhAhIMRkVtdXNpY19ob21l")
+        );
+        let shelves = page.shelves;
+        let titles: Vec<&str> = shelves.iter().map(|s| s.title.as_str()).collect();
+        assert_eq!(titles, ["Quick picks", "Trending community playlists"]);
+
+        let picks = &shelves[0].items;
+        assert_eq!(picks.len(), 3);
+        let t = track(&picks[0]);
+        assert_eq!(t.id.id, "FV_SqGu4IzE");
+        assert_eq!(t.id.provider, ProviderId("ytmusic".into()));
+        assert_eq!(t.title, "Amor Factura");
+        assert_eq!(t.artists, ["Ricardo Arjona", "Grupo Firme"]);
+        assert_eq!(t.album.as_deref(), Some("Amor Factura"));
+        assert_eq!(t.duration, None);
+        assert!(
+            t.artwork_url
+                .as_deref()
+                .unwrap()
+                .contains("yt3.googleusercontent.com")
+        );
+        let t = track(&picks[1]);
+        assert_eq!(t.title, "Patient Zero");
+        assert_eq!(t.artists, ["Taylor Swift"]);
+        assert_eq!(
+            t.album.as_deref(),
+            Some("The Life of a Showgirl: The Encore")
+        );
+
+        let lists = &shelves[1].items;
+        assert_eq!(lists.len(), 3);
+        let c = collection(&lists[0]);
+        assert_eq!(c.id.id, "browse:VLPLW0lk8zFei2v91CDXtie506Q669dkKQQu");
+        assert_eq!(c.kind, CollectionKind::Playlist);
+        assert_eq!(c.title, "เพลงไว้ฟังขับรถ");
+        assert_eq!(c.subtitle.as_deref(), Some("Metha Kunsamut • 1.5M views"));
+        let art = c.artwork_url.as_deref().unwrap();
+        let raw: Value = serde_json::from_str(HOME).unwrap();
+        let mut thumbs = Vec::new();
+        find_all(&raw, &["musicTwoRowItemRenderer"], &mut thumbs);
+        let biggest = thumbs[0]
+            .pointer("/thumbnailRenderer/musicThumbnailRenderer/thumbnail/thumbnails")
+            .and_then(Value::as_array)
+            .unwrap()
+            .iter()
+            .max_by_key(|t| t["width"].as_u64())
+            .unwrap()["url"]
+            .as_str()
+            .unwrap();
+        assert_eq!(art, biggest);
+    }
+
+    #[test]
+    fn home_skips_empty_shelves_and_unknown_cards() {
+        let body = r#"{"contents":{"sectionListRenderer":{"contents":[
+            {"musicCarouselShelfRenderer":{"header":{"musicCarouselShelfBasicHeaderRenderer":
+                {"title":{"runs":[{"text":"Artists"}]}}},
+             "contents":[{"musicTwoRowItemRenderer":{"title":{"runs":[{"text":"Someone"}]},
+                "navigationEndpoint":{"browseEndpoint":{"browseId":"UCabc"}}}}]}},
+            {"musicCarouselShelfRenderer":{"header":{"musicCarouselShelfBasicHeaderRenderer":
+                {"title":{"runs":[{"text":"Mixed"}]}}},
+             "contents":[
+               {"musicTwoRowItemRenderer":{"title":{"runs":[{"text":"Homework"}]},
+                  "subtitle":{"runs":[{"text":"Album"},{"text":" • "},{"text":"Daft Punk"}]},
+                  "navigationEndpoint":{"browseEndpoint":{"browseId":"MPREb_abc"}}}},
+               {"musicTwoRowItemRenderer":{"title":{"runs":[{"text":"One More Time"}]},
+                  "subtitle":{"runs":[{"text":"Song"},{"text":" • "},{"text":"Daft Punk"}]},
+                  "navigationEndpoint":{"watchEndpoint":{"videoId":"FGBhQbmPwH8"}}}},
+               {"musicResponsiveListItemRenderer":{"flexColumns":[]}}]}}]}}}"#;
+        let HomePage { shelves, next } = parse_home(body.as_bytes()).unwrap();
+        assert_eq!(next, None);
+        assert_eq!(shelves.len(), 1);
+        assert_eq!(shelves[0].title, "Mixed");
+        assert_eq!(shelves[0].items.len(), 2);
+        let album = collection(&shelves[0].items[0]);
+        assert_eq!(album.id.id, "browse:MPREb_abc");
+        assert_eq!(album.kind, CollectionKind::Album);
+        let song = track(&shelves[0].items[1]);
+        assert_eq!(song.id.id, "FGBhQbmPwH8");
+        assert_eq!(song.artists, ["Daft Punk"]);
+    }
+
+    // Synthetic, hand-built to the paths ytmusicapi reads: a signed-in Home's first page and a
+    // continuation of it, and the Library's Playlists tab. No value in them is real.
+    const SIGNED_IN_HOME: &str = include_str!("../../tests/fixtures/signed_in_home.json");
+    const HOME_CONTINUATION: &str =
+        include_str!("../../tests/fixtures/signed_in_home_continuation.json");
+    const LIBRARY: &str = include_str!("../../tests/fixtures/signed_in_library_playlists.json");
+
+    fn ids(shelf: &Shelf) -> Vec<&str> {
+        shelf
+            .items
+            .iter()
+            .map(|i| match i {
+                Item::Track(t) => t.id.id.as_str(),
+                Item::Collection(c) => c.id.id.as_str(),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn signed_in_home_has_songs_without_durations_mixes_and_a_next_page() {
+        let page = parse_home(SIGNED_IN_HOME.as_bytes()).unwrap();
+        assert_eq!(page.next.as_deref(), Some("FAKE-CONTINUATION-1"));
+        let titles: Vec<&str> = page.shelves.iter().map(|s| s.title.as_str()).collect();
+        assert_eq!(titles, ["Quick picks", "Mixed for you", "Listen again"]);
+
+        assert_eq!(ids(&page.shelves[0]), ["fakeVid0001", "fakeVid0002"]);
+        let one = track(&page.shelves[0].items[0]);
+        assert_eq!(one.title, "Fake Song One");
+        assert_eq!(one.artists, ["Fake Artist"]);
+        assert_eq!(one.album.as_deref(), Some("Fake Album"));
+        assert_eq!(one.duration, None);
+        assert_eq!(
+            one.artwork_url.as_deref(),
+            Some("https://lh3.googleusercontent.com/fake-one=w120-h120")
+        );
+        let two = track(&page.shelves[0].items[1]);
+        assert_eq!(two.artists, ["Another Fake Artist"]);
+        assert_eq!(two.duration, Some(Duration::from_secs(3 * 60 + 25)));
+
+        assert_eq!(
+            ids(&page.shelves[1]),
+            ["browse:VLRDTMAKfakeSupermix01", "browse:VLRDCLAKfakeMix02"]
+        );
+        let mix = collection(&page.shelves[1].items[0]);
+        assert_eq!(mix.kind, CollectionKind::Playlist);
+        assert_eq!(mix.title, "My Supermix");
+        assert!(mix.artwork_url.as_deref().unwrap().ends_with("w544-h544"));
+
+        // The artist card and the podcast episode are skipped.
+        assert_eq!(
+            ids(&page.shelves[2]),
+            ["fakeVid0003", "browse:MPREb_fakeAlbum01"]
+        );
+        assert_eq!(track(&page.shelves[2].items[0]).artists, ["Fake Artist"]);
+    }
+
+    #[test]
+    fn a_home_continuation_parses_as_a_page() {
+        let page = parse_home(HOME_CONTINUATION.as_bytes()).unwrap();
+        assert_eq!(page.next.as_deref(), Some("FAKE-CONTINUATION-2"));
+        assert_eq!(page.shelves.len(), 4);
+        assert_eq!(page.shelves[0].title, "Your favorites");
+        assert_eq!(ids(&page.shelves[1]), ["fakeVid0004"]);
+        let last = br#"{"continuationContents":{"sectionListContinuation":{"contents":[]}}}"#;
+        assert_eq!(parse_home(last).unwrap(), HomePage::default());
+        assert!(matches!(parse_home(b"{}"), Err(ProviderError::Parse(_))));
+    }
+
+    #[test]
+    fn library_playlists_skip_the_new_playlist_tile_and_unknown_cards() {
+        let lists = parse_library_playlists(LIBRARY.as_bytes()).unwrap();
+        let ids: Vec<&str> = lists.iter().map(|c| c.id.id.as_str()).collect();
+        assert_eq!(
+            ids,
+            [
+                "browse:VLLM",
+                "browse:VLPLfakeRoadTrip01",
+                "browse:VLPLfakeNight02"
+            ]
+        );
+        let road = &lists[1];
+        assert_eq!(road.title, "Road trip");
+        assert_eq!(
+            road.subtitle.as_deref(),
+            Some("Playlist • Requiem Tester • 12 tracks")
+        );
+        assert!(road.artwork_url.is_some());
+        assert!(matches!(
+            parse_library_playlists(b"{}"),
+            Err(ProviderError::Parse(_))
+        ));
     }
 
     #[test]
@@ -241,6 +598,7 @@ mod tests {
     fn collection_kinds_and_bad_bodies() {
         assert_eq!(collection_kind("MPREb_x"), CollectionKind::Album);
         assert_eq!(collection_kind("VLPLx"), CollectionKind::Playlist);
+        assert!(matches!(parse_home(b"{}"), Err(ProviderError::Parse(_))));
         assert!(matches!(
             parse_collection(b"nope", CollectionKind::Album),
             Err(ProviderError::Parse(_))

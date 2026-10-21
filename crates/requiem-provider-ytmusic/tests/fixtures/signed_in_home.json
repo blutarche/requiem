@@ -1,0 +1,265 @@
+{
+  "responseContext": {
+    "serviceTrackingParams": [
+      {
+        "service": "GFEEDBACK",
+        "params": [
+          { "key": "logged_in", "value": "1" },
+          { "key": "e", "value": "1" }
+        ]
+      }
+    ]
+  },
+  "contents": {
+    "singleColumnBrowseResultsRenderer": {
+      "tabs": [
+        {
+          "tabRenderer": {
+            "content": {
+              "sectionListRenderer": {
+                "contents": [
+                  {
+                    "musicCarouselShelfRenderer": {
+                      "header": {
+                        "musicCarouselShelfBasicHeaderRenderer": {
+                          "title": { "runs": [{ "text": "Quick picks" }] }
+                        }
+                      },
+                      "contents": [
+                        {
+                          "musicResponsiveListItemRenderer": {
+                            "thumbnail": {
+                              "musicThumbnailRenderer": {
+                                "thumbnail": {
+                                  "thumbnails": [
+                                    { "url": "https://lh3.googleusercontent.com/fake-one=w60-h60", "width": 60, "height": 60 },
+                                    { "url": "https://lh3.googleusercontent.com/fake-one=w120-h120", "width": 120, "height": 120 }
+                                  ]
+                                }
+                              }
+                            },
+                            "flexColumns": [
+                              {
+                                "musicResponsiveListItemFlexColumnRenderer": {
+                                  "text": {
+                                    "runs": [
+                                      {
+                                        "text": "Fake Song One",
+                                        "navigationEndpoint": {
+                                          "watchEndpoint": { "videoId": "fakeVid0001", "playlistId": "RDAMVMfakeVid0001" }
+                                        }
+                                      }
+                                    ]
+                                  }
+                                }
+                              },
+                              {
+                                "musicResponsiveListItemFlexColumnRenderer": {
+                                  "text": {
+                                    "runs": [
+                                      {
+                                        "text": "Fake Artist",
+                                        "navigationEndpoint": {
+                                          "browseEndpoint": {
+                                            "browseId": "UCfakeArtist0001",
+                                            "browseEndpointContextSupportedConfigs": {
+                                              "browseEndpointContextMusicConfig": { "pageType": "MUSIC_PAGE_TYPE_ARTIST" }
+                                            }
+                                          }
+                                        }
+                                      }
+                                    ]
+                                  }
+                                }
+                              },
+                              {
+                                "musicResponsiveListItemFlexColumnRenderer": {
+                                  "text": {
+                                    "runs": [
+                                      {
+                                        "text": "Fake Album",
+                                        "navigationEndpoint": {
+                                          "browseEndpoint": {
+                                            "browseId": "MPREb_fakeAlbum01",
+                                            "browseEndpointContextSupportedConfigs": {
+                                              "browseEndpointContextMusicConfig": { "pageType": "MUSIC_PAGE_TYPE_ALBUM" }
+                                            }
+                                          }
+                                        }
+                                      }
+                                    ]
+                                  }
+                                }
+                              }
+                            ],
+                            "playlistItemData": { "videoId": "fakeVid0001" }
+                          }
+                        },
+                        {
+                          "musicResponsiveListItemRenderer": {
+                            "flexColumns": [
+                              {
+                                "musicResponsiveListItemFlexColumnRenderer": {
+                                  "text": {
+                                    "runs": [
+                                      {
+                                        "text": "Fake Song Two",
+                                        "navigationEndpoint": { "watchEndpoint": { "videoId": "fakeVid0002" } }
+                                      }
+                                    ]
+                                  }
+                                }
+                              },
+                              {
+                                "musicResponsiveListItemFlexColumnRenderer": {
+                                  "text": { "runs": [{ "text": "Another Fake Artist" }] }
+                                }
+                              }
+                            ],
+                            "fixedColumns": [
+                              {
+                                "musicResponsiveListItemFixedColumnRenderer": {
+                                  "text": { "runs": [{ "text": "3:25" }] }
+                                }
+                              }
+                            ]
+                          }
+                        },
+                        {
+                          "musicResponsiveListItemRenderer": {
+                            "flexColumns": [
+                              {
+                                "musicResponsiveListItemFlexColumnRenderer": {
+                                  "text": { "runs": [{ "text": "A deleted upload, with nowhere to go" }] }
+                                }
+                              }
+                            ]
+                          }
+                        }
+                      ]
+                    }
+                  },
+                  {
+                    "musicCarouselShelfRenderer": {
+                      "header": {
+                        "musicCarouselShelfBasicHeaderRenderer": {
+                          "title": { "runs": [{ "text": "Mixed for you" }] }
+                        }
+                      },
+                      "contents": [
+                        {
+                          "musicTwoRowItemRenderer": {
+                            "title": { "runs": [{ "text": "My Supermix" }] },
+                            "subtitle": { "runs": [{ "text": "Fake Artist, Another Fake Artist and more" }] },
+                            "navigationEndpoint": {
+                              "watchPlaylistEndpoint": { "playlistId": "RDTMAKfakeSupermix01", "params": "wAEB" }
+                            },
+                            "thumbnailRenderer": {
+                              "musicThumbnailRenderer": {
+                                "thumbnail": {
+                                  "thumbnails": [
+                                    { "url": "https://lh3.googleusercontent.com/fake-mix=w226-h226", "width": 226, "height": 226 },
+                                    { "url": "https://lh3.googleusercontent.com/fake-mix=w544-h544", "width": 544, "height": 544 }
+                                  ]
+                                }
+                              }
+                            }
+                          }
+                        },
+                        {
+                          "musicTwoRowItemRenderer": {
+                            "title": {
+                              "runs": [
+                                {
+                                  "text": "My Mix 2",
+                                  "navigationEndpoint": {
+                                    "browseEndpoint": {
+                                      "browseId": "VLRDCLAKfakeMix02",
+                                      "browseEndpointContextSupportedConfigs": {
+                                        "browseEndpointContextMusicConfig": { "pageType": "MUSIC_PAGE_TYPE_PLAYLIST" }
+                                      }
+                                    }
+                                  }
+                                }
+                              ]
+                            },
+                            "subtitle": { "runs": [{ "text": "Mix" }, { "text": " • " }, { "text": "YouTube Music" }] }
+                          }
+                        }
+                      ]
+                    }
+                  },
+                  {
+                    "musicTastebuilderShelfRenderer": {
+                      "primaryText": { "runs": [{ "text": "Tell us which artists you like" }] }
+                    }
+                  },
+                  {
+                    "musicCarouselShelfRenderer": {
+                      "header": {
+                        "musicCarouselShelfBasicHeaderRenderer": {
+                          "title": { "runs": [{ "text": "Listen again" }] }
+                        }
+                      },
+                      "contents": [
+                        {
+                          "musicTwoRowItemRenderer": {
+                            "title": { "runs": [{ "text": "Fake Song Three" }] },
+                            "subtitle": {
+                              "runs": [
+                                { "text": "Song" },
+                                { "text": " • " },
+                                {
+                                  "text": "Fake Artist",
+                                  "navigationEndpoint": {
+                                    "browseEndpoint": {
+                                      "browseId": "UCfakeArtist0001",
+                                      "browseEndpointContextSupportedConfigs": {
+                                        "browseEndpointContextMusicConfig": { "pageType": "MUSIC_PAGE_TYPE_ARTIST" }
+                                      }
+                                    }
+                                  }
+                                }
+                              ]
+                            },
+                            "navigationEndpoint": { "watchEndpoint": { "videoId": "fakeVid0003" } }
+                          }
+                        },
+                        {
+                          "musicTwoRowItemRenderer": {
+                            "title": { "runs": [{ "text": "Fake Album" }] },
+                            "subtitle": { "runs": [{ "text": "Album" }, { "text": " • " }, { "text": "Fake Artist" }] },
+                            "navigationEndpoint": { "browseEndpoint": { "browseId": "MPREb_fakeAlbum01" } }
+                          }
+                        },
+                        {
+                          "musicTwoRowItemRenderer": {
+                            "title": { "runs": [{ "text": "Fake Artist" }] },
+                            "navigationEndpoint": { "browseEndpoint": { "browseId": "UCfakeArtist0001" } }
+                          }
+                        },
+                        {
+                          "musicMultiRowListItemRenderer": {
+                            "title": { "runs": [{ "text": "A podcast episode" }] }
+                          }
+                        }
+                      ]
+                    }
+                  }
+                ],
+                "continuations": [
+                  {
+                    "nextContinuationData": {
+                      "continuation": "FAKE-CONTINUATION-1",
+                      "clickTrackingParams": "FAKE"
+                    }
+                  }
+                ]
+              }
+            }
+          }
+        }
+      ]
+    }
+  }
+}

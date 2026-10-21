@@ -10,7 +10,9 @@ use serde_json::Value;
 
 mod browse;
 
-pub(crate) use browse::{BROWSE_PREFIX, collection_kind, parse_collection};
+pub(crate) use browse::{
+    BROWSE_PREFIX, HomePage, collection_kind, parse_collection, parse_home, parse_library_playlists,
+};
 
 pub(crate) const PROVIDER: &str = "ytmusic";
 
@@ -33,6 +35,19 @@ struct VisitorEnvelope {
 pub(crate) fn visitor_data(body: &[u8]) -> Option<String> {
     let env: VisitorEnvelope = serde_json::from_slice(body).ok()?;
     env.response_context?.visitor_data.filter(|v| !v.is_empty())
+}
+
+/// Whether YouTube took the request as signed in: the `logged_in` tracking param, which a
+/// response may leave out.
+pub(crate) fn logged_in(root: &Value) -> Option<bool> {
+    root.pointer("/responseContext/serviceTrackingParams")?
+        .as_array()?
+        .iter()
+        .filter_map(|s| s.get("params")?.as_array())
+        .flatten()
+        .find(|p| p.get("key").and_then(Value::as_str) == Some("logged_in"))
+        .and_then(|p| p.get("value")?.as_str())
+        .map(|v| v == "1")
 }
 
 // ---------------------------------------------------------------- search
@@ -90,11 +105,19 @@ struct Run {
 struct NavEndpoint {
     browse_endpoint: Option<BrowseEndpoint>,
     watch_endpoint: Option<WatchEndpoint>,
+    watch_playlist_endpoint: Option<WatchPlaylistEndpoint>,
+}
+
+#[derive(Deserialize, Default)]
+#[serde(default, rename_all = "camelCase")]
+struct WatchPlaylistEndpoint {
+    playlist_id: Option<String>,
 }
 
 #[derive(Deserialize, Default)]
 #[serde(default, rename_all = "camelCase")]
 struct BrowseEndpoint {
+    browse_id: Option<String>,
     browse_endpoint_context_supported_configs: Option<BrowseConfigs>,
 }
 
@@ -574,6 +597,19 @@ mod tests {
         assert!(s.contains("musicResponsiveListItemRenderer"), "{s}");
         assert!(!s.contains("Around the World"), "{s}");
         assert!(structure_summary(b"nope").contains("not json"));
+    }
+
+    #[test]
+    fn logged_in_reads_the_tracking_param() {
+        let with = |v: &str| {
+            serde_json::json!({"responseContext": {"serviceTrackingParams": [
+                {"service": "CSI", "params": [{"key": "c", "value": "WEB_REMIX"}]},
+                {"service": "GFEEDBACK", "params": [{"key": "logged_in", "value": v}]}]}})
+        };
+        assert_eq!(logged_in(&with("1")), Some(true));
+        assert_eq!(logged_in(&with("0")), Some(false));
+        assert_eq!(logged_in(&serde_json::json!({"responseContext": {}})), None);
+        assert_eq!(logged_in(&serde_json::json!([])), None);
     }
 
     #[test]
