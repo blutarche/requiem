@@ -11,7 +11,7 @@ use requiem_cli::remote::{RemotePlayer, daemon_exe};
 use requiem_core::{EngineEventSink, Session, SessionConfig};
 use requiem_provider_ytmusic::{YtMusicOptions, YtMusicProvider};
 
-const USAGE: &str = "usage: requiem [--script <file|->] [--connect [--json]] [--prefer-aac] [--help]\n       requiem [--json] update [check|install]\n       requiem --version\n  --connect  drive the requiemd daemon (started if not running) instead of playing in-process\n  --script -  read the script from stdin\n  --json     with --connect: print one JSON object per line instead of text\n  update     the daemon's self-update status; check checks now, install restarts to the ready update";
+const USAGE: &str = "usage: requiem [--script <file|->] [--connect [--json]] [--prefer-aac] [--help]\n       requiem [--json] update [check|install]\n       requiem [--json] signin-browser <provider> <file|->\n       requiem --version\n  --connect  drive the requiemd daemon (started if not running) instead of playing in-process\n  --script -  read the script from stdin\n  --json     with --connect: print one JSON object per line instead of text\n  update     the daemon's self-update status; check checks now, install restarts to the ready update\n  signin-browser  sign the daemon in with the request headers of a signed-in browser tab, from a file or stdin (-)";
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(3);
 
@@ -23,6 +23,10 @@ struct Args {
     version: bool,
     /// The script-mode `update` line to run against the daemon.
     update: Option<String>,
+    /// `signin-browser`'s provider and the file its paste is in, `-` for stdin.
+    signin_browser: Option<(String, String)>,
+    /// The paste, read before the daemon is reached.
+    paste: String,
 }
 
 fn parse_args() -> Result<Option<Args>, String> {
@@ -33,6 +37,8 @@ fn parse_args() -> Result<Option<Args>, String> {
         prefer_aac: false,
         version: false,
         update: None,
+        signin_browser: None,
+        paste: String::new(),
     };
     let mut it = std::env::args().skip(1).peekable();
     while let Some(a) = it.next() {
@@ -52,12 +58,27 @@ fn parse_args() -> Result<Option<Args>, String> {
                 };
                 args.update = Some(line);
             }
+            "signin-browser" if args.signin_browser.is_none() => {
+                let (Some(provider), Some(path)) = (it.next(), it.next()) else {
+                    return Err("signin-browser needs a provider and a file, or - for stdin".into());
+                };
+                args.signin_browser = Some((provider, path));
+            }
             other => return Err(format!("unknown argument {other}")),
         }
+    }
+    if args.update.is_some() && args.signin_browser.is_some() {
+        return Err("update and signin-browser run one at a time".into());
     }
     if args.update.is_some() {
         if args.script.is_some() || args.prefer_aac {
             return Err("update takes only --json".into());
+        }
+        args.connect = true;
+    }
+    if args.signin_browser.is_some() {
+        if args.script.is_some() || args.prefer_aac {
+            return Err("signin-browser takes only --json".into());
         }
         args.connect = true;
     }
@@ -71,7 +92,7 @@ fn parse_args() -> Result<Option<Args>, String> {
 }
 
 fn main() -> ExitCode {
-    let args = match parse_args() {
+    let mut args = match parse_args() {
         Ok(Some(a)) => a,
         Ok(None) => {
             println!("{USAGE}");
@@ -85,6 +106,16 @@ fn main() -> ExitCode {
     if args.version {
         println!("requiem {}", env!("CARGO_PKG_VERSION"));
         return ExitCode::SUCCESS;
+    }
+    if let Some((_, path)) = &args.signin_browser {
+        match app::read_paste(path) {
+            Ok(paste) => args.paste = paste,
+            Err(e) => {
+                let shown = if path == "-" { "stdin" } else { path };
+                fail(&args, &format!("signin-browser: {shown}: {e}"));
+                return ExitCode::from(2);
+            }
+        }
     }
 
     if args.connect {
@@ -157,6 +188,10 @@ fn drive(player: &dyn Player, args: &Args) -> ExitCode {
     } else {
         Format::Text
     };
+    if let Some((provider, _)) = &args.signin_browser {
+        let code = app::run_signin_browser(player, provider, &args.paste, io::stdout(), format);
+        return ExitCode::from(code);
+    }
     let result = match (&args.update, args.script.as_deref()) {
         (Some(line), _) => Ok(app::run_update(player, line, io::stdout(), format)),
         (None, Some("-")) => {

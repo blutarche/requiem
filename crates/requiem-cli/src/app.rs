@@ -21,10 +21,10 @@ const SYNC_TIMEOUT: Duration = Duration::from_secs(2);
 const SIGN_IN_START: Duration = Duration::from_secs(60);
 /// How long `signin` waits past the code's expiry for the provider to report it.
 const SIGN_IN_GRACE: Duration = Duration::from_secs(30);
-/// How long `signout` and `signin-client` wait for the provider to report it; Google's
-/// revoke, the slowest part, gives up within 15 s.
+/// How long `signout`, `signin-client` and `signin-browser` wait for the provider to report
+/// it; Google's revoke, the slowest part, gives up within 15 s.
 const SIGN_OUT_WAIT: Duration = Duration::from_secs(30);
-/// The largest file `signin-client` sends; providers take no more.
+/// The largest file `signin-client` or `signin-browser` sends; providers take no more.
 const MAX_CLIENT_FILE: u64 = 64 * 1024;
 
 /// How long `update check` waits: a check, a 10 min download, then staging.
@@ -63,6 +63,11 @@ commands:
   signin-client <provider> <path>
                         give the provider your own OAuth client, the JSON file its console
                         downloads (ytmusic: Google Cloud); waits until the provider reports it
+  signin-browser <provider> <path|->
+                        sign in with the request headers copied from a signed-in browser tab
+                        (ytmusic: a music.youtube.com request named browse), saved to a file;
+                        - (stdin) works as `requiem signin-browser <provider> -`; waits until
+                        the provider reports it
   account               show the sign-in state
   mark <name>           print MARK <name> <unix_millis>
   update                with --connect: the self-update status
@@ -654,9 +659,24 @@ fn unix_now() -> u64 {
 
 /// The file's text, up to `MAX_CLIENT_FILE` bytes. Errors never quote it.
 fn read_client_file(path: &str) -> Result<String, String> {
+    read_capped(File::open(path).map_err(|e| e.to_string())?)
+}
+
+/// The text of the file at `path`, or of stdin for `-`, up to the most `signin-browser`
+/// sends. Errors never quote it.
+pub fn read_paste(path: &str) -> Result<String, String> {
+    if path == "-" {
+        read_capped(io::stdin().lock())
+    } else {
+        read_client_file(path)
+    }
+}
+
+fn read_capped(reader: impl Read) -> Result<String, String> {
     let mut bytes = Vec::new();
-    File::open(path)
-        .and_then(|f| f.take(MAX_CLIENT_FILE + 1).read_to_end(&mut bytes))
+    reader
+        .take(MAX_CLIENT_FILE + 1)
+        .read_to_end(&mut bytes)
         .map_err(|e| e.to_string())?;
     if bytes.len() as u64 > MAX_CLIENT_FILE {
         return Err(format!("over {} KiB", MAX_CLIENT_FILE / 1024));
@@ -850,6 +870,7 @@ impl<'a> App<'a> {
             "signin" => return self.sign_in(cmd, arg),
             "signout" => return self.sign_out(cmd, arg),
             "signin-client" => return self.import_client(cmd, arg),
+            "signin-browser" => return self.import_browser(cmd, arg),
             "account" => {
                 let ui = self.accounts_known(None);
                 if ui.accounts.is_empty() {
@@ -1204,8 +1225,7 @@ impl<'a> App<'a> {
         self.failed()
     }
 
-    /// Reads the client file at the path in `arg`, sends `ImportSignInClient` and waits up to
-    /// `SIGN_OUT_WAIT` for the provider's account, the sign of success.
+    /// Reads the client file at the path in `arg` and sends it.
     fn import_client(&self, cmd: &str, arg: &str) -> Flow {
         let Some((name, path)) = arg
             .split_once(char::is_whitespace)
@@ -1221,6 +1241,43 @@ impl<'a> App<'a> {
                 return self.failed();
             }
         };
+        self.send_import(cmd, name, json)
+    }
+
+    /// `signin-client` for the headers of a signed-in browser tab's request, read from the
+    /// file at the path in `arg`.
+    fn import_browser(&self, cmd: &str, arg: &str) -> Flow {
+        let Some((name, path)) = arg
+            .split_once(char::is_whitespace)
+            .map(|(p, f)| (p, f.trim()))
+        else {
+            self.hub.error("usage: signin-browser <provider> <path|->");
+            return self.failed();
+        };
+        // The commands themselves come from stdin.
+        if path == "-" {
+            self.hub.error(&format!(
+                "signin-browser: - reads stdin only as `requiem signin-browser {name} -`"
+            ));
+            return self.failed();
+        }
+        match read_client_file(path) {
+            Ok(paste) => self.browser_session(cmd, name, &paste),
+            Err(e) => {
+                self.hub.error(&format!("signin-browser: {path}: {e}"));
+                self.failed()
+            }
+        }
+    }
+
+    /// Sends `paste` to the provider named `name` as a browser session to sign in with.
+    fn browser_session(&self, cmd: &str, name: &str, paste: &str) -> Flow {
+        self.send_import(cmd, name, json!({ "browser_session": paste }).to_string())
+    }
+
+    /// Sends `json` to the provider named `name` with `ImportSignInClient` and waits up to
+    /// `SIGN_OUT_WAIT` for the provider's account, the sign of success.
+    fn send_import(&self, cmd: &str, name: &str, json: String) -> Flow {
         let provider = ProviderId(name.to_owned());
         if !self.has_account(&provider) {
             return self.failed();
@@ -1241,7 +1298,7 @@ impl<'a> App<'a> {
             return self.failed();
         }
         if w.ended.is_none() {
-            self.hub.error("timed out waiting for signin-client");
+            self.hub.error(&format!("timed out waiting for {cmd}"));
             return self.failed();
         }
         self.hub.ack(cmd);
@@ -1539,6 +1596,25 @@ pub fn run_update(
         app.sync();
     }
     match app.exec(line) {
+        Flow::Continue | Flow::Quit => 0,
+        Flow::Exit(code) => code,
+    }
+}
+
+/// `requiem signin-browser`: signs `provider` in with `paste` as a one-line script would.
+/// Returns the exit code.
+pub fn run_signin_browser(
+    player: &dyn Player,
+    provider: &str,
+    paste: &str,
+    out: impl Write + Send + 'static,
+    format: Format,
+) -> u8 {
+    let app = App::with_format(player, out, true, format);
+    if player.remote() {
+        app.sync();
+    }
+    match app.browser_session("signin-browser", provider, paste) {
         Flow::Continue | Flow::Quit => 0,
         Flow::Exit(code) => code,
     }

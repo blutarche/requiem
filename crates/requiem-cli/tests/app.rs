@@ -1225,16 +1225,20 @@ fn a_failed_signin_client_says_why_and_exits_2_without_an_ack() {
 
 /// A daemon that answers an import with `answer`, each event a moment after the one before,
 /// as frames come over its socket.
+#[derive(Default)]
 struct ImportAnswer {
     answer: Vec<Event>,
     tx: Mutex<Option<crossbeam_channel::Sender<Event>>>,
+    /// The JSON of each import.
+    sent: Mutex<Vec<String>>,
 }
 
 impl app::Player for ImportAnswer {
     fn send(&self, cmd: Command) {
-        let Command::ImportSignInClient { .. } = cmd else {
+        let Command::ImportSignInClient { json, .. } = cmd else {
             return;
         };
+        self.sent.lock().unwrap().push(json.0);
         let tx = self.tx.lock().unwrap().clone().expect("subscribed");
         let answer = self.answer.clone();
         thread::spawn(move || {
@@ -1270,7 +1274,7 @@ fn import_answered(file: &str, answer: Vec<Event>) -> (u8, String) {
     let file = TempFile::new(file, CLIENT.as_bytes());
     let player = ImportAnswer {
         answer,
-        tx: Mutex::new(None),
+        ..ImportAnswer::default()
     };
     let out = Buf::default();
     let script = format!("signin-client fake {}\n", file.0.display());
@@ -1397,6 +1401,140 @@ fn signin_client_checks_its_arguments_and_file_before_sending() {
     let text = r.out.text();
     assert!(!text.contains("LEAKME"), "{text}");
     assert!(!text.contains("account"), "{text}");
+}
+
+/// Made-up request headers, as a browser's developer tools copy them.
+const HEADERS: &str =
+    "accept: */*\ncookie: SID=LEAKME; __Secure-3PAPISID=fake\nx-goog-authuser: 0\n";
+
+fn browser_session(paste: &str) -> String {
+    serde_json::json!({ "browser_session": paste }).to_string()
+}
+
+#[test]
+fn signin_browser_sends_the_file_as_a_browser_session_and_acks() {
+    let r = needs_setup_rig();
+    let file = TempFile::new("my headers.txt", HEADERS.as_bytes());
+    let app = r.json_app();
+    let line = format!("signin-browser fake {}", file.0.display());
+    assert_eq!(app.exec(&line), Flow::Continue);
+    assert_eq!(r.provider.imported(), [browser_session(HEADERS)]);
+    let lines = r.json_lines();
+    assert_eq!(
+        lines.last(),
+        Some(&serde_json::json!({"type": "ack", "command": "signin-browser"}))
+    );
+    assert!(of_type(&lines, "error").is_empty(), "{lines:?}");
+    assert!(!r.out.text().contains("LEAKME"));
+}
+
+#[test]
+fn a_refused_browser_session_says_why_and_exits_2() {
+    let r = needs_setup_rig();
+    let file = TempFile::new("refused.txt", HEADERS.as_bytes());
+    let line = format!("signin-browser fake {}", file.0.display());
+    let why = "That cookie has no __Secure-3PAPISID, so it isn't from a signed-in tab.";
+    r.provider
+        .fail_import(ProviderError::SignInRequired(why.into()));
+    assert_eq!(r.app(true).exec(&line), Flow::Exit(2));
+    let text = r.out.text();
+    assert!(text.contains(&format!("account error: {why}\n")), "{text}");
+    assert!(!text.contains("LEAKME"), "{text}");
+}
+
+#[test]
+fn signin_browser_checks_its_arguments_and_file_before_sending() {
+    let r = needs_setup_rig();
+    let good = TempFile::new("good-headers.txt", HEADERS.as_bytes());
+    let mut big = HEADERS.as_bytes().to_vec();
+    big.resize(64 * 1024 + 1, b'x');
+    let big = TempFile::new("big-headers.txt", &big);
+    let binary = TempFile::new("binary-headers.txt", &[0xff, 0xfe, b'c']);
+    let missing = std::env::temp_dir().join(format!("rq-cli-{}-no-headers", std::process::id()));
+    let app = r.app(true);
+    let usage = "usage: signin-browser <provider> <path|->".to_owned();
+    for (line, error) in [
+        ("signin-browser".to_owned(), usage.clone()),
+        ("signin-browser fake".to_owned(), usage),
+        (
+            "signin-browser fake -".to_owned(),
+            "signin-browser: - reads stdin only as `requiem signin-browser fake -`".to_owned(),
+        ),
+        (
+            format!("signin-browser fake {}", big.0.display()),
+            format!("signin-browser: {}: over 64 KiB", big.0.display()),
+        ),
+        (
+            format!("signin-browser fake {}", binary.0.display()),
+            format!("signin-browser: {}: not UTF-8 text", binary.0.display()),
+        ),
+        (
+            format!("signin-browser fake {}", missing.display()),
+            format!("signin-browser: {}: No such file", missing.display()),
+        ),
+        (
+            format!("signin-browser foo {}", good.0.display()),
+            "no provider foo".to_owned(),
+        ),
+    ] {
+        assert_eq!(app.exec(&line), Flow::Exit(2), "{line}");
+        let text = r.out.text();
+        assert!(text.contains(&format!("error: {error}")), "{text}");
+    }
+    exec_all(&app, "vol 55");
+    wait_out(&r, "volume: 55\n", 1);
+    assert!(r.provider.imported().is_empty());
+    let text = r.out.text();
+    assert!(!text.contains("LEAKME"), "{text}");
+    assert!(!text.contains("account"), "{text}");
+}
+
+#[test]
+fn requiem_signin_browser_exits_as_signin_client_does() {
+    let fake = || ProviderId("fake".into());
+    for (answer, code) in [
+        (
+            vec![Event::Account {
+                provider: fake(),
+                state: AccountState::SignedIn {
+                    name: Some("Requiem Tester".into()),
+                },
+            }],
+            0,
+        ),
+        (
+            vec![
+                Event::AccountError {
+                    provider: fake(),
+                    error: "Google didn't accept that session".into(),
+                },
+                Event::Account {
+                    provider: fake(),
+                    state: AccountState::SignedOut,
+                },
+            ],
+            2,
+        ),
+    ] {
+        let player = ImportAnswer {
+            answer,
+            ..ImportAnswer::default()
+        };
+        let out = Buf::default();
+        let got = app::run_signin_browser(&player, "fake", HEADERS, out.clone(), Format::Text);
+        let text = out.text();
+        assert_eq!(got, code, "{text}");
+        assert_eq!(*player.sent.lock().unwrap(), [browser_session(HEADERS)]);
+        assert!(!text.contains("LEAKME"), "{text}");
+        if code == 0 {
+            assert!(text.contains("signed in as Requiem Tester\n"), "{text}");
+        } else {
+            assert!(
+                text.contains("account error: Google didn't accept that session\n"),
+                "{text}"
+            );
+        }
+    }
 }
 
 fn liked_songs(provider: &str) -> Item {
