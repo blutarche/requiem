@@ -1308,3 +1308,75 @@ fn signin_client_checks_its_arguments_and_file_before_sending() {
     assert!(!text.contains("LEAKME"), "{text}");
     assert!(!text.contains("account"), "{text}");
 }
+
+fn liked_songs(provider: &str) -> Item {
+    Item::Collection(Collection {
+        id: CollectionId {
+            provider: ProviderId(provider.into()),
+            id: "liked".into(),
+        },
+        kind: CollectionKind::Playlist,
+        title: "Liked songs".into(),
+        subtitle: None,
+        artwork_url: None,
+    })
+}
+
+fn library_rig(stocked: &[&str]) -> Rig {
+    let providers: Vec<_> = ["spotify", "ytmusic"]
+        .into_iter()
+        .map(|id| {
+            let p = FakeProvider::new(id);
+            p.set_account(AccountState::SignedIn { name: None });
+            if stocked.contains(&id) {
+                p.script_browse(
+                    Page::Library,
+                    vec![Step::ok(vec![Shelf {
+                        title: "Playlists".into(),
+                        items: vec![liked_songs(id)],
+                    }])],
+                );
+            }
+            p
+        })
+        .collect();
+    let engine = FakeEngineHandle::new();
+    let session = Session::spawn(
+        providers.iter().map(|p| p.clone() as _).collect(),
+        engine.factory(),
+        SessionConfig::default(),
+    );
+    Rig {
+        session,
+        provider: providers[0].clone(),
+        engine,
+        out: Buf::default(),
+    }
+}
+
+#[test]
+fn a_mixed_library_names_the_service_on_each_line() {
+    let r = library_rig(&["spotify", "ytmusic"]);
+    let app = r.app(true);
+    exec_all(&app, "library\nawait results 5");
+    let text = r.out.text();
+    assert!(
+        text.contains(
+            "Library:\n  1. [playlist] Liked songs · Spotify\n  2. [playlist] Liked songs · YouTube Music\n"
+        ),
+        "{text}"
+    );
+}
+
+#[test]
+fn a_single_service_library_has_no_service_suffix() {
+    let r = library_rig(&["spotify"]);
+    let app = r.app(true);
+    exec_all(&app, "library\nawait results 5");
+    let text = r.out.text();
+    assert!(
+        text.contains("Playlists:\n  1. [playlist] Liked songs\n"),
+        "{text}"
+    );
+    assert!(!text.contains(" · "), "{text}");
+}

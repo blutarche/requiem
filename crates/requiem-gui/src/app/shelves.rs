@@ -152,8 +152,9 @@ fn scroll_axis(
     };
     let axis = held.or_else(|| (dx != 0.0 || dy != 0.0).then(|| dominant(dx, dy)));
     let route = axis.map_or(Route::Both, route_of);
-    let over = NSEventPhase::Ended | NSEventPhase::Cancelled;
-    let done = phase.intersects(over) || momentum.intersects(over);
+    // The touch's own `Ended` comes before its momentum, so only the momentum's end lets go;
+    // a lock left behind by a gesture without momentum is reset by the next `Began`.
+    let done = momentum.intersects(NSEventPhase::Ended | NSEventPhase::Cancelled);
     (route, if done { None } else { axis })
 }
 
@@ -965,21 +966,23 @@ mod tests {
     }
 
     #[test]
-    fn the_lock_clears_when_a_gesture_or_its_momentum_ends() {
+    fn the_lock_holds_through_momentum_and_clears_when_it_ends() {
         let (none, changed, began) = (
             NSEventPhase::None,
             NSEventPhase::Changed,
             NSEventPhase::Began,
         );
         for end in [NSEventPhase::Ended, NSEventPhase::Cancelled] {
+            // Lifting the fingers keeps the lock for the momentum that follows.
             let mut lock = Some(Axis::Vertical);
             assert_eq!(gesture(end, none, 0.0, 0.0, &mut lock), Route::Page);
-            assert_eq!(lock, None);
-            let mut lock = Some(Axis::Vertical);
+            assert_eq!(lock, Some(Axis::Vertical));
+            assert_eq!(gesture(none, began, 6.0, -1.0, &mut lock), Route::Page);
+            assert_eq!(gesture(none, changed, 5.0, 0.0, &mut lock), Route::Page);
             assert_eq!(gesture(none, end, 0.0, 0.0, &mut lock), Route::Page);
             assert_eq!(lock, None);
         }
-        // Momentum after a cleared gesture picks its axis from its own first delta.
+        // Momentum with no lock picks its axis from its own first delta.
         let mut lock = None;
         assert_eq!(gesture(none, changed, 0.0, -4.0, &mut lock), Route::Page);
         assert_eq!(lock, Some(Axis::Vertical));
