@@ -52,42 +52,12 @@ func continuousRoundedRect(_ rect: CGRect, radius r: CGFloat) -> CGPath {
     return path
 }
 
-// A skull whose teeth are the old equalizer bars. Built in y-down local units centred on the
-// cranium dome, then mapped onto the canvas; its eyes and nose are even-odd holes.
-let skullScale: CGFloat = 8.3
-let skullToCanvas = CGAffineTransform(translationX: 512, y: 512 + 9 * skullScale).scaledBy(x: skullScale, y: -skullScale)
-
-func skullPath() -> CGPath {
-    let local = CGMutablePath()
-    local.move(to: CGPoint(x: -27, y: 0))
-    local.addArc(center: .zero, radius: 27, startAngle: .pi, endAngle: 2 * .pi, clockwise: false)
-    local.addCurve(to: CGPoint(x: 18, y: 19), control1: CGPoint(x: 27, y: 9), control2: CGPoint(x: 24, y: 14))
-    local.addQuadCurve(to: CGPoint(x: 12, y: 23), control: CGPoint(x: 16, y: 23))
-    local.addLine(to: CGPoint(x: -12, y: 23))
-    local.addQuadCurve(to: CGPoint(x: -18, y: 19), control: CGPoint(x: -16, y: 23))
-    local.addCurve(to: CGPoint(x: -27, y: 0), control1: CGPoint(x: -24, y: 14), control2: CGPoint(x: -27, y: 9))
-    local.closeSubpath()
-
-    local.move(to: CGPoint(x: 0, y: 12))
-    local.addLine(to: CGPoint(x: -3.4, y: 18.5))
-    local.addQuadCurve(to: CGPoint(x: 3.4, y: 18.5), control: CGPoint(x: 0, y: 19.6))
-    local.closeSubpath()
-
-    for (cx, degrees) in [(CGFloat(-10.5), CGFloat(12)), (10.5, -12)] {
-        let eye = CGAffineTransform(translationX: cx, y: 4).rotated(by: degrees * .pi / 180)
-        local.addEllipse(in: CGRect(x: -7.2, y: -8.6, width: 14.4, height: 17.2), transform: eye)
-    }
-
-    let teethWidth: CGFloat = 7.5
-    for (i, h) in [CGFloat(12), 18, 15, 10].enumerated() {
-        let tooth = CGRect(x: -18 + CGFloat(i) * 9.5, y: 45 - h, width: teethWidth, height: h)
-        local.addRoundedRect(in: tooth, cornerWidth: teethWidth / 2, cornerHeight: teethWidth / 2)
-    }
-
-    let path = CGMutablePath()
-    path.addPath(local, transform: skullToCanvas)
-    return path
-}
+// Equalizer bars, left to right: heights as a fraction of the tallest, centred on the
+// shape's middle.
+let barHeights: [CGFloat] = [0.46, 0.80, 1.0, 0.62]
+let barWidth: CGFloat = 92
+let barGap: CGFloat = 64
+let tallestBar: CGFloat = 470
 
 func draw(_ ctx: CGContext, pixels: Int) {
     let s = CGFloat(pixels) / 1024
@@ -120,21 +90,29 @@ func draw(_ ctx: CGContext, pixels: Int) {
     ctx.drawLinearGradient(rim, start: CGPoint(x: 0, y: shapeRect.maxY), end: CGPoint(x: 0, y: shapeRect.maxY - 260), options: [])
     ctx.restoreGState()
 
-    let skull = skullPath()
-    let glyph = skull.boundingBox
+    let bars = CGMutablePath()
+    let total = CGFloat(barHeights.count) * barWidth + CGFloat(barHeights.count - 1) * barGap
+    var x = shapeRect.midX - total / 2
+    for h in barHeights {
+        let height = h * tallestBar
+        let bar = CGRect(x: x, y: shapeRect.midY - height / 2, width: barWidth, height: height)
+        bars.addRoundedRect(in: bar, cornerWidth: barWidth / 2, cornerHeight: barWidth / 2)
+        x += barWidth + barGap
+    }
+    let glyph = bars.boundingBox
     let ink = CGGradient(colorsSpace: srgb, colors: [accent, pink] as CFArray, locations: [0, 1])!
 
-    // A soft accent glow under the skull.
+    // A soft accent glow under the bars.
     ctx.saveGState()
     ctx.setShadow(offset: .zero, blur: 60 * s, color: rgb(0x7C70F5, 0.55))
-    ctx.addPath(skull)
+    ctx.addPath(bars)
     ctx.setFillColor(rgb(0x7C70F5, 0.6))
-    ctx.fillPath(using: .evenOdd)
+    ctx.fillPath()
     ctx.restoreGState()
 
     ctx.saveGState()
-    ctx.addPath(skull)
-    ctx.clip(using: .evenOdd)
+    ctx.addPath(bars)
+    ctx.clip()
     ctx.drawLinearGradient(ink, start: CGPoint(x: glyph.minX, y: glyph.minY), end: CGPoint(x: glyph.maxX, y: glyph.maxY), options: [])
     ctx.restoreGState()
 
