@@ -850,12 +850,18 @@ fn home_shelves(liked: Vec<Track>, playlists: Vec<Collection>) -> Vec<Shelf> {
     });
     let own = std::iter::once(liked_card()).chain(own);
     [
-        ("Liked songs", liked.into_iter().map(Item::Track).collect()),
         (
-            "Made for you",
+            requiem_core::HOME_LIKED,
+            liked.into_iter().map(Item::Track).collect(),
+        ),
+        (
+            requiem_core::HOME_MIXES,
             made.into_iter().map(Item::Collection).collect(),
         ),
-        ("Your playlists", own.map(Item::Collection).collect()),
+        (
+            requiem_core::HOME_PLAYLISTS,
+            own.map(Item::Collection).collect(),
+        ),
     ]
     .into_iter()
     .filter(|(_, items): &(_, Vec<Item>)| !items.is_empty())
@@ -1401,7 +1407,7 @@ mod tests {
             [
                 ("Liked songs", vec!["Song"]),
                 (
-                    "Made for you",
+                    "Mixes",
                     vec!["Daily Mix 2", "This Is Kado", "Discover Weekly"]
                 ),
                 ("Your playlists", vec!["Liked Songs", "Mine"]),

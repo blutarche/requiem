@@ -306,21 +306,32 @@ fn interleave<T>(lists: Vec<Vec<T>>) -> Vec<T> {
     }
 }
 
-/// Shelves that share a title become one, where the title first appears, with their items
-/// taken in turn, in provider order; `shelves` are in provider order.
-fn merge_home(shelves: Vec<Shelf>) -> Vec<Shelf> {
-    let mut titles: Vec<(String, Vec<Vec<Item>>)> = Vec::new();
-    for shelf in shelves {
+/// Providers' shelves taken in turn (each one's first, then each one's second, ...), in
+/// provider order; a shelf whose title already appeared joins that shelf, its items taken in
+/// turn with the others', instead of taking a slot. `answers` are each provider's shelves, in
+/// provider order.
+fn merge_home(answers: Vec<Vec<Shelf>>) -> Vec<Shelf> {
+    let answers = answers
+        .into_iter()
+        .enumerate()
+        .map(|(provider, shelves)| shelves.into_iter().map(|s| (provider, s)).collect())
+        .collect();
+    type FromProvider = (usize, Vec<Item>);
+    let mut titles: Vec<(String, Vec<FromProvider>)> = Vec::new();
+    for (provider, shelf) in interleave(answers) {
         match titles.iter_mut().find(|(t, _)| *t == shelf.title) {
-            Some((_, lists)) => lists.push(shelf.items),
-            None => titles.push((shelf.title, vec![shelf.items])),
+            Some((_, lists)) => lists.push((provider, shelf.items)),
+            None => titles.push((shelf.title, vec![(provider, shelf.items)])),
         }
     }
     titles
         .into_iter()
-        .map(|(title, lists)| Shelf {
-            title,
-            items: interleave(lists),
+        .map(|(title, mut lists)| {
+            lists.sort_by_key(|(provider, _)| *provider);
+            Shelf {
+                title,
+                items: interleave(lists.into_iter().map(|(_, items)| items).collect()),
+            }
         })
         .collect()
 }
@@ -777,7 +788,7 @@ impl Actor {
                 move |p| p.browse(&page)
             });
             let result = result.map(|answers| match page {
-                Page::Home => merge_home(answers.into_iter().flatten().collect()),
+                Page::Home => merge_home(answers),
                 Page::Library => merge_library(answers),
                 Page::Collection(_) => answers.into_iter().flatten().collect(),
             });

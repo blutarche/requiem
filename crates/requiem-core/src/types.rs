@@ -64,10 +64,11 @@ pub const HOME_LIKED: &str = "Liked songs";
 pub const HOME_MIXES: &str = "Mixes";
 pub const HOME_PLAYLISTS: &str = "Your playlists";
 
-/// `Home` goes to every signed-in provider with `has_home()`, merged in provider order, with
-/// shelves that share a title made one whose items alternate between providers; `Library` to
-/// every signed-in provider, whose items, when more than one has any, alternate in one shelf;
-/// a collection to the provider that issued it.
+/// `Home` goes to every signed-in provider with `has_home()`; their shelves are taken in turn
+/// (each one's first, then each one's second, ...), so shelves only one has alternate between
+/// providers, and a shelf whose title already appeared joins that shelf, its items alternating
+/// between providers; `Library` to every signed-in provider, whose items, when more than one
+/// has any, alternate in one shelf; a collection to the provider that issued it.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum Page {
     Home,

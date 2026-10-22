@@ -2032,6 +2032,7 @@ fn home_shelves_that_share_a_title_alternate_their_items() {
                 ]
             ),
             track_shelf("Made for you", "first", &["m1"]),
+            track_shelf("Only second", "second", &["x1"]),
             mixed(
                 "Your playlists",
                 &[
@@ -2041,7 +2042,180 @@ fn home_shelves_that_share_a_title_alternate_their_items() {
                     ("second", "q3")
                 ]
             ),
-            track_shelf("Only second", "second", &["x1"]),
+        ]
+    );
+}
+
+fn titles_of(shelves: &[Shelf]) -> Vec<&str> {
+    shelves.iter().map(|s| s.title.as_str()).collect()
+}
+
+#[test]
+fn home_weaves_shared_shelves_and_alternates_the_rest() {
+    let (a, b) = pair();
+    for p in [&a, &b] {
+        p.set_has_home(true);
+        p.set_account(signed_in());
+    }
+    a.script_browse(
+        Page::Home,
+        vec![Step::ok(vec![
+            track_shelf(HOME_LIKED, "first", &["s1", "s2"]),
+            track_shelf(HOME_MIXES, "first", &["sm1", "sm2"]),
+            track_shelf(HOME_PLAYLISTS, "first", &["sp1", "sp2"]),
+        ])],
+    );
+    b.script_browse(
+        Page::Home,
+        vec![Step::ok(vec![
+            track_shelf(HOME_LIKED, "second", &["y1", "y2"]),
+            track_shelf(HOME_MIXES, "second", &["ym1", "ym2"]),
+            track_shelf("Listen again", "second", &["l1"]),
+            track_shelf("Quick picks", "second", &["k1"]),
+            track_shelf("Forgotten favorites", "second", &["f1"]),
+            track_shelf(HOME_PLAYLISTS, "second", &["yp1", "yp2"]),
+        ])],
+    );
+    let r = rig_with(a, vec![b], config());
+    let Event::BrowseResults { shelves, .. } = home_event(&r) else {
+        panic!("Home failed");
+    };
+    assert_eq!(
+        titles_of(&shelves),
+        [
+            HOME_LIKED,
+            HOME_MIXES,
+            HOME_PLAYLISTS,
+            "Listen again",
+            "Quick picks",
+            "Forgotten favorites"
+        ]
+    );
+    assert_eq!(
+        shelves[..3],
+        [
+            mixed_shelf(
+                HOME_LIKED,
+                &[
+                    ("first", "s1"),
+                    ("second", "y1"),
+                    ("first", "s2"),
+                    ("second", "y2")
+                ]
+            ),
+            mixed_shelf(
+                HOME_MIXES,
+                &[
+                    ("first", "sm1"),
+                    ("second", "ym1"),
+                    ("first", "sm2"),
+                    ("second", "ym2")
+                ]
+            ),
+            mixed_shelf(
+                HOME_PLAYLISTS,
+                &[
+                    ("first", "sp1"),
+                    ("second", "yp1"),
+                    ("first", "sp2"),
+                    ("second", "yp2")
+                ]
+            ),
+        ]
+    );
+}
+
+#[test]
+fn home_of_one_provider_comes_back_unchanged() {
+    let (a, b) = pair();
+    a.set_has_home(true);
+    a.set_account(signed_in());
+    b.set_account(signed_in());
+    let home = vec![
+        track_shelf("One", "first", &["a1", "a2"]),
+        track_shelf("Two", "first", &["b1"]),
+        track_shelf("Three", "first", &["c1"]),
+    ];
+    a.script_browse(Page::Home, vec![Step::ok(home.clone())]);
+    let r = rig_with(a, vec![b], config());
+    let Event::BrowseResults { shelves, .. } = home_event(&r) else {
+        panic!("Home failed");
+    };
+    assert_eq!(shelves, home);
+}
+
+#[test]
+fn home_of_three_providers_takes_their_shelves_in_turn() {
+    let (a, b) = pair();
+    let c = FakeProvider::new("third");
+    for p in [&a, &b, &c] {
+        p.set_has_home(true);
+        p.set_account(signed_in());
+    }
+    a.script_browse(
+        Page::Home,
+        vec![Step::ok(vec![
+            track_shelf("A1", "first", &["a1"]),
+            track_shelf("A2", "first", &["a2"]),
+            track_shelf("Shared", "first", &["as"]),
+        ])],
+    );
+    b.script_browse(
+        Page::Home,
+        vec![Step::ok(vec![
+            track_shelf("B1", "second", &["b1"]),
+            track_shelf("Shared", "second", &["bs"]),
+        ])],
+    );
+    c.script_browse(
+        Page::Home,
+        vec![Step::ok(vec![
+            track_shelf("C1", "third", &["c1"]),
+            track_shelf("C2", "third", &["c2"]),
+            track_shelf("Shared", "third", &["cs"]),
+        ])],
+    );
+    let r = rig_with(a, vec![b, c], config());
+    let Event::BrowseResults { shelves, .. } = home_event(&r) else {
+        panic!("Home failed");
+    };
+    assert_eq!(
+        titles_of(&shelves),
+        ["A1", "B1", "C1", "A2", "Shared", "C2"]
+    );
+    assert_eq!(
+        shelves[4],
+        mixed_shelf(
+            "Shared",
+            &[("first", "as"), ("second", "bs"), ("third", "cs")]
+        )
+    );
+}
+
+#[test]
+fn home_of_a_provider_without_shelves_drops_out() {
+    let (a, b) = pair();
+    for p in [&a, &b] {
+        p.set_has_home(true);
+        p.set_account(signed_in());
+    }
+    a.script_browse(Page::Home, vec![Step::ok(Vec::new())]);
+    b.script_browse(
+        Page::Home,
+        vec![Step::ok(vec![
+            track_shelf("One", "second", &["b1"]),
+            track_shelf("Two", "second", &["b2"]),
+        ])],
+    );
+    let r = rig_with(a, vec![b], config());
+    let Event::BrowseResults { shelves, .. } = home_event(&r) else {
+        panic!("Home failed");
+    };
+    assert_eq!(
+        shelves,
+        [
+            track_shelf("One", "second", &["b1"]),
+            track_shelf("Two", "second", &["b2"])
         ]
     );
 }

@@ -224,7 +224,7 @@ fn live_home() {
         assert!(!shelf.items.is_empty());
     }
     let titles: Vec<_> = home.iter().map(|s| s.title.as_str()).collect();
-    assert_eq!(titles, ["Liked songs", "Made for you", "Your playlists"]);
+    assert_eq!(titles, ["Liked songs", "Mixes", "Your playlists"]);
     assert!(home[0].items.len() <= 20);
     assert!(home[0].items.iter().all(|i| matches!(i, Item::Track(_))));
     assert!(
