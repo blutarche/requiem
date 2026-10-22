@@ -73,6 +73,8 @@ const MADE_FOR_YOU: [&str; 2] = ["37i9dQZF1", "37i9dQZEVX"];
 const IMAGE_URL: &str = "https://i.scdn.co/image/";
 const LIKED: &str = "Liked Songs";
 const LIKED_ID: &str = "collection";
+/// Spotify's own Liked Songs picture, the same for everyone.
+const LIKED_ARTWORK: &str = "https://misc.scdn.co/liked-songs/liked-songs-640.png";
 const PLAYLIST_PREFIX: &str = "playlist:";
 
 pub(crate) struct Librespot {
@@ -795,7 +797,7 @@ fn liked_card() -> Collection {
         kind: CollectionKind::Playlist,
         title: LIKED.into(),
         subtitle: None,
-        artwork_url: None,
+        artwork_url: Some(LIKED_ARTWORK.into()),
     }
 }
 
@@ -1412,6 +1414,16 @@ mod tests {
                 ),
                 ("Your playlists", vec!["Liked Songs", "Mine"]),
             ]
+        );
+    }
+
+    #[test]
+    fn the_liked_songs_card_has_spotifys_picture() {
+        let card = liked_card();
+        assert_eq!(card.title, "Liked Songs");
+        assert_eq!(
+            card.artwork_url.as_deref(),
+            Some("https://misc.scdn.co/liked-songs/liked-songs-640.png")
         );
     }
 

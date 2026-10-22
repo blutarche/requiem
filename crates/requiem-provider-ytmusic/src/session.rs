@@ -40,6 +40,9 @@ const HOME_LIKED_TRACKS: usize = 20;
 /// What YouTube Music calls its mixes shelf (requests ask for English).
 const MIXED_FOR_YOU: &str = "Mixed for you";
 const LIKED: &str = "LM";
+/// YouTube Music's own Liked music picture, the same for everyone.
+const LIKED_ARTWORK: &str =
+    "https://www.gstatic.com/youtube/media/ytm/images/pbg/liked-music-@576.png";
 
 const ENDED: &str = "Your YouTube Music browser session ended; paste a new one in Settings";
 const NOT_ACCEPTED: &str = "Google didn't accept that session; copy it again from a browser where you're signed in to YouTube Music";
@@ -535,7 +538,7 @@ impl BrowserSession {
             kind: CollectionKind::Playlist,
             title: "Liked music".to_owned(),
             subtitle: None,
-            artwork_url: None,
+            artwork_url: Some(LIKED_ARTWORK.to_owned()),
         })];
         items.extend(playlists);
         Ok(vec![Shelf {
@@ -1037,6 +1040,13 @@ mod tests {
                 ("browse:VLPLfakeRoadTrip01", "Road trip"),
                 ("browse:VLPLfakeNight02", "Night drive"),
             ]
+        );
+        let Item::Collection(liked) = &shelves[0].items[0] else {
+            panic!("no Liked music first");
+        };
+        assert_eq!(
+            liked.artwork_url.as_deref(),
+            Some("https://www.gstatic.com/youtube/media/ytm/images/pbg/liked-music-@576.png")
         );
         let body: Value = serde_json::from_str(&rig.music.calls.lock().unwrap()[0].body).unwrap();
         assert_eq!(body["browseId"], "FEmusic_liked_playlists");
