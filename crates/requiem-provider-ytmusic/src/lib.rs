@@ -1,11 +1,9 @@
 //! YouTube Music provider: Innertube client, parsers and ranged byte source, and the
-//! signed-in library through a browser session, or else through Google sign-in and the
-//! YouTube Data API.
+//! signed-in library through a browser session.
 
 mod browser;
 mod clients;
-mod dataapi;
-mod google;
+mod files;
 mod innertube;
 mod log;
 mod parse;
@@ -18,6 +16,7 @@ mod live_tests;
 #[cfg(test)]
 mod testing;
 
+use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -25,16 +24,22 @@ use requiem_core::{
     AccountState, AudioSource, Page, Provider, ProviderError, ProviderId, Shelf, Track, TrackId,
 };
 
-use dataapi::DATA_PREFIX;
-use google::{Clock, Google, GoogleFiles, SystemClock};
 use innertube::{ClientRefresher, InnertubeClient};
+use log::debug;
 use parse::{BROWSE_PREFIX, PROVIDER, StreamFormat};
 use range::{HttpRangeSource, RangeConfig};
-use session::BrowserSession;
-use transport::{ApiHttp, Transport, UreqTransport};
+use session::{BrowserSession, Clock, SystemClock};
+use transport::{Transport, UreqTransport};
 
 /// The most an `import_client` payload carrying a browser session may hold.
 const MAX_SESSION_IMPORT: usize = 256 * 1024;
+/// The Google sign-in that versions before browser-session-only sign-in kept in the provider's
+/// folder, and `REQUIEM_GOOGLE_TOKEN_FILE` could put elsewhere.
+const OLD_TOKEN_NAME: &str = "google-token.json";
+const OLD_TOKEN_ENV: &str = "REQUIEM_GOOGLE_TOKEN_FILE";
+/// What a sign-in, which YouTube Music takes only as a pasted browser session, answers.
+const SIGN_IN_BY_SESSION: &str = "YouTube Music signs in with a browser session: paste one in Settings, or run `requiem signin-browser ytmusic <path|->`";
+const SIGNED_OUT: &str = "sign in to YouTube Music with a browser session to see your library";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum IpFamily {
@@ -53,19 +58,45 @@ pub struct YtMusicOptions {
 
 pub struct YtMusicProvider {
     client: Arc<InnertubeClient>,
-    google: Google,
     session: BrowserSession,
+    /// No usable `HOME`, so there is nowhere to keep a session.
+    homeless: bool,
     prefer_aac: bool,
 }
 
-/// The Google sign-in file [`YtMusicProvider::new`] reads, when there is a usable location.
-pub fn token_file() -> Option<PathBuf> {
-    GoogleFiles::from_env().token
+/// The browser session file [`YtMusicProvider::new`] reads, when there is a usable location:
+/// in `~/Library/Application Support/requiem` on macOS, `$XDG_STATE_HOME/requiem` on Linux.
+pub fn session_file() -> Option<PathBuf> {
+    session::path_in(files::data_dir().as_deref())
 }
 
-/// The browser session file [`YtMusicProvider::new`] reads: beside [`token_file`].
-pub fn session_file() -> Option<PathBuf> {
-    session::path_beside(token_file().as_deref())
+/// Deletes the Google sign-in that earlier versions kept, which nothing reads any more, and a
+/// copy a save of it left behind. Nothing is revoked online. The user's own Google client file
+/// stays.
+pub fn remove_old_google_sign_in() {
+    let var = std::env::var_os(OLD_TOKEN_ENV).map(PathBuf::from);
+    if let Some(path) = old_token_file(var, files::data_dir())
+        && let Err(e) = remove_old_token(&path)
+    {
+        eprintln!("[ytmusic] cannot delete {}: {e}", path.display());
+    }
+}
+
+/// `REQUIEM_GOOGLE_TOKEN_FILE` as `var` when it is absolute, else the file in `dir`.
+fn old_token_file(var: Option<PathBuf>, dir: Option<PathBuf>) -> Option<PathBuf> {
+    match var {
+        Some(p) if p.is_absolute() => Some(p),
+        _ => Some(dir?.join(OLD_TOKEN_NAME)),
+    }
+}
+
+fn remove_old_token(path: &Path) -> io::Result<()> {
+    let existed = path.exists();
+    files::remove(path)?;
+    if existed {
+        debug!("deleted the old Google sign-in {}", path.display());
+    }
+    Ok(())
 }
 
 /// Keeps `path` out of Time Machine backups, as the browser session is; elsewhere, or on a
@@ -74,43 +105,29 @@ pub fn exclude_from_backups(path: &Path) {
     session::exclude_from_backups(path);
 }
 
-/// Parses the Google sign-in file at `path` without changing it; a missing file passes.
-pub fn check_token_file(path: &Path) -> Result<(), String> {
-    google::check_token(path)
-}
-
 impl YtMusicProvider {
-    /// Reads the Google client and sign-in files named by `REQUIEM_GOOGLE_CLIENT_FILE` and
-    /// `REQUIEM_GOOGLE_TOKEN_FILE`, or their defaults, and the browser session beside the
-    /// sign-in; makes no network calls.
+    /// Reads the browser session at [`session_file`]; makes no network calls.
     pub fn new(opts: YtMusicOptions) -> YtMusicProvider {
-        let transport = Arc::new(UreqTransport::new());
         Self::with(
             opts,
-            transport.clone(),
-            transport,
+            Arc::new(UreqTransport::new()),
             Arc::new(SystemClock),
-            GoogleFiles::from_env(),
+            session_file(),
         )
     }
 
     fn with(
         opts: YtMusicOptions,
         transport: Arc<dyn Transport>,
-        api: Arc<dyn ApiHttp>,
         clock: Arc<dyn Clock>,
-        files: GoogleFiles,
+        session_file: Option<PathBuf>,
     ) -> YtMusicProvider {
-        let session = BrowserSession::new(
-            transport.clone(),
-            clock.clone(),
-            opts.ip_family,
-            session::path_beside(files.token.as_deref()),
-        );
+        let homeless = session_file.is_none();
+        let session = BrowserSession::new(transport.clone(), clock, opts.ip_family, session_file);
         Self {
             client: Arc::new(InnertubeClient::new(transport, opts.ip_family)),
-            google: Google::new(api, clock, files),
             session,
+            homeless,
             prefer_aac: opts.prefer_aac,
         }
     }
@@ -159,16 +176,14 @@ impl Provider for YtMusicProvider {
         match page {
             Page::Home => match session {
                 Some(s) => self.session.home(&s),
-                None => dataapi::home(&self.google),
+                None => Err(ProviderError::SignInRequired(SIGNED_OUT.into())),
             },
             Page::Library => match session {
                 Some(s) => self.session.library(&s),
-                None => dataapi::library(&self.google),
+                None => Err(ProviderError::SignInRequired(SIGNED_OUT.into())),
             },
             Page::Collection(c) if c.provider.0 == PROVIDER => {
-                if let Some(id) = c.id.strip_prefix(DATA_PREFIX) {
-                    dataapi::playlist(&self.google, id)
-                } else if let Some(id) = c.id.strip_prefix(BROWSE_PREFIX) {
+                if let Some(id) = c.id.strip_prefix(BROWSE_PREFIX) {
                     if let Some(s) = session {
                         return Ok(vec![self.session.collection(&s, id)?]);
                     }
@@ -196,28 +211,30 @@ impl Provider for YtMusicProvider {
     }
 
     fn account(&self) -> AccountState {
-        self.session
-            .account()
-            .unwrap_or_else(|| self.google.account())
+        match self.session.account() {
+            Some(state) => state,
+            None if self.homeless => AccountState::Unavailable(session::NO_HOME_DIR.into()),
+            None => AccountState::SignedOut,
+        }
     }
 
-    fn sign_in(&self, on_state: &dyn Fn(AccountState)) -> Result<(), ProviderError> {
-        self.google.sign_in(on_state)
+    /// YouTube Music signs in only by `import_client` with a browser session, so this says
+    /// how.
+    fn sign_in(&self, _on_state: &dyn Fn(AccountState)) -> Result<(), ProviderError> {
+        Err(ProviderError::SignInRequired(SIGN_IN_BY_SESSION.into()))
     }
 
-    /// Forgets the browser session, which tells Google nothing, and signs out of Google. A
-    /// session that can't be deleted leaves both signed in.
+    /// Forgets the browser session, which tells Google nothing. A session that can't be
+    /// deleted stays signed in.
     fn sign_out(&self) -> Result<(), ProviderError> {
-        self.session.sign_out()?;
-        self.google.sign_out()
+        self.session.sign_out().map(drop)
     }
 
-    /// `{"browser_session": "<pasted headers>"}` signs in with a browser session; anything else
-    /// is a Google OAuth client.
+    /// `{"browser_session": "<pasted headers>"}` signs in with a browser session.
     fn import_client(&self, json: &str) -> Result<(), ProviderError> {
         match browser_session(json) {
             Some(paste) => self.session.import(&paste?),
-            None => self.google.import_client(json),
+            None => Err(ProviderError::SignInRequired(SIGN_IN_BY_SESSION.into())),
         }
     }
 }
@@ -245,7 +262,7 @@ mod tests {
     use requiem_core::{CollectionId, ProviderId};
 
     use super::*;
-    use crate::testing::{FakeApi, FakeMusic, TempDir};
+    use crate::testing::{FakeMusic, TempDir};
 
     // Synthetic responses; every value in them is made up.
     const MENU: &str = include_str!("../tests/fixtures/account_menu.json");
@@ -276,43 +293,31 @@ mod tests {
 
     struct Rig {
         music: Arc<FakeMusic>,
-        api: Arc<FakeApi>,
         tmp: TempDir,
     }
 
     impl Rig {
         fn new() -> Self {
-            let tmp = TempDir::new();
-            fs::write(
-                tmp.path().join("client.json"),
-                r#"{"installed":{"client_id":"cid","client_secret":"csecret"}}"#,
-            )
-            .unwrap();
             Self {
                 music: Arc::new(FakeMusic::default()),
-                api: Arc::new(FakeApi::default()),
-                tmp,
+                tmp: TempDir::new(),
             }
         }
 
-        fn files(&self) -> GoogleFiles {
-            GoogleFiles {
-                client: Some(self.tmp.path().join("client.json")),
-                token: Some(self.tmp.path().join("requiem/google-token.json")),
-            }
+        fn dir(&self) -> PathBuf {
+            self.tmp.path().join("requiem")
         }
 
         fn session_file(&self) -> PathBuf {
-            self.tmp.path().join("requiem/ytmusic-session.json")
+            self.dir().join("ytmusic-session.json")
         }
 
         fn provider(&self) -> YtMusicProvider {
             YtMusicProvider::with(
                 YtMusicOptions::default(),
                 self.music.clone(),
-                self.api.clone(),
                 Arc::new(SystemClock),
-                self.files(),
+                session::path_in(Some(&self.dir())),
             )
         }
 
@@ -382,8 +387,14 @@ mod tests {
     }
 
     #[test]
-    fn a_session_import_is_told_apart_from_a_google_client() {
+    fn only_a_browser_session_signs_in() {
         let rig = Rig::new();
+        let p = rig.provider();
+        assert_eq!(p.account(), AccountState::SignedOut);
+        let e = p.sign_in(&|_| panic!("no state to report")).unwrap_err();
+        assert!(e.to_string().contains("signin-browser ytmusic"), "{e}");
+        assert!(rig.music.calls.lock().unwrap().is_empty());
+
         let p = rig.signed_in();
         assert_eq!(
             p.account(),
@@ -392,23 +403,21 @@ mod tests {
             }
         );
         assert!(rig.session_file().exists());
-        // The Google client and sign-in stay as they were.
-        assert!(rig.api.calls().is_empty());
-        assert!(!rig.files().token.unwrap().exists());
 
-        // A client goes to Google, leaving the session.
-        p.import_client(r#"{"installed":{"client_id":"cid2","client_secret":"s2"}}"#)
-            .unwrap();
-        let client = fs::read_to_string(rig.files().client.unwrap()).unwrap();
-        assert!(client.contains("cid2"));
+        // An OAuth client, as earlier versions took, is refused and changes nothing.
+        let e = p
+            .import_client(r#"{"installed":{"client_id":"cid2","client_secret":"s2"}}"#)
+            .unwrap_err();
+        assert_eq!(e, ProviderError::SignInRequired(SIGN_IN_BY_SESSION.into()));
+        assert!(p.account() != AccountState::SignedOut);
         assert!(rig.session_file().exists());
 
         let e = p.import_client(r#"{"browser_session": 42}"#).unwrap_err();
         assert!(e.to_string().contains("browser_session"), "{e}");
-        // Too big to be a session import, so the Google client path refuses it.
+        // Too big to be a session import.
         let big = serde_json::json!({ "browser_session": "x".repeat(MAX_SESSION_IMPORT) });
         let e = p.import_client(&big.to_string()).unwrap_err();
-        assert!(e.to_string().contains("Google OAuth client"), "{e}");
+        assert_eq!(e, ProviderError::SignInRequired(SIGN_IN_BY_SESSION.into()));
         // A session over the paste's own cap but under the payload's.
         let e = p
             .import_client(
@@ -423,10 +432,92 @@ mod tests {
     fn signing_out_of_a_session_tells_google_nothing() {
         let rig = Rig::new();
         let p = rig.signed_in();
+        rig.music.calls.lock().unwrap().clear();
         p.sign_out().unwrap();
         assert_eq!(p.account(), AccountState::SignedOut);
         assert!(!rig.session_file().exists());
-        assert!(rig.api.calls().is_empty());
+        assert!(rig.music.calls.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn signed_out_home_and_library_ask_for_a_session() {
+        let rig = Rig::new();
+        let p = rig.provider();
+        for page in [Page::Home, Page::Library] {
+            assert_eq!(
+                p.browse(&page),
+                Err(ProviderError::SignInRequired(SIGNED_OUT.into()))
+            );
+        }
+        assert!(rig.music.calls.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn with_nowhere_to_keep_a_session_sign_in_is_unavailable() {
+        let rig = Rig::new();
+        let p = YtMusicProvider::with(
+            YtMusicOptions::default(),
+            rig.music.clone(),
+            Arc::new(SystemClock),
+            None,
+        );
+        assert_eq!(
+            p.account(),
+            AccountState::Unavailable(session::NO_HOME_DIR.into())
+        );
+    }
+
+    /// The files a 0.3 Google sign-in left in the provider's folder.
+    fn old_google_files(dir: &Path) -> [PathBuf; 3] {
+        fs::create_dir_all(dir).unwrap();
+        let files = [
+            dir.join(OLD_TOKEN_NAME),
+            files::staged_path(&dir.join(OLD_TOKEN_NAME)),
+            dir.join("google-client.json"),
+        ];
+        for f in &files {
+            fs::write(f, r#"{"refresh_token":"RT-FAKE"}"#).unwrap();
+        }
+        files
+    }
+
+    #[test]
+    fn a_google_sign_in_from_before_reads_as_signed_out_and_is_deleted() {
+        let rig = Rig::new();
+        let [token, staged, client] = old_google_files(&rig.dir());
+        let p = rig.provider();
+        assert_eq!(p.account(), AccountState::SignedOut);
+        assert!(matches!(
+            p.browse(&Page::Library),
+            Err(ProviderError::SignInRequired(_))
+        ));
+
+        let path = old_token_file(None, Some(rig.dir())).unwrap();
+        assert_eq!(path, token);
+        remove_old_token(&path).unwrap();
+        assert!(!token.exists() && !staged.exists());
+        // The user's own client file stays.
+        assert!(client.exists());
+        // Once is enough; again finds nothing and is no error.
+        remove_old_token(&path).unwrap();
+    }
+
+    #[test]
+    fn the_old_sign_in_is_looked_for_where_its_variable_put_it() {
+        let dir = Some(PathBuf::from("/st/requiem"));
+        assert_eq!(
+            old_token_file(Some("/elsewhere/t.json".into()), dir.clone()),
+            Some(PathBuf::from("/elsewhere/t.json"))
+        );
+        assert_eq!(
+            old_token_file(Some("t.json".into()), dir.clone()),
+            Some(PathBuf::from("/st/requiem/google-token.json"))
+        );
+        assert_eq!(
+            old_token_file(None, dir),
+            Some(PathBuf::from("/st/requiem/google-token.json"))
+        );
+        assert_eq!(old_token_file(None, None), None);
     }
 
     #[test]

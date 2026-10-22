@@ -7,7 +7,26 @@
 use std::fmt::{self, Write};
 
 use crate::clients::MUSIC_ORIGIN;
-use crate::google::Secret;
+
+/// A secret. `Debug` never shows it.
+#[derive(Clone, PartialEq, Eq)]
+pub(crate) struct Secret(String);
+
+impl Secret {
+    pub(crate) fn new(s: impl Into<String>) -> Self {
+        Self(s.into())
+    }
+
+    pub(crate) fn expose(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Debug for Secret {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("Secret(<redacted>)")
+    }
+}
 
 /// The most text a paste may hold: a request's headers are a few KiB.
 pub(crate) const MAX_PASTE: usize = 64 * 1024;

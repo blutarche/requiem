@@ -118,6 +118,9 @@ fn main() -> ExitCode {
         eprintln!("requiemd: {e}");
         return ExitCode::from(1);
     }
+    // YouTube Music signs in only with a browser session now, so the Google sign-in an earlier
+    // version kept is of no use; it goes once the lock says no other player runs.
+    requiem_provider_ytmusic::remove_old_google_sign_in();
 
     // The engine must exist before `Session::spawn`, whose factory cannot fail, so events
     // reach the session through a slot the factory fills.
@@ -254,12 +257,6 @@ fn self_test() -> ExitCode {
         && let Err(e) = persist::read(&path)
     {
         eprintln!("requiemd: {}: {e}", path.display());
-        ok = false;
-    }
-    if let Some(path) = requiem_provider_ytmusic::token_file()
-        && let Err(e) = requiem_provider_ytmusic::check_token_file(&path)
-    {
-        eprintln!("requiemd: {e}");
         ok = false;
     }
     if let Some(path) = requiem_provider_spotify::credentials_file()

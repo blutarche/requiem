@@ -14,7 +14,7 @@ const MAX_FILE_BYTES: u64 = 64 * 1024;
 /// A sign-in's brief librespot cache, beside the credentials file.
 const SCRATCH: &str = ".spotify-sign-in";
 
-/// `REQUIEM_SPOTIFY_CREDENTIALS_FILE`, else beside the Google sign-in: in
+/// `REQUIEM_SPOTIFY_CREDENTIALS_FILE`, else beside the YouTube Music session: in
 /// `~/Library/Application Support/requiem` on macOS, `$XDG_STATE_HOME/requiem` on Linux.
 pub(crate) fn from_env() -> Option<PathBuf> {
     let var = |k: &str| std::env::var_os(k).map(PathBuf::from);
@@ -297,7 +297,7 @@ mod tests {
         }
         std::os::unix::fs::symlink(&outside, tmp.path().join(".spotify-sign-in-link")).unwrap();
         fs::write(&path, "{}").unwrap();
-        fs::write(tmp.path().join("google-token.json"), "{}").unwrap();
+        fs::write(tmp.path().join("ytmusic-session.json"), "{}").unwrap();
 
         forget(&path).unwrap();
         let mut left: Vec<_> = fs::read_dir(tmp.path())
@@ -305,7 +305,7 @@ mod tests {
             .map(|e| e.unwrap().file_name().into_string().unwrap())
             .collect();
         left.sort();
-        assert_eq!(left, ["google-token.json", "outside"]);
+        assert_eq!(left, ["ytmusic-session.json", "outside"]);
         assert!(outside.join("keep").exists());
         forget(&path).unwrap();
         // No directory to sweep is not an error.
