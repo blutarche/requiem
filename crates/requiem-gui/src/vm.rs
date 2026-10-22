@@ -1488,6 +1488,7 @@ impl Vm {
                     true,
                 );
             }
+            Event::PageChanged { .. } => {}
         }
     }
 

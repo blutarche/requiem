@@ -1,7 +1,7 @@
 use std::io::{self, Cursor, Write};
 use std::sync::{Arc, Mutex};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use requiem_cli::app::{self, App, Flow, Format};
 use requiem_core::testing::{EngineCall, FakeEngineHandle, FakeProvider, Gate, SignInScript, Step};
@@ -1586,6 +1586,9 @@ fn library_rig(stocked: &[&str]) -> Rig {
 fn a_mixed_library_names_the_service_on_each_line() {
     let r = library_rig(&["spotify", "ytmusic"]);
     let app = r.app(true);
+    // The first service to answer is listed at once; the other's answer is a change.
+    exec_all(&app, "library\nawait results 5");
+    wait_for_text(&r, "library changed; run library again to see it\n");
     exec_all(&app, "library\nawait results 5");
     let text = r.out.text();
     assert!(
@@ -1594,6 +1597,22 @@ fn a_mixed_library_names_the_service_on_each_line() {
         ),
         "{text}"
     );
+}
+
+fn wait_for_text(r: &Rig, want: &str) {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !r.out.text().contains(want) {
+        assert!(Instant::now() < deadline, "no {want:?} in {}", r.out.text());
+        std::thread::sleep(Duration::from_millis(5));
+    }
+}
+
+#[test]
+fn a_changed_listed_page_is_a_json_line() {
+    let r = library_rig(&["spotify", "ytmusic"]);
+    let app = r.json_app();
+    exec_all(&app, "library\nawait results 5");
+    wait_for_text(&r, "{\"page\":\"library\",\"type\":\"page_changed\"}\n");
 }
 
 #[test]

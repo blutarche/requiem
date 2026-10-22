@@ -1759,13 +1759,8 @@ fn library_comes_only_from_signed_in_providers_in_order() {
     b.script_browse(Page::Library, vec![Step::ok(vec![shelf("b")])]);
     c.script_browse(Page::Library, vec![Step::ok(vec![shelf("c")])]);
     let r = rig_with(a, vec![b.clone(), c], config());
-    r.send(Command::Browse {
-        req: 1,
-        page: Page::Library,
-    });
-    let ev = r.wait_event(|e| matches!(e, Event::BrowseResults { .. }));
     assert_eq!(
-        ev,
+        library_event(&r),
         Event::BrowseResults {
             req: 1,
             page: Page::Library,
@@ -1809,11 +1804,25 @@ fn track_shelf(title: &str, provider: &str, ids: &[&str]) -> Shelf {
 }
 
 fn library_event(r: &Rig) -> Event {
-    r.send(Command::Browse {
-        req: 1,
-        page: Page::Library,
-    });
-    r.wait_event(|e| matches!(e, Event::BrowseResults { .. } | Event::BrowseFailed { .. }))
+    settled_browse(r, Page::Library)
+}
+
+/// The answer to a browse of `page` once every provider has landed: the session answers with
+/// the first, so this asks again once the rest are in, which the kept parts answer.
+fn settled_browse(r: &Rig, page: Page) -> Event {
+    let browse = || {
+        r.send(Command::Browse {
+            req: 1,
+            page: page.clone(),
+        });
+        r.wait_event(|e| matches!(e, Event::BrowseResults { .. } | Event::BrowseFailed { .. }))
+    };
+    let first = browse();
+    if matches!(first, Event::BrowseFailed { .. }) {
+        return first;
+    }
+    r.settle();
+    browse()
 }
 
 fn mixed_shelf(title: &str, items: &[(&str, &str)]) -> Shelf {
@@ -1944,11 +1953,7 @@ fn library_takes_the_others_in_turn_when_one_fails() {
 }
 
 fn home_event(r: &Rig) -> Event {
-    r.send(Command::Browse {
-        req: 1,
-        page: Page::Home,
-    });
-    r.wait_event(|e| matches!(e, Event::BrowseResults { .. } | Event::BrowseFailed { .. }))
+    settled_browse(r, Page::Home)
 }
 
 #[test]
@@ -2218,6 +2223,309 @@ fn home_of_a_provider_without_shelves_drops_out() {
             track_shelf("Two", "second", &["b2"])
         ]
     );
+}
+
+#[test]
+fn home_answers_with_the_first_provider_before_a_slow_one_lands() {
+    let (a, b) = pair();
+    for p in [&a, &b] {
+        p.set_has_home(true);
+        p.set_account(signed_in());
+    }
+    let gate = Gate::new();
+    a.script_browse(
+        Page::Home,
+        vec![Step::ok(vec![track_shelf("Slow", "first", &["a1"])]).gated(&gate)],
+    );
+    b.script_browse(
+        Page::Home,
+        vec![Step::ok(vec![track_shelf("Fast", "second", &["b1"])])],
+    );
+    let r = rig_with(a, vec![b], config());
+    r.send(Command::Browse {
+        req: 1,
+        page: Page::Home,
+    });
+    let ev =
+        r.wait_event(|e| matches!(e, Event::BrowseResults { .. } | Event::BrowseFailed { .. }));
+    gate.release();
+    assert_eq!(
+        ev,
+        Event::BrowseResults {
+            req: 1,
+            page: Page::Home,
+            shelves: vec![track_shelf("Fast", "second", &["b1"])],
+        }
+    );
+}
+
+fn browse_event(r: &Rig, req: u64, page: Page) -> Event {
+    r.send(Command::Browse { req, page });
+    r.wait_event(|e| matches!(e, Event::BrowseResults { .. } | Event::BrowseFailed { .. }))
+}
+
+fn results(req: u64, page: Page, shelves: Vec<Shelf>) -> Event {
+    Event::BrowseResults { req, page, shelves }
+}
+
+#[test]
+fn a_kept_home_answers_at_once_then_says_when_a_fetch_changed_it() {
+    let a = FakeProvider::new("first");
+    a.set_has_home(true);
+    a.set_account(signed_in());
+    let gate = Gate::new();
+    let old = vec![track_shelf("Mixes", "first", &["a1"])];
+    let new = vec![track_shelf("Mixes", "first", &["a2"])];
+    a.script_browse(
+        Page::Home,
+        vec![Step::ok(old.clone()), Step::ok(new.clone()).gated(&gate)],
+    );
+    let r = rig_with(a.clone(), vec![], config());
+    assert_eq!(
+        browse_event(&r, 1, Page::Home),
+        results(1, Page::Home, old.clone())
+    );
+    r.settle();
+
+    // The second fetch is held, yet the browse is answered with what was kept.
+    assert_eq!(browse_event(&r, 2, Page::Home), results(2, Page::Home, old));
+    gate.release();
+    r.wait_event(|e| *e == Event::PageChanged { page: Page::Home });
+    assert_eq!(browse_event(&r, 3, Page::Home), results(3, Page::Home, new));
+    // Browsing again on hearing of the change fetches nothing more.
+    r.settle();
+    assert_eq!(a.browse_calls().len(), 2);
+}
+
+#[test]
+fn a_fetch_that_changes_nothing_says_nothing() {
+    let a = FakeProvider::new("first");
+    a.set_account(signed_in());
+    let shelves = vec![track_shelf("Library", "first", &["a1"])];
+    a.script_browse(
+        Page::Library,
+        vec![Step::ok(shelves.clone()), Step::ok(shelves.clone())],
+    );
+    let r = rig_with(a.clone(), vec![], config());
+    browse_event(&r, 1, Page::Library);
+    r.settle();
+    browse_event(&r, 2, Page::Library);
+    r.settle();
+    assert_eq!(a.browse_calls().len(), 2);
+    r.send(Command::SetVolume(42));
+    let seen = r.events_until(1, |e| *e == Event::Volume(42));
+    assert!(
+        !seen.iter().any(|e| matches!(e, Event::PageChanged { .. })),
+        "{seen:?}"
+    );
+}
+
+fn home_pair(gate: Option<&Gate>) -> (Arc<FakeProvider>, Arc<FakeProvider>) {
+    let (a, b) = pair();
+    for p in [&a, &b] {
+        p.set_has_home(true);
+        p.set_account(signed_in());
+    }
+    let slow = Step::ok(vec![
+        track_shelf(HOME_LIKED, "first", &["a1", "a2"]),
+        track_shelf("Slow", "first", &["a3"]),
+    ]);
+    a.script_browse(
+        Page::Home,
+        vec![match gate {
+            Some(g) => slow.gated(g),
+            None => slow,
+        }],
+    );
+    b.script_browse(
+        Page::Home,
+        vec![Step::ok(vec![
+            track_shelf(HOME_LIKED, "second", &["b1", "b2"]),
+            track_shelf("Fast", "second", &["b3"]),
+        ])],
+    );
+    (a, b)
+}
+
+#[test]
+fn home_takes_a_slow_provider_in_once_it_lands_as_if_all_came_at_once() {
+    let (a, b) = home_pair(None);
+    let at_once = settled_browse(&rig_with(a, vec![b], config()), Page::Home);
+
+    let gate = Gate::new();
+    let (a, b) = home_pair(Some(&gate));
+    let r = rig_with(a, vec![b], config());
+    assert_eq!(
+        browse_event(&r, 1, Page::Home),
+        results(
+            1,
+            Page::Home,
+            vec![
+                track_shelf(HOME_LIKED, "second", &["b1", "b2"]),
+                track_shelf("Fast", "second", &["b3"]),
+            ]
+        )
+    );
+    gate.release();
+    r.wait_event(|e| *e == Event::PageChanged { page: Page::Home });
+    assert_eq!(browse_event(&r, 1, Page::Home), at_once);
+}
+
+#[test]
+fn a_signed_out_provider_never_serves_its_kept_shelves() {
+    let (a, b) = pair();
+    for p in [&a, &b] {
+        p.set_account(signed_in());
+    }
+    a.script_browse(
+        Page::Library,
+        vec![Step::ok(vec![track_shelf("Library", "first", &["a1"])])],
+    );
+    let gate = Gate::new();
+    b.script_browse(
+        Page::Library,
+        vec![
+            Step::ok(vec![track_shelf("Library", "second", &["b1"])]),
+            Step::ok(vec![track_shelf("Library", "second", &["b1"])]).gated(&gate),
+        ],
+    );
+    let r = rig_with(a, vec![b], config());
+    settled_browse(&r, Page::Library);
+    r.send(Command::SignOut {
+        provider: ProviderId("first".into()),
+    });
+    r.wait_event(|e| {
+        matches!(e, Event::Account { provider, state: AccountState::SignedOut }
+            if provider.0 == "first")
+    });
+    // The second provider's fetch is held: the answer is what is kept of it alone.
+    assert_eq!(
+        browse_event(&r, 2, Page::Library),
+        results(
+            2,
+            Page::Library,
+            vec![track_shelf("Library", "second", &["b1"])]
+        )
+    );
+    gate.release();
+}
+
+#[test]
+fn a_kept_page_of_another_account_is_dropped_at_the_start() {
+    let a = FakeProvider::new("first");
+    a.set_account(signed_in());
+    let gate = Gate::new();
+    a.script_browse(
+        Page::Library,
+        vec![Step::ok(vec![track_shelf("Library", "first", &["mine"])]).gated(&gate)],
+    );
+    let saved: Arc<std::sync::Mutex<Vec<SavedPages>>> = Arc::default();
+    let sink = saved.clone();
+    let r = rig_with(
+        a,
+        vec![],
+        SessionConfig {
+            pages: SavedPages {
+                home: vec![],
+                library: vec![PagePart {
+                    provider: ProviderId("first".into()),
+                    account: Some("Someone else".into()),
+                    shelves: vec![track_shelf("Library", "first", &["theirs"])],
+                }],
+            },
+            save_pages: Some(Arc::new(move |p| sink.lock().unwrap().push(p))),
+            ..config()
+        },
+    );
+    r.send(Command::Browse {
+        req: 1,
+        page: Page::Library,
+    });
+    r.settle();
+    assert!(
+        r.rx.try_iter()
+            .all(|e| !matches!(e, Event::BrowseResults { .. })),
+        "answered while the fetch was held"
+    );
+    assert_eq!(saved.lock().unwrap().first(), Some(&SavedPages::default()));
+    gate.release();
+    assert_eq!(
+        r.wait_event(|e| matches!(e, Event::BrowseResults { .. })),
+        results(
+            1,
+            Page::Library,
+            vec![track_shelf("Library", "first", &["mine"])]
+        )
+    );
+}
+
+#[test]
+fn a_kept_page_of_the_same_account_answers_a_restart_at_once() {
+    let a = FakeProvider::new("first");
+    a.set_account(signed_in());
+    let gate = Gate::new();
+    a.script_browse(
+        Page::Library,
+        vec![Step::ok(vec![track_shelf("Library", "first", &["new"])]).gated(&gate)],
+    );
+    let kept = vec![track_shelf("Library", "first", &["old"])];
+    let saved: Arc<std::sync::Mutex<Vec<SavedPages>>> = Arc::default();
+    let sink = saved.clone();
+    let r = rig_with(
+        a,
+        vec![],
+        SessionConfig {
+            pages: SavedPages {
+                home: vec![],
+                library: vec![PagePart {
+                    provider: ProviderId("first".into()),
+                    account: Some("Me".into()),
+                    shelves: kept.clone(),
+                }],
+            },
+            save_pages: Some(Arc::new(move |p| sink.lock().unwrap().push(p))),
+            ..config()
+        },
+    );
+    assert_eq!(
+        browse_event(&r, 1, Page::Library),
+        results(1, Page::Library, kept)
+    );
+    gate.release();
+    r.wait_event(|e| {
+        *e == Event::PageChanged {
+            page: Page::Library,
+        }
+    });
+    let last = saved.lock().unwrap().last().cloned().expect("saved");
+    assert_eq!(
+        last.library,
+        vec![PagePart {
+            provider: ProviderId("first".into()),
+            account: Some("Me".into()),
+            shelves: vec![track_shelf("Library", "first", &["new"])],
+        }]
+    );
+}
+
+#[test]
+fn a_provider_saying_its_page_changed_has_it_fetched_again() {
+    let a = FakeProvider::new("first");
+    a.set_has_home(true);
+    a.set_account(signed_in());
+    a.script_browse(
+        Page::Home,
+        vec![
+            Step::ok(vec![track_shelf("Mixes", "first", &["a1"])]),
+            Step::ok(vec![track_shelf("Mixes", "first", &["a2"])]),
+        ],
+    );
+    let r = rig_with(a.clone(), vec![], config());
+    browse_event(&r, 1, Page::Home);
+    r.settle();
+    a.say_changed(Page::Home);
+    r.wait_event(|e| *e == Event::PageChanged { page: Page::Home });
+    assert_eq!(a.browse_calls(), vec![Page::Home, Page::Home]);
 }
 
 #[test]

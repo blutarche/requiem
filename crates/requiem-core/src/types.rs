@@ -188,7 +188,14 @@ pub trait Provider: Send + Sync {
             "this provider has no client to import".into(),
         ))
     }
+
+    /// Called once, by the session at its start, with where to say that a page this provider
+    /// answered has newer content than it gave, so the session browses it again.
+    fn on_page_changed(&self, _changed: PageSink) {}
 }
+
+/// Takes a page whose content changed; must not block.
+pub type PageSink = Arc<dyn Fn(Page) + Send + Sync>;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum FailureKind {
@@ -311,7 +318,9 @@ pub enum Command {
     Seek(SeekTarget),
     SetVolume(u8),
     Shutdown,
-    /// Answered with `BrowseResults` or `BrowseFailed` under the same `req`.
+    /// Answered with `BrowseResults` or `BrowseFailed` under the same `req`. Home and Library
+    /// may be answered with what was kept of them, or with the providers that answered first;
+    /// a `PageChanged` follows if the rest changes them.
     Browse {
         req: u64,
         page: Page,
@@ -383,5 +392,9 @@ pub enum Event {
     AccountError {
         provider: ProviderId,
         error: String,
+    },
+    /// `page` has newer content than the last answer to it: browse it again.
+    PageChanged {
+        page: Page,
     },
 }
