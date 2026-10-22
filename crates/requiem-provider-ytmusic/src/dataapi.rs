@@ -5,8 +5,8 @@ use std::collections::HashMap;
 use std::time::Duration;
 
 use requiem_core::{
-    Collection, CollectionId, CollectionKind, Item, ProviderError, ProviderId, Shelf, Track,
-    TrackId,
+    Collection, CollectionId, CollectionKind, HOME_LIKED, HOME_PLAYLISTS, Item, ProviderError,
+    ProviderId, Shelf, Track, TrackId,
 };
 use serde_json::Value;
 
@@ -22,8 +22,8 @@ const PER_PAGE: usize = 50;
 const MAX_PLAYLISTS: usize = 200;
 const MAX_TRACKS: usize = 1000;
 /// Home's most recently liked music videos.
-const HOME_LIKED: usize = 20;
-/// Likes pages Home reads while looking for `HOME_LIKED` music videos.
+const HOME_LIKED_TRACKS: usize = 20;
+/// Likes pages Home reads while looking for `HOME_LIKED_TRACKS` music videos.
 const HOME_MAX_PAGES: usize = 4;
 /// `snippet.categoryId` of Music.
 const MUSIC_CATEGORY: &str = "10";
@@ -287,9 +287,9 @@ pub(crate) fn home(api: &dyn DataApi) -> Result<Vec<Shelf>, ProviderError> {
     };
     let own = collections(api, likes.as_deref())?;
     Ok([
-        ("Liked songs", liked.into_iter().map(Item::Track).collect()),
+        (HOME_LIKED, liked.into_iter().map(Item::Track).collect()),
         (
-            "Your playlists",
+            HOME_PLAYLISTS,
             own.into_iter().map(Item::Collection).collect(),
         ),
     ]
@@ -302,7 +302,7 @@ pub(crate) fn home(api: &dyn DataApi) -> Result<Vec<Shelf>, ProviderError> {
     .collect())
 }
 
-/// Walks the liked-videos playlist a page at a time, keeping music videos, until `HOME_LIKED`
+/// Walks the liked-videos playlist a page at a time, keeping music videos, until `HOME_LIKED_TRACKS`
 /// are in, the likes run out or `HOME_MAX_PAGES` pages are read.
 fn liked_music(api: &dyn DataApi, likes: &str) -> Result<Vec<Track>, ProviderError> {
     let per_page = PER_PAGE.to_string();
@@ -327,13 +327,13 @@ fn liked_music(api: &dyn DataApi, likes: &str) -> Result<Vec<Track>, ProviderErr
             })
         }));
         match next {
-            Some(n) if out.len() < HOME_LIKED && token.as_deref() != Some(n.as_str()) => {
+            Some(n) if out.len() < HOME_LIKED_TRACKS && token.as_deref() != Some(n.as_str()) => {
                 token = Some(n);
             }
             _ => break,
         }
     }
-    out.truncate(HOME_LIKED);
+    out.truncate(HOME_LIKED_TRACKS);
     Ok(out)
 }
 
