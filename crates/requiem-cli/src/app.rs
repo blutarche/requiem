@@ -54,9 +54,9 @@ commands:
   sleep <secs>          wait (fractional ok)
   await <results|playing|stopped|nowplaying> [timeout_secs=30]
                         wait for that event since the last play/next/prev/search/browse
-  signin [provider]     sign in to spotify (default: the first not signed in): prints a code
-                        to enter on another device and waits until it is entered or expires;
-                        ytmusic signs in with signin-browser
+  signin [provider]     sign in (default: the first not signed in). spotify prints a code to
+                        enter on another device and waits until it is entered or expires;
+                        ytmusic says to use signin-browser
   signout [provider]    sign out (spotify or ytmusic; default: the first signed in) and forget
                         the saved sign-in; waits until the provider reports it
   signin-browser <provider> <path|->
