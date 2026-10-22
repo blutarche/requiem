@@ -59,6 +59,11 @@ pub struct Shelf {
     pub items: Vec<Item>,
 }
 
+/// Home shelves every provider names alike, so the merge makes one of each.
+pub const HOME_LIKED: &str = "Liked songs";
+pub const HOME_MIXES: &str = "Mixes";
+pub const HOME_PLAYLISTS: &str = "Your playlists";
+
 /// `Home` goes to every signed-in provider with `has_home()`, merged in provider order, with
 /// shelves that share a title made one whose items alternate between providers; `Library` to
 /// every signed-in provider, whose items, when more than one has any, alternate in one shelf;
