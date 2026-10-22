@@ -9,7 +9,7 @@ use std::hash::{BuildHasher, Hasher};
 use std::io::{self, Read, Seek, SeekFrom};
 use std::os::unix::fs::DirBuilderExt;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -38,7 +38,8 @@ use tokio::sync::Notify;
 
 use crate::covers::{AlbumCover, COVER_TRACKS, Covers, InTime, MOSAIC_COVERS, Whole, cover_choice};
 use crate::keys::Keys;
-use crate::logger::redact;
+use crate::logger::{debug, redact};
+use crate::recent::{BACKOFF, Card, RecentCache, Shelves};
 use crate::server::{Backend, Stream};
 use crate::wire::Pending;
 use crate::{PROVIDER_ID, creds};
@@ -100,6 +101,7 @@ pub(crate) struct Librespot {
     prepared: Mutex<PreparedStreams<Prep>>,
     flow: SignInFlow,
     covers: Arc<Covers>,
+    recent: Mutex<RecentCache>,
 }
 
 /// `AudioKey` prints itself in `Debug`, so this has none.
@@ -175,6 +177,7 @@ impl Librespot {
             prepared: Mutex::new(PreparedStreams::new()),
             flow: SignInFlow::default(),
             covers: Arc::new(Covers::new()),
+            recent: Mutex::new(RecentCache::default()),
         }
     }
 
@@ -254,7 +257,7 @@ impl Librespot {
                 tracks(session, ids).await
             },
             playlists(session, &self.covers),
-            recent(session, &self.covers),
+            recent(session, &self.covers, &self.recent),
         );
         // Without the liked songs, Home still has the playlists.
         let liked = liked.unwrap_or_else(|e| {
@@ -464,6 +467,8 @@ impl Backend for Librespot {
         if let Some(s) = old {
             s.shutdown();
         }
+        // The next account must not see this one's listening.
+        *lock(&self.recent) = RecentCache::default();
         match &self.creds {
             Some(path) => creds::forget(path).map_err(ProviderError::ClientBroken),
             None => Ok(()),
@@ -906,17 +911,29 @@ async fn listed(
         collection = completed(collection, whole)?;
     }
     if collection.artwork_url.is_none() {
-        let find = {
-            let session = session.clone();
-            let covers = covers.clone();
-            move || async move {
-                let deadline = tokio::time::Instant::now() + BACKGROUND_BUDGET;
-                find_cover(&session, &covers, id, first, deadline).await
-            }
-        };
-        collection.artwork_url = covers.cover_now(id, &revision, find);
+        collection.artwork_url = cover_later(session, covers, id, &revision, first);
     }
     Some(collection)
+}
+
+/// The cover kept for playlist `id` at `revision`; on a miss, none for now while a lookup runs
+/// in the background, from the playlist's `first` tracks when they are known.
+fn cover_later(
+    session: &Session,
+    covers: &Arc<Covers>,
+    id: SpotifyId,
+    revision: &[u8],
+    first: Option<Vec<SpotifyId>>,
+) -> Option<String> {
+    let find = {
+        let session = session.clone();
+        let covers = covers.clone();
+        move || async move {
+            let deadline = tokio::time::Instant::now() + BACKGROUND_BUDGET;
+            find_cover(&session, &covers, id, first, deadline).await
+        }
+    };
+    covers.cover_now(id, revision, find)
 }
 
 /// The ids of a playlist's first tracks.
@@ -1132,74 +1149,122 @@ fn station_track(t: &Value) -> Option<Track> {
     })
 }
 
-/// Home's shelves of what was played lately.
-#[derive(Debug, Default)]
-struct Recent {
-    listen_again: Vec<Collection>,
-    quick_picks: Vec<Track>,
+fn lock(cache: &Mutex<RecentCache>) -> std::sync::MutexGuard<'_, RecentCache> {
+    cache.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+/// What one fetch of the recent shelves asked of Spotify.
+#[derive(Default)]
+struct Asked {
+    requests: AtomicUsize,
+    limited: AtomicBool,
+}
+
+impl Asked {
+    /// Sends `request`, given up on at `until`, counting it and noting whether Spotify answered
+    /// by limiting the rate. The error is fit to log.
+    async fn ask<T>(
+        &self,
+        what: &str,
+        until: tokio::time::Instant,
+        request: impl Future<Output = Result<T, Error>>,
+    ) -> Result<T, String> {
+        self.requests.fetch_add(1, Ordering::Relaxed);
+        match tokio::time::timeout_at(until, request).await {
+            Ok(Ok(v)) => Ok(v),
+            Ok(Err(e)) => {
+                if e.kind == ErrorKind::ResourceExhausted {
+                    self.limited.store(true, Ordering::Relaxed);
+                }
+                Err(format!("Spotify {what}: {}", shown(&e)))
+            }
+            Err(_) => Err(format!("Spotify {what}: timed out")),
+        }
+    }
 }
 
 /// Listen again, the collections played lately, and Quick picks, a radio of the track played
 /// last. Each is left out, or left short, when its requests fail or aren't answered within
-/// [`RECENT_BUDGET`]; Home never fails for them.
-async fn recent(session: &Session, covers: &Arc<Covers>) -> Recent {
+/// [`RECENT_BUDGET`]; Home never fails for them. Cards and radios are kept in `cache`, and
+/// once Spotify limits the rate the last good shelves stand in for a while.
+async fn recent(session: &Session, covers: &Arc<Covers>, cache: &Mutex<RecentCache>) -> Shelves {
+    let backing_off = lock(cache).backing_off(Instant::now());
+    if let Some(kept) = backing_off {
+        debug(format_args!(
+            "Listen again and Quick picks wait out a rate limit"
+        ));
+        return kept;
+    }
     let until = tokio::time::Instant::now() + RECENT_BUDGET;
+    let asked = Asked::default();
     let path = format!(
         "/recently-played/v3/user/{}/{RECENTLY_PLAYED}",
         session.username()
     );
     // librespot's plain JSON GET.
-    let fetched = tokio::time::timeout_at(until, session.spclient().get_next_page(&path)).await;
-    let played = match fetched {
-        Ok(Ok(bytes)) => parse_recently_played(&bytes),
-        Ok(Err(e)) => Err(api_error("recently played", &e)),
-        Err(_) => Err(ProviderError::Network(
-            "Spotify recently played: timed out".into(),
-        )),
-    };
-    let played = match played {
-        Ok(p) => p,
+    let played = asked
+        .ask(
+            "recently played",
+            until,
+            session.spclient().get_next_page(&path),
+        )
+        .await
+        .and_then(|b| parse_recently_played(&b).map_err(|e| e.to_string()));
+    let got = match played {
+        Ok(played) => {
+            let seed = played.iter().find_map(|p| p.track);
+            let (listen_again, quick_picks) = tokio::join!(
+                listen_again(session, covers, cache, &asked, &played, until),
+                quick_picks(session, cache, &asked, seed, until),
+            );
+            Shelves {
+                listen_again,
+                quick_picks,
+            }
+        }
         Err(e) => {
             eprintln!("[spotify] Home left out Listen again and Quick picks: {e}");
-            return Recent::default();
+            Shelves::default()
         }
     };
-    let seed = played.iter().find_map(|p| p.track);
-    let (listen_again, quick_picks) =
-        tokio::join!(listen_again(session, covers, &played, until), async {
-            let seed = seed?;
-            quick_picks(session, seed, until)
-                .await
-                .map_err(|e| eprintln!("[spotify] Home left out Quick picks: {e}"))
-                .ok()
-        });
-    Recent {
-        listen_again,
-        quick_picks: quick_picks.unwrap_or_default(),
+    let requests = asked.requests.load(Ordering::Relaxed);
+    debug(format_args!(
+        "Listen again and Quick picks made {requests} requests"
+    ));
+    let mut kept = lock(cache);
+    if asked.limited.load(Ordering::Relaxed) {
+        eprintln!(
+            "[spotify] Spotify is limiting requests; Listen again and Quick picks ask nothing of it for {} minutes",
+            BACKOFF.as_secs() / 60
+        );
+        return kept.limited(Instant::now(), got);
     }
+    kept.answered(&got);
+    got
 }
 
 async fn listen_again(
     session: &Session,
     covers: &Arc<Covers>,
+    cache: &Mutex<RecentCache>,
+    asked: &Asked,
     played: &[Played],
     until: tokio::time::Instant,
 ) -> Vec<Collection> {
     let picks = listen_again_picks(played);
     let wanted = picks.len();
     let cards: Vec<_> = futures_util::future::join_all(picks.into_iter().map(|opens| async move {
-        match opens {
-            Opens::Liked => Some(liked_card()),
-            Opens::Playlist(id) => played_playlist(session, covers, id, until).await,
-            Opens::Album(id) => {
-                let album =
-                    tokio::time::timeout_at(until, Album::get(session, &SpotifyUri::Album { id }))
-                        .await
-                        .ok()?
-                        .ok()?;
-                Some(album_card(id, &album))
+        let key = opens.id().id;
+        let kept = lock(cache).card(&key, Instant::now());
+        let card = match kept {
+            Some(card) => card,
+            None => {
+                let card = fetch_card(session, asked, opens, until).await?;
+                lock(cache).keep_card(key, card.clone(), Instant::now());
+                card
             }
-        }
+        };
+        Some(with_cover(session, covers, opens, card))
     }))
     .await
     .into_iter()
@@ -1214,18 +1279,62 @@ async fn listen_again(
     cards
 }
 
-/// Playlist `id` as a card, given the cover found for it as the rootlist's cards are.
+async fn fetch_card(
+    session: &Session,
+    asked: &Asked,
+    opens: Opens,
+    until: tokio::time::Instant,
+) -> Option<Card> {
+    let card = |collection| Card {
+        collection,
+        revision: Vec::new(),
+        first: Vec::new(),
+    };
+    match opens {
+        Opens::Liked => Some(card(liked_card())),
+        Opens::Playlist(id) => played_playlist(session, asked, id, until).await,
+        Opens::Album(id) => {
+            let album = asked
+                .ask(
+                    "album",
+                    until,
+                    Album::get(session, &SpotifyUri::Album { id }),
+                )
+                .await
+                .ok()?;
+            Some(card(album_card(id, &album)))
+        }
+    }
+}
+
+/// `card`, given the cover kept for its playlist if it has no artwork of its own, or none for
+/// now while a lookup from the tracks it holds runs in the background.
+fn with_cover(session: &Session, covers: &Arc<Covers>, opens: Opens, card: Card) -> Collection {
+    let mut collection = card.collection;
+    if let Opens::Playlist(id) = opens
+        && collection.artwork_url.is_none()
+    {
+        collection.artwork_url = cover_later(session, covers, id, &card.revision, Some(card.first));
+    }
+    collection
+}
+
 async fn played_playlist(
     session: &Session,
-    covers: &Arc<Covers>,
+    asked: &Asked,
     id: SpotifyId,
     until: tokio::time::Instant,
-) -> Option<Collection> {
-    let bytes = tokio::time::timeout_at(until, session.spclient().get_playlist(&id))
+) -> Option<Card> {
+    let bytes = asked
+        .ask("playlist", until, session.spclient().get_playlist(&id))
         .await
-        .ok()?
         .ok()?;
     let list = SelectedListContent::parse_from_bytes(&bytes).ok()?;
+    let whole = whole_of(&list);
+    let first = match &whole {
+        Whole::Found { first, .. } => first.clone(),
+        Whole::NotFound => Vec::new(),
+    };
     let row = Collection {
         id: Opens::Playlist(id).id(),
         kind: CollectionKind::Playlist,
@@ -1233,13 +1342,11 @@ async fn played_playlist(
         subtitle: None,
         artwork_url: None,
     };
-    let row = RootlistRow {
-        id,
-        collection: completed(row, Some(whole_of(&list)))?,
-        incomplete: false,
+    Some(Card {
+        collection: completed(row, Some(whole))?,
         revision: list.revision().to_vec(),
-    };
-    listed(session, covers, row, until).await
+        first,
+    })
 }
 
 fn album_card(id: SpotifyId, album: &Album) -> Collection {
@@ -1255,30 +1362,47 @@ fn album_card(id: SpotifyId, album: &Album) -> Collection {
     }
 }
 
-/// A radio of track `seed`, without it.
+/// A radio of track `seed`, without it; the one kept for `seed` if there is one.
 async fn quick_picks(
     session: &Session,
-    seed: SpotifyId,
+    cache: &Mutex<RecentCache>,
+    asked: &Asked,
+    seed: Option<SpotifyId>,
     until: tokio::time::Instant,
-) -> Result<Vec<Track>, ProviderError> {
+) -> Vec<Track> {
+    let Some(seed) = seed else {
+        return Vec::new();
+    };
+    let kept = lock(cache).radio(seed, Instant::now());
+    if let Some(tracks) = kept {
+        return tracks;
+    }
     let uri = SpotifyUri::Track { id: seed }.to_uri();
     let station =
         session
             .spclient()
             .get_apollo_station("tracks", &uri, Some(QUICK_PICKS), vec![seed], true);
-    let bytes = tokio::time::timeout_at(until, station)
+    let tracks = asked
+        .ask("radio", until, station)
         .await
-        .map_err(|_| ProviderError::Network("Spotify radio: timed out".into()))?
-        .map_err(|e| api_error("radio", &e))?;
-    let mut tracks = parse_station(&bytes)?;
-    tracks.retain(|t| t.id.id != seed.to_base62());
-    tracks.truncate(QUICK_PICKS);
-    Ok(tracks)
+        .and_then(|b| parse_station(&b).map_err(|e| e.to_string()));
+    match tracks {
+        Ok(mut tracks) => {
+            tracks.retain(|t| t.id.id != seed.to_base62());
+            tracks.truncate(QUICK_PICKS);
+            lock(cache).keep_radio(seed, tracks.clone(), Instant::now());
+            tracks
+        }
+        Err(e) => {
+            eprintln!("[spotify] Home left out Quick picks: {e}");
+            Vec::new()
+        }
+    }
 }
 
 /// Home, without empty shelves: the `liked` tracks, the playlists Spotify made, the Liked
 /// Songs card and the rest of the playlists, then what was played lately.
-fn home_shelves(liked: Vec<Track>, playlists: Vec<Collection>, recent: Recent) -> Vec<Shelf> {
+fn home_shelves(liked: Vec<Track>, playlists: Vec<Collection>, recent: Shelves) -> Vec<Shelf> {
     let (made, own): (Vec<_>, Vec<_>) = playlists.into_iter().partition(|c| {
         c.id.id
             .strip_prefix(PLAYLIST_PREFIX)
@@ -1876,7 +2000,7 @@ mod tests {
                 playlist("37i9dQZF1DZ06evO1JiPRm", "This Is Kado"),
                 playlist("37i9dQZEVXcJZyENOWUFo7", "Discover Weekly"),
             ],
-            Recent::default(),
+            Shelves::default(),
         );
         let got: Vec<_> = shelves.iter().map(|s| (&*s.title, titles(s))).collect();
         assert_eq!(
@@ -1893,12 +2017,52 @@ mod tests {
     }
 
     #[test]
+    fn asking_counts_requests_and_notes_only_a_rate_limit() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        rt.block_on(async {
+            let asked = Asked::default();
+            let until = tokio::time::Instant::now() + Duration::from_secs(5);
+            let limited = || asked.limited.load(Ordering::Relaxed);
+            assert_eq!(
+                asked.ask("x", until, async { Ok::<_, Error>(1) }).await,
+                Ok(1)
+            );
+            let down = asked
+                .ask("x", until, async {
+                    Err::<u8, _>(Error::unavailable(io::Error::other("down")))
+                })
+                .await;
+            assert!(down.is_err() && !limited());
+            let late = asked
+                .ask(
+                    "x",
+                    tokio::time::Instant::now(),
+                    std::future::pending::<Result<u8, Error>>(),
+                )
+                .await;
+            assert_eq!(late, Err("Spotify x: timed out".into()));
+            assert!(!limited());
+            let refused = asked
+                .ask("radio", until, async {
+                    Err::<u8, _>(Error::resource_exhausted(io::Error::other("429")))
+                })
+                .await;
+            assert!(refused.unwrap_err().starts_with("Spotify radio: "));
+            assert!(limited());
+            assert_eq!(asked.requests.load(Ordering::Relaxed), 4);
+        });
+    }
+
+    #[test]
     fn home_ends_with_listen_again_then_quick_picks() {
         let picks = parse_station(RADIO.as_bytes()).unwrap();
         let shelves = home_shelves(
             Vec::new(),
             vec![playlist("1Ab2", "Mine")],
-            Recent {
+            Shelves {
                 listen_again: vec![
                     liked_card(),
                     playlist("37i9dQZF1E39pZBVudb5vh", "Daily Mix 2"),
@@ -2040,7 +2204,7 @@ mod tests {
         let shelves = home_shelves(
             Vec::new(),
             vec![playlist("1Ab2", "Mine")],
-            Recent::default(),
+            Shelves::default(),
         );
         let got: Vec<_> = shelves.iter().map(|s| (&*s.title, titles(s))).collect();
         assert_eq!(got, [("Your playlists", vec!["Liked Songs", "Mine"])]);
