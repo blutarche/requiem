@@ -10,7 +10,7 @@ use serde_json::Value;
 
 use super::{
     ListItem, NavEndpoint, PROVIDER, Run, Runs, SEPARATOR, Thumbnail, collect_items, column_runs,
-    largest, largest_thumbnail, parse_duration, parse_err, parse_subtitle,
+    is_live, largest, largest_thumbnail, parse_duration, parse_err, parse_subtitle,
 };
 
 /// Prefix of collection ids that are Innertube browse ids.
@@ -23,6 +23,8 @@ struct TwoRowItem {
     subtitle: Option<Runs>,
     navigation_endpoint: Option<NavEndpoint>,
     thumbnail_renderer: Option<Thumbnail>,
+    badges: Vec<Value>,
+    subtitle_badges: Vec<Value>,
 }
 
 #[derive(Deserialize, Default)]
@@ -102,8 +104,11 @@ fn video_id(item: &ListItem) -> Option<String> {
 }
 
 /// A song row. Columns after the title hold the artists, then the album or a play count;
-/// a fixed column holds the duration on collection pages.
+/// a fixed column holds the duration on collection pages. A live stream is no song.
 fn list_item_track(item: &ListItem) -> Option<Track> {
+    if is_live(&item.badges, &item.subtitle_badges) {
+        return None;
+    }
     let id = video_id(item)?;
     let title: String = column_runs(item, 0)
         .iter()
@@ -141,8 +146,12 @@ fn list_item_track(item: &ListItem) -> Option<Track> {
     })
 }
 
-/// A carousel card: a playlist, an album, or a song. Artists and other pages are skipped.
+/// A carousel card: a playlist, an album, or a song. Artists, live streams and other pages are
+/// skipped.
 fn two_row_item(item: &TwoRowItem) -> Option<Item> {
+    if is_live(&item.badges, &item.subtitle_badges) {
+        return None;
+    }
     let title = joined(item.title.as_ref());
     let first_run = item.title.as_ref().and_then(|t| t.runs.first());
     let nav = item
@@ -455,6 +464,72 @@ mod tests {
         let song = track(&shelves[0].items[1]);
         assert_eq!(song.id.id, "FGBhQbmPwH8");
         assert_eq!(song.artists, ["Daft Punk"]);
+    }
+
+    // Cut down from a real Home: "Listen together" is three live streams, and the Quick picks
+    // rows name their artists in runs that link nowhere.
+    const LISTEN_TOGETHER: &str = include_str!("../../tests/fixtures/home_listen_together.json");
+    const UNLINKED_ARTISTS: &str = include_str!("../../tests/fixtures/home_unlinked_artists.json");
+
+    #[test]
+    fn live_streams_are_not_songs() {
+        let raw: Value = serde_json::from_str(LISTEN_TOGETHER).unwrap();
+        let mut cards = Vec::new();
+        find_all(&raw, &["musicTwoRowItemRenderer"], &mut cards);
+        assert_eq!(cards.len(), 3);
+        let page = parse_home(LISTEN_TOGETHER.as_bytes()).unwrap();
+        assert_eq!(page.shelves, []);
+
+        let body = r#"{"contents":{"sectionListRenderer":{"contents":[
+            {"musicCarouselShelfRenderer":{"header":{"musicCarouselShelfBasicHeaderRenderer":
+                {"title":{"runs":[{"text":"Rows"}]}}},
+             "contents":[
+               {"musicResponsiveListItemRenderer":{"playlistItemData":{"videoId":"live"},
+                  "badges":[{"liveBadgeRenderer":{}}],
+                  "flexColumns":[{"musicResponsiveListItemFlexColumnRenderer":
+                     {"text":{"runs":[{"text":"Live row"}]}}}]}},
+               {"musicTwoRowItemRenderer":{"title":{"runs":[{"text":"Live card"}]},
+                  "badges":[{"liveBadgeRenderer":{}}],
+                  "navigationEndpoint":{"watchEndpoint":{"videoId":"live2"}}}},
+               {"musicResponsiveListItemRenderer":{"playlistItemData":{"videoId":"song"},
+                  "badges":[{"musicInlineBadgeRenderer":{}}],
+                  "flexColumns":[{"musicResponsiveListItemFlexColumnRenderer":
+                     {"text":{"runs":[{"text":"Song row"}]}}}]}}]}}]}}}"#;
+        let page = parse_home(body.as_bytes()).unwrap();
+        assert_eq!(ids(&page.shelves[0]), ["song"]);
+    }
+
+    #[test]
+    fn unlinked_artists_come_from_the_first_group() {
+        let page = parse_home(UNLINKED_ARTISTS.as_bytes()).unwrap();
+        assert_eq!(page.shelves.len(), 1);
+        assert_eq!(page.shelves[0].title, "Quick picks");
+        let items = &page.shelves[0].items;
+        assert_eq!(items.len(), 3);
+
+        let linked = track(&items[0]);
+        assert_eq!(linked.title, "Rip & Tear");
+        assert_eq!(linked.artists, ["Mick Gordon"]);
+        assert_eq!(
+            linked.album.as_deref(),
+            Some("DOOM (Original Game Soundtrack)")
+        );
+
+        let two = track(&items[1]);
+        assert_eq!(two.id.id, "mmHFyfyngMk");
+        assert_eq!(two.artists, ["Papa Roach", "Hanumankind"]);
+        assert_eq!(
+            two.album.as_deref(),
+            Some("See U in Hell (from the Netflix Series \"Devil May Cry\")")
+        );
+
+        let one = track(&items[2]);
+        assert_eq!(one.id.id, "51PbvYmPoDg");
+        assert_eq!(one.artists, ["Papa Roach"]);
+        assert_eq!(
+            one.album.as_deref(),
+            Some("Devil May Cry: Season 2 (Soundtrack from the Netflix Series)")
+        );
     }
 
     // Synthetic, hand-built to the paths ytmusicapi reads: a signed-in Home's first page and a
