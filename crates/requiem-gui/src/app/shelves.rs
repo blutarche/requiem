@@ -531,6 +531,19 @@ fn page_offset(
     to.clamp(0.0, (content - visible).max(0.0))
 }
 
+/// Each title with how many shelves of that title came before it, which tells shelves of the
+/// same title apart across a refresh.
+fn title_keys<'a>(titles: impl Iterator<Item = &'a str>) -> Vec<(String, usize)> {
+    let mut seen: HashMap<&str, usize> = HashMap::new();
+    titles
+        .map(|t| {
+            let n = seen.entry(t).or_default();
+            *n += 1;
+            (t.to_owned(), *n - 1)
+        })
+        .collect()
+}
+
 struct ShelfRow {
     /// The shelf's index in the page's list, which `Intent`s name.
     shelf: usize,
@@ -666,16 +679,18 @@ impl Shelves {
     }
 
     /// Replaces the page's shelves; shelves with nothing in them are left out. With
-    /// `keep_scroll`, the page and each shelf found again by its title stay scrolled where they
-    /// were, as far as the new shelves reach; otherwise the page starts at its top.
+    /// `keep_scroll`, the page and each shelf found again by its title, and by which of the
+    /// shelves of that title it is, stay scrolled where they were, as far as the new shelves
+    /// reach; otherwise the page starts at its top.
     pub fn set_shelves(&self, shelves: &[Shelf], keep_scroll: bool) {
         let kept = keep_scroll.then(|| {
-            let across: HashMap<String, CGFloat> = self
-                .rows
-                .borrow()
-                .iter()
-                .map(|r| (r.name.clone(), r.scroll.documentVisibleRect().origin.x))
-                .collect();
+            let rows = self.rows.borrow();
+            let across: HashMap<(String, usize), CGFloat> =
+                title_keys(rows.iter().map(|r| r.name.as_str()))
+                    .into_iter()
+                    .zip(rows.iter())
+                    .map(|(key, r)| (key, r.scroll.documentVisibleRect().origin.x))
+                    .collect();
             (self.view.documentVisibleRect().origin.y, across)
         });
         let centre = NSNotificationCenter::defaultCenter();
@@ -788,8 +803,12 @@ impl Shelves {
         *self.rows.borrow_mut() = rows;
         let mut top = NSPoint::ZERO;
         if let Some((y, across)) = kept {
-            for row in self.rows.borrow().iter() {
-                let Some(&x) = across.get(&row.name) else {
+            let rows = self.rows.borrow();
+            for (key, row) in title_keys(rows.iter().map(|r| r.name.as_str()))
+                .into_iter()
+                .zip(rows.iter())
+            {
+                let Some(&x) = across.get(&key) else {
                     continue;
                 };
                 let room = row.doc.frame().size.width - row.scroll.contentSize().width;
@@ -956,6 +975,15 @@ mod tests {
         let (route, next) = scroll_axis(phase, momentum, dx, dy, *locked);
         *locked = next;
         route
+    }
+
+    #[test]
+    fn shelves_of_the_same_title_keep_apart() {
+        let key = |t: &str, n| (t.to_owned(), n);
+        assert_eq!(
+            title_keys(["Mixes", "New", "Mixes"].into_iter()),
+            [key("Mixes", 0), key("New", 0), key("Mixes", 1)]
+        );
     }
 
     #[test]
