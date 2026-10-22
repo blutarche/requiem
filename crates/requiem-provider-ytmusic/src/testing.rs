@@ -128,8 +128,8 @@ pub(crate) struct MusicCall {
 
 type Hook = Box<dyn Fn() + Send + Sync>;
 
-/// Innertube's endpoints: replies are scripted per URL without its query and served in order;
-/// an unscripted call is a network error.
+/// Innertube's endpoints: replies are scripted per URL without its query and served in order,
+/// or per URL and `browseId` for browses made at once; an unscripted call is a network error.
 #[derive(Default)]
 pub(crate) struct FakeMusic {
     replies: Mutex<HashMap<String, VecDeque<(u16, String)>>>,
@@ -148,6 +148,21 @@ impl FakeMusic {
             .push_back((status, body.to_owned()));
     }
 
+    /// Like `script`, for calls to `path` whose body asks for `browse_id` only.
+    pub(crate) fn script_browse(&self, path: &str, browse_id: &str, status: u16, body: &str) {
+        self.script(&format!("{path}#{browse_id}"), status, body);
+    }
+
+    /// Like `during`, for the next call to `path` that asks for `browse_id`.
+    pub(crate) fn during_browse(
+        &self,
+        path: &str,
+        browse_id: &str,
+        f: impl Fn() + Send + Sync + 'static,
+    ) {
+        self.during(&format!("{path}#{browse_id}"), f);
+    }
+
     /// Runs `f` while the next call to `path` is in flight.
     pub(crate) fn during(&self, path: &str, f: impl Fn() + Send + Sync + 'static) {
         self.hooks
@@ -158,17 +173,26 @@ impl FakeMusic {
 
     fn reply(&self, call: MusicCall) -> Result<HttpResponse, ProviderError> {
         let path = call.url.split('?').next().unwrap_or_default().to_owned();
+        let browse_id = serde_json::from_str::<serde_json::Value>(&call.body)
+            .ok()
+            .and_then(|b| b["browseId"].as_str().map(str::to_owned));
         self.calls.lock().unwrap().push(call);
-        let hook = self.hooks.lock().unwrap().remove(&path);
+        let hook = {
+            let mut hooks = self.hooks.lock().unwrap();
+            browse_id
+                .as_ref()
+                .and_then(|id| hooks.remove(&format!("{path}#{id}")))
+                .or_else(|| hooks.remove(&path))
+        };
         if let Some(hook) = hook {
             hook();
         }
-        let (status, body) = self
-            .replies
-            .lock()
-            .unwrap()
-            .get_mut(&path)
-            .and_then(VecDeque::pop_front)
+        let mut replies = self.replies.lock().unwrap();
+        let by_id = browse_id
+            .and_then(|id| replies.get_mut(&format!("{path}#{id}")))
+            .and_then(VecDeque::pop_front);
+        let (status, body) = by_id
+            .or_else(|| replies.get_mut(&path).and_then(VecDeque::pop_front))
             .ok_or_else(|| ProviderError::Network(format!("unscripted {path}")))?;
         Ok(HttpResponse {
             status,
