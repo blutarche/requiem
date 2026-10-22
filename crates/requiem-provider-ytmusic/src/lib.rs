@@ -253,6 +253,7 @@ mod tests {
     const SEARCH: &str = include_str!("../tests/fixtures/search_songs.json");
     const PLAYER: &str = include_str!("../tests/fixtures/player_ok.json");
     const PLAYLIST: &str = include_str!("../tests/fixtures/browse_playlist.json");
+    const LIBRARY: &str = include_str!("../tests/fixtures/signed_in_library_playlists.json");
 
     const SECRET: &str = "fakeSID-MARKER";
     const SAPISID: &str = "FAKEsapisid-0123/AbCdEfGh";
@@ -333,6 +334,9 @@ mod tests {
         rig.music.script(BROWSE_URL, 200, HOME);
         rig.music
             .script(BROWSE_URL, 200, r#"{"continuationContents":{}}"#);
+        // Home's liked music and the library, then the collection.
+        rig.music.script(BROWSE_URL, 200, PLAYLIST);
+        rig.music.script(BROWSE_URL, 200, LIBRARY);
         rig.music.script(BROWSE_URL, 200, PLAYLIST);
         let tracks = p.search("fake query", 5).unwrap();
         assert!(!tracks.is_empty());
@@ -371,7 +375,9 @@ mod tests {
             .collect();
         assert_eq!(
             signed,
-            [MENU_URL, BROWSE_URL, BROWSE_URL, BROWSE_URL, BROWSE_URL]
+            [
+                MENU_URL, BROWSE_URL, BROWSE_URL, BROWSE_URL, BROWSE_URL, BROWSE_URL, BROWSE_URL
+            ]
         );
     }
 
