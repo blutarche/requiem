@@ -771,7 +771,7 @@ fn library_that_needs_sign_in_says_so() {
     r.provider.script_browse(
         Page::Library,
         vec![Step::err(ProviderError::SignInRequired(
-            "sign in to Google to see your library".into(),
+            "sign in to see your library".into(),
         ))],
     );
     let app = r.json_app();
@@ -782,7 +782,7 @@ fn library_that_needs_sign_in_says_so() {
         *of_type(&lines, "browse_failed")[0],
         serde_json::json!({
             "type": "browse_failed",
-            "error": "sign-in required: sign in to Google to see your library",
+            "error": "sign-in required: sign in to see your library",
             "sign_in_required": true,
         })
     );
@@ -790,7 +790,7 @@ fn library_that_needs_sign_in_says_so() {
 
 fn pending() -> AccountState {
     AccountState::Pending {
-        verification_url: "https://www.google.com/device".into(),
+        verification_url: "https://www.spotify.com/pair".into(),
         user_code: "GQVQ-JKEC".into(),
         expires_at_unix: 4_000_000_000,
     }
@@ -811,7 +811,7 @@ fn signin_prints_the_code_and_waits_for_the_outcome() {
         let waiter = s.spawn(|| r.app(true).exec("signin"));
         wait_out(
             &r,
-            "Go to https://www.google.com/device and enter GQVQ-JKEC\n",
+            "Go to https://www.spotify.com/pair and enter GQVQ-JKEC\n",
             1,
         );
         assert!(!waiter.is_finished());
@@ -821,9 +821,7 @@ fn signin_prints_the_code_and_waits_for_the_outcome() {
     assert_eq!(flow, Flow::Continue);
     let text = r.out.text();
     assert!(
-        text.ends_with(
-            "Go to https://www.google.com/device and enter GQVQ-JKEC\nsigned in as Me\n"
-        ),
+        text.ends_with("Go to https://www.spotify.com/pair and enter GQVQ-JKEC\nsigned in as Me\n"),
         "{text}"
     );
     let app = r.app(true);
@@ -857,11 +855,11 @@ fn a_failed_signin_says_why_and_exits_2_in_script_mode() {
 }
 
 #[test]
-fn signin_without_a_client_prints_the_hint() {
+fn signin_to_a_provider_that_takes_a_browser_session_prints_the_hint() {
     let provider = FakeProvider::new("fake");
-    let hint = "no Google OAuth client: save the JSON of a \"TVs and Limited Input devices\" \
-                client to /cfg/requiem/google-client.json";
-    provider.set_account(AccountState::Unavailable(hint.into()));
+    let hint = "YouTube Music signs in with a browser session: paste one in Settings, or run \
+                `requiem signin-browser ytmusic <path|->`";
+    provider.set_account(AccountState::SignedOut);
     provider.script_sign_in(SignInScript {
         pending: None,
         gate: None,
@@ -877,8 +875,7 @@ fn signin_without_a_client_prints_the_hint() {
         serde_json::json!({
             "type": "account",
             "provider": "fake",
-            "state": "unavailable",
-            "detail": hint,
+            "state": "signed_out",
         })
     );
     assert_eq!(
@@ -907,7 +904,7 @@ fn json_signin_and_signout_report_the_account() {
             "type": "account",
             "provider": "fake",
             "state": "pending",
-            "verification_url": "https://www.google.com/device",
+            "verification_url": "https://www.spotify.com/pair",
             "user_code": "GQVQ-JKEC",
             "expires_at_unix": 4_000_000_000u64,
         })
@@ -951,7 +948,7 @@ fn a_signin_after_a_signout_starts_from_signed_out() {
     let text = r.out.text();
     assert!(
         text.ends_with(
-            "signed out\nGo to https://www.google.com/device and enter GQVQ-JKEC\nsigned in as New\n"
+            "signed out\nGo to https://www.spotify.com/pair and enter GQVQ-JKEC\nsigned in as New\n"
         ),
         "{text}"
     );
@@ -974,7 +971,7 @@ fn a_signin_that_a_signout_ends_says_it_was_cancelled() {
         let waiter = s.spawn(|| r.app(true).exec("signin"));
         wait_out(
             &r,
-            "Go to https://www.google.com/device and enter GQVQ-JKEC\n",
+            "Go to https://www.spotify.com/pair and enter GQVQ-JKEC\n",
             1,
         );
         // Another client's sign-out.
@@ -1014,7 +1011,7 @@ fn a_signout_during_a_pending_signin_acks() {
             ..
         }
     ) {}
-    // As with Google, the sign-out ends the sign-in before it finishes itself.
+    // As with a real provider, the sign-out ends the sign-in before it finishes itself.
     let sign_out = Gate::new();
     r.provider.gate_sign_out(sign_out.clone());
     let flow = thread::scope(|s| {
@@ -1153,8 +1150,6 @@ fn signout_naming_an_unknown_provider_exits_2_without_sending() {
     );
 }
 
-const CLIENT: &str = r#"{"installed":{"client_id":"id","client_secret":"s"}}"#;
-
 /// A file under the temp dir, removed on drop.
 struct TempFile(std::path::PathBuf);
 
@@ -1172,39 +1167,19 @@ impl Drop for TempFile {
     }
 }
 
-fn needs_setup_rig() -> Rig {
+fn signed_out_rig() -> Rig {
     let provider = FakeProvider::new("fake");
-    provider.set_account(AccountState::Unavailable("no client".into()));
+    provider.set_account(AccountState::SignedOut);
     rig_with(provider)
 }
 
 #[test]
-fn signin_client_sends_the_file_and_acks() {
-    let r = needs_setup_rig();
-    let file = TempFile::new("my client.json", CLIENT.as_bytes());
-    let app = r.json_app();
-    let line = format!("signin-client fake {}", file.0.display());
-    assert_eq!(app.exec(&line), Flow::Continue);
-    assert_eq!(r.provider.imported(), [CLIENT]);
-    let lines = r.json_lines();
-    assert_eq!(
-        lines.last(),
-        Some(&serde_json::json!({"type": "ack", "command": "signin-client"}))
-    );
-    assert_eq!(
-        of_type(&lines, "account").last(),
-        Some(&&serde_json::json!({"type": "account", "provider": "fake", "state": "signed_out"}))
-    );
-    assert!(of_type(&lines, "error").is_empty(), "{lines:?}");
-}
-
-#[test]
-fn a_failed_signin_client_says_why_and_exits_2_without_an_ack() {
-    let r = needs_setup_rig();
-    let file = TempFile::new("bad.json", CLIENT.as_bytes());
-    let line = format!("signin-client fake {}", file.0.display());
+fn a_failed_signin_browser_says_why_and_exits_2_without_an_ack() {
+    let r = signed_out_rig();
+    let file = TempFile::new("bad.txt", HEADERS.as_bytes());
+    let line = format!("signin-browser fake {}", file.0.display());
     r.provider
-        .fail_import(ProviderError::SignInRequired("not a client".into()));
+        .fail_import(ProviderError::SignInRequired("not a session".into()));
     let started = std::time::Instant::now();
     assert_eq!(r.json_app().exec(&line), Flow::Exit(2));
     assert!(started.elapsed() < Duration::from_secs(5));
@@ -1212,13 +1187,13 @@ fn a_failed_signin_client_says_why_and_exits_2_without_an_ack() {
     assert_eq!(
         of_type(&lines, "account_error"),
         [
-            &serde_json::json!({"type": "account_error", "provider": "fake", "error": "not a client"})
+            &serde_json::json!({"type": "account_error", "provider": "fake", "error": "not a session"})
         ]
     );
     assert!(of_type(&lines, "ack").is_empty(), "{lines:?}");
 
     r.provider
-        .fail_import(ProviderError::SignInRequired("not a client".into()));
+        .fail_import(ProviderError::SignInRequired("not a session".into()));
     assert_eq!(r.app(false).exec(&line), Flow::Continue);
     assert_eq!(r.provider.imported().len(), 2);
 }
@@ -1269,23 +1244,23 @@ impl app::Player for ImportAnswer {
     }
 }
 
-/// Runs `signin-client` as a script against a daemon that answers with `answer`.
+/// Runs `signin-browser` as a script against a daemon that answers with `answer`.
 fn import_answered(file: &str, answer: Vec<Event>) -> (u8, String) {
-    let file = TempFile::new(file, CLIENT.as_bytes());
+    let file = TempFile::new(file, HEADERS.as_bytes());
     let player = ImportAnswer {
         answer,
         ..ImportAnswer::default()
     };
     let out = Buf::default();
-    let script = format!("signin-client fake {}\n", file.0.display());
+    let script = format!("signin-browser fake {}\n", file.0.display());
     let code = app::run(&player, Cursor::new(script), out.clone(), true).unwrap();
     (code, out.text())
 }
 
 #[test]
-fn signin_client_answered_with_an_error_then_the_state_exits_2() {
+fn signin_browser_answered_with_an_error_then_the_state_exits_2() {
     let (code, text) = import_answered(
-        "stood.json",
+        "stood.txt",
         vec![
             Event::AccountError {
                 provider: ProviderId("fake".into()),
@@ -1305,9 +1280,9 @@ fn signin_client_answered_with_an_error_then_the_state_exits_2() {
 }
 
 #[test]
-fn signin_client_answered_with_the_state_alone_exits_0() {
+fn signin_browser_answered_with_the_state_alone_exits_0() {
     let (code, text) = import_answered(
-        "taken.json",
+        "taken.txt",
         vec![Event::Account {
             provider: ProviderId("fake".into()),
             state: AccountState::SignedOut,
@@ -1318,7 +1293,7 @@ fn signin_client_answered_with_the_state_alone_exits_0() {
 }
 
 #[test]
-fn signin_client_waits_past_another_signins_code() {
+fn signin_browser_waits_past_another_signins_code() {
     let r = rig();
     let (import, sign_in) = (Gate::new(), Gate::new());
     r.provider.gate_import(import.clone());
@@ -1327,8 +1302,8 @@ fn signin_client_waits_past_another_signins_code() {
         gate: Some(sign_in.clone()),
         outcome: Ok(AccountState::SignedIn { name: None }),
     });
-    let file = TempFile::new("client.json", CLIENT.as_bytes());
-    let line = format!("signin-client fake {}", file.0.display());
+    let file = TempFile::new("waits.txt", HEADERS.as_bytes());
+    let line = format!("signin-browser fake {}", file.0.display());
     let flow = thread::scope(|s| {
         let waiter = s.spawn(|| r.app(true).exec(&line));
         r.provider.wait_import_calls(1);
@@ -1338,7 +1313,7 @@ fn signin_client_waits_past_another_signins_code() {
         });
         wait_out(
             &r,
-            "Go to https://www.google.com/device and enter GQVQ-JKEC\n",
+            "Go to https://www.spotify.com/pair and enter GQVQ-JKEC\n",
             1,
         );
         thread::sleep(Duration::from_millis(200));
@@ -1353,56 +1328,6 @@ fn signin_client_waits_past_another_signins_code() {
     assert!(!text.contains("error"), "{text}");
 }
 
-#[test]
-fn signin_client_checks_its_arguments_and_file_before_sending() {
-    let r = needs_setup_rig();
-    let good = TempFile::new("good.json", CLIENT.as_bytes());
-    let mut big = b"{\"client_secret\":\"LEAKME\",\"pad\":\"".to_vec();
-    big.resize(64 * 1024 + 1, b'x');
-    let big = TempFile::new("big.json", &big);
-    let binary = TempFile::new("binary.json", &[0xff, 0xfe, b'{']);
-    let missing = std::env::temp_dir().join(format!("rq-cli-{}-none", std::process::id()));
-    let app = r.app(true);
-    for (line, error) in [
-        (
-            "signin-client".to_owned(),
-            "usage: signin-client <provider> <path>".to_owned(),
-        ),
-        (
-            "signin-client fake".to_owned(),
-            "usage: signin-client <provider> <path>".to_owned(),
-        ),
-        (
-            format!("signin-client fake {}", big.0.display()),
-            format!("signin-client: {}: over 64 KiB", big.0.display()),
-        ),
-        (
-            format!("signin-client fake {}", binary.0.display()),
-            format!("signin-client: {}: not UTF-8 text", binary.0.display()),
-        ),
-        (
-            format!("signin-client fake {}", missing.display()),
-            format!("signin-client: {}: No such file", missing.display()),
-        ),
-        (
-            format!("signin-client foo {}", good.0.display()),
-            "no provider foo".to_owned(),
-        ),
-    ] {
-        assert_eq!(app.exec(&line), Flow::Exit(2), "{line}");
-        let text = r.out.text();
-        assert!(text.contains(&format!("error: {error}")), "{text}");
-    }
-    assert_eq!(r.app(false).exec("signin-client"), Flow::Continue);
-    // The session answers commands in order, so an import sent would be answered by now.
-    exec_all(&app, "vol 55");
-    wait_out(&r, "volume: 55\n", 1);
-    assert!(r.provider.imported().is_empty());
-    let text = r.out.text();
-    assert!(!text.contains("LEAKME"), "{text}");
-    assert!(!text.contains("account"), "{text}");
-}
-
 /// Made-up request headers, as a browser's developer tools copy them.
 const HEADERS: &str =
     "accept: */*\ncookie: SID=LEAKME; __Secure-3PAPISID=fake\nx-goog-authuser: 0\n";
@@ -1413,7 +1338,7 @@ fn browser_session(paste: &str) -> String {
 
 #[test]
 fn signin_browser_sends_the_file_as_a_browser_session_and_acks() {
-    let r = needs_setup_rig();
+    let r = signed_out_rig();
     let file = TempFile::new("my headers.txt", HEADERS.as_bytes());
     let app = r.json_app();
     let line = format!("signin-browser fake {}", file.0.display());
@@ -1430,7 +1355,7 @@ fn signin_browser_sends_the_file_as_a_browser_session_and_acks() {
 
 #[test]
 fn a_refused_browser_session_says_why_and_exits_2() {
-    let r = needs_setup_rig();
+    let r = signed_out_rig();
     let file = TempFile::new("refused.txt", HEADERS.as_bytes());
     let line = format!("signin-browser fake {}", file.0.display());
     let why = "That cookie has no __Secure-3PAPISID, so it isn't from a signed-in tab.";
@@ -1443,8 +1368,22 @@ fn a_refused_browser_session_says_why_and_exits_2() {
 }
 
 #[test]
+fn signin_client_is_gone() {
+    let r = signed_out_rig();
+    let file = TempFile::new("client.json", br#"{"installed":{"client_id":"id"}}"#);
+    let line = format!("signin-client fake {}", file.0.display());
+    assert_eq!(r.app(true).exec(&line), Flow::Exit(2));
+    let text = r.out.text();
+    assert!(
+        text.contains("error: unknown command signin-client"),
+        "{text}"
+    );
+    assert!(r.provider.imported().is_empty());
+}
+
+#[test]
 fn signin_browser_checks_its_arguments_and_file_before_sending() {
-    let r = needs_setup_rig();
+    let r = signed_out_rig();
     let good = TempFile::new("good-headers.txt", HEADERS.as_bytes());
     let mut big = HEADERS.as_bytes().to_vec();
     big.resize(64 * 1024 + 1, b'x');
