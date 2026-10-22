@@ -375,9 +375,7 @@ impl BrowserSession {
     pub(crate) fn import(&self, paste: &str) -> Result<(), ProviderError> {
         let headers = browser::parse_paste(paste).map_err(ProviderError::SignInRequired)?;
         let Some(path) = self.path.clone() else {
-            return Err(ProviderError::SignInRequired(
-NO_HOME_DIR.into(),
-            ));
+            return Err(ProviderError::SignInRequired(NO_HOME_DIR.into()));
         };
         let checked = |f: Failure| match f {
             Failure::SignedOut | Failure::Forbidden => {
