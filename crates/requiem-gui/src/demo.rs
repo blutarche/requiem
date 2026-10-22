@@ -11,7 +11,7 @@ use requiem_core::{
 use requiem_ipc::{UpdateState, UpdateStatus};
 
 use crate::args::View;
-use crate::vm::{BANNER_GRACE, Intent, Link, LinkError, Place, Vm};
+use crate::vm::{BANNER_GRACE, Intent, Link, LinkError, Place, Service, ServiceFilter, Vm};
 
 pub const QUERY: &str = "night drive";
 /// The demo player's version, and the one its update offers.
@@ -467,7 +467,7 @@ impl Default for Daemon {
                         name: Some("Demo Listener".into()),
                     },
                 ),
-                (ytmusic(), AccountState::SignedOut),
+                (ytmusic(), AccountState::SignedIn { name: None }),
             ],
         }
     }
@@ -743,7 +743,8 @@ fn run_intent(vm: &mut Vm, daemon: &mut Daemon, intent: Intent) {
 
 /// `start`, staged for a demo-only `view`: `Empty` skips the search; `Disconnected`,
 /// `OutOfDate`, `Toast` and the update views add their banner or toast; the Library views and
-/// `HomeSignedOut` set the account, and `SignInSetup` opens the setup sheet; `SettingsSetup`
+/// `HomeSignedOut` set the account, and `SignInSetup` opens the setup sheet; `HomeSpotify`
+/// filters Home to Spotify; `SettingsSetup`
 /// shows Settings with no Google client, and `SettingsSession` opens its session form; `NowPlayingEmpty`
 /// stops playback; `NowPlayingLast` plays the queue's last track. Other views get the plain start.
 pub fn start_in(view: View) -> (Vm, Daemon) {
@@ -807,6 +808,10 @@ pub fn start_in(view: View) -> (Vm, Daemon) {
         }
         View::Home | View::HomeScrolled | View::HomeShelfPaged | View::HomeSignedOut => {
             run_intent(&mut vm, &mut daemon, Intent::Visit(Place::Home))
+        }
+        View::HomeSpotify => {
+            run_intent(&mut vm, &mut daemon, Intent::Visit(Place::Home));
+            vm.intent(Intent::SetFilter(ServiceFilter::Only(Service::Spotify)));
         }
         View::Library | View::LibrarySignedOut | View::LibraryUnavailable | View::SignIn => {
             run_intent(&mut vm, &mut daemon, Intent::Visit(Place::Library));
@@ -912,6 +917,32 @@ mod tests {
             vm.ui().home_view(),
             HomeView::SignedOut(vec![spotify(), ytmusic()])
         );
+    }
+
+    #[test]
+    fn the_demo_filters_home_to_one_service_for_its_spotify_view() {
+        let (vm, _) = start_in(View::Home);
+        assert!(vm.ui().filter_shown());
+        assert_eq!(vm.ui().shown_home().len(), 5);
+
+        let (vm, _) = start_in(View::HomeSpotify);
+        let shelves = vm.ui().shown_home();
+        let titles: Vec<&str> = shelves.iter().map(|s| &*s.title).collect();
+        // Quick picks is YouTube Music's alone.
+        assert_eq!(
+            titles,
+            [HOME_LIKED, HOME_MIXES, HOME_PLAYLISTS, "Jump back in"]
+        );
+        for shelf in shelves.iter() {
+            assert!(
+                shelf
+                    .items
+                    .iter()
+                    .all(|i| *vm::item_provider(i) == spotify()),
+                "{}",
+                shelf.title
+            );
+        }
     }
 
     #[test]

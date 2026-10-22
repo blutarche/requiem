@@ -283,7 +283,8 @@ impl Palette {
             .iter()
             .enumerate()
             .filter(|(_, r)| {
-                matches.contains(&r.action) && (!r.action.is_account() || r.enabled.get())
+                matches.contains(&r.action)
+                    && (!r.action.listed_only_when_runnable() || r.enabled.get())
             })
             .map(|(i, _)| i)
             .collect()

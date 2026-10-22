@@ -35,6 +35,8 @@ use super::badge;
 use super::bar::PlayerBar;
 use super::now_playing::NowPlayingPage;
 use super::palette::Palette;
+use super::prefs;
+use super::service_switch::ServiceSwitch;
 use super::settings::SettingsPage;
 use super::shelves::Shelves;
 use super::table::{self, Kind, Table};
@@ -46,8 +48,8 @@ use super::widgets::{
 use super::{Delegate, MainWindow};
 use crate::vm::{
     self, AccountRow, AccountRowState, Banner, Controls, Dirty, EmptyText, HomeView, Intent,
-    LibraryView, List, PageView, PaletteAction, Place, QueueEdit, Selection, Service, Toast,
-    UiState, Vm,
+    LibraryView, List, PageView, PaletteAction, Place, QueueEdit, Selection, Service,
+    ServiceFilter, Toast, UiState, Vm,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -326,6 +328,7 @@ pub struct Ui {
     nav_library: Retained<NavItem>,
     nav_queue: Retained<NavItem>,
     nav_settings: Retained<NavItem>,
+    service_switch: ServiceSwitch,
     main: Retained<NSView>,
     banner: Retained<NSView>,
     banner_label: Retained<NSTextField>,
@@ -461,6 +464,12 @@ impl Ui {
         );
         nav_settings.setAutoresizingMask(PIN_BOTTOM);
         sidebar.addSubview(&nav_settings);
+        // Directly above Settings.
+        let service_switch = ServiceSwitch::new(
+            mtm,
+            rect(12.0, 12.0 + 36.0 + 8.0, SIDEBAR_W - 24.0, ServiceSwitch::H),
+        );
+        sidebar.addSubview(&service_switch.view);
         root.addSubview(&sidebar);
 
         let mw = WIN_W - SIDEBAR_W;
@@ -709,6 +718,7 @@ impl Ui {
             nav_library,
             nav_queue,
             nav_settings,
+            service_switch,
             main,
             banner,
             banner_label,
@@ -1127,7 +1137,7 @@ impl Ui {
     pub fn show(&self, view: AppView) {
         self.switch_to(view);
         self.visit(view.place());
-        if view == AppView::Search && self.vm.borrow().ui().results.is_empty() {
+        if view == AppView::Search && self.vm.borrow().ui().shown_results().is_empty() {
             self.window.makeFirstResponder(Some(&self.search.text));
             return;
         }
@@ -1330,6 +1340,7 @@ impl Ui {
             PaletteAction::ShowQueue => self.show(AppView::Queue),
             PaletteAction::ShowNowPlaying => self.show_now_playing(),
             PaletteAction::ShowSettings => self.show(AppView::Settings),
+            PaletteAction::ShowServices(filter) => self.choose_filter(filter),
             PaletteAction::Refresh => self.intent(Intent::Refresh),
             PaletteAction::SignIn(service) => self.sign_in(service.provider()),
             PaletteAction::SignOut(service) => self.confirm_sign_out(service.provider()),
@@ -1341,6 +1352,15 @@ impl Ui {
 
     pub fn intent(&self, intent: Intent) {
         self.run(intent);
+    }
+
+    /// The user's choice of service: shown at once, and kept for the next launch. Demo runs
+    /// leave the saved choice alone.
+    pub fn choose_filter(&self, filter: ServiceFilter) {
+        self.run(Intent::SetFilter(filter));
+        if !matches!(self.backend, Backend::Demo(_)) {
+            prefs::save_service_filter(filter);
+        }
     }
 
     /// Appends item `i` of `list`, and confirms it on the row's "+" and to VoiceOver when it
@@ -2132,11 +2152,14 @@ impl Ui {
                     .set(Icon::Search, &e.heading, &e.sub, e.action);
             }
         }
-        if let Some((view, shelves)) = p.home {
-            self.show_home(&view, &shelves);
+        if let Some((shown, filter)) = p.filter {
+            self.service_switch.set(shown, filter);
         }
-        if let Some((view, rows)) = p.library {
-            self.show_library(&view, rows);
+        if let Some((view, shelves, only)) = p.home {
+            self.show_home(&view, &shelves, only);
+        }
+        if let Some((view, rows, only)) = p.library {
+            self.show_library(&view, rows, only);
         }
         if let Some(rows) = p.settings {
             let speak = self.view.get() == AppView::Settings;
@@ -2216,7 +2239,7 @@ impl Ui {
         ]
     }
 
-    fn show_home(&self, view: &HomeView, shelves: &[Shelf]) {
+    fn show_home(&self, view: &HomeView, shelves: &[Shelf], only: Option<Service>) {
         let ready =
             *view == HomeView::Page(PageView::Ready) && shelves.iter().any(|s| !s.items.is_empty());
         self.shelves.set_shelves(if ready { shelves } else { &[] });
@@ -2233,22 +2256,39 @@ impl Ui {
                     &labelled(&actions),
                 );
             }
-            HomeView::Page(page) => Self::page_state(&self.home_state, Icon::Home, page, "Home"),
+            HomeView::Page(page) => {
+                Self::page_state(&self.home_state, Icon::Home, page, "Home", only);
+            }
         }
     }
 
-    /// A page that is loading, failed or empty, in its empty state.
-    fn page_state(state: &EmptyState, icon: Icon, view: &PageView, name: &str) {
+    /// A page that is loading, failed or empty, in its empty state. `only` is the service its
+    /// items are filtered to.
+    fn page_state(
+        state: &EmptyState,
+        icon: Icon,
+        view: &PageView,
+        name: &str,
+        only: Option<Service>,
+    ) {
         match view {
             PageView::Loading => state.set(icon, &format!("Loading {name}"), "", None),
             PageView::Failed(e) => {
                 state.set(icon, &format!("Couldn't load {name}"), e, Some("Try again"));
             }
-            PageView::Ready => state.set(icon, &format!("{name} is empty"), "", None),
+            PageView::Ready => match only {
+                Some(s) => state.set(
+                    icon,
+                    &format!("{name} has nothing from {}", s.name()),
+                    "Choose All to see every service.",
+                    None,
+                ),
+                None => state.set(icon, &format!("{name} is empty"), "", None),
+            },
         }
     }
 
-    fn show_library(&self, view: &LibraryView, rows: Vec<table::RowText>) {
+    fn show_library(&self, view: &LibraryView, rows: Vec<table::RowText>, only: Option<Service>) {
         let panel = matches!(view, LibraryView::Pending { .. });
         let setup = matches!(view, LibraryView::Setup { .. });
         let list = matches!(
@@ -2295,10 +2335,10 @@ impl Ui {
                         .as_deref()
                         .map_or_else(|| "Signed in".to_owned(), |n| format!("Signed in as {n}")),
                 );
-                if *page == PageView::Ready && rows.is_empty() {
+                if *page == PageView::Ready && rows.is_empty() && only.is_none() {
                     state.set(Icon::Library, "Your Library is empty", "", None);
-                } else if *page != PageView::Ready {
-                    Self::page_state(state, Icon::Library, page, "Library");
+                } else if *page != PageView::Ready || rows.is_empty() {
+                    Self::page_state(state, Icon::Library, page, "Library", only);
                 }
             }
         }
@@ -2412,7 +2452,13 @@ impl Ui {
         self.collection_table.view.setHidden(!ready);
         self.collection_state.view.setHidden(ready);
         if !ready {
-            Self::page_state(&self.collection_state, Icon::ListMusic, &c.view, "playlist");
+            Self::page_state(
+                &self.collection_state,
+                Icon::ListMusic,
+                &c.view,
+                "playlist",
+                None,
+            );
         }
         self.collection_table
             .set_rows(if ready { c.rows } else { Vec::new() }, None);
@@ -2872,8 +2918,11 @@ struct Patch {
     search_status: Option<Option<(String, bool)>>,
     queue: Option<(Vec<table::RowText>, Option<usize>)>,
     queue_badge: Option<Option<String>>,
-    home: Option<(HomeView, Vec<Shelf>)>,
-    library: Option<(LibraryView, Vec<table::RowText>)>,
+    /// The page, its shelves, and the service they are filtered to.
+    home: Option<(HomeView, Vec<Shelf>, Option<Service>)>,
+    library: Option<(LibraryView, Vec<table::RowText>, Option<Service>)>,
+    /// Whether the sidebar offers the service filter, and the choice.
+    filter: Option<(bool, ServiceFilter)>,
     settings: Option<Vec<AccountRow>>,
     collection: Option<Option<CollectionPatch>>,
     now_playing: Option<NowPlaying>,
@@ -2893,17 +2942,26 @@ impl Patch {
     fn new(d: Dirty, s: &UiState) -> Patch {
         let any = |r: Dirty| d.contains(r);
         Patch {
-            results: any(Dirty::RESULTS).then(|| (table::rows(&s.results), s.results_empty())),
+            results: any(Dirty::RESULTS)
+                .then(|| (table::rows(&s.shown_results()), s.results_empty())),
             search_status: any(Dirty::SEARCH_STATUS).then(|| s.search_status_text()),
             queue: any(Dirty::QUEUE).then(|| (table::rows(&s.queue), s.current)),
             queue_badge: any(Dirty::QUEUE).then(|| s.queue_badge()),
-            home: any(Dirty::HOME).then(|| (s.home_view(), s.home.shelves.clone())),
+            home: any(Dirty::HOME).then(|| {
+                (
+                    s.home_view(),
+                    s.shown_home().into_owned(),
+                    s.shown_service(),
+                )
+            }),
             library: (any(Dirty::LIBRARY) || any(Dirty::ACCOUNT)).then(|| {
                 (
                     s.library_view(),
                     table::collection_rows(&s.library_collections()),
+                    s.shown_service(),
                 )
             }),
+            filter: any(Dirty::ACCOUNT).then(|| (s.filter_shown(), s.filter)),
             settings: (any(Dirty::LIBRARY) || any(Dirty::ACCOUNT)).then(|| s.settings_view()),
             collection: any(Dirty::COLLECTION).then(|| {
                 s.collection.as_ref().map(|c| CollectionPatch {
@@ -2981,6 +3039,7 @@ mod tests {
         assert!(p.now_playing.is_none() && p.elapsed.is_none() && p.progress.is_none());
         assert!(p.playing.is_none() && p.toast.is_none() && p.banner.is_none());
         assert!(p.controls.is_none() && p.now_page.is_none() && p.settings.is_none());
+        assert!(p.filter.is_none());
     }
 
     #[test]
@@ -2991,6 +3050,8 @@ mod tests {
         assert_eq!(rows.len(), 30);
         assert_eq!(empty, None);
         assert_eq!(p.search_status, Some(None));
+        // The demo has both services signed in.
+        assert_eq!(p.filter, Some((true, ServiceFilter::All)));
         let (queue, current) = p.queue.unwrap();
         assert_eq!((queue.len(), current), (8, Some(2)));
         assert_eq!(p.queue_badge, Some(Some("8".into())));
