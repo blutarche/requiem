@@ -3,7 +3,7 @@ use std::fmt;
 use std::panic::{self, AssertUnwindSafe};
 use std::sync::Arc;
 use std::thread::{self, JoinHandle};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use crossbeam_channel::{Receiver, Sender, bounded, unbounded};
 
@@ -242,7 +242,8 @@ impl PreSlot {
 /// A fetch of Home or Library from every signed-in provider that answers it.
 struct Run {
     id: u64,
-    /// Browses with nothing kept to answer them; the first provider's answer does.
+    /// Browses with nothing kept to answer them; the first answer that leaves something to
+    /// show does, or else the last.
     waiting: Vec<u64>,
     /// The providers asked, with their states when asked.
     asked: Vec<(ProviderId, AccountState)>,
@@ -250,11 +251,6 @@ struct Run {
     hard: Option<ProviderError>,
     sign_in: Option<ProviderError>,
 }
-
-/// How long after a `PageChanged` a browse that the kept parts answer fetches nothing more:
-/// clients browse again on hearing it, and a provider whose content differs on every fetch
-/// would otherwise keep them at it.
-const CHANGED_QUIET: Duration = Duration::from_secs(10);
 
 /// What is kept of Home or Library, and its fetch.
 #[derive(Default)]
@@ -264,8 +260,23 @@ struct Kept {
     run: Option<Run>,
     /// Fetch again once `run` ends: something changed after it started.
     again: bool,
-    /// When the last `PageChanged` for it went out.
-    changed_at: Option<Instant>,
+}
+
+/// Whether `shelves` hold anything to show.
+fn showable(shelves: &[Shelf]) -> bool {
+    shelves.iter().any(|s| !s.items.is_empty())
+}
+
+/// What a browse of Home or Library gets with no provider signed in that answers it.
+fn page_sign_in(page: &Page) -> ProviderError {
+    ProviderError::SignInRequired(
+        if *page == Page::Home {
+            "sign in to see your music"
+        } else {
+            "sign in to browse your library"
+        }
+        .into(),
+    )
 }
 
 struct Actor {
@@ -872,19 +883,15 @@ impl Actor {
             Page::Collection(c) => self.provider(&c.provider).into_iter().collect(),
             Page::Home | Page::Library => {
                 if self.page_targets(&page).is_empty() {
-                    let why = if page == Page::Home {
-                        "sign in to see your music"
-                    } else {
-                        "sign in to browse your library"
-                    };
-                    let e = ProviderError::SignInRequired(why.into());
                     self.emit(Event::BrowseFailed {
                         req,
-                        error: e.to_string(),
+                        error: page_sign_in(&page).to_string(),
                         sign_in_required: true,
                     });
                     return;
                 }
+                // Clients never browse on hearing of a change, which carries the shelves, so
+                // fetching on every browse cannot loop.
                 match self.served(&page) {
                     Some(shelves) => {
                         self.emit(Event::BrowseResults {
@@ -892,13 +899,7 @@ impl Actor {
                             page: page.clone(),
                             shelves,
                         });
-                        let quiet = self
-                            .kept(&page)
-                            .and_then(|k| k.changed_at)
-                            .is_some_and(|at| at.elapsed() < CHANGED_QUIET);
-                        if !quiet {
-                            self.fetch_page(page, None);
-                        }
+                        self.fetch_page(page, None);
                     }
                     None => self.fetch_page(page, Some(req)),
                 }
@@ -1043,7 +1044,8 @@ impl Actor {
     }
 
     /// Takes one provider's answer into what is kept of `page`. The first that leaves
-    /// something to show answers the browses waiting; any later change is a `PageChanged`.
+    /// something to show, or else the last, answers the browses waiting; any later change is a
+    /// `PageChanged`.
     fn page_answered(
         &mut self,
         page: Page,
@@ -1118,33 +1120,43 @@ impl Actor {
             self.save_pages();
         }
         let after = self.served(&page);
+        let signed_out = self.page_targets(&page).is_empty();
         let Some(kept) = self.kept_mut(&page) else {
             return;
         };
         let Some(r) = kept.run.as_mut() else {
             return;
         };
-        let answered = if after.is_some() {
+        // Parts with nothing in them answer only once every provider is in.
+        let answered = if after.as_deref().is_some_and(showable) || (done && after.is_some()) {
             std::mem::take(&mut r.waiting)
         } else {
             Vec::new()
         };
+        let unanswered = !r.waiting.is_empty();
         let mut failed = None;
         if done {
             let r = kept.run.take().expect("the run is current");
             if !r.waiting.is_empty() {
-                let e = r
-                    .hard
-                    .or(r.sign_in)
-                    .unwrap_or_else(|| ProviderError::Unplayable("no provider answered".into()));
+                // As a browse now would be answered, when its providers signed out meanwhile.
+                let e = if signed_out {
+                    page_sign_in(&page)
+                } else {
+                    r.hard
+                        .or(r.sign_in)
+                        .unwrap_or_else(|| ProviderError::Unplayable("no provider answered".into()))
+                };
                 failed = Some((r.waiting, e));
             }
         }
         let again = done && std::mem::take(&mut kept.again);
         if answered.is_empty() {
-            if after != before {
-                kept.changed_at = Some(Instant::now());
-                self.emit(Event::PageChanged { page: page.clone() });
+            // Browses still waiting are answered with the change once there is one to show.
+            if !unanswered && after != before {
+                self.emit(Event::PageChanged {
+                    page: page.clone(),
+                    shelves: after.unwrap_or_default(),
+                });
             }
         } else if let Some(shelves) = after {
             for req in answered {

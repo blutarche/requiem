@@ -811,6 +811,7 @@ fn a_changed_page_is_told_to_every_client() {
     p.say_changed(requiem_core::Page::Library);
     let changed = Event::PageChanged {
         page: requiem_core::Page::Library,
+        shelves: vec![shelf("new")],
     };
     assert_eq!(next_event(&arx), changed);
     assert_eq!(next_event(&brx), changed);
