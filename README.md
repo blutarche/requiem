@@ -91,7 +91,7 @@ Signing in shows a code: the app shows it on the Library page, or in Settings wh
 What a sign-in gets you:
 
 - **Available:** your playlists (the first 200) and Liked videos, each opened up to its first 1000 videos. These come from the YouTube Data API, so a project gets 10,000 requests a day, and each request returns up to 50 items.
-- **Not available:** YouTube Music's personalized home, Quick picks, saved albums and history. YouTube Music's own API rejects this kind of sign-in, so Home shows your 20 most recently liked videos and your playlists instead.
+- **Not available:** YouTube Music's personalized home, Quick picks, saved albums and history. YouTube Music's own API rejects this kind of sign-in, so Home shows your 20 most recently liked music videos (YouTube's Music category) and your playlists instead.
 
 Playback stays anonymous whether or not you are signed in.
 
