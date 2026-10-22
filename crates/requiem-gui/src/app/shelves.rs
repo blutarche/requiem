@@ -5,15 +5,16 @@
 
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
+use dispatch2::{DispatchQueue, DispatchTime, MainThreadBound};
 use objc2::rc::Retained;
 use objc2::runtime::{AnyObject, NSObject, Sel};
-use objc2::{DefinedClass, MainThreadOnly, define_class, msg_send, sel};
+use objc2::{DefinedClass, MainThreadOnly, Message, define_class, msg_send, sel};
 use objc2_app_kit::{
-    NSAnimatablePropertyContainer, NSBorderType, NSControl, NSEvent, NSEventPhase, NSFocusRingType,
-    NSLineBreakMode, NSMenu, NSMenuItem, NSResponder, NSScrollView, NSTextField,
-    NSTrackingAreaOptions, NSView, NSViewBoundsDidChangeNotification,
+    NSAnimatablePropertyContainer, NSBorderType, NSControl, NSCursor, NSEvent, NSEventMask,
+    NSEventPhase, NSEventType, NSFocusRingType, NSLineBreakMode, NSMenu, NSMenuItem, NSResponder,
+    NSScrollView, NSTextField, NSTrackingAreaOptions, NSView, NSViewBoundsDidChangeNotification,
 };
 use objc2_core_foundation::CGFloat;
 use objc2_foundation::{
@@ -51,6 +52,18 @@ const SIDE_MARGIN: CGFloat = 72.0;
 const PAGE_BUTTON: CGFloat = 28.0;
 const PAGE_GLYPH: CGFloat = 16.0;
 const PAGE_GAP: CGFloat = 4.0;
+/// How far a press moves sideways before it drags its shelf rather than clicking.
+const DRAG_SLOP: CGFloat = 4.0;
+/// A fling's speed falls by a factor of e every this many seconds, so it carries on for its
+/// release speed times this, in points.
+const FLING_DECAY: f64 = 0.325;
+/// Released slower than this, in points a second, a drag just stops.
+const FLING_MIN: CGFloat = 100.0;
+/// A fling ends when it slows below this, in points a second.
+const FLING_STOP: CGFloat = 10.0;
+/// Only the pointer's last moves before release, over this many seconds, set a fling's speed.
+const FLING_WINDOW: f64 = 0.1;
+const FLING_TICK: Duration = Duration::from_millis(16);
 
 define_class!(
     /// A view with its origin at the top left, so rows and cards lay out downwards.
@@ -158,22 +171,76 @@ fn scroll_axis(
     (route, if done { None } else { axis })
 }
 
+/// Whether a press that has moved `dx` sideways is a drag. Up and down count for nothing.
+fn is_drag(dx: CGFloat) -> bool {
+    dx.abs() > DRAG_SLOP
+}
+
+/// A row's offset after a drag of `dx` from a press at offset `start`: the cards follow the
+/// pointer, within the row's `max` offset.
+fn drag_offset(start: CGFloat, dx: CGFloat, max: CGFloat) -> CGFloat {
+    (start - dx).clamp(0.0, max.max(0.0))
+}
+
+/// The pointer's sideways speed, in points a second, over `moves`: its times and x positions
+/// within `FLING_WINDOW` of the release, the release last.
+fn release_speed(moves: &[(f64, CGFloat)]) -> CGFloat {
+    match (moves.first(), moves.last()) {
+        (Some(&(t0, x0)), Some(&(t1, x1))) if t1 > t0 => (x1 - x0) / (t1 - t0),
+        _ => 0.0,
+    }
+}
+
+/// A fling `dt` seconds on from `offset` at `speed`: the new offset within `0..=max`, and the
+/// speed it goes on at, or `None` once it has slowed to a stop or reached an end.
+fn fling_step(
+    offset: CGFloat,
+    speed: CGFloat,
+    dt: f64,
+    max: CGFloat,
+) -> (CGFloat, Option<CGFloat>) {
+    let decay = (-dt / FLING_DECAY).exp();
+    let to = offset + speed * FLING_DECAY * (1.0 - decay);
+    let at = to.clamp(0.0, max.max(0.0));
+    let speed = speed * decay;
+    let going = at == to && speed.abs() >= FLING_STOP;
+    (at, going.then_some(speed))
+}
+
 pub struct RowScrollIvars {
     locked: Cell<Option<Axis>>,
+    /// Counts flings; a fling whose number is no longer this one has been stopped.
+    fling: Cell<u64>,
+}
+
+/// What a press on a shelf turned out to be.
+enum Press {
+    /// Let go without dragging: the release.
+    Click(Retained<NSEvent>),
+    Drag,
 }
 
 define_class!(
     /// A shelf's scroll view. It scrolls sideways only; a mostly vertical gesture goes on to
-    /// the page behind it, which a plain scroll view would swallow.
-    // SAFETY: NSScrollView has no subclassing requirements for `scrollWheel:`; no Drop impl.
+    /// the page behind it, which a plain scroll view would swallow. A mouse, with no sideways
+    /// wheel, drags it instead.
+    // SAFETY: NSScrollView has no subclassing requirements for `scrollWheel:` or
+    // `mouseDown:`; no Drop impl.
     #[unsafe(super(NSScrollView, NSView, NSResponder, NSObject))]
     #[thread_kind = MainThreadOnly]
     #[ivars = RowScrollIvars]
     pub struct RowScroll;
 
     impl RowScroll {
+        /// A press between cards, which the row's document passes on.
+        #[unsafe(method(mouseDown:))]
+        fn mouse_down(&self, event: &NSEvent) {
+            self.track(event);
+        }
+
         #[unsafe(method(scrollWheel:))]
         fn scroll_wheel(&self, event: &NSEvent) {
+            self.stop_fling();
             let iv = self.ivars();
             let (route, locked) = scroll_axis(
                 event.phase(),
@@ -202,9 +269,95 @@ impl RowScroll {
     fn new(mtm: MainThreadMarker, frame: NSRect) -> Retained<Self> {
         let this = Self::alloc(mtm).set_ivars(RowScrollIvars {
             locked: Cell::new(None),
+            fling: Cell::new(0),
         });
         // SAFETY: `initWithFrame:` is NSView's designated initializer.
         unsafe { msg_send![super(this), initWithFrame: frame] }
+    }
+
+    fn max_offset(&self) -> CGFloat {
+        let content = self.documentView().map_or(0.0, |d| d.frame().size.width);
+        (content - self.contentSize().width).max(0.0)
+    }
+
+    /// Scrolls to `x`; the bounds change brings the cards and paging buttons along.
+    fn scroll_to(&self, x: CGFloat) {
+        let clip = self.contentView();
+        clip.scrollToPoint(NSPoint::new(x, clip.bounds().origin.y));
+        self.reflectScrolledClipView(&clip);
+    }
+
+    fn stop_fling(&self) {
+        let fling = &self.ivars().fling;
+        fling.set(fling.get().wrapping_add(1));
+    }
+
+    /// Follows a press until it is let go. Moved sideways past `DRAG_SLOP`, it drags the
+    /// row, and flings it on at the speed it was let go at.
+    fn track(&self, down: &NSEvent) -> Press {
+        self.stop_fling();
+        let Some(window) = self.window() else {
+            return Press::Drag;
+        };
+        let start_x = down.locationInWindow().x;
+        let start = self.contentView().bounds().origin.x;
+        let mut dragging = false;
+        let mut moves = vec![(down.timestamp(), start_x)];
+        // A loop of its own, as a button tracks its press: the card pressed can scroll out
+        // of the row and be dropped while the drag goes on.
+        loop {
+            let mask = NSEventMask::LeftMouseDragged | NSEventMask::LeftMouseUp;
+            let Some(event) = window.nextEventMatchingMask(mask) else {
+                continue;
+            };
+            let (t, x) = (event.timestamp(), event.locationInWindow().x);
+            moves.retain(|&(s, _)| t - s <= FLING_WINDOW);
+            moves.push((t, x));
+            if event.r#type() == NSEventType::LeftMouseUp {
+                if !dragging {
+                    return Press::Click(event);
+                }
+                NSCursor::pop_class();
+                self.fling(-release_speed(&moves));
+                return Press::Drag;
+            }
+            if !dragging && is_drag(x - start_x) {
+                dragging = true;
+                NSCursor::closedHandCursor().push();
+            }
+            if dragging {
+                self.scroll_to(drag_offset(start, x - start_x, self.max_offset()));
+            }
+        }
+    }
+
+    fn fling(&self, speed: CGFloat) {
+        if speed.abs() < FLING_MIN || widgets::reduce_motion() {
+            return;
+        }
+        self.fling_on(speed, Instant::now(), self.ivars().fling.get());
+    }
+
+    fn fling_on(&self, speed: CGFloat, last: Instant, fling: u64) {
+        let Ok(when) = DispatchTime::try_from(FLING_TICK) else {
+            return;
+        };
+        let this = MainThreadBound::new(self.retain(), self.mtm());
+        let _ = DispatchQueue::main().after(when, move || {
+            this.get_on_main(|this| {
+                if this.ivars().fling.get() != fling || this.window().is_none() {
+                    return;
+                }
+                let now = Instant::now();
+                let at = this.contentView().bounds().origin.x;
+                let dt = now.duration_since(last).as_secs_f64();
+                let (to, next) = fling_step(at, speed, dt, this.max_offset());
+                this.scroll_to(to);
+                if let Some(speed) = next {
+                    this.fling_on(speed, now, fling);
+                }
+            });
+        });
     }
 }
 
@@ -245,20 +398,25 @@ define_class!(
             self.set_hovered(false);
         }
 
+        /// A press that drags sideways scrolls the row and is no click.
         #[unsafe(method(mouseDown:))]
-        fn mouse_down(&self, _event: &NSEvent) {
-            self.ivars().pressed.set(true);
+        fn mouse_down(&self, event: &NSEvent) {
+            // A drag can scroll the card out of its row, which then lets go of it.
+            let this = self.retain();
+            this.ivars().pressed.set(true);
+            let row = this
+                .enclosingScrollView()
+                .and_then(|s| s.downcast::<RowScroll>().ok());
+            match row.map(|row| row.track(event)) {
+                Some(Press::Click(up)) => this.release(&up),
+                Some(Press::Drag) => this.ivars().pressed.set(false),
+                None => {}
+            }
         }
 
         #[unsafe(method(mouseUp:))]
         fn mouse_up(&self, event: &NSEvent) {
-            let was = self.ivars().pressed.replace(false);
-            let at = self.convertPoint_fromView(event.locationInWindow(), None);
-            let b = self.bounds();
-            let inside = at.x >= 0.0 && at.x < b.size.width && at.y >= 0.0 && at.y < b.size.height;
-            if was && inside {
-                self.activate();
-            }
+            self.release(event);
         }
 
         #[unsafe(method(acceptsFirstMouse:))]
@@ -454,6 +612,17 @@ impl ShelfCard {
         }
         let fill = hovered.then(theme::row_hover);
         widgets::fill(self, fill.as_deref());
+    }
+
+    /// Activates the card if it was pressed and is let go over it.
+    fn release(&self, up: &NSEvent) {
+        let was = self.ivars().pressed.replace(false);
+        let at = self.convertPoint_fromView(up.locationInWindow(), None);
+        let b = self.bounds();
+        let inside = at.x >= 0.0 && at.x < b.size.width && at.y >= 0.0 && at.y < b.size.height;
+        if was && inside {
+            self.activate();
+        }
     }
 
     fn activate(&self) {
@@ -1028,6 +1197,7 @@ impl Shelves {
     pub fn page(&self, row: usize, forward: bool) {
         let rows = self.rows.borrow();
         let Some(row) = rows.get(row) else { return };
+        row.scroll.stop_fling();
         let clip = row.scroll.contentView();
         let b = clip.bounds();
         let x = page_offset(
@@ -1294,6 +1464,63 @@ mod tests {
         let changed = NSEventPhase::Changed;
         assert_eq!(gesture(changed, none, 0.0, -2.0, &mut lock), Route::Page);
         assert_eq!(lock, Some(Axis::Vertical));
+    }
+
+    #[test]
+    fn a_press_drags_only_past_four_points_sideways() {
+        assert!(!is_drag(0.0));
+        assert!(!is_drag(4.0) && !is_drag(-4.0));
+        assert!(is_drag(4.5) && is_drag(-4.5));
+    }
+
+    #[test]
+    fn a_drag_moves_the_row_with_the_pointer_within_its_ends() {
+        // Dragging right shows what was to the left.
+        assert_eq!(drag_offset(300.0, 50.0, 1000.0), 250.0);
+        assert_eq!(drag_offset(300.0, -50.0, 1000.0), 350.0);
+        assert_eq!(drag_offset(30.0, 50.0, 1000.0), 0.0);
+        assert_eq!(drag_offset(980.0, -50.0, 1000.0), 1000.0);
+        // A row that fits does not move.
+        assert_eq!(drag_offset(0.0, -50.0, -20.0), 0.0);
+    }
+
+    #[test]
+    fn the_release_speed_is_the_last_moves_over_their_time() {
+        assert_eq!(release_speed(&[]), 0.0);
+        assert_eq!(release_speed(&[(1.0, 50.0)]), 0.0);
+        assert_eq!(release_speed(&[(1.0, 0.0), (1.0625, 50.0)]), 800.0);
+        assert_eq!(
+            release_speed(&[(1.0, 100.0), (1.05, 70.0), (1.125, 0.0)]),
+            -800.0
+        );
+    }
+
+    #[test]
+    fn a_fling_slows_down_and_stops() {
+        // In one decay time it goes 1 - 1/e of its whole reach, at 1/e of the speed.
+        let (at, next) = fling_step(0.0, 1000.0, FLING_DECAY, 10_000.0);
+        let e = std::f64::consts::E;
+        assert!(
+            (at - 1000.0 * FLING_DECAY * (1.0 - 1.0 / e)).abs() < 1e-6,
+            "{at}"
+        );
+        assert!((next.unwrap() - 1000.0 / e).abs() < 1e-6);
+        // Step by step, it covers about speed × decay time, and stops.
+        let (mut at, mut speed, mut steps) = (0.0, 1000.0, 0);
+        while let (to, Some(s)) = fling_step(at, speed, 0.016, 10_000.0) {
+            (at, speed, steps) = (to, s, steps + 1);
+            assert!(steps < 1000, "never stopped");
+        }
+        assert!(at > 300.0 && at < 1000.0 * FLING_DECAY, "{at}");
+        // Backwards too.
+        let (at, next) = fling_step(500.0, -1000.0, 0.016, 10_000.0);
+        assert!(at < 500.0 && next.unwrap() < 0.0);
+    }
+
+    #[test]
+    fn a_fling_stops_at_the_row_ends() {
+        assert_eq!(fling_step(990.0, 5000.0, 0.1, 1000.0), (1000.0, None));
+        assert_eq!(fling_step(5.0, -5000.0, 0.1, 1000.0), (0.0, None));
     }
 
     #[test]
