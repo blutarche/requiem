@@ -2290,7 +2290,12 @@ fn a_kept_home_answers_at_once_then_says_when_a_fetch_changed_it() {
     // The second fetch is held, yet the browse is answered with what was kept.
     assert_eq!(browse_event(&r, 2, Page::Home), results(2, Page::Home, old));
     gate.release();
-    r.wait_event(|e| *e == Event::PageChanged { page: Page::Home });
+    r.wait_event(|e| {
+        *e == Event::PageChanged {
+            page: Page::Home,
+            shelves: new.clone(),
+        }
+    });
     assert_eq!(browse_event(&r, 3, Page::Home), results(3, Page::Home, new));
     // Browsing again on hearing of the change fetches nothing more.
     r.settle();
@@ -2367,7 +2372,16 @@ fn home_takes_a_slow_provider_in_once_it_lands_as_if_all_came_at_once() {
         )
     );
     gate.release();
-    r.wait_event(|e| *e == Event::PageChanged { page: Page::Home });
+    let Event::BrowseResults { shelves: all, .. } = at_once.clone() else {
+        panic!("Home failed: {at_once:?}");
+    };
+    // The change carries the page as all of it landing at once would have answered.
+    r.wait_event(|e| {
+        *e == Event::PageChanged {
+            page: Page::Home,
+            shelves: all.clone(),
+        }
+    });
     assert_eq!(browse_event(&r, 1, Page::Home), at_once);
 }
 
@@ -2495,6 +2509,7 @@ fn a_kept_page_of_the_same_account_answers_a_restart_at_once() {
     r.wait_event(|e| {
         *e == Event::PageChanged {
             page: Page::Library,
+            shelves: vec![track_shelf("Library", "first", &["new"])],
         }
     });
     let last = saved.lock().unwrap().last().cloned().expect("saved");
@@ -2524,7 +2539,12 @@ fn a_provider_saying_its_page_changed_has_it_fetched_again() {
     browse_event(&r, 1, Page::Home);
     r.settle();
     a.say_changed(Page::Home);
-    r.wait_event(|e| *e == Event::PageChanged { page: Page::Home });
+    r.wait_event(|e| {
+        *e == Event::PageChanged {
+            page: Page::Home,
+            shelves: vec![track_shelf("Mixes", "first", &["a2"])],
+        }
+    });
     assert_eq!(a.browse_calls(), vec![Page::Home, Page::Home]);
 }
 

@@ -1492,20 +1492,28 @@ impl Vm {
                     true,
                 );
             }
-            Event::PageChanged { page } => {
+            // Taken as they come, never fetched again: a fetch would start the player fetching
+            // anew, and a page that differs on every fetch would never settle.
+            Event::PageChanged { page, shelves } => {
                 let slot = match page {
                     Page::Home => Some(Slot::Home),
                     Page::Library => Some(Slot::Library),
                     Page::Collection(_) => None,
                 };
-                // Refetched quietly, the shelves on screen staying until the answer lands.
-                if let Some(slot) = slot
+                // A page not asked for yet gets the newest on its visit. One still loading
+                // shows these until its own answer, which is as new or newer, lands.
+                let load = slot.and_then(|slot| match self.browse_mut(slot)?.load {
+                    Load::Done => Some(Load::Done),
+                    Load::Refreshing => Some(Load::Refreshing),
+                    Load::Loading if !shelves.is_empty() => Some(Load::Refreshing),
+                    _ => None,
+                });
+                if let (Some(slot), Some(load)) = (slot, load)
                     && self
                         .browse_mut(slot)
-                        .is_some_and(|b| matches!(b.load, Load::Done | Load::Refreshing))
+                        .is_some_and(|b| b.load != load || b.shelves != shelves)
                 {
-                    let fetch = self.fetch(slot, true);
-                    self.outbox.extend(fetch);
+                    self.set_browse(slot, Browse { load, shelves });
                 }
             }
         }
@@ -5031,57 +5039,68 @@ mod tests {
         assert!(vm.ui().library.shelves.is_empty());
     }
 
-    #[test]
-    fn a_changed_page_on_screen_is_fetched_again_quietly() {
-        let mut vm = loaded();
-        vm.apply(Event::PageChanged { page: Page::Home });
-        let cmds = browses(&vm.take_commands());
-        let [(req, Page::Home)] = cmds.as_slice() else {
-            panic!("expected one Home fetch, got {cmds:?}");
-        };
-        assert_eq!(vm.ui().home.load, Load::Refreshing);
-        assert_eq!(vm.ui().home.shelves[0].title, "Quick picks");
-        assert!(!vm.take_dirty().contains(Dirty::HOME), "nothing to redraw");
-        vm.apply(Event::BrowseFailed {
-            req: *req,
-            error: "network error".into(),
-            sign_in_required: false,
-        });
-        assert_eq!(vm.ui().home.load, Load::Done);
-        assert_eq!(vm.ui().home.shelves[0].title, "Quick picks");
-        assert!(vm.ui().toast.is_none(), "{:?}", vm.ui().toast);
-
-        vm.apply(Event::PageChanged {
-            page: Page::Library,
-        });
-        let req = browses(&vm.take_commands())[0].0;
-        vm.apply(results(
-            req,
-            Page::Library,
-            vec![shelf("Fresh", track_items(1))],
-        ));
-        assert_eq!(vm.ui().library.load, Load::Done);
-        assert_eq!(vm.ui().library.shelves[0].title, "Fresh");
+    fn changed(page: Page, shelves: Vec<Shelf>) -> Event {
+        Event::PageChanged { page, shelves }
     }
 
     #[test]
-    fn a_changed_page_not_yet_shown_is_left_for_its_visit() {
+    fn a_changed_page_on_screen_takes_its_shelves_without_a_fetch() {
+        let mut vm = loaded();
+        vm.apply(changed(Page::Home, vec![shelf("Fresh", track_items(3))]));
+        assert!(vm.take_commands().is_empty());
+        assert_eq!(vm.ui().home.load, Load::Done);
+        assert_eq!(vm.ui().home.shelves, [shelf("Fresh", track_items(3))]);
+        assert!(vm.take_dirty().contains(Dirty::HOME));
+
+        vm.apply(changed(Page::Library, vec![shelf("New", track_items(1))]));
+        assert!(vm.take_commands().is_empty());
+        assert_eq!(vm.ui().library.load, Load::Done);
+        assert_eq!(vm.ui().library.shelves, [shelf("New", track_items(1))]);
+
+        // The same shelves again change nothing.
+        vm.take_dirty();
+        vm.apply(changed(Page::Library, vec![shelf("New", track_items(1))]));
+        assert!(!vm.take_dirty().contains(Dirty::LIBRARY));
+    }
+
+    #[test]
+    fn a_changed_page_not_yet_asked_for_is_left_for_its_visit() {
+        // Home is loading; the Library, with nobody signed in, was never asked for.
         let (mut vm, _) = home();
-        vm.apply(signed_in());
-        vm.take_commands();
-        // Home is still loading; the Library's first answer is on its way.
-        for page in [Page::Home, Page::Library] {
-            vm.apply(Event::PageChanged { page });
-        }
-        assert!(browses(&vm.take_commands()).is_empty());
+        assert_eq!(vm.ui().library, Browse::default());
+        vm.apply(changed(
+            Page::Library,
+            vec![shelf("Playlists", track_items(1))],
+        ));
+        assert_eq!(vm.ui().library, Browse::default());
+        assert!(vm.take_commands().is_empty());
+    }
+
+    #[test]
+    fn a_changed_page_still_loading_shows_the_change_until_its_answer() {
+        let (mut vm, req) = home();
+        vm.apply(changed(Page::Home, Vec::new()));
+        assert_eq!(vm.ui().home.load, Load::Loading, "nothing to show yet");
+        vm.apply(changed(Page::Home, vec![shelf("Early", track_items(1))]));
+        assert!(vm.take_commands().is_empty());
+        assert_eq!(vm.ui().home.view(), PageView::Ready);
+        assert_eq!(vm.ui().home.shelves[0].title, "Early");
+        vm.apply(results(
+            req,
+            Page::Home,
+            vec![shelf("Later", track_items(2))],
+        ));
+        assert_eq!(vm.ui().home.load, Load::Done);
+        assert_eq!(vm.ui().home.shelves[0].title, "Later");
     }
 
     #[test]
     fn a_change_while_the_user_refreshes_still_reports_the_failure() {
         let mut vm = loaded();
-        vm.intent(Intent::Refresh);
-        vm.apply(Event::PageChanged { page: Page::Home });
-        let req = browses(&vm.take_commands())[0].0;
+        let req = browses(&vm.intent(Intent::Refresh))[0].0;
+        vm.apply(changed(Page::Home, vec![shelf("Fresh", track_items(1))]));
+        assert!(vm.take_commands().is_empty());
+        assert_eq!(vm.ui().home.load, Load::Refreshing);
         vm.apply(Event::BrowseFailed {
             req,
             error: "network error".into(),
@@ -5091,6 +5110,8 @@ mod tests {
             vm.ui().toast.as_ref().map(|t| t.text.as_str()),
             Some("Couldn’t refresh Home: network error")
         );
+        assert_eq!(vm.ui().home.load, Load::Done);
+        assert_eq!(vm.ui().home.shelves[0].title, "Fresh");
     }
 
     #[test]
@@ -6767,6 +6788,22 @@ mod tests {
         assert_eq!(card_ids(&vm, 2), ["m1"]);
         // The page's own shelves are untouched.
         assert_eq!(vm.ui().home.shelves.len(), 4);
+    }
+
+    #[test]
+    fn a_changed_home_is_shown_through_the_filter() {
+        let mut vm = home_with(vec![shelf("Quick picks", track_items(1))]);
+        vm.intent(Intent::SetFilter(ONLY_SPOTIFY));
+        vm.apply(changed(Page::Home, mixed_home()));
+        assert!(vm.take_commands().is_empty());
+        let titles: Vec<String> = vm
+            .ui()
+            .shown_home()
+            .iter()
+            .map(|s| s.title.clone())
+            .collect();
+        assert_eq!(titles, ["Liked", "Mixes"]);
+        assert_eq!(vm.ui().home.shelves, mixed_home());
     }
 
     #[test]

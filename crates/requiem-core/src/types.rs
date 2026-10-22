@@ -393,8 +393,10 @@ pub enum Event {
         provider: ProviderId,
         error: String,
     },
-    /// `page` has newer content than the last answer to it: browse it again.
+    /// `page` has newer content than the last answer to it: `shelves`, as a browse of it would
+    /// now be answered.
     PageChanged {
         page: Page,
+        shelves: Vec<Shelf>,
     },
 }

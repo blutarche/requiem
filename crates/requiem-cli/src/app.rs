@@ -292,7 +292,7 @@ impl Hub {
             }
             Event::Account { provider, state } => self.on_account(&mut ui, provider, state),
             // The listing stays as it was, so the numbers printed keep meaning what they did.
-            Event::PageChanged { page } => {
+            Event::PageChanged { page, .. } => {
                 if ui.listed.as_ref() == Some(&page) {
                     let name = if page == Page::Home {
                         "home"

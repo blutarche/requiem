@@ -1144,7 +1144,10 @@ impl Actor {
         if answered.is_empty() {
             if after != before {
                 kept.changed_at = Some(Instant::now());
-                self.emit(Event::PageChanged { page: page.clone() });
+                self.emit(Event::PageChanged {
+                    page: page.clone(),
+                    shelves: after.unwrap_or_default(),
+                });
             }
         } else if let Some(shelves) = after {
             for req in answered {
