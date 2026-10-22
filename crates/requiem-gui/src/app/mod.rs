@@ -96,8 +96,6 @@ define_class!(
                 };
                 if ui.palette.field.is(&control) {
                     ui.palette.filter();
-                } else if let Some(row) = ui.settings.form_row(&control) {
-                    ui.settings.fields_changed(row);
                 }
             });
         }
@@ -209,24 +207,9 @@ define_class!(
             ui::with(|ui| ui.cancel_sign_in());
         }
 
-        #[unsafe(method(chooseClientFile:))]
-        fn choose_client_file(&self, _sender: Option<&AnyObject>) {
-            ui::with(|ui| ui.choose_client_file());
-        }
-
-        #[unsafe(method(openSetupGuide:))]
-        fn open_setup_guide(&self, _sender: Option<&AnyObject>) {
-            ui::with(|ui| ui.open_setup_guide());
-        }
-
         #[unsafe(method(cancelSetup:))]
         fn cancel_setup(&self, _sender: Option<&AnyObject>) {
             ui::with(|ui| ui.cancel_setup());
-        }
-
-        #[unsafe(method(enterClientID:))]
-        fn enter_client_id(&self, _sender: Option<&AnyObject>) {
-            ui::with(|ui| ui.enter_client_id());
         }
 
         #[unsafe(method(showSettings:))]
@@ -272,37 +255,11 @@ define_class!(
             }
         }
 
-        #[unsafe(method(changeClient:))]
-        fn change_client(&self, sender: Option<&AnyObject>) {
-            if let Some(row) = sender_row(sender) {
-                ui::with(|ui| ui.change_client(row));
-            }
-        }
-
-        #[unsafe(method(saveClient:))]
-        fn save_client(&self, sender: Option<&AnyObject>) {
-            if let Some(row) = sender_row(sender) {
-                ui::with(|ui| ui.save_client(row));
-            }
-        }
-
-        #[unsafe(method(settingsChooseClientFile:))]
-        fn settings_choose_client_file(&self, sender: Option<&AnyObject>) {
-            if let Some(row) = sender_row(sender) {
-                ui::with(|ui| ui.settings_choose_client_file(row));
-            }
-        }
-
         #[unsafe(method(useBrowserSession:))]
         fn use_browser_session(&self, sender: Option<&AnyObject>) {
             if let Some(row) = sender_row(sender) {
                 ui::with(|ui| ui.use_browser_session(row));
             }
-        }
-
-        #[unsafe(method(sheetUseBrowserSession:))]
-        fn sheet_use_browser_session(&self, _sender: Option<&AnyObject>) {
-            ui::with(|ui| ui.sheet_use_browser_session());
         }
 
         #[unsafe(method(pasteSession:))]
@@ -645,7 +602,7 @@ fn row_edit(action: Sel) -> Option<fn(usize) -> QueueEdit> {
     }
 }
 
-/// Keys the search, palette and client fields handle themselves; true when handled.
+/// Keys the search and palette fields handle themselves; true when handled.
 fn field_command(ui: &Ui, control: &NSControl, text: &NSTextView, command: Sel) -> bool {
     if ui.search.is(control) {
         if command == sel!(insertNewline:) {
@@ -680,13 +637,6 @@ fn field_command(ui: &Ui, control: &NSControl, text: &NSTextView, command: Sel) 
         } else {
             return false;
         }
-        return true;
-    }
-    // Save is the client form's default button.
-    if let Some(row) = ui.settings.form_row(control)
-        && command == sel!(insertNewline:)
-    {
-        ui.save_client(row);
         return true;
     }
     false
@@ -1055,14 +1005,12 @@ pub fn run(args: Args) {
             }
         }
         View::HomeSpotify | View::HomeSignedOut => ui.show(AppView::Home),
-        View::Library
-        | View::LibrarySignedOut
-        | View::LibraryUnavailable
-        | View::SignIn
-        | View::SignInSetup => ui.show(AppView::Library),
+        View::Library | View::LibrarySignedOut | View::LibraryUnavailable | View::SignIn => {
+            ui.show(AppView::Library)
+        }
         View::Collection => ui.show(AppView::Collection),
         View::Queue => ui.show(AppView::Queue),
-        View::Settings | View::SettingsSetup | View::SettingsSession => ui.show(AppView::Settings),
+        View::Settings | View::SettingsSession => ui.show(AppView::Settings),
         View::NowPlaying | View::NowPlayingEmpty | View::NowPlayingLast => ui.show_now_playing(),
         View::Palette => ui.open_palette(),
         View::Search

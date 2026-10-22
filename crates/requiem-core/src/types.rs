@@ -76,10 +76,6 @@ pub enum Page {
     Collection(CollectionId),
 }
 
-/// How an [`AccountState::Unavailable`] text starts when all that is missing is the user's own
-/// Google OAuth client, which a front end may ask for in its own words.
-pub const NO_OAUTH_CLIENT: &str = "no Google OAuth client";
-
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum AccountState {
     /// Sign-in can't start; the text says what to set up.
@@ -180,9 +176,10 @@ pub trait Provider: Send + Sync {
         Ok(())
     }
 
-    /// Keeps `json`, the user's own OAuth client, for sign-in, so that `account` no longer
-    /// reports it missing. Blocking; called on a worker thread. An `Err` that leaves `account`
-    /// changed says what an import that stood could not finish. Errors never quote `json`.
+    /// Signs in with `json`, what the user brought from elsewhere: for YouTube Music, a session
+    /// copied from a signed-in browser. Blocking; called on a worker thread. An `Err` that
+    /// leaves `account` changed says what an import that stood could not finish. Errors never
+    /// quote `json`.
     fn import_client(&self, _json: &str) -> Result<(), ProviderError> {
         Err(ProviderError::SignInRequired(
             "this provider has no client to import".into(),
@@ -333,8 +330,8 @@ pub enum Command {
     SignOut {
         provider: ProviderId,
     },
-    /// Gives `provider` the user's own OAuth client, as the JSON its console downloads.
-    /// Answered with the provider's `Account`, or with an `AccountError`.
+    /// Gives `provider` a sign-in the user brought, as JSON: for YouTube Music, a browser
+    /// session. Answered with the provider's `Account`, or with an `AccountError`.
     ImportSignInClient {
         provider: ProviderId,
         json: Redacted,

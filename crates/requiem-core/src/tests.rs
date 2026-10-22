@@ -1493,7 +1493,7 @@ fn a_failed_import_says_why() {
     provider.set_account(AccountState::Unavailable("no client".into()));
     let r = rig_with(provider, vec![], config());
     r.provider.fail_import(ProviderError::SignInRequired(
-        "not a Google OAuth client".into(),
+        "not a browser session".into(),
     ));
     import(&r);
     let mut seen = r.events_until(1, |e| matches!(e, Event::AccountError { .. }));
@@ -1501,7 +1501,7 @@ fn a_failed_import_says_why() {
         seen.pop(),
         Some(Event::AccountError {
             provider: fake_id(),
-            error: "not a Google OAuth client".into(),
+            error: "not a browser session".into(),
         })
     );
     // The state follows, unchanged.
@@ -1520,9 +1520,9 @@ fn an_import_that_stood_but_could_not_finish_says_why_then_its_state() {
     let provider = FakeProvider::new("fake");
     provider.set_account(AccountState::SignedIn { name: None });
     let r = rig_with(provider, vec![], config());
-    // As a provider that kept the new client and signed out, but whose revoke went unconfirmed.
+    // As a provider that took the import and signed out, but could not finish the sign-out.
     r.provider.set_account(AccountState::SignedOut);
-    let unconfirmed = "signed out on this computer, but Google did not confirm";
+    let unconfirmed = "signed out on this computer, but the service did not confirm";
     r.provider
         .fail_import(ProviderError::ClientBroken(unconfirmed.into()));
     import(&r);
