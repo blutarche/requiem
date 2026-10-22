@@ -1,14 +1,17 @@
-//! Artwork, fetched on one background thread and decoded on the main thread into a cache shared
-//! by every [`Cover`] in the process. Nothing is written to disk.
+//! Artwork, read from disk or fetched on background threads, decoded there at the size it is
+//! drawn, and kept in a cache shared by every [`Cover`] in the process. Downloads are kept on
+//! disk too, so a restart does not fetch them again.
 
 use std::cell::{Cell, OnceCell, RefCell};
 use std::io::Read;
-use std::sync::{Arc, Condvar, Mutex, PoisonError};
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Condvar, Mutex, OnceLock, PoisonError};
 use std::thread;
 use std::time::Duration;
 
 use block2::RcBlock;
-use dispatch2::DispatchQueue;
+use dispatch2::{DispatchQueue, DispatchTime, MainThreadBound};
 use objc2::rc::{Retained, Weak};
 use objc2::runtime::{AnyObject, Bool};
 use objc2::{AnyThread, DefinedClass, MainThreadOnly, Message, define_class, msg_send};
@@ -17,31 +20,98 @@ use objc2_app_kit::{
     NSImageScaling, NSImageView, NSResponder, NSScreen, NSView, NSWindowOcclusionState,
     NSWorkspace,
 };
-use objc2_core_foundation::CGFloat;
+use objc2_core_foundation::{
+    CFBoolean, CFData, CFDictionary, CFNumber, CFRetained, CFString, CFType, CGFloat,
+};
+use objc2_core_graphics::CGImage;
 use objc2_foundation::{
-    MainThreadMarker, NSData, NSNumber, NSObject, NSPoint, NSRect, NSSize, ns_string,
+    MainThreadMarker, NSBundle, NSNumber, NSObject, NSPoint, NSRect, NSSize, ns_string,
+};
+use objc2_image_io::{
+    CGImageSource, kCGImageSourceCreateThumbnailFromImageAlways,
+    kCGImageSourceCreateThumbnailWithTransform, kCGImageSourceShouldCacheImmediately,
+    kCGImageSourceThumbnailMaxPixelSize,
 };
 use objc2_quartz_core::{
     CABasicAnimation, CAMediaTiming, CAMediaTimingFunction, kCAGravityResizeAspectFill,
 };
 
-use crate::art::{Book, Lru, Queue, Want, pixel_cost, sized_url};
+use crate::art::{
+    Book, CACHE_DIR_ENV, DiskCache, Lru, Queue, Want, cache_dir, pixel_cost, sized_url,
+};
 
-/// The decoded-image budget unless [`set_capacity`] changes it.
-pub const DEFAULT_CAPACITY: usize = 8 * 1024 * 1024;
+/// The decoded-image budget unless [`set_capacity`] changes it: about 370 covers at 256 pixels.
+pub const DEFAULT_CAPACITY: usize = 96 * 1024 * 1024;
+/// Downloaded images kept on disk.
+const DISK_CAPACITY: u64 = 256 * 1024 * 1024;
 /// Waiting requests past this many drop the oldest, for rows long scrolled away.
 const QUEUE_LIMIT: usize = 48;
+const NETWORK_THREADS: usize = 4;
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 const IO_TIMEOUT: Duration = Duration::from_secs(10);
 /// Covers are tens of KB; anything near this is not one.
 const MAX_BODY: u64 = 4 * 1024 * 1024;
 const FADE: Duration = Duration::from_millis(120);
+/// How long a cover not in memory waits for the disk before showing its placeholder.
+const GRACE: Duration = Duration::from_millis(50);
 
-type Waiter = Box<dyn FnOnce(&NSImage)>;
+/// Called with the image and whether it came from the network.
+type Waiter = Box<dyn FnOnce(&NSImage, bool)>;
 
-struct Fetcher {
-    queue: Mutex<Queue>,
+/// One image wanted at one size.
+struct Request {
+    /// The decoded image's key in the cache and the book.
+    key: String,
+    /// What is fetched, and the downloaded bytes' key on disk.
+    url: String,
+    px: u32,
+}
+
+/// A queue that threads wait on.
+struct Lane {
+    queue: Mutex<Queue<Request>>,
     ready: Condvar,
+}
+
+impl Lane {
+    fn new() -> Self {
+        Self {
+            queue: Mutex::new(Queue::new(QUEUE_LIMIT)),
+            ready: Condvar::new(),
+        }
+    }
+
+    /// Returns the request it pushed out, if any.
+    fn push(&self, request: Request) -> Option<Request> {
+        let dropped = self
+            .queue
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .push(request);
+        self.ready.notify_one();
+        dropped
+    }
+
+    /// Waits on the condvar while empty, so an idle thread costs nothing.
+    fn pop(&self) -> Request {
+        let mut queue = self.queue.lock().unwrap_or_else(PoisonError::into_inner);
+        loop {
+            if let Some(request) = queue.pop() {
+                return request;
+            }
+            queue = self
+                .ready
+                .wait(queue)
+                .unwrap_or_else(PoisonError::into_inner);
+        }
+    }
+}
+
+/// Requests go to the disk thread first, and on to the network threads if not on disk. The
+/// disk has a thread of its own so a hit never waits behind a slow download.
+struct Fetcher {
+    disk: Option<(DiskCache, Lane)>,
+    network: Lane,
 }
 
 struct Loader {
@@ -66,8 +136,8 @@ pub fn set_capacity(_mtm: MainThreadMarker, bytes: usize) {
     LOADER.with_borrow_mut(|l| l.cache.set_cap(bytes));
 }
 
-/// Caches `image` as `url`'s artwork, as if fetched. Found at every size only for URLs that
-/// take none, such as demo artwork.
+/// Caches `image` as `url`'s artwork at every size, as if fetched. For URLs that are not
+/// fetched, such as demo artwork.
 pub fn insert(_mtm: MainThreadMarker, url: &str, image: &NSImage) {
     LOADER.with_borrow_mut(|l| {
         l.cache
@@ -79,55 +149,69 @@ pub fn insert(_mtm: MainThreadMarker, url: &str, image: &NSImage) {
 /// `done` runs on the main thread once it arrives; it never runs if the load fails or the
 /// request is dropped for newer ones. Only https URLs are fetched.
 pub fn load(
-    _mtm: MainThreadMarker,
+    mtm: MainThreadMarker,
     url: &str,
     px: u32,
     done: impl FnOnce(&NSImage) + 'static,
 ) -> Option<Retained<NSImage>> {
-    let key = sized_url(url, px);
+    request(mtm, url, px, move |image, _| done(image))
+}
+
+/// [`load`], with `done` also told whether the image came from the network.
+fn request(
+    _mtm: MainThreadMarker,
+    url: &str,
+    px: u32,
+    done: impl FnOnce(&NSImage, bool) + 'static,
+) -> Option<Retained<NSImage>> {
+    let sized = sized_url(url, px);
+    // Images are decoded at `px`, which only Google's URLs carry.
+    let key = format!("{px} {sized}");
     LOADER.with_borrow_mut(|l| {
-        if let Some(image) = l.cache.get(&key) {
+        if let Some(image) = l.cache.get(&key).or_else(|| l.cache.get(url)) {
             return Some(image);
         }
-        if key.starts_with("https://") && l.book.want(&key, Box::new(done)) == Want::Fetch {
-            l.enqueue(key);
+        if sized.starts_with("https://") && l.book.want(&key, Box::new(done)) == Want::Fetch {
+            l.enqueue(Request {
+                key,
+                url: sized,
+                px,
+            });
         }
         None
     })
 }
 
 impl Loader {
-    fn enqueue(&mut self, key: String) {
+    fn enqueue(&mut self, request: Request) {
         let fetcher = self.fetcher.get_or_insert_with(start_fetcher);
-        let dropped = fetcher
-            .queue
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .push(key);
-        fetcher.ready.notify_one();
-        if let Some(key) = dropped {
-            self.book.dropped(&key);
+        let lane = match &fetcher.disk {
+            Some((_, lane)) => lane,
+            None => &fetcher.network,
+        };
+        if let Some(dropped) = lane.push(request) {
+            self.book.dropped(&dropped.key);
         }
     }
 }
 
-fn start_fetcher() -> Arc<Fetcher> {
-    let fetcher = Arc::new(Fetcher {
-        queue: Mutex::new(Queue::new(QUEUE_LIMIT)),
-        ready: Condvar::new(),
-    });
-    let shared = Arc::clone(&fetcher);
-    let spawned = thread::Builder::new()
-        .name("requiem-artwork".into())
-        .spawn(move || fetch_loop(&shared));
-    if let Err(e) = spawned {
-        eprintln!("requiem: cannot start the artwork thread: {e}");
-    }
-    fetcher
+/// Where downloads are kept, or `None` to keep none.
+fn disk_dir() -> Option<PathBuf> {
+    let id = NSBundle::mainBundle()
+        .bundleIdentifier()
+        .map(|id| id.to_string());
+    cache_dir(
+        std::env::var_os(CACHE_DIR_ENV),
+        std::env::var_os("HOME").map(PathBuf::from),
+        id.as_deref(),
+    )
 }
 
-/// Waits on the condvar while idle, so it costs nothing between requests.
-fn fetch_loop(fetcher: &Fetcher) {
+fn start_fetcher() -> Arc<Fetcher> {
+    let fetcher = Arc::new(Fetcher {
+        disk: disk_dir().map(|dir| (DiskCache::new(dir, DISK_CAPACITY), Lane::new())),
+        network: Lane::new(),
+    });
     let agent: ureq::Agent = ureq::Agent::config_builder()
         .timeout_resolve(Some(CONNECT_TIMEOUT))
         .timeout_connect(Some(CONNECT_TIMEOUT))
@@ -136,22 +220,100 @@ fn fetch_loop(fetcher: &Fetcher) {
         .timeout_recv_body(Some(IO_TIMEOUT))
         .build()
         .into();
-    loop {
-        let key = {
-            let mut queue = fetcher.queue.lock().unwrap_or_else(PoisonError::into_inner);
-            loop {
-                if let Some(key) = queue.pop() {
-                    break key;
-                }
-                queue = fetcher
-                    .ready
-                    .wait(queue)
-                    .unwrap_or_else(PoisonError::into_inner);
-            }
-        };
-        let body = fetch(&agent, &key);
-        DispatchQueue::main().exec_async(move || deliver(&key, body));
+    let spawn = |name: &str, work: Box<dyn FnOnce() + Send>| {
+        if let Err(e) = thread::Builder::new().name(name.into()).spawn(work) {
+            eprintln!("requiem: cannot start the artwork thread: {e}");
+        }
+    };
+    if fetcher.disk.is_some() {
+        let shared = Arc::clone(&fetcher);
+        spawn("requiem-artwork-disk", Box::new(move || disk_loop(&shared)));
     }
+    for _ in 0..NETWORK_THREADS {
+        let shared = Arc::clone(&fetcher);
+        let agent = agent.clone();
+        spawn(
+            "requiem-artwork",
+            Box::new(move || network_loop(&shared, &agent)),
+        );
+    }
+    fetcher
+}
+
+/// Prunes once at start, then serves requests from disk or passes them to the network.
+fn disk_loop(fetcher: &Fetcher) {
+    let Some((disk, lane)) = &fetcher.disk else {
+        return;
+    };
+    disk.prune();
+    loop {
+        let request = lane.pop();
+        if let Some(bytes) = disk.read(&request.url) {
+            if let Some(image) = decode(&bytes, request.px) {
+                debug("from disk", &DISK_HITS);
+                DispatchQueue::main().exec_async(move || deliver(&request.key, Some(image), false));
+                continue;
+            }
+            disk.remove(&request.url);
+        }
+        if let Some(dropped) = fetcher.network.push(request) {
+            DispatchQueue::main().exec_async(move || {
+                LOADER.with_borrow_mut(|l| l.book.dropped(&dropped.key));
+            });
+        }
+    }
+}
+
+fn network_loop(fetcher: &Fetcher, agent: &ureq::Agent) {
+    loop {
+        let request = fetcher.network.pop();
+        debug("from the network", &NETWORK_FETCHES);
+        let image = fetch(agent, &request.url).and_then(|bytes| {
+            let image = decode(&bytes, request.px)?;
+            // Kept before delivery, so whoever sees the image can count on the disk having it.
+            if let Some((disk, _)) = &fetcher.disk
+                && let Err(e) = disk.write(&request.url, &bytes)
+            {
+                eprintln!("requiem: cannot keep artwork on disk: {e}");
+            }
+            Some(image)
+        });
+        DispatchQueue::main().exec_async(move || deliver(&request.key, image, true));
+    }
+}
+
+static DISK_HITS: AtomicUsize = AtomicUsize::new(0);
+static NETWORK_FETCHES: AtomicUsize = AtomicUsize::new(0);
+
+/// Counts an image's source, and says so on stderr when `REQUIEM_LOG=debug`.
+fn debug(source: &str, count: &AtomicUsize) {
+    static ON: OnceLock<bool> = OnceLock::new();
+    let n = count.fetch_add(1, Ordering::Relaxed) + 1;
+    if *ON.get_or_init(|| std::env::var("REQUIEM_LOG").is_ok_and(|v| v == "debug")) {
+        eprintln!("requiem: artwork {source} ({n} so far)");
+    }
+}
+
+/// `bytes` decoded now, rather than when first drawn, and scaled to fit `px` square.
+fn decode(bytes: &[u8], px: u32) -> Option<CFRetained<CGImage>> {
+    let data = CFData::from_bytes(bytes);
+    // SAFETY: no options are passed.
+    let source = unsafe { CGImageSource::with_data(&data, None) }?;
+    let size = CFNumber::new_i64(i64::from(px.max(1)));
+    let yes: &CFType = CFBoolean::new(true);
+    // SAFETY: the keys are immutable framework constants.
+    let keys: [&CFString; 4] = unsafe {
+        [
+            kCGImageSourceCreateThumbnailFromImageAlways,
+            kCGImageSourceShouldCacheImmediately,
+            kCGImageSourceCreateThumbnailWithTransform,
+            kCGImageSourceThumbnailMaxPixelSize,
+        ]
+    };
+    let options = CFDictionary::<CFString, CFType>::from_slices(&keys, &[yes, yes, yes, &size]);
+    // SAFETY: the options map CFString keys to the CFBoolean and CFNumber values ImageIO
+    // documents for them.
+    unsafe { source.thumbnail_at_index(0, Some(options.as_opaque())) }
 }
 
 /// The body of a successful response no larger than `MAX_BODY`.
@@ -168,21 +330,22 @@ fn fetch(agent: &ureq::Agent, url: &str) -> Option<Vec<u8>> {
 }
 
 /// On the main thread. Waiters run after the loader is released, so they may load again.
-fn deliver(key: &str, body: Option<Vec<u8>>) {
-    let image = body.and_then(|bytes| {
-        let image = NSImage::initWithData(NSImage::alloc(), &NSData::with_bytes(&bytes))?;
-        image.isValid().then_some(image)
+fn deliver(key: &str, image: Option<CFRetained<CGImage>>, fresh: bool) {
+    let image = image.map(|cg| {
+        let cost = pixel_cost(CGImage::width(Some(&cg)), CGImage::height(Some(&cg)));
+        // A zero size takes the CGImage's pixels as points; covers scale to their bounds.
+        let image = NSImage::initWithCGImage_size(NSImage::alloc(), &cg, NSSize::ZERO);
+        (image, cost)
     });
     let waiters = LOADER.with_borrow_mut(|l| {
-        if let Some(image) = &image {
-            l.cache
-                .insert(key.to_owned(), image.clone(), image_cost(image));
+        if let Some((image, cost)) = &image {
+            l.cache.insert(key.to_owned(), image.clone(), *cost);
         }
         l.book.finish(key, image.is_some())
     });
-    if let Some(image) = image {
+    if let Some((image, _)) = image {
         for done in waiters {
-            done(&image);
+            done(&image, fresh);
         }
     }
 }
@@ -218,6 +381,9 @@ pub struct Placeholder {
 pub struct CoverIvars {
     fill: Retained<NSColor>,
     art: OnceCell<Retained<CoverArt>>,
+    glyph: OnceCell<Retained<NSImageView>>,
+    /// The placeholder is hidden while the image may yet come from disk.
+    veiled: Cell<bool>,
     url: RefCell<Option<String>>,
     /// Bumped by every `set_url`, so an image for an earlier URL is dropped.
     generation: Cell<u64>,
@@ -321,6 +487,8 @@ impl Cover {
         let this = Self::alloc(mtm).set_ivars(CoverIvars {
             fill: placeholder.fill.clone(),
             art: OnceCell::new(),
+            glyph: OnceCell::new(),
+            veiled: Cell::new(false),
             url: RefCell::new(None),
             generation: Cell::new(0),
         });
@@ -358,6 +526,7 @@ impl Cover {
             );
             hide_from_accessibility(&g);
             this.addSubview(&g);
+            let _ = this.ivars().glyph.set(g);
         }
         let art = CoverArt::new(mtm, NSRect::new(NSPoint::ZERO, NSSize::new(w, h)));
         art.setAutoresizingMask(
@@ -370,8 +539,9 @@ impl Cover {
     }
 
     /// Shows `url`'s artwork; the placeholder while it loads, if it fails, or for `None`. An
-    /// image already cached shows at once; one that arrives later fades in, unless the window
-    /// is not visible or Reduce Motion is on.
+    /// image in memory shows at once, and one on disk as soon as it is read, with nothing
+    /// before it for the first moment. One from the network fades in, unless the window is not
+    /// visible or Reduce Motion is on.
     pub fn set_url(&self, url: Option<&str>) {
         let iv = self.ivars();
         if iv.url.borrow().as_deref() == url {
@@ -382,15 +552,48 @@ impl Cover {
         iv.generation.set(generation);
         let image = url.and_then(|url| {
             let cover = Weak::new(self);
-            load(self.mtm(), url, self.pixel_size(), move |image| {
+            request(self.mtm(), url, self.pixel_size(), move |image, fresh| {
                 if let Some(cover) = cover.load()
                     && cover.ivars().generation.get() == generation
                 {
-                    cover.show(Some(image), true);
+                    cover.show(Some(image), fresh);
                 }
             })
         });
         self.show(image.as_deref(), false);
+        if url.is_some() && image.is_none() {
+            self.veil(generation);
+        }
+    }
+
+    /// Hides the placeholder for [`GRACE`], so an image read from disk replaces nothing.
+    fn veil(&self, generation: u64) {
+        self.set_veiled(true);
+        let Ok(when) = DispatchTime::try_from(GRACE) else {
+            self.set_veiled(false);
+            return;
+        };
+        let cover = MainThreadBound::new(Weak::new(self), self.mtm());
+        let _ = DispatchQueue::main().after(when, move || {
+            cover.get_on_main(|cover| {
+                if let Some(cover) = cover.load()
+                    && cover.ivars().generation.get() == generation
+                {
+                    cover.set_veiled(false);
+                }
+            });
+        });
+    }
+
+    fn set_veiled(&self, veiled: bool) {
+        let iv = self.ivars();
+        if iv.veiled.replace(veiled) == veiled {
+            return;
+        }
+        if let Some(glyph) = iv.glyph.get() {
+            glyph.setHidden(veiled);
+        }
+        self.paint();
     }
 
     /// A URL is set whose image has not arrived: still loading, or failed.
@@ -407,6 +610,7 @@ impl Cover {
         let Some(art) = self.ivars().art.get() else {
             return;
         };
+        self.set_veiled(false);
         art.set_image(image);
         let Some(layer) = art.layer() else { return };
         layer.removeAllAnimations();
@@ -431,7 +635,9 @@ impl Cover {
 
     fn paint(&self) {
         if let Some(layer) = self.layer() {
-            layer.setBackgroundColor(Some(&self.ivars().fill.CGColor()));
+            let iv = self.ivars();
+            let fill = (!iv.veiled.get()).then(|| iv.fill.CGColor());
+            layer.setBackgroundColor(fill.as_deref());
         }
     }
 
