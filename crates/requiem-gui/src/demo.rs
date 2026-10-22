@@ -4,8 +4,9 @@
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use requiem_core::{
-    AccountState, Collection, CollectionId, CollectionKind, Command, EnqueueMode, Event, Item,
-    Page, PlayState, ProviderId, SeekTarget, Shelf, Track, TrackId,
+    AccountState, Collection, CollectionId, CollectionKind, Command, EnqueueMode, Event,
+    HOME_LIKED, HOME_MIXES, HOME_PLAYLISTS, Item, Page, PlayState, ProviderId, SeekTarget, Shelf,
+    Track, TrackId,
 };
 use requiem_ipc::{UpdateState, UpdateStatus};
 
@@ -240,12 +241,12 @@ fn taken_in_turn(i: usize, mixed: usize) -> ProviderId {
     }
 }
 
-/// Home's Made for you is Spotify's; its other shelves alternate, as both services have them.
+/// The Library's entries alternate for the first `MIXED_LIBRARY`, then are YouTube Music's;
+/// Home's shelves alternate throughout, as both services have them.
 fn collection_id(kind: &str, i: usize) -> CollectionId {
     CollectionId {
         provider: match kind {
             "lib" => taken_in_turn(i, MIXED_LIBRARY),
-            "mix" => spotify(),
             _ => taken_in_turn(i, usize::MAX),
         },
         id: format!("demo-{kind}-{i:02}"),
@@ -263,8 +264,10 @@ fn home_tracks() -> Vec<Track> {
     tracks
 }
 
-/// Home as both accounts merge into it: a grid of liked songs, then two shelves of cards. The
-/// Liked cards have no cover, as neither service gives them one.
+/// Home as both accounts merge into it: Liked songs, Mixes and Your playlists, which both
+/// services have, with their items alternating, Spotify's first. Then the shelves only one
+/// service has, taken in turn by service. The Liked cards have no cover, as neither service
+/// gives them one.
 pub fn home() -> Vec<Shelf> {
     let playlists = ["Liked Songs", "Liked videos"]
         .into_iter()
@@ -304,19 +307,31 @@ pub fn home() -> Vec<Shelf> {
             })
         })
         .collect();
+    let one_service = |title: &str, service: ProviderId| Shelf {
+        title: title.into(),
+        items: results()
+            .into_iter()
+            .filter(|t| t.id.provider == service)
+            .skip(2)
+            .take(8)
+            .map(Item::Track)
+            .collect(),
+    };
     vec![
         Shelf {
-            title: "Liked songs".into(),
+            title: HOME_LIKED.into(),
             items: home_tracks().into_iter().map(Item::Track).collect(),
         },
         Shelf {
-            title: "Made for you".into(),
+            title: HOME_MIXES.into(),
             items: mixes,
         },
         Shelf {
-            title: "Your playlists".into(),
+            title: HOME_PLAYLISTS.into(),
             items: playlists,
         },
+        one_service("Jump back in", spotify()),
+        one_service("Quick picks", ytmusic()),
     ]
 }
 
@@ -875,7 +890,20 @@ mod tests {
     fn home_shows_the_accounts_music_or_asks_for_a_sign_in() {
         let (vm, _) = start_in(View::Home);
         let titles: Vec<&str> = vm.ui().home.shelves.iter().map(|s| &*s.title).collect();
-        assert_eq!(titles, ["Liked songs", "Made for you", "Your playlists"]);
+        assert_eq!(
+            titles,
+            [
+                HOME_LIKED,
+                HOME_MIXES,
+                HOME_PLAYLISTS,
+                "Jump back in",
+                "Quick picks"
+            ]
+        );
+        for shelf in &vm.ui().home.shelves[..3] {
+            let providers: Vec<_> = shelf.items.iter().map(vm::item_provider).collect();
+            assert_eq!(providers[..2], [&spotify(), &ytmusic()], "{}", shelf.title);
+        }
         assert_eq!(vm.ui().home_view(), HomeView::Page(PageView::Ready));
 
         let (vm, _) = start_in(View::HomeSignedOut);

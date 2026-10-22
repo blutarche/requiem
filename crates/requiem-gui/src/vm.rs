@@ -259,6 +259,14 @@ enum Slot {
 
 impl Slot {
     const ALL: [Slot; 3] = [Slot::Home, Slot::Library, Slot::Collection];
+
+    fn name(self) -> &'static str {
+        match self {
+            Slot::Home => "Home",
+            Slot::Library => "the Library",
+            Slot::Collection => "this page",
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -267,6 +275,8 @@ pub enum Load {
     #[default]
     Idle,
     Loading,
+    /// Asked again while the page shows its shelves, which stay until the answer replaces them.
+    Refreshing,
     Done,
     Failed {
         error: String,
@@ -495,7 +505,7 @@ impl Browse {
         match &self.load {
             Load::Idle | Load::Loading => PageView::Loading,
             Load::Failed { error, .. } => PageView::Failed(error.clone()),
-            Load::Done => PageView::Ready,
+            Load::Refreshing | Load::Done => PageView::Ready,
         }
     }
 }
@@ -1349,16 +1359,25 @@ impl Vm {
                 sign_in_required,
             } => {
                 if let Some(slot) = self.take_browse(req) {
-                    self.set_browse(
-                        slot,
-                        Browse {
-                            load: Load::Failed {
-                                error,
-                                sign_in_required,
+                    let refreshing = self
+                        .browse_mut(slot)
+                        .filter(|b| !sign_in_required && b.load == Load::Refreshing);
+                    if let Some(browse) = refreshing {
+                        // The stale shelves stay; only the refresh failed.
+                        browse.load = Load::Done;
+                        self.toast(format!("Couldn’t refresh {}: {error}", slot.name()), true);
+                    } else {
+                        self.set_browse(
+                            slot,
+                            Browse {
+                                load: Load::Failed {
+                                    error,
+                                    sign_in_required,
+                                },
+                                shelves: Vec::new(),
                             },
-                            shelves: Vec::new(),
-                        },
-                    );
+                        );
+                    }
                 }
             }
             Event::Account { provider, state } => {
@@ -1782,8 +1801,17 @@ impl Vm {
         }
     }
 
-    /// Requests `slot`'s page, replacing what it shows with a loading state. Nothing goes out
-    /// while disconnected; the reconnect asks again. Library needs a signed-in account.
+    fn browse_mut(&mut self, slot: Slot) -> Option<&mut Browse> {
+        match slot {
+            Slot::Home => Some(&mut self.ui.home),
+            Slot::Library => Some(&mut self.ui.library),
+            Slot::Collection => self.ui.collection.as_mut().map(|p| &mut p.browse),
+        }
+    }
+
+    /// Requests `slot`'s page. A page with shelves keeps them, refreshing, until the answer
+    /// lands; one without shows a loading state. Nothing goes out while disconnected; the
+    /// reconnect asks again. Library needs a signed-in account.
     fn fetch(&mut self, slot: Slot) -> Option<Command> {
         if !self.ui.controls().player {
             return None;
@@ -1800,13 +1828,17 @@ impl Vm {
         };
         self.last_req += 1;
         self.pending_browse[slot as usize] = Some(self.last_req);
-        self.set_browse(
-            slot,
-            Browse {
-                load: Load::Loading,
-                shelves: Vec::new(),
-            },
-        );
+        match self.browse_mut(slot) {
+            // Nothing on screen changes, so nothing is redrawn.
+            Some(browse) if !browse.shelves.is_empty() => browse.load = Load::Refreshing,
+            _ => self.set_browse(
+                slot,
+                Browse {
+                    load: Load::Loading,
+                    shelves: Vec::new(),
+                },
+            ),
+        }
         Some(Command::Browse {
             req: self.last_req,
             page,
@@ -1881,7 +1913,14 @@ impl Vm {
                 self.toast(format!("Signed in to {service}. {CLEAR_CLIPBOARD}"), false);
             }
         }
-        let signed_in = |ui: &UiState| ui.signed_in().cloned().collect::<Vec<_>>();
+        // The states too, so a signed-in provider whose account changed counts as a change.
+        let signed_in = |ui: &UiState| {
+            ui.accounts
+                .iter()
+                .filter(|(_, s)| matches!(s, AccountState::SignedIn { .. }))
+                .cloned()
+                .collect::<Vec<_>>()
+        };
         let was = signed_in(&self.ui);
         let known = match self.ui.accounts.iter_mut().find(|(p, _)| *p == provider) {
             Some(entry) => {
@@ -4389,8 +4428,8 @@ mod tests {
         let first = browses(&vm.intent(Intent::Refresh))[0].0;
         let second = browses(&vm.intent(Intent::Refresh))[0].0;
         vm.apply(results(first, Page::Home, vec![shelf("Old", Vec::new())]));
-        assert_eq!(vm.ui().home.load, Load::Loading);
-        assert!(vm.ui().home.shelves.is_empty());
+        assert_eq!(vm.ui().home.load, Load::Refreshing);
+        assert_eq!(vm.ui().home.shelves[0].title, "Quick picks");
         vm.apply(results(second, Page::Home, vec![shelf("New", Vec::new())]));
         assert_eq!(vm.ui().home.shelves[0].title, "New");
         // Search shares the counter, so no req means two things.
@@ -4609,7 +4648,7 @@ mod tests {
         };
         // Signed out, then pending: Home lost its only account.
         assert_eq!(home_fetches(&mut vm), 1);
-        assert_eq!(vm.ui().home.load, Load::Loading);
+        assert_eq!(vm.ui().home.load, Load::Refreshing);
         vm.apply(signed_in());
         assert_eq!(home_fetches(&mut vm), 1);
         // The same state announced again changes nothing.
@@ -4617,6 +4656,158 @@ mod tests {
         assert_eq!(home_fetches(&mut vm), 0);
         vm.apply(account(AccountState::SignedOut));
         assert_eq!(home_fetches(&mut vm), 1);
+    }
+
+    /// A connected vm with Home answered and the Library fetched and answered, signed in as
+    /// Ada.
+    fn loaded() -> Vm {
+        let (mut vm, home_req) = home();
+        vm.apply(signed_in());
+        let lib_req = browses(&vm.take_commands())[0].0;
+        vm.apply(results(
+            home_req,
+            Page::Home,
+            vec![shelf("Quick picks", track_items(2))],
+        ));
+        vm.apply(results(
+            lib_req,
+            Page::Library,
+            vec![shelf("Playlists", track_items(1))],
+        ));
+        vm.take_dirty();
+        vm
+    }
+
+    #[test]
+    fn a_refresh_keeps_the_shelves_until_the_answer_replaces_them() {
+        let mut vm = loaded();
+        let req = browses(&vm.intent(Intent::Refresh))[0].0;
+        assert_eq!(vm.ui().home.load, Load::Refreshing);
+        assert_eq!(vm.ui().home.view(), PageView::Ready);
+        assert_eq!(vm.ui().home.shelves[0].title, "Quick picks");
+        assert!(!vm.take_dirty().contains(Dirty::HOME), "nothing to redraw");
+        vm.apply(results(
+            req,
+            Page::Home,
+            vec![shelf("Fresh", track_items(3))],
+        ));
+        assert_eq!(vm.ui().home.load, Load::Done);
+        assert_eq!(vm.ui().home.shelves[0].title, "Fresh");
+        assert!(vm.take_dirty().contains(Dirty::HOME));
+    }
+
+    #[test]
+    fn a_refresh_that_fails_keeps_the_shelves_and_says_so() {
+        let mut vm = loaded();
+        let req = browses(&vm.intent(Intent::Refresh))[0].0;
+        vm.apply(Event::BrowseFailed {
+            req,
+            error: "network error".into(),
+            sign_in_required: false,
+        });
+        assert_eq!(vm.ui().home.load, Load::Done);
+        assert_eq!(vm.ui().home.shelves[0].title, "Quick picks");
+        let toast = vm.ui().toast.as_ref().expect("a toast");
+        assert!(toast.error);
+        assert_eq!(toast.text, "Couldn’t refresh Home: network error");
+    }
+
+    #[test]
+    fn a_refresh_that_needs_a_sign_in_replaces_the_page() {
+        let mut vm = loaded();
+        let req = browses(&vm.intent(Intent::Refresh))[0].0;
+        vm.apply(Event::BrowseFailed {
+            req,
+            error: "sign-in required".into(),
+            sign_in_required: true,
+        });
+        assert!(vm.ui().home.shelves.is_empty());
+        assert!(matches!(vm.ui().home_view(), HomeView::SignedOut(_)));
+        assert!(vm.ui().toast.is_none());
+    }
+
+    #[test]
+    fn a_library_refresh_keeps_the_shelves_too() {
+        let mut vm = loaded();
+        vm.intent(Intent::Visit(Place::Library));
+        let req = browses(&vm.intent(Intent::Refresh))[0].0;
+        assert_eq!(vm.ui().library.load, Load::Refreshing);
+        assert_eq!(vm.ui().library.shelves[0].title, "Playlists");
+        vm.apply(Event::BrowseFailed {
+            req,
+            error: "timeout".into(),
+            sign_in_required: false,
+        });
+        assert_eq!(vm.ui().library.shelves[0].title, "Playlists");
+        assert_eq!(
+            vm.ui().toast.as_ref().map(|t| t.text.as_str()),
+            Some("Couldn’t refresh the Library: timeout")
+        );
+    }
+
+    #[test]
+    fn an_open_collection_refreshes_in_place() {
+        let mut vm = loaded();
+        let cmds = browses(&vm.intent(Intent::OpenCollection {
+            collection: collection("pl"),
+            from: Place::Home,
+        }));
+        let [(req, page)] = cmds.as_slice() else {
+            panic!("expected the collection fetch, got {cmds:?}");
+        };
+        vm.apply(results(
+            *req,
+            page.clone(),
+            vec![shelf("Tracks", track_items(4))],
+        ));
+        let req = browses(&vm.intent(Intent::Refresh))[0].0;
+        let shown = vm.ui().collection.as_ref().expect("the page");
+        assert_eq!(shown.browse.load, Load::Refreshing);
+        assert_eq!(shown.tracks.len(), 4);
+        vm.apply(results(
+            req,
+            page.clone(),
+            vec![shelf("Tracks", track_items(2))],
+        ));
+        assert_eq!(vm.ui().collection.as_ref().unwrap().tracks.len(), 2);
+    }
+
+    #[test]
+    fn a_new_account_name_refetches_home_and_library_without_clearing() {
+        let mut vm = loaded();
+        vm.apply(account(AccountState::SignedIn {
+            name: Some("Grace".into()),
+        }));
+        let cmds = browses(&vm.take_commands());
+        assert!(
+            matches!(
+                cmds.as_slice(),
+                [(_, Page::Home), (_, Page::Library)] | [(_, Page::Library), (_, Page::Home)]
+            ),
+            "{cmds:?}"
+        );
+        assert_eq!(vm.ui().home.load, Load::Refreshing);
+        assert_eq!(vm.ui().library.load, Load::Refreshing);
+        assert_eq!(vm.ui().home.shelves[0].title, "Quick picks");
+        assert_eq!(vm.ui().library.shelves[0].title, "Playlists");
+    }
+
+    #[test]
+    fn pending_ticks_of_a_sign_in_fetch_nothing() {
+        let mut vm = loaded();
+        vm.apply(spotify_account(AccountState::SignedOut));
+        vm.take_commands();
+        vm.apply(spotify_account(pending()));
+        for _ in 0..2 {
+            vm.apply(spotify_account(AccountState::Pending {
+                verification_url: "https://www.spotify.com/pair".into(),
+                user_code: "GHIJKL".into(),
+                expires_at_unix: 2_000,
+            }));
+        }
+        assert!(browses(&vm.take_commands()).is_empty());
+        assert_eq!(vm.ui().home.load, Load::Done);
+        assert_eq!(vm.ui().library.load, Load::Done);
     }
 
     #[test]

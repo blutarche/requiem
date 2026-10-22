@@ -100,8 +100,8 @@ Playback stays anonymous whether or not you are signed in.
 Instead of a Google client, Requiem can use the sign-in of a browser where you are signed in to YouTube Music. That needs no Google Cloud project, and it gets what the client can't: Home shows the first 6 shelves of YouTube Music's own Home, Library shows your Liked music and your playlists, and your private playlists and mixes open. Requiem sends the session only to YouTube Music's own API, for Home, Library, the playlists you open and your account's name. Search and playback stay anonymous, and plays aren't reported to Google.
 
 1. In a browser where you are signed in, open [music.youtube.com](https://music.youtube.com).
-2. Open the browser's developer tools with Option+Cmd+I, go to the **Network** tab, then reload the page. In Safari, first turn on **Show features for web developers** in **Safari → Settings… → Advanced**.
-3. Type `browse` in the Network tab's filter and right-click (in Safari, Control-click) a request named `browse`.
+2. Open the browser's developer tools with Option+Cmd+I and go to the **Network** tab. In Safari, first turn on **Show features for web developers** in **Safari → Settings… → Advanced**.
+3. Type `browse` in the Network tab's filter, then click **Explore** or **Library** in YouTube Music's sidebar (or scroll Home) so a `browse` request appears. Right-click it (in Safari, Control-click).
    - **Chrome:** choose **Copy → Copy as cURL**.
    - **Firefox:** in the **Copy** submenu, choose **Copy Request Headers** or **Copy as cURL**.
    - **Safari:** choose **Copy as cURL**.
