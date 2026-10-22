@@ -161,6 +161,12 @@ pub trait Provider: Send + Sync {
         false
     }
 
+    /// Whether the session may fetch this provider's collections before they are opened.
+    /// Worth it only where a collection costs a request or a few, not one per track.
+    fn fetch_ahead(&self) -> bool {
+        false
+    }
+
     /// Called on the session thread: must not block.
     fn account(&self) -> AccountState {
         AccountState::Unavailable("this provider has no accounts".into())

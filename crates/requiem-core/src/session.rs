@@ -3,7 +3,7 @@ use std::fmt;
 use std::panic::{self, AssertUnwindSafe};
 use std::sync::Arc;
 use std::thread::{self, JoinHandle};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use crossbeam_channel::{Receiver, Sender, bounded, unbounded};
 
@@ -90,6 +90,9 @@ pub struct SessionConfig {
     pub prefetch_parallel: usize,
     /// A collection fetched this recently is not fetched ahead again.
     pub prefetch_fresh: Duration,
+    /// After a provider fails for now, as when it is rate limited, its collections are not
+    /// fetched ahead for this long.
+    pub prefetch_pause: Duration,
 }
 
 impl fmt::Debug for SessionConfig {
@@ -110,6 +113,7 @@ impl fmt::Debug for SessionConfig {
             .field("prefetch_per_page", &self.prefetch_per_page)
             .field("prefetch_parallel", &self.prefetch_parallel)
             .field("prefetch_fresh", &self.prefetch_fresh)
+            .field("prefetch_pause", &self.prefetch_pause)
             .finish()
     }
 }
@@ -129,6 +133,7 @@ impl Default for SessionConfig {
             prefetch_per_page: 12,
             prefetch_parallel: 2,
             prefetch_fresh: Duration::from_secs(10 * 60),
+            prefetch_pause: Duration::from_secs(10 * 60),
         }
     }
 }
@@ -384,6 +389,8 @@ struct Actor {
     prefetch: VecDeque<CollectionId>,
     /// Collections being fetched ahead.
     prefetching: HashSet<CollectionId>,
+    /// When each provider last failed for now.
+    failed_at: HashMap<ProviderId, Instant>,
 }
 
 /// The provider's own words, except that a network failure keeps its "network error" prefix.
@@ -592,6 +599,7 @@ impl Actor {
             last_run: 0,
             prefetch: VecDeque::new(),
             prefetching: HashSet::new(),
+            failed_at: HashMap::new(),
             providers,
             engine,
             config,
@@ -1179,7 +1187,12 @@ impl Actor {
                 return;
             };
             let page = Page::Collection(id.clone());
-            if self.page_targets(&page).is_empty() {
+            let cheap = self.provider(&id.provider).is_some_and(|p| p.fetch_ahead());
+            let paused = self
+                .failed_at
+                .get(&id.provider)
+                .is_some_and(|t| t.elapsed() < self.config.prefetch_pause);
+            if !cheap || paused || self.page_targets(&page).is_empty() {
                 continue;
             }
             let skip = self.collections.get(&id).is_some_and(|c| {
@@ -1283,6 +1296,7 @@ impl Actor {
             .map(|(_, s)| s.clone());
         let mut changed = false;
         let mut fetched = false;
+        let failed_for_now = matches!(result, Err(ProviderError::Network(_)));
         // The account changed while it answered: neither its answer nor its part from before
         // is the current account's.
         let same = matches!(&asked, Some(AccountState::SignedIn { name })
@@ -1404,6 +1418,9 @@ impl Actor {
                     error: e.to_string(),
                 });
             }
+        }
+        if failed_for_now {
+            self.failed_at.insert(provider.clone(), Instant::now());
         }
         // After the answer, as it may have signed the provider out.
         self.set_account(provider, account, false);

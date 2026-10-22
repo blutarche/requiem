@@ -195,6 +195,10 @@ impl Provider for YtMusicProvider {
         true
     }
 
+    fn fetch_ahead(&self) -> bool {
+        true
+    }
+
     fn account(&self) -> AccountState {
         self.session
             .account()

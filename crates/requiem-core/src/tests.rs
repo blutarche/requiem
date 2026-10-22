@@ -3211,3 +3211,53 @@ fn a_collection_fetched_lately_is_not_fetched_ahead() {
         vec![collection_page("a"), Page::Library, collection_page("b")]
     );
 }
+
+#[test]
+fn a_provider_that_pays_per_track_is_not_fetched_ahead() {
+    let p = signed_in_fake();
+    p.set_fetch_ahead(false);
+    p.script_browse(
+        Page::Library,
+        vec![Step::ok(vec![collection_shelf("Library", &["a", "b"])])],
+    );
+    let r = rig_with(p.clone(), vec![], config());
+    browse_event(&r, 1, Page::Library);
+    r.settle();
+    assert_eq!(p.browse_calls(), vec![Page::Library]);
+    // An open still fetches it.
+    browse_event(&r, 2, collection_page("a"));
+    assert_eq!(p.browse_calls(), vec![Page::Library, collection_page("a")]);
+}
+
+#[test]
+fn a_provider_that_failed_for_now_is_not_fetched_ahead_for_a_while() {
+    let library = || Step::ok(vec![collection_shelf("Library", &["a", "b", "c"])]);
+    let p = signed_in_fake();
+    p.script_browse(Page::Library, vec![library(), library()]);
+    p.script_browse(
+        collection_page("a"),
+        vec![Step::err(ProviderError::Network("rate limited".into()))],
+    );
+    let r = rig_with(
+        p.clone(),
+        vec![],
+        SessionConfig {
+            prefetch_parallel: 1,
+            ..config()
+        },
+    );
+    browse_event(&r, 1, Page::Library);
+    p.wait_browse_calls(2);
+    r.settle();
+    assert_eq!(p.browse_calls(), vec![Page::Library, collection_page("a")]);
+    browse_event(&r, 2, Page::Library);
+    p.wait_browse_calls(3);
+    r.settle();
+    assert_eq!(
+        p.browse_calls(),
+        vec![Page::Library, collection_page("a"), Page::Library]
+    );
+    // An open still fetches it.
+    browse_event(&r, 3, collection_page("b"));
+    assert_eq!(p.browse_calls()[3], collection_page("b"));
+}

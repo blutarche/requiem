@@ -653,27 +653,41 @@ pub(crate) fn best_file(files: &AudioFiles) -> Option<(FileId, usize)> {
 }
 
 /// Track details for `ids`, in order and at most [`METADATA_IN_FLIGHT`] requests at a time.
-/// A track without details is left out; only if every one fails is that an error.
 async fn tracks(session: &Session, ids: Vec<SpotifyId>) -> Result<Vec<Track>, ProviderError> {
-    let results: Vec<_> = futures_util::stream::iter(ids)
-        .map(|id| async move {
-            let t = SpotifyTrack::get(session, &SpotifyUri::Track { id }).await;
-            (id, t)
-        })
-        .buffered(METADATA_IN_FLIGHT)
-        .collect()
-        .await;
-    let mut out = Vec::with_capacity(results.len());
-    let mut first_err = None;
-    for (id, r) in results {
+    let found = all_found(
+        futures_util::stream::iter(ids)
+            .map(|id| async move {
+                SpotifyTrack::get(session, &SpotifyUri::Track { id })
+                    .await
+                    .map(|t| (id, t))
+            })
+            .buffered(METADATA_IN_FLIGHT),
+    )
+    .await?;
+    Ok(found.into_iter().map(|(id, t)| to_track(id, t)).collect())
+}
+
+/// The lookups that found something, in order. One that failed for now, as when rate
+/// limited, fails them all and stops the rest: a list cut short would pass for the whole one.
+/// A track Spotify no longer has is left out; only if every one is gone is that an error.
+async fn all_found<T>(
+    lookups: impl futures_util::Stream<Item = Result<T, Error>>,
+) -> Result<Vec<T>, ProviderError> {
+    let mut lookups = std::pin::pin!(lookups);
+    let mut out = Vec::new();
+    let mut gone = None;
+    while let Some(r) = lookups.next().await {
         match r {
-            Ok(t) => out.push(to_track(id, t)),
-            Err(e) => {
-                first_err.get_or_insert(e);
-            }
+            Ok(t) => out.push(t),
+            Err(e) => match api_error("track details", &e) {
+                ProviderError::Unplayable(_) => {
+                    gone.get_or_insert(e);
+                }
+                failed => return Err(failed),
+            },
         }
     }
-    match first_err {
+    match gone {
         Some(e) if out.is_empty() => Err(api_error("track details", &e)),
         Some(e) => {
             eprintln!("[spotify] left out tracks without details: {}", shown(&e));
@@ -1220,6 +1234,35 @@ mod tests {
         backend.sign_out().unwrap();
         assert!(!fixed.exists() && !path.exists());
         assert!(tmp.path().join("requiem").exists());
+    }
+
+    #[test]
+    fn a_track_lookup_that_fails_for_now_fails_the_list() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+        let found = |lookups: Vec<Result<u8, Error>>| {
+            rt.block_on(all_found(futures_util::stream::iter(lookups)))
+        };
+        let limited = || Error::resource_exhausted(io::Error::other("rate limited"));
+        let gone = || Error::not_found(io::Error::other("no such track"));
+
+        assert!(matches!(
+            found(vec![Ok(1), Err(limited()), Ok(3)]),
+            Err(ProviderError::Network(_))
+        ));
+        assert!(matches!(
+            found(vec![
+                Ok(1),
+                Err(Error::unavailable(io::Error::other("down")))
+            ]),
+            Err(ProviderError::Network(_))
+        ));
+        assert_eq!(found(vec![Ok(1), Err(gone()), Ok(3)]).unwrap(), vec![1, 3]);
+        assert!(matches!(
+            found(vec![Err(gone())]),
+            Err(ProviderError::Unplayable(_))
+        ));
     }
 
     #[test]
