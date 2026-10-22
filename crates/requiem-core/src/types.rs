@@ -63,6 +63,9 @@ pub struct Shelf {
 pub const HOME_LIKED: &str = "Liked songs";
 pub const HOME_MIXES: &str = "Mixes";
 pub const HOME_PLAYLISTS: &str = "Your playlists";
+/// YouTube Music's own names, which its feed sends in English as requests ask for it.
+pub const HOME_LISTEN_AGAIN: &str = "Listen again";
+pub const HOME_QUICK_PICKS: &str = "Quick picks";
 
 /// `Home` goes to every signed-in provider with `has_home()`; their shelves are taken in turn
 /// (each one's first, then each one's second, ...), so shelves only one has alternate between

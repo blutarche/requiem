@@ -2138,6 +2138,77 @@ fn home_weaves_shared_shelves_and_alternates_the_rest() {
 }
 
 #[test]
+fn home_weaves_listen_again_and_quick_picks_where_the_second_provider_has_them() {
+    let (a, b) = pair();
+    for p in [&a, &b] {
+        p.set_has_home(true);
+        p.set_account(signed_in());
+    }
+    // As Spotify answers: its own three, then Listen again and Quick picks.
+    a.script_browse(
+        Page::Home,
+        vec![Step::ok(vec![
+            track_shelf(HOME_LIKED, "first", &["s1"]),
+            track_shelf(HOME_MIXES, "first", &["sm1"]),
+            track_shelf(HOME_PLAYLISTS, "first", &["sp1"]),
+            track_shelf(HOME_LISTEN_AGAIN, "first", &["sl1", "sl2"]),
+            track_shelf(HOME_QUICK_PICKS, "first", &["sk1", "sk2", "sk3"]),
+        ])],
+    );
+    // As YouTube Music answers: its feed between the mixes and the playlists.
+    b.script_browse(
+        Page::Home,
+        vec![Step::ok(vec![
+            track_shelf(HOME_LIKED, "second", &["y1"]),
+            track_shelf(HOME_MIXES, "second", &["ym1"]),
+            track_shelf(HOME_QUICK_PICKS, "second", &["yk1", "yk2"]),
+            track_shelf(HOME_LISTEN_AGAIN, "second", &["yl1", "yl2"]),
+            track_shelf("Forgotten favorites", "second", &["f1"]),
+            track_shelf(HOME_PLAYLISTS, "second", &["yp1"]),
+        ])],
+    );
+    let r = rig_with(a, vec![b], config());
+    let Event::BrowseResults { shelves, .. } = home_event(&r) else {
+        panic!("Home failed");
+    };
+    assert_eq!(
+        titles_of(&shelves),
+        [
+            HOME_LIKED,
+            HOME_MIXES,
+            HOME_PLAYLISTS,
+            HOME_QUICK_PICKS,
+            HOME_LISTEN_AGAIN,
+            "Forgotten favorites"
+        ]
+    );
+    assert_eq!(
+        shelves[3..5],
+        [
+            mixed_shelf(
+                HOME_QUICK_PICKS,
+                &[
+                    ("first", "sk1"),
+                    ("second", "yk1"),
+                    ("first", "sk2"),
+                    ("second", "yk2"),
+                    ("first", "sk3")
+                ]
+            ),
+            mixed_shelf(
+                HOME_LISTEN_AGAIN,
+                &[
+                    ("first", "sl1"),
+                    ("second", "yl1"),
+                    ("first", "sl2"),
+                    ("second", "yl2")
+                ]
+            ),
+        ]
+    );
+}
+
+#[test]
 fn home_of_one_provider_comes_back_unchanged() {
     let (a, b) = pair();
     a.set_has_home(true);

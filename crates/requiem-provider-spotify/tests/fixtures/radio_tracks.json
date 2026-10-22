@@ -1,0 +1,58 @@
+{
+  "correlation_id": "00000000000000000000000000000000",
+  "next_page_url": "hm://radio-router/v3/tracks/spotify:station:track:0FakeSeed1000000000000?salt=14",
+  "tracks": [
+    {
+      "uri": "spotify:track:0FakeRadio100000000000",
+      "uid": "0123456789abcdef",
+      "artist_uri": "spotify:artist:0FakeBand1000000000000",
+      "album_uri": "spotify:album:0FakeRecord10000000000",
+      "original_gid": "0FakeRadio100000000000",
+      "metadata": {
+        "album_title": "First Record",
+        "artist_name": "First Band",
+        "artist_uri": "spotify:artist:0FakeBand1000000000000",
+        "image_url": "spotify:image:ab67616d0000b2730000000000000000000000a1",
+        "title": "First Song",
+        "is_explicit": "false",
+        "is_promotional": "false",
+        "decision_id": "ssp~0000000000000000000000000000000000"
+      },
+      "artistUri": "spotify:artist:0FakeBand1000000000000",
+      "name": "First Song"
+    },
+    {
+      "uri": "spotify:track:0FakeRadio200000000000",
+      "uid": "0123456789abcdef",
+      "artist_uri": "spotify:artist:0FakeBand2000000000000",
+      "album_uri": "spotify:album:0FakeRecord20000000000",
+      "original_gid": "0FakeRadio200000000000",
+      "metadata": {
+        "album_title": "Second Record",
+        "artist_name": "Second Band",
+        "artist_uri": "spotify:artist:0FakeBand2000000000000",
+        "image_url": "spotify:image:ab67616d0000b2730000000000000000000000a2",
+        "title": "Second Song",
+        "is_explicit": "false",
+        "is_promotional": "false",
+        "decision_id": "ssp~0000000000000000000000000000000000"
+      },
+      "artistUri": "spotify:artist:0FakeBand2000000000000",
+      "name": "Second Song"
+    },
+    {
+      "uri": "spotify:episode:0FakeEpisode2000000000",
+      "uid": "0123456789abcdef",
+      "name": "An Episode"
+    },
+    {
+      "uri": "spotify:track:0FakeRadio300000000000",
+      "uid": "0123456789abcdef",
+      "artist_uri": "spotify:artist:0FakeBand3000000000000",
+      "album_uri": "spotify:album:0FakeRecord30000000000",
+      "original_gid": "0FakeRadio300000000000",
+      "artistUri": "spotify:artist:0FakeBand3000000000000",
+      "name": "Bare Song"
+    }
+  ]
+}

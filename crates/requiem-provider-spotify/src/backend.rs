@@ -22,7 +22,7 @@ use librespot_core::error::ErrorKind;
 use librespot_core::{Error, FileId, Session, SessionConfig, SpotifyId, SpotifyUri};
 use librespot_metadata::audio::{AudioFileFormat, AudioFiles, AudioItem};
 use librespot_metadata::image::{Image, ImageSize};
-use librespot_metadata::{Metadata, Track as SpotifyTrack};
+use librespot_metadata::{Album, Metadata, Track as SpotifyTrack};
 use librespot_oauth::DeviceAuthClientBuilder;
 use librespot_protocol::context_page::ContextPage;
 use librespot_protocol::context_track::ContextTrack;
@@ -70,6 +70,15 @@ const BACKGROUND_BUDGET: Duration = Duration::from_secs(30);
 const MAX_COLLECTION_TRACKS: usize = 1000;
 /// Home's most recently liked tracks.
 const HOME_LIKED: usize = 20;
+/// Collections on Home's Listen again, each one a request.
+const LISTEN_AGAIN: usize = 10;
+/// Tracks on Home's Quick picks.
+const QUICK_PICKS: usize = 20;
+/// How long Home waits for Listen again and Quick picks; whatever isn't in by then is left out.
+const RECENT_BUDGET: Duration = Duration::from_secs(5);
+/// What the desktop client asks for; contexts only, each with the track of it played last.
+const RECENTLY_PLAYED: &str =
+    "recently-played?format=json&offset=0&limit=50&filter=default,collection-new-episodes";
 /// The ids of the playlists Spotify makes start with one of these: its mixes, Daily Mixes,
 /// "This Is" and editorial playlists, then Discover Weekly and Release Radar.
 const MADE_FOR_YOU: [&str; 2] = ["37i9dQZF1", "37i9dQZEVX"];
@@ -79,6 +88,7 @@ const LIKED_ID: &str = "collection";
 /// Spotify's own Liked Songs picture, the same for everyone.
 const LIKED_ARTWORK: &str = "https://misc.scdn.co/liked-songs/liked-songs-640.png";
 const PLAYLIST_PREFIX: &str = "playlist:";
+const ALBUM_PREFIX: &str = "album:";
 
 pub(crate) struct Librespot {
     rt: Runtime,
@@ -238,38 +248,38 @@ impl Librespot {
     async fn home(&self) -> Result<Vec<Shelf>, ProviderError> {
         let session = self.session().await?;
         let session = &session;
-        let (liked, playlists) = tokio::join!(
+        let (liked, playlists, recent) = tokio::join!(
             async {
                 let ids = context_ids(session, &liked_uri(session), HOME_LIKED).await?;
                 tracks(session, ids).await
             },
             playlists(session, &self.covers),
+            recent(session, &self.covers),
         );
         // Without the liked songs, Home still has the playlists.
         let liked = liked.unwrap_or_else(|e| {
             eprintln!("[spotify] Home left out the liked songs: {}", shown(&e));
             Vec::new()
         });
-        Ok(home_shelves(liked, playlists?))
+        Ok(home_shelves(liked, playlists?, recent))
     }
 
     async fn collection(&self, id: &str) -> Result<Vec<Shelf>, ProviderError> {
         let session = self.session().await?;
-        let (uri, playlist) = if id == LIKED_ID {
-            (liked_uri(&session), None)
-        } else {
-            let pid = id
-                .strip_prefix(PLAYLIST_PREFIX)
-                .and_then(|b62| SpotifyId::from_base62(b62).ok())
-                .ok_or_else(|| ProviderError::Unplayable(format!("no Spotify collection {id}")))?;
-            (format!("spotify:playlist:{}", pid.to_base62()), Some(pid))
-        };
-        let ids = context_ids(&session, &uri, MAX_COLLECTION_TRACKS).await?;
-        let title = match playlist {
-            None => LIKED.to_owned(),
-            Some(pid) => playlist_name(&session, &pid)
+        let opens = Opens::from_id(id)
+            .ok_or_else(|| ProviderError::Unplayable(format!("no Spotify collection {id}")))?;
+        let ids = context_ids(&session, &opens.uri(&session), MAX_COLLECTION_TRACKS).await?;
+        let title = match opens {
+            Opens::Liked => LIKED.to_owned(),
+            Opens::Playlist(pid) => playlist_name(&session, &pid)
                 .await
                 .unwrap_or_else(|| "Playlist".into()),
+            Opens::Album(aid) => Album::get(&session, &SpotifyUri::Album { id: aid })
+                .await
+                .ok()
+                .map(|a| a.name)
+                .filter(|n| !n.is_empty())
+                .unwrap_or_else(|| "Album".into()),
         };
         let tracks = tracks(&session, ids).await?;
         Ok(vec![Shelf {
@@ -988,9 +998,287 @@ fn album_cover(t: &SpotifyTrack) -> Option<AlbumCover> {
     })
 }
 
-/// Home, without empty shelves: the `liked` tracks, the playlists Spotify made, then the
-/// Liked Songs card and the rest of the playlists.
-fn home_shelves(liked: Vec<Track>, playlists: Vec<Collection>) -> Vec<Shelf> {
+/// What a Spotify collection id opens.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Opens {
+    Liked,
+    Playlist(SpotifyId),
+    Album(SpotifyId),
+}
+
+impl Opens {
+    fn from_id(id: &str) -> Option<Self> {
+        if id == LIKED_ID {
+            return Some(Self::Liked);
+        }
+        let b62 = |prefix| SpotifyId::from_base62(id.strip_prefix(prefix)?).ok();
+        b62(PLAYLIST_PREFIX)
+            .map(Self::Playlist)
+            .or_else(|| b62(ALBUM_PREFIX).map(Self::Album))
+    }
+
+    /// From a played context's URI; artists, shows and the rest open as nothing.
+    fn from_context(uri: &str) -> Option<Self> {
+        // The user's Liked Songs; an artist's songs within it end in more.
+        if uri.starts_with("spotify:user:") && uri.ends_with(":collection") {
+            return Some(Self::Liked);
+        }
+        match SpotifyUri::from_uri(uri).ok()? {
+            SpotifyUri::Playlist { id, .. } => Some(Self::Playlist(id)),
+            SpotifyUri::Album { id } => Some(Self::Album(id)),
+            _ => None,
+        }
+    }
+
+    fn uri(self, session: &Session) -> String {
+        match self {
+            Self::Liked => liked_uri(session),
+            Self::Playlist(id) => format!("spotify:playlist:{}", id.to_base62()),
+            Self::Album(id) => format!("spotify:album:{}", id.to_base62()),
+        }
+    }
+
+    fn id(self) -> CollectionId {
+        let id = match self {
+            Self::Liked => LIKED_ID.to_owned(),
+            Self::Playlist(id) => format!("{PLAYLIST_PREFIX}{}", id.to_base62()),
+            Self::Album(id) => format!("{ALBUM_PREFIX}{}", id.to_base62()),
+        };
+        CollectionId {
+            provider: provider(),
+            id,
+        }
+    }
+}
+
+/// A context played lately, and the track of it played last.
+#[derive(Debug, PartialEq)]
+pub(crate) struct Played {
+    pub(crate) context: String,
+    pub(crate) track: Option<SpotifyId>,
+}
+
+/// A recently-played answer: its contexts, the latest first.
+pub(crate) fn parse_recently_played(bytes: &[u8]) -> Result<Vec<Played>, ProviderError> {
+    let bad = |e: String| ProviderError::Parse(format!("Spotify recently played: {e}"));
+    let v: Value = serde_json::from_slice(bytes).map_err(|e| bad(e.to_string()))?;
+    let contexts = v
+        .get("playContexts")
+        .and_then(Value::as_array)
+        .ok_or_else(|| bad("no playContexts".into()))?;
+    Ok(contexts
+        .iter()
+        .filter_map(|c| {
+            Some(Played {
+                context: c.get("uri")?.as_str()?.to_owned(),
+                track: c
+                    .get("lastPlayedTrackUri")
+                    .and_then(Value::as_str)
+                    .and_then(track_id),
+            })
+        })
+        .collect())
+}
+
+/// The first [`LISTEN_AGAIN`] of `played` that open as collections, each once.
+fn listen_again_picks(played: &[Played]) -> Vec<Opens> {
+    let mut picks = Vec::new();
+    for opens in played
+        .iter()
+        .filter_map(|p| Opens::from_context(&p.context))
+    {
+        if picks.len() == LISTEN_AGAIN {
+            break;
+        }
+        if !picks.contains(&opens) {
+            picks.push(opens);
+        }
+    }
+    picks
+}
+
+/// A radio answer's tracks, with the details it sends along: one artist and no duration,
+/// which saves a request per track.
+pub(crate) fn parse_station(bytes: &[u8]) -> Result<Vec<Track>, ProviderError> {
+    let bad = |e: String| ProviderError::Parse(format!("Spotify radio: {e}"));
+    let v: Value = serde_json::from_slice(bytes).map_err(|e| bad(e.to_string()))?;
+    let tracks = v
+        .get("tracks")
+        .and_then(Value::as_array)
+        .ok_or_else(|| bad("no tracks".into()))?;
+    Ok(tracks.iter().filter_map(station_track).collect())
+}
+
+fn station_track(t: &Value) -> Option<Track> {
+    let id = track_id(t.get("uri")?.as_str()?)?;
+    let text = |v: Option<&Value>, key: &str| {
+        v?.get(key)?
+            .as_str()
+            .filter(|s| !s.is_empty())
+            .map(str::to_owned)
+    };
+    let meta = t.get("metadata");
+    Some(Track {
+        id: TrackId {
+            provider: provider(),
+            id: id.to_base62(),
+        },
+        title: text(meta, "title").or_else(|| text(Some(t), "name"))?,
+        artists: text(meta, "artist_name").into_iter().collect(),
+        album: text(meta, "album_title"),
+        duration: None,
+        artwork_url: text(meta, "image_url")
+            .and_then(|u| Some(format!("{IMAGE_URL}{}", u.strip_prefix("spotify:image:")?))),
+    })
+}
+
+/// Home's shelves of what was played lately.
+#[derive(Debug, Default)]
+struct Recent {
+    listen_again: Vec<Collection>,
+    quick_picks: Vec<Track>,
+}
+
+/// Listen again, the collections played lately, and Quick picks, a radio of the track played
+/// last. Each is left out, or left short, when its requests fail or aren't answered within
+/// [`RECENT_BUDGET`]; Home never fails for them.
+async fn recent(session: &Session, covers: &Arc<Covers>) -> Recent {
+    let until = tokio::time::Instant::now() + RECENT_BUDGET;
+    let path = format!(
+        "/recently-played/v3/user/{}/{RECENTLY_PLAYED}",
+        session.username()
+    );
+    // librespot's plain JSON GET.
+    let fetched = tokio::time::timeout_at(until, session.spclient().get_next_page(&path)).await;
+    let played = match fetched {
+        Ok(Ok(bytes)) => parse_recently_played(&bytes),
+        Ok(Err(e)) => Err(api_error("recently played", &e)),
+        Err(_) => Err(ProviderError::Network(
+            "Spotify recently played: timed out".into(),
+        )),
+    };
+    let played = match played {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("[spotify] Home left out Listen again and Quick picks: {e}");
+            return Recent::default();
+        }
+    };
+    let seed = played.iter().find_map(|p| p.track);
+    let (listen_again, quick_picks) =
+        tokio::join!(listen_again(session, covers, &played, until), async {
+            let seed = seed?;
+            quick_picks(session, seed, until)
+                .await
+                .map_err(|e| eprintln!("[spotify] Home left out Quick picks: {e}"))
+                .ok()
+        });
+    Recent {
+        listen_again,
+        quick_picks: quick_picks.unwrap_or_default(),
+    }
+}
+
+async fn listen_again(
+    session: &Session,
+    covers: &Arc<Covers>,
+    played: &[Played],
+    until: tokio::time::Instant,
+) -> Vec<Collection> {
+    let picks = listen_again_picks(played);
+    let wanted = picks.len();
+    let cards: Vec<_> = futures_util::future::join_all(picks.into_iter().map(|opens| async move {
+        match opens {
+            Opens::Liked => Some(liked_card()),
+            Opens::Playlist(id) => played_playlist(session, covers, id, until).await,
+            Opens::Album(id) => {
+                let album =
+                    tokio::time::timeout_at(until, Album::get(session, &SpotifyUri::Album { id }))
+                        .await
+                        .ok()?
+                        .ok()?;
+                Some(album_card(id, &album))
+            }
+        }
+    }))
+    .await
+    .into_iter()
+    .flatten()
+    .collect();
+    if cards.len() < wanted {
+        eprintln!(
+            "[spotify] Listen again left out {} it couldn't get",
+            wanted - cards.len()
+        );
+    }
+    cards
+}
+
+/// Playlist `id` as a card, given the cover found for it as the rootlist's cards are.
+async fn played_playlist(
+    session: &Session,
+    covers: &Arc<Covers>,
+    id: SpotifyId,
+    until: tokio::time::Instant,
+) -> Option<Collection> {
+    let bytes = tokio::time::timeout_at(until, session.spclient().get_playlist(&id))
+        .await
+        .ok()?
+        .ok()?;
+    let list = SelectedListContent::parse_from_bytes(&bytes).ok()?;
+    let row = Collection {
+        id: Opens::Playlist(id).id(),
+        kind: CollectionKind::Playlist,
+        title: "Playlist".into(),
+        subtitle: None,
+        artwork_url: None,
+    };
+    let row = RootlistRow {
+        id,
+        collection: completed(row, Some(whole_of(&list)))?,
+        incomplete: false,
+        revision: list.revision().to_vec(),
+    };
+    listed(session, covers, row, until).await
+}
+
+fn album_card(id: SpotifyId, album: &Album) -> Collection {
+    let artists: Vec<_> = album.artists.iter().map(|a| a.name.as_str()).collect();
+    Collection {
+        id: Opens::Album(id).id(),
+        kind: CollectionKind::Album,
+        title: Some(album.name.clone())
+            .filter(|n| !n.is_empty())
+            .unwrap_or_else(|| "Album".into()),
+        subtitle: Some(artists.join(", ")).filter(|s| !s.is_empty()),
+        artwork_url: artwork(&album.covers).or_else(|| artwork(&album.cover_group)),
+    }
+}
+
+/// A radio of track `seed`, without it.
+async fn quick_picks(
+    session: &Session,
+    seed: SpotifyId,
+    until: tokio::time::Instant,
+) -> Result<Vec<Track>, ProviderError> {
+    let uri = SpotifyUri::Track { id: seed }.to_uri();
+    let station =
+        session
+            .spclient()
+            .get_apollo_station("tracks", &uri, Some(QUICK_PICKS), vec![seed], true);
+    let bytes = tokio::time::timeout_at(until, station)
+        .await
+        .map_err(|_| ProviderError::Network("Spotify radio: timed out".into()))?
+        .map_err(|e| api_error("radio", &e))?;
+    let mut tracks = parse_station(&bytes)?;
+    tracks.retain(|t| t.id.id != seed.to_base62());
+    tracks.truncate(QUICK_PICKS);
+    Ok(tracks)
+}
+
+/// Home, without empty shelves: the `liked` tracks, the playlists Spotify made, the Liked
+/// Songs card and the rest of the playlists, then what was played lately.
+fn home_shelves(liked: Vec<Track>, playlists: Vec<Collection>, recent: Recent) -> Vec<Shelf> {
     let (made, own): (Vec<_>, Vec<_>) = playlists.into_iter().partition(|c| {
         c.id.id
             .strip_prefix(PLAYLIST_PREFIX)
@@ -1009,6 +1297,18 @@ fn home_shelves(liked: Vec<Track>, playlists: Vec<Collection>) -> Vec<Shelf> {
         (
             requiem_core::HOME_PLAYLISTS,
             own.map(Item::Collection).collect(),
+        ),
+        (
+            requiem_core::HOME_LISTEN_AGAIN,
+            recent
+                .listen_again
+                .into_iter()
+                .map(Item::Collection)
+                .collect(),
+        ),
+        (
+            requiem_core::HOME_QUICK_PICKS,
+            recent.quick_picks.into_iter().map(Item::Track).collect(),
         ),
     ]
     .into_iter()
@@ -1576,6 +1876,7 @@ mod tests {
                 playlist("37i9dQZF1DZ06evO1JiPRm", "This Is Kado"),
                 playlist("37i9dQZEVXcJZyENOWUFo7", "Discover Weekly"),
             ],
+            Recent::default(),
         );
         let got: Vec<_> = shelves.iter().map(|s| (&*s.title, titles(s))).collect();
         assert_eq!(
@@ -1592,6 +1893,139 @@ mod tests {
     }
 
     #[test]
+    fn home_ends_with_listen_again_then_quick_picks() {
+        let picks = parse_station(RADIO.as_bytes()).unwrap();
+        let shelves = home_shelves(
+            Vec::new(),
+            vec![playlist("1Ab2", "Mine")],
+            Recent {
+                listen_again: vec![
+                    liked_card(),
+                    playlist("37i9dQZF1E39pZBVudb5vh", "Daily Mix 2"),
+                ],
+                quick_picks: picks,
+            },
+        );
+        let got: Vec<_> = shelves.iter().map(|s| (&*s.title, titles(s))).collect();
+        assert_eq!(
+            got,
+            [
+                ("Your playlists", vec!["Liked Songs", "Mine"]),
+                ("Listen again", vec!["Liked Songs", "Daily Mix 2"]),
+                (
+                    "Quick picks",
+                    vec!["First Song", "Second Song", "Bare Song"]
+                ),
+            ]
+        );
+        assert_eq!(shelves[1].title, requiem_core::HOME_LISTEN_AGAIN);
+        assert_eq!(shelves[2].title, requiem_core::HOME_QUICK_PICKS);
+    }
+
+    const RECENTLY_PLAYED_FIXTURE: &str = include_str!("../tests/fixtures/recently_played.json");
+    const RADIO: &str = include_str!("../tests/fixtures/radio_tracks.json");
+
+    fn b62(s: &str) -> SpotifyId {
+        SpotifyId::from_base62(s).unwrap()
+    }
+
+    #[test]
+    fn recently_played_gives_contexts_and_the_track_played_last() {
+        let played = parse_recently_played(RECENTLY_PLAYED_FIXTURE.as_bytes()).unwrap();
+        assert_eq!(played.len(), 7);
+        assert_eq!(
+            played[0],
+            Played {
+                context: "spotify:playlist:0FakeMix10000000000000".into(),
+                track: Some(b62("0FakeSeed1000000000000")),
+            }
+        );
+        // An episode is no track, and a context may name none.
+        assert_eq!(played[5].track, None);
+        assert_eq!(played[6].track, None);
+        assert!(matches!(
+            parse_recently_played(b"{}"),
+            Err(ProviderError::Parse(_))
+        ));
+        assert!(matches!(
+            parse_recently_played(b"<html>"),
+            Err(ProviderError::Parse(_))
+        ));
+    }
+
+    #[test]
+    fn listen_again_takes_collections_once_each_and_leaves_out_artists_and_shows() {
+        let played = parse_recently_played(RECENTLY_PLAYED_FIXTURE.as_bytes()).unwrap();
+        assert_eq!(
+            listen_again_picks(&played),
+            [
+                Opens::Playlist(b62("0FakeMix10000000000000")),
+                Opens::Album(b62("0FakeAlbum100000000000")),
+                Opens::Liked,
+                Opens::Playlist(b62("0FakeOwn10000000000000")),
+            ]
+        );
+        let many: Vec<_> = (0..LISTEN_AGAIN + 3)
+            .map(|n| Played {
+                context: format!("spotify:album:0FakeAlbum{n:0>12}"),
+                track: None,
+            })
+            .collect();
+        assert_eq!(listen_again_picks(&many).len(), LISTEN_AGAIN);
+    }
+
+    #[test]
+    fn collection_ids_round_trip_and_artist_liked_songs_open_nothing() {
+        for opens in [
+            Opens::Liked,
+            Opens::Playlist(b62("0FakeMix10000000000000")),
+            Opens::Album(b62("0FakeAlbum100000000000")),
+        ] {
+            assert_eq!(Opens::from_id(&opens.id().id), Some(opens));
+        }
+        assert_eq!(
+            Opens::Album(b62("0FakeAlbum100000000000")).id().id,
+            "album:0FakeAlbum100000000000"
+        );
+        assert_eq!(Opens::from_id("artist:0FakeArtist10000000000"), None);
+        assert_eq!(Opens::from_id("album:not-base62"), None);
+        assert_eq!(
+            Opens::from_context("spotify:user:u:collection:artist:0FakeArtist10000000000"),
+            None
+        );
+    }
+
+    #[test]
+    fn a_radio_gives_its_tracks_with_the_details_it_sends() {
+        let tracks = parse_station(RADIO.as_bytes()).unwrap();
+        assert_eq!(tracks.len(), 3, "the episode is left out");
+        assert_eq!(
+            tracks[0],
+            Track {
+                id: TrackId {
+                    provider: provider(),
+                    id: "0FakeRadio100000000000".into(),
+                },
+                title: "First Song".into(),
+                artists: vec!["First Band".into()],
+                album: Some("First Record".into()),
+                duration: None,
+                artwork_url: Some(format!(
+                    "{IMAGE_URL}ab67616d0000b2730000000000000000000000a1"
+                )),
+            }
+        );
+        // Without metadata, the name is the title.
+        assert_eq!(tracks[2].title, "Bare Song");
+        assert!(tracks[2].artists.is_empty());
+        assert_eq!(tracks[2].artwork_url, None);
+        assert!(matches!(
+            parse_station(b"{\"tracks\":null}"),
+            Err(ProviderError::Parse(_))
+        ));
+    }
+
+    #[test]
     fn the_liked_songs_card_has_spotifys_picture() {
         let card = liked_card();
         assert_eq!(card.title, "Liked Songs");
@@ -1603,7 +2037,11 @@ mod tests {
 
     #[test]
     fn home_leaves_out_empty_shelves() {
-        let shelves = home_shelves(Vec::new(), vec![playlist("1Ab2", "Mine")]);
+        let shelves = home_shelves(
+            Vec::new(),
+            vec![playlist("1Ab2", "Mine")],
+            Recent::default(),
+        );
         let got: Vec<_> = shelves.iter().map(|s| (&*s.title, titles(s))).collect();
         assert_eq!(got, [("Your playlists", vec!["Liked Songs", "Mine"])]);
     }
