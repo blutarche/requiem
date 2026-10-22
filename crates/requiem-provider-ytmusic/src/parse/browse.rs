@@ -273,8 +273,12 @@ pub(crate) fn parse_home(body: &[u8]) -> Result<HomePage, ProviderError> {
     Ok(HomePage { shelves, next })
 }
 
+/// The podcast queue every account's Library lists among its playlists.
+const EPISODES_FOR_LATER: &str = "browse:VLSE";
+
 /// The playlists on the Library's Playlists tab. Its first tile makes a new playlist and opens
-/// nothing, so it is left out with any other card that is not a collection.
+/// nothing, so it is left out with the podcast queue and any other card that is not a
+/// collection.
 pub(crate) fn parse_library_playlists(body: &[u8]) -> Result<Vec<Collection>, ProviderError> {
     let root = root(body, "library")?;
     let mut grids = Vec::new();
@@ -286,8 +290,8 @@ pub(crate) fn parse_library_playlists(body: &[u8]) -> Result<Vec<Collection>, Pr
         .filter_map(|entry| {
             let v = entry.get("musicTwoRowItemRenderer")?;
             match two_row_item(&TwoRowItem::deserialize(v).ok()?)? {
-                Item::Collection(c) => Some(c),
-                Item::Track(_) => None,
+                Item::Collection(c) if c.id.id != EPISODES_FOR_LATER => Some(c),
+                _ => None,
             }
         })
         .collect();

@@ -85,6 +85,13 @@
                                 }
                               },
                               {
+                                "musicTwoRowItemRenderer": {
+                                  "title": { "runs": [{ "text": "Episodes for Later" }] },
+                                  "subtitle": { "runs": [{ "text": "Your queued episodes" }] },
+                                  "navigationEndpoint": { "browseEndpoint": { "browseId": "VLSE" } }
+                                }
+                              },
+                              {
                                 "musicSomethingNewRenderer": { "title": { "runs": [{ "text": "Unknown" }] } }
                               }
                             ]
