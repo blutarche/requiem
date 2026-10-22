@@ -10,7 +10,8 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use requiem_core::{
-    AccountState, Collection, CollectionId, CollectionKind, Item, ProviderError, ProviderId, Shelf,
+    AccountState, Collection, CollectionId, CollectionKind, HOME_LIKED, HOME_MIXES, HOME_PLAYLISTS,
+    Item, ProviderError, ProviderId, Shelf,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -34,6 +35,10 @@ const API: &str = "https://music.youtube.com/youtubei/v1/";
 const API_KEY: &str = "AIzaSyC9XL3ZjWddXya6X74dJoCTL-WEYFDNX30";
 /// Home's shelves, its first page's and its next pages' together.
 const HOME_SHELVES: usize = 6;
+/// Tracks of the liked music playlist on Home.
+const HOME_LIKED_TRACKS: usize = 20;
+/// What YouTube Music calls its mixes shelf (requests ask for English).
+const MIXED_FOR_YOU: &str = "Mixed for you";
 const LIKED: &str = "LM";
 
 const ENDED: &str = "Your YouTube Music browser session ended; paste a new one in Settings";
@@ -227,6 +232,21 @@ fn query_value(s: &str) -> String {
         }
     }
     out
+}
+
+/// A browse that failed is left out of Home, but one that ended the session is not.
+fn left_out_unless_ended<T>(
+    result: Result<T, ProviderError>,
+    what: &str,
+) -> Result<Option<T>, ProviderError> {
+    match result {
+        Ok(v) => Ok(Some(v)),
+        Err(e @ ProviderError::SignInRequired(_)) => Err(e),
+        Err(e) => {
+            debug!("home without {what}: {e}");
+            Ok(None)
+        }
+    }
 }
 
 fn browse_body(browse_id: &str) -> Value {
@@ -441,9 +461,36 @@ impl BrowserSession {
             })
     }
 
+    /// Liked songs, the mixes, YouTube Music's other shelves, then the playlists. Liked songs
+    /// and the playlists are left out when their browse fails, unless the session ended.
+    pub(crate) fn home(&self, s: &Signed) -> Result<Vec<Shelf>, ProviderError> {
+        let mut feed = self.home_feed(s)?;
+        let liked =
+            left_out_unless_ended(self.collection(s, &format!("VL{LIKED}")), "liked music")?;
+        let playlists = left_out_unless_ended(self.library(s), "the library")?;
+        let mut shelves = Vec::new();
+        if let Some(mut liked) = liked {
+            liked.items.truncate(HOME_LIKED_TRACKS);
+            liked.title = HOME_LIKED.to_owned();
+            shelves.push(liked);
+        }
+        if let Some(i) = feed.iter().position(|s| s.title == MIXED_FOR_YOU) {
+            let mut mixes = feed.remove(i);
+            mixes.title = HOME_MIXES.to_owned();
+            shelves.push(mixes);
+        }
+        shelves.extend(feed);
+        for mut shelf in playlists.unwrap_or_default() {
+            shelf.title = HOME_PLAYLISTS.to_owned();
+            shelves.push(shelf);
+        }
+        shelves.retain(|s| !s.items.is_empty());
+        Ok(shelves)
+    }
+
     /// Home's first page, then its next pages until there are `HOME_SHELVES` shelves. A next
     /// page that fails ends Home early, unless the session ended.
-    pub(crate) fn home(&self, s: &Signed) -> Result<Vec<Shelf>, ProviderError> {
+    fn home_feed(&self, s: &Signed) -> Result<Vec<Shelf>, ProviderError> {
         let body = browse_body("FEmusic_home");
         let first = parse_home(&self.browse(s, "", &body)?)?;
         let mut shelves = first.shelves;
@@ -789,6 +836,23 @@ mod tests {
         }
     }
 
+    /// A liked music playlist page of `n` tracks.
+    fn liked(n: usize) -> String {
+        let rows: Vec<Value> = (0..n)
+            .map(|i| {
+                json!({"musicResponsiveListItemRenderer": {
+                    "playlistItemData": {"videoId": format!("liked{i:02}")},
+                    "flexColumns": [{"musicResponsiveListItemFlexColumnRenderer":
+                        {"text": {"runs": [{"text": format!("Liked {i}")}]}}}]}})
+            })
+            .collect();
+        json!({"contents": {"musicPlaylistShelfRenderer": {"contents": rows}}}).to_string()
+    }
+
+    fn titles(shelves: &[Shelf]) -> Vec<&str> {
+        shelves.iter().map(|s| s.title.as_str()).collect()
+    }
+
     #[test]
     fn home_follows_next_pages_up_to_six_shelves() {
         let rig = Rig::new();
@@ -796,12 +860,11 @@ mod tests {
         rig.music.script(BROWSE_URL, 200, HOME);
         rig.music.script(BROWSE_URL, 200, HOME_NEXT);
         let shelves = s.home(&s.current().unwrap()).unwrap();
-        let titles: Vec<_> = shelves.iter().map(|s| s.title.as_str()).collect();
         assert_eq!(
-            titles,
+            titles(&shelves),
             [
+                "Mixes",
                 "Quick picks",
-                "Mixed for you",
                 "Listen again",
                 "Your favorites",
                 "Forgotten favorites",
@@ -809,16 +872,136 @@ mod tests {
             ]
         );
         let calls = rig.calls();
-        assert_eq!(calls.len(), 2);
+        assert_eq!(
+            calls.len(),
+            4,
+            "home's two pages, then liked music and the library"
+        );
         assert!(
             calls[1].ends_with("&ctoken=FAKE-CONTINUATION-1&continuation=FAKE-CONTINUATION-1"),
             "{}",
             calls[1]
         );
+        let Item::Collection(mix) = &shelves[0].items[0] else {
+            panic!("{:?}", shelves[0].items[0])
+        };
+        assert_eq!(mix.id.id, "browse:VLRDTMAKfakeSupermix01");
+    }
+
+    #[test]
+    fn home_is_liked_songs_then_mixes_then_the_feed_then_playlists() {
+        let rig = Rig::new();
+        let s = rig.signed_in();
+        rig.music.script(BROWSE_URL, 200, HOME);
+        rig.music.script(BROWSE_URL, 200, HOME_NEXT);
+        rig.music.script(BROWSE_URL, 200, &liked(25));
+        rig.music.script(BROWSE_URL, 200, LIBRARY);
+        let shelves = s.home(&s.current().unwrap()).unwrap();
+        assert_eq!(
+            titles(&shelves),
+            [
+                "Liked songs",
+                "Mixes",
+                "Quick picks",
+                "Listen again",
+                "Your favorites",
+                "Forgotten favorites",
+                "Recommended albums",
+                "Your playlists"
+            ]
+        );
+        let ids: Vec<&str> = shelves[0]
+            .items
+            .iter()
+            .map(|i| match i {
+                Item::Track(t) => t.id.id.as_str(),
+                Item::Collection(c) => panic!("{c:?}"),
+            })
+            .collect();
+        assert_eq!(ids.len(), 20);
+        assert_eq!((ids[0], ids[19]), ("liked00", "liked19"));
         let Item::Collection(mix) = &shelves[1].items[0] else {
             panic!("{:?}", shelves[1].items[0])
         };
         assert_eq!(mix.id.id, "browse:VLRDTMAKfakeSupermix01");
+        let playlists: Vec<&str> = shelves[7]
+            .items
+            .iter()
+            .map(|i| match i {
+                Item::Collection(c) => c.id.id.as_str(),
+                Item::Track(t) => panic!("{t:?}"),
+            })
+            .collect();
+        assert_eq!(
+            playlists,
+            [
+                "browse:VLLM",
+                "browse:VLPLfakeRoadTrip01",
+                "browse:VLPLfakeNight02"
+            ]
+        );
+        let calls = rig.music.calls.lock().unwrap();
+        let browse_ids: Vec<String> = calls
+            .iter()
+            .map(|c| {
+                let body: Value = serde_json::from_str(&c.body).unwrap();
+                body["browseId"].as_str().unwrap().to_owned()
+            })
+            .collect();
+        assert_eq!(
+            browse_ids,
+            [
+                "FEmusic_home",
+                "FEmusic_home",
+                "VLLM",
+                "FEmusic_liked_playlists"
+            ]
+        );
+    }
+
+    #[test]
+    fn a_failed_liked_or_library_browse_leaves_home_without_that_shelf() {
+        let rig = Rig::new();
+        let s = rig.signed_in();
+        rig.music.script(BROWSE_URL, 200, HOME);
+        rig.music.script(BROWSE_URL, 200, HOME_NEXT);
+        rig.music.script(BROWSE_URL, 503, "");
+        rig.music.script(BROWSE_URL, 200, LIBRARY);
+        let shelves = s.home(&s.current().unwrap()).unwrap();
+        assert_eq!(titles(&shelves)[0], "Mixes");
+        assert_eq!(titles(&shelves).last(), Some(&"Your playlists"));
+        assert!(!titles(&shelves).contains(&"Liked songs"));
+
+        let rig = Rig::new();
+        let s = rig.signed_in();
+        rig.music.script(BROWSE_URL, 200, HOME);
+        rig.music.script(BROWSE_URL, 200, HOME_NEXT);
+        rig.music.script(BROWSE_URL, 200, &liked(2));
+        rig.music.script(BROWSE_URL, 200, "{}");
+        let shelves = s.home(&s.current().unwrap()).unwrap();
+        assert_eq!(titles(&shelves)[..2], ["Liked songs", "Mixes"]);
+        assert!(!titles(&shelves).contains(&"Your playlists"));
+        assert!(s.account().is_some());
+    }
+
+    #[test]
+    fn an_ended_session_in_liked_music_or_the_library_still_fails_home() {
+        for ended_at in [2, 3] {
+            let rig = Rig::new();
+            let s = rig.signed_in();
+            rig.music.script(BROWSE_URL, 200, HOME);
+            rig.music.script(BROWSE_URL, 200, HOME_NEXT);
+            for i in 2..=3 {
+                if i == ended_at {
+                    rig.music.script(BROWSE_URL, 401, "{}");
+                } else {
+                    rig.music.script(BROWSE_URL, 200, &liked(1));
+                }
+            }
+            let e = s.home(&s.current().unwrap()).unwrap_err();
+            assert_eq!(e, ProviderError::SignInRequired(ENDED.into()), "{ended_at}");
+            assert_eq!(s.account(), None, "{ended_at}");
+        }
     }
 
     #[test]
@@ -828,7 +1011,7 @@ mod tests {
         rig.music.script(BROWSE_URL, 200, HOME);
         rig.music.script(BROWSE_URL, 503, "");
         let shelves = s.home(&s.current().unwrap()).unwrap();
-        assert_eq!(shelves.len(), 3);
+        assert_eq!(titles(&shelves), ["Mixes", "Quick picks", "Listen again"]);
     }
 
     #[test]

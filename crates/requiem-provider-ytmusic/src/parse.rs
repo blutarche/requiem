@@ -59,6 +59,8 @@ struct ListItem {
     flex_columns: Vec<FlexColumn>,
     fixed_columns: Vec<FixedColumn>,
     thumbnail: Option<Thumbnail>,
+    badges: Vec<Value>,
+    subtitle_badges: Vec<Value>,
 }
 
 #[derive(Deserialize, Default)]
@@ -202,32 +204,59 @@ fn parse_duration(s: &str) -> Option<Duration> {
 
 const SEPARATOR: &str = " \u{2022} ";
 
+/// Whether a card or row carries a live badge: a stream, not a song that can be played.
+fn is_live(badges: &[Value], subtitle_badges: &[Value]) -> bool {
+    badges
+        .iter()
+        .chain(subtitle_badges)
+        .any(|b| b.get("liveBadgeRenderer").is_some())
+}
+
+/// What a subtitle's leading group says about the item, not who made it.
+const TYPE_LABELS: [&str; 4] = ["Song", "Video", "Single", "EP"];
+/// Unlinked runs between artists in a subtitle.
+const ARTIST_SEPARATORS: [&str; 2] = [" & ", ", "];
+
+/// A group of a subtitle between " \u{2022} " runs.
+struct Group {
+    text: String,
+    /// The group's text split at its unlinked artist separators.
+    parts: Vec<String>,
+}
+
 struct Subtitle {
     artists: Vec<String>,
     album: Option<String>,
     duration: Option<Duration>,
 }
 
-/// Column 1: artists, album and duration separated by " • " runs. Typed runs
+/// Column 1: artists, album and duration separated by " \u{2022} " runs. Typed runs
 /// (`pageType`) win; without any, the first group is the artist and the second the album.
+/// A linked album with no linked artist takes its artists from the first group that is
+/// neither a count, a type label nor the album, split at unlinked " & " and ", " runs.
 fn parse_subtitle<'a>(runs: impl IntoIterator<Item = &'a Run>) -> Subtitle {
     let mut artists = Vec::new();
     let mut album = None;
     let mut duration = None;
-    let mut groups: Vec<String> = vec![String::new()];
+    let mut groups = vec![Group {
+        text: String::new(),
+        parts: vec![String::new()],
+    }];
     for run in runs {
         let Some(text) = run.text.as_deref() else {
             continue;
         };
         if text == SEPARATOR {
-            groups.push(String::new());
+            groups.push(Group {
+                text: String::new(),
+                parts: vec![String::new()],
+            });
             continue;
         }
         if let Some(d) = parse_duration(text) {
             duration = Some(d);
             continue;
         }
-        groups.last_mut().expect("non-empty").push_str(text);
         let page_type = run
             .navigation_endpoint
             .as_ref()
@@ -235,21 +264,46 @@ fn parse_subtitle<'a>(runs: impl IntoIterator<Item = &'a Run>) -> Subtitle {
             .and_then(|b| b.browse_endpoint_context_supported_configs.as_ref())
             .and_then(|c| c.browse_endpoint_context_music_config.as_ref())
             .and_then(|m| m.page_type.as_deref());
+        let group = groups.last_mut().expect("non-empty");
+        group.text.push_str(text);
+        if page_type.is_none() && ARTIST_SEPARATORS.contains(&text) {
+            group.parts.push(String::new());
+        } else {
+            group.parts.last_mut().expect("non-empty").push_str(text);
+        }
         match page_type {
             Some("MUSIC_PAGE_TYPE_ARTIST") => artists.push(text.to_owned()),
             Some("MUSIC_PAGE_TYPE_ALBUM") => album = Some(text.to_owned()),
             _ => {}
         }
     }
+    let counted = |g: &Group| g.text.ends_with(" views") || g.text.ends_with(" plays");
     if artists.is_empty() && album.is_none() {
         // Video results put a view or play count where a song has its album.
         let mut untyped = groups
             .into_iter()
+            .map(|g| g.text)
             .filter(|g| !g.is_empty() && !g.ends_with(" views") && !g.ends_with(" plays"));
         if let Some(a) = untyped.next() {
             artists.push(a);
         }
         album = untyped.next();
+    } else if artists.is_empty() {
+        let mut named = groups
+            .into_iter()
+            .filter(|g| !g.text.is_empty() && !counted(g) && Some(&g.text) != album.as_ref());
+        let first = named
+            .next()
+            .filter(|g| !TYPE_LABELS.contains(&g.text.as_str()));
+        if let Some(g) = first.or_else(|| named.next()) {
+            artists = g
+                .parts
+                .iter()
+                .map(|p| p.trim())
+                .filter(|p| !p.is_empty())
+                .map(str::to_owned)
+                .collect();
+        }
     }
     Subtitle {
         artists,
@@ -575,6 +629,43 @@ mod tests {
         let t = &parse_search(body.as_bytes(), 1).unwrap()[0];
         assert_eq!(t.artists, vec!["A"]);
         assert_eq!(t.album, None);
+    }
+
+    fn subtitle_of(runs: &str) -> Subtitle {
+        let runs: Vec<Run> = serde_json::from_str(runs).unwrap();
+        parse_subtitle(&runs)
+    }
+
+    const ALBUM: &str = r#"{"text":"Alb","navigationEndpoint":{"browseEndpoint":{"browseId":"MPREb_x",
+        "browseEndpointContextSupportedConfigs":{"browseEndpointContextMusicConfig":
+        {"pageType":"MUSIC_PAGE_TYPE_ALBUM"}}}}}"#;
+
+    #[test]
+    fn unlinked_artists_split_at_unlinked_separators() {
+        let sub = subtitle_of(&format!(
+            r#"[{{"text":"A"}},{{"text":" & "}},{{"text":"B"}},{{"text":", "}},{{"text":"C"}},
+               {{"text":" \u2022 "}},{{"text":"12M plays"}},{{"text":" \u2022 "}},{ALBUM}]"#
+        ));
+        assert_eq!(sub.artists, ["A", "B", "C"]);
+        assert_eq!(sub.album.as_deref(), Some("Alb"));
+
+        let sub = subtitle_of(&format!(
+            r#"[{{"text":"EP"}},{{"text":" \u2022 "}},{{"text":"Simon"}},{{"text":" \u2022 "}},{ALBUM},
+               {{"text":" \u2022 "}},{{"text":"3:25"}}]"#
+        ));
+        assert_eq!(sub.artists, ["Simon"]);
+        assert_eq!(sub.duration, Some(Duration::from_secs(205)));
+    }
+
+    #[test]
+    fn linked_artists_win_over_unlinked_text() {
+        let artist = r#"{"text":"Linked","navigationEndpoint":{"browseEndpoint":{"browseId":"UC",
+            "browseEndpointContextSupportedConfigs":{"browseEndpointContextMusicConfig":
+            {"pageType":"MUSIC_PAGE_TYPE_ARTIST"}}}}}"#;
+        let sub = subtitle_of(&format!(
+            r#"[{artist},{{"text":" & "}},{{"text":"Plain"}},{{"text":" \u2022 "}},{ALBUM}]"#
+        ));
+        assert_eq!(sub.artists, ["Linked"]);
     }
 
     #[test]
