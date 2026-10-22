@@ -36,6 +36,7 @@ use serde_json::Value;
 use tokio::runtime::Runtime;
 use tokio::sync::Notify;
 
+use crate::covers::{AlbumCover, COVER_TRACKS, Covers, MOSAIC_COVERS, cover_choice};
 use crate::keys::Keys;
 use crate::logger::redact;
 use crate::server::{Backend, Stream};
@@ -70,7 +71,7 @@ const HOME_LIKED: usize = 20;
 /// The ids of the playlists Spotify makes start with one of these: its mixes, Daily Mixes,
 /// "This Is" and editorial playlists, then Discover Weekly and Release Radar.
 const MADE_FOR_YOU: [&str; 2] = ["37i9dQZF1", "37i9dQZEVX"];
-const IMAGE_URL: &str = "https://i.scdn.co/image/";
+pub(crate) const IMAGE_URL: &str = "https://i.scdn.co/image/";
 const LIKED: &str = "Liked Songs";
 const LIKED_ID: &str = "collection";
 /// Spotify's own Liked Songs picture, the same for everyone.
@@ -86,6 +87,7 @@ pub(crate) struct Librespot {
     keys: Keys<(SpotifyId, FileId), AudioKey>,
     prepared: Mutex<PreparedStreams<Prep>>,
     flow: SignInFlow,
+    covers: Covers,
 }
 
 /// `AudioKey` prints itself in `Debug`, so this has none.
@@ -160,6 +162,7 @@ impl Librespot {
             keys: Keys::new(),
             prepared: Mutex::new(PreparedStreams::new()),
             flow: SignInFlow::default(),
+            covers: Covers::new(),
         }
     }
 
@@ -218,7 +221,12 @@ impl Librespot {
     async fn library(&self) -> Result<Vec<Shelf>, ProviderError> {
         let session = self.session().await?;
         let mut items = vec![Item::Collection(liked_card())];
-        items.extend(playlists(&session).await?.into_iter().map(Item::Collection));
+        items.extend(
+            playlists(&session, &self.covers)
+                .await?
+                .into_iter()
+                .map(Item::Collection),
+        );
         Ok(vec![Shelf {
             title: "Spotify".into(),
             items,
@@ -233,7 +241,7 @@ impl Librespot {
                 let ids = context_ids(session, &liked_uri(session), HOME_LIKED).await?;
                 tracks(session, ids).await
             },
-            playlists(session),
+            playlists(session, &self.covers),
         );
         // Without the liked songs, Home still has the playlists.
         let liked = liked.unwrap_or_else(|e| {
@@ -679,18 +687,19 @@ fn to_track(id: SpotifyId, t: SpotifyTrack) -> Track {
     }
 }
 
-/// The widest image, by declared size when widths are missing.
 pub(crate) fn artwork(images: &[Image]) -> Option<String> {
+    widest(images).map(|i| format!("{IMAGE_URL}{}", i.id.to_base16()))
+}
+
+/// The widest image, by declared size when widths are missing.
+fn widest(images: &[Image]) -> Option<&Image> {
     let rank = |s: ImageSize| match s {
         ImageSize::SMALL => 0,
         ImageSize::DEFAULT => 1,
         ImageSize::LARGE => 2,
         ImageSize::XLARGE => 3,
     };
-    images
-        .iter()
-        .max_by_key(|i| (i.width, rank(i.size)))
-        .map(|i| format!("{IMAGE_URL}{}", i.id.to_base16()))
+    images.iter().max_by_key(|i| (i.width, rank(i.size)))
 }
 
 /// Track ids in context order; episodes, local files and anything else are left out.
@@ -801,8 +810,9 @@ fn liked_card() -> Collection {
     }
 }
 
-/// The rootlist's playlists in order, each completed where the rootlist left it incomplete.
-async fn playlists(session: &Session) -> Result<Vec<Collection>, ProviderError> {
+/// The rootlist's playlists in order, each completed where the rootlist left it incomplete and
+/// given a cover where it has none.
+async fn playlists(session: &Session, covers: &Covers) -> Result<Vec<Collection>, ProviderError> {
     let mut rows = Vec::new();
     let mut from = 0;
     for _ in 0..MAX_PAGES {
@@ -826,20 +836,122 @@ async fn playlists(session: &Session) -> Result<Vec<Collection>, ProviderError> 
     }
     let deadline = tokio::time::Instant::now() + FULL_PLAYLISTS_BUDGET;
     let collections: Vec<_> = futures_util::stream::iter(rows)
-        .map(|row| async move {
-            if row.incomplete {
-                completed(
-                    row.collection,
-                    full_playlist(session, &row.id, deadline).await,
-                )
-            } else {
-                Some(row.collection)
-            }
-        })
+        .map(|row| listed(session, covers, row, deadline))
         .buffered(METADATA_IN_FLIGHT)
         .collect()
         .await;
     Ok(collections.into_iter().flatten().collect())
+}
+
+/// `row` as a Library card. A row that is incomplete is fetched whole for its details; one
+/// still without artwork then gets a cover, or stays blank if none can be had by `deadline`.
+async fn listed(
+    session: &Session,
+    covers: &Covers,
+    row: RootlistRow,
+    deadline: tokio::time::Instant,
+) -> Option<Collection> {
+    let RootlistRow {
+        id,
+        mut collection,
+        incomplete,
+        revision,
+    } = row;
+    let mut first = None;
+    if incomplete {
+        let full = full_playlist(session, &id, deadline).await;
+        if let Full::Playlist(list) = &full {
+            first = Some(first_tracks(list));
+        }
+        collection = completed(collection, full)?;
+    }
+    if collection.artwork_url.is_none() {
+        collection.artwork_url = covers
+            .resolve(id, &revision, || {
+                find_cover(session, covers, id, first, deadline)
+            })
+            .await;
+    }
+    Some(collection)
+}
+
+/// The ids of a playlist's first tracks.
+fn first_tracks(list: &SelectedListContent) -> Vec<SpotifyId> {
+    list.contents
+        .items
+        .iter()
+        .filter_map(|i| track_id(i.uri()))
+        .take(COVER_TRACKS)
+        .collect()
+}
+
+/// Playlist `id`'s cover, given its `first` tracks if they are known, else fetching the playlist.
+/// `None` if that couldn't be told by `deadline`; `Some(None)` if the playlist has no cover to be
+/// had.
+async fn find_cover(
+    session: &Session,
+    covers: &Covers,
+    id: SpotifyId,
+    first: Option<Vec<SpotifyId>>,
+    deadline: tokio::time::Instant,
+) -> Option<Option<String>> {
+    let ids = match first {
+        Some(ids) => ids,
+        None => {
+            let Full::Playlist(list) = full_playlist(session, &id, deadline).await else {
+                return None;
+            };
+            if let Some(art) = list.attributes.as_ref().and_then(playlist_artwork) {
+                return Some(Some(art));
+            }
+            first_tracks(&list)
+        }
+    };
+    let until = deadline.min(tokio::time::Instant::now() + FULL_PLAYLIST_TIMEOUT);
+    let albums = tokio::time::timeout_at(until, album_covers(session, covers, ids))
+        .await
+        .ok()??;
+    Some(cover_choice(None, &albums))
+}
+
+/// The album covers of `ids`' tracks in order, read [`MOSAIC_COVERS`] tracks at a time until
+/// there are that many distinct albums. `None` if a track's details failed and that left the
+/// albums short of that: the cover would not be the playlist's.
+async fn album_covers(
+    session: &Session,
+    covers: &Covers,
+    ids: Vec<SpotifyId>,
+) -> Option<Vec<AlbumCover>> {
+    let mut found = Vec::new();
+    let mut failed = false;
+    for chunk in ids.chunks(MOSAIC_COVERS) {
+        let results = futures_util::future::join_all(chunk.iter().map(|id| async move {
+            let _permit = covers.permits.acquire().await.ok()?;
+            SpotifyTrack::get(session, &SpotifyUri::Track { id: *id })
+                .await
+                .ok()
+        }))
+        .await;
+        for t in results {
+            match t {
+                Some(t) => found.extend(album_cover(&t)),
+                None => failed = true,
+            }
+        }
+        let distinct: HashSet<_> = found.iter().map(|a| &a.album).collect();
+        if distinct.len() >= MOSAIC_COVERS {
+            return Some(found);
+        }
+    }
+    (!failed).then_some(found)
+}
+
+fn album_cover(t: &SpotifyTrack) -> Option<AlbumCover> {
+    let image = widest(&t.album.covers).or_else(|| widest(&t.album.cover_group))?;
+    Some(AlbumCover {
+        album: t.album.id.to_id(),
+        image: image.id.to_base16(),
+    })
 }
 
 /// Home, without empty shelves: the `liked` tracks, the playlists Spotify made, then the
@@ -882,6 +994,8 @@ pub(crate) struct RootlistRow {
     /// them: some mixes list 0 there while holding 50, and a playlist that no longer exists
     /// comes with neither.
     pub(crate) incomplete: bool,
+    /// The playlist's revision in the rootlist; empty when the rootlist gave none.
+    pub(crate) revision: Vec<u8>,
 }
 
 /// The rootlist's playlists in order; folder markers are skipped, so folders flatten.
@@ -916,6 +1030,7 @@ pub(crate) fn rootlist_rows(list: &SelectedListContent) -> Vec<RootlistRow> {
                     artwork_url: attrs.and_then(playlist_artwork),
                 },
                 incomplete: name.is_none() || length.is_none(),
+                revision: meta.map(|m| m.revision().to_vec()).unwrap_or_default(),
             })
         })
         .collect()
@@ -1295,6 +1410,16 @@ mod tests {
         assert_eq!(got[1].collection.subtitle, None);
         assert_eq!(got[1].collection.title, "Hardcore Rock Mix");
         assert_eq!(got[3].collection.subtitle.as_deref(), Some("12 songs"));
+    }
+
+    #[test]
+    fn rows_carry_the_rootlists_revision() {
+        let mut at_r7 = meta("Mine", Some(3));
+        at_r7.revision = Some(b"r7".to_vec());
+        let got = rootlist_of(vec![at_r7, meta("Unrevised", Some(3))]);
+        let got = rootlist_rows(&got);
+        assert_eq!(got[0].revision, b"r7");
+        assert!(got[1].revision.is_empty());
     }
 
     fn row(title: &str, subtitle: Option<&str>, art: Option<&str>) -> Collection {

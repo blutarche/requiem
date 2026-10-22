@@ -238,3 +238,53 @@ fn live_home() {
     };
     assert_eq!(liked.title, "Liked Songs");
 }
+
+/// Run with `cargo test -p requiem-provider-spotify live_covers -- --ignored --nocapture`.
+/// Prints each Library card's title and its cover's host, then loads the Library again.
+#[test]
+#[ignore = "talks to Spotify with the real sign-in; run by hand"]
+fn live_covers() {
+    let tmp = TempDir::new();
+    let p = live_provider(&tmp);
+    let host = |url: &str| {
+        url.split_once("://")
+            .map_or(url, |(_, rest)| rest)
+            .split('/')
+            .next()
+            .unwrap_or_default()
+            .to_owned()
+    };
+    let load = || {
+        let t = Instant::now();
+        let library = p.browse(&Page::Library).unwrap();
+        let cards: Vec<_> = library[0]
+            .items
+            .iter()
+            .filter_map(|i| match i {
+                Item::Collection(c) => Some((c.title.clone(), c.artwork_url.clone())),
+                Item::Track(_) => None,
+            })
+            .collect();
+        (cards, t.elapsed())
+    };
+    let (cards, first) = load();
+    for (title, art) in &cards {
+        println!("  {title}: {}", art.as_deref().map_or("-".into(), host));
+    }
+    let covered = cards.iter().filter(|(_, a)| a.is_some()).count();
+    println!(
+        "  {covered} of {} have a cover; loaded in {first:?}",
+        cards.len()
+    );
+    assert!(
+        cards[0]
+            .1
+            .as_deref()
+            .is_some_and(|a| a.contains("liked-songs"))
+    );
+    assert!(covered > 1);
+
+    let (again, second) = load();
+    println!("  loaded again in {second:?}");
+    assert_eq!(again, cards);
+}
