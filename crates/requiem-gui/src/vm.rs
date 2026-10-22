@@ -1498,7 +1498,13 @@ impl Vm {
                 let slot = match page {
                     Page::Home => Some(Slot::Home),
                     Page::Library => Some(Slot::Library),
-                    Page::Collection(_) => None,
+                    // Only the collection open; another's tracks are fetched when it opens.
+                    Page::Collection(id) => self
+                        .ui
+                        .collection
+                        .as_ref()
+                        .is_some_and(|c| c.collection.id == id)
+                        .then_some(Slot::Collection),
                 };
                 // A page not asked for yet gets the newest on its visit. One still loading
                 // shows these until its own answer, which is as new or newer, lands.
@@ -5074,6 +5080,39 @@ mod tests {
         ));
         assert_eq!(vm.ui().library, Browse::default());
         assert!(vm.take_commands().is_empty());
+    }
+
+    #[test]
+    fn a_changed_collection_on_screen_takes_its_tracks_in_place() {
+        let mut vm = connected();
+        let cmds = vm.intent(Intent::OpenCollection {
+            collection: collection("a"),
+            from: Place::Library,
+        });
+        let fetches = browses(&cmds);
+        let [(req, page)] = fetches.as_slice() else {
+            panic!("expected the collection fetch, got {cmds:?}");
+        };
+        vm.apply(results(*req, page.clone(), vec![shelf("", track_items(2))]));
+        vm.take_dirty();
+
+        vm.apply(changed(page.clone(), vec![shelf("", track_items(3))]));
+        assert!(vm.take_commands().is_empty());
+        assert!(vm.take_dirty().contains(Dirty::COLLECTION));
+        assert_eq!(vm.ui().place, Place::Collection);
+        let open = vm.ui().collection.as_ref().expect("still open");
+        assert_eq!(open.collection, collection("a"));
+        assert_eq!(open.from, Place::Library);
+        assert_eq!(open.browse.load, Load::Done);
+        assert_eq!(open.tracks, tracks(3));
+
+        // Another collection's change leaves the open one alone.
+        vm.apply(changed(
+            Page::Collection(collection("b").id),
+            vec![shelf("", track_items(1))],
+        ));
+        assert!(!vm.take_dirty().contains(Dirty::COLLECTION));
+        assert_eq!(vm.ui().collection.as_ref().unwrap().tracks, tracks(3));
     }
 
     #[test]

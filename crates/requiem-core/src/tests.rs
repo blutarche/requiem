@@ -2450,6 +2450,7 @@ fn a_kept_page_of_another_account_is_dropped_at_the_start() {
                     account: Some("Someone else".into()),
                     shelves: vec![track_shelf("Library", "first", &["theirs"])],
                 }],
+                collections: vec![],
             },
             save_pages: Some(Arc::new(move |p| sink.lock().unwrap().push(p))),
             ..config()
@@ -2500,6 +2501,7 @@ fn a_kept_page_of_the_same_account_answers_a_restart_at_once() {
                     account: Some("Me".into()),
                     shelves: kept.clone(),
                 }],
+                collections: vec![],
             },
             save_pages: Some(Arc::new(move |p| sink.lock().unwrap().push(p))),
             ..config()
@@ -2786,4 +2788,426 @@ fn sign_in_and_out_of_an_unknown_provider_report_at_once() {
             }
         );
     }
+}
+
+fn collection_id(id: &str) -> CollectionId {
+    CollectionId {
+        provider: fake_id(),
+        id: id.into(),
+    }
+}
+
+fn collection_page(id: &str) -> Page {
+    Page::Collection(collection_id(id))
+}
+
+fn collection_item(id: &str) -> Item {
+    Item::Collection(Collection {
+        id: collection_id(id),
+        kind: CollectionKind::Playlist,
+        title: id.into(),
+        subtitle: None,
+        artwork_url: None,
+    })
+}
+
+fn collection_shelf(title: &str, ids: &[&str]) -> Shelf {
+    Shelf {
+        title: title.into(),
+        items: ids.iter().map(|id| collection_item(id)).collect(),
+    }
+}
+
+fn tracks_of(ids: &[&str]) -> Vec<Shelf> {
+    vec![track_shelf("", "fake", ids)]
+}
+
+fn signed_in_fake() -> Arc<FakeProvider> {
+    let p = FakeProvider::new("fake");
+    p.set_account(signed_in());
+    p
+}
+
+/// Fetches nothing ahead, so that only the browses a test sends fetch.
+fn no_prefetch() -> SessionConfig {
+    SessionConfig {
+        prefetch_per_page: 0,
+        ..config()
+    }
+}
+
+fn answered(seen: &[Event], req: u64) -> bool {
+    seen.iter().any(
+        |e| matches!(e, Event::BrowseResults { req: r, .. } | Event::BrowseFailed { req: r, .. } if *r == req),
+    )
+}
+
+#[test]
+fn a_collection_opened_before_answers_at_once_then_says_when_a_fetch_changed_it() {
+    let p = signed_in_fake();
+    let page = collection_page("x");
+    let gate = Gate::new();
+    p.script_browse(
+        page.clone(),
+        vec![
+            Step::ok(tracks_of(&["a"])),
+            Step::ok(tracks_of(&["b"])).gated(&gate),
+        ],
+    );
+    let r = rig_with(p.clone(), vec![], no_prefetch());
+    // Nothing kept: the browse waits on the fetch.
+    assert_eq!(
+        browse_event(&r, 1, page.clone()),
+        results(1, page.clone(), tracks_of(&["a"]))
+    );
+    r.settle();
+
+    // The second fetch is held, yet the browse is answered with what was kept.
+    assert_eq!(
+        browse_event(&r, 2, page.clone()),
+        results(2, page.clone(), tracks_of(&["a"]))
+    );
+    gate.release();
+    r.wait_event(|e| {
+        *e == Event::PageChanged {
+            page: page.clone(),
+            shelves: tracks_of(&["b"]),
+        }
+    });
+    assert_eq!(
+        browse_event(&r, 3, page.clone()),
+        results(3, page.clone(), tracks_of(&["b"]))
+    );
+    p.wait_browse_calls(3);
+}
+
+#[test]
+fn a_collection_whose_first_fetch_fails_says_why_and_keeps_nothing() {
+    let p = signed_in_fake();
+    let page = collection_page("x");
+    let gate = Gate::new();
+    p.script_browse(
+        page.clone(),
+        vec![
+            Step::err(ProviderError::Network("down".into())),
+            Step::ok(tracks_of(&["a"])).gated(&gate),
+        ],
+    );
+    let r = rig_with(p, vec![], no_prefetch());
+    assert_eq!(
+        browse_event(&r, 1, page.clone()),
+        Event::BrowseFailed {
+            req: 1,
+            error: "network error: down".into(),
+            sign_in_required: false,
+        }
+    );
+    r.send(Command::Browse {
+        req: 2,
+        page: page.clone(),
+    });
+    assert!(!answered(&r.settle_seen(), 2), "answered from nothing");
+    gate.release();
+    r.wait_event(|e| *e == results(2, page.clone(), tracks_of(&["a"])));
+}
+
+#[test]
+fn the_least_recently_opened_collection_goes_beyond_the_cap() {
+    let p = signed_in_fake();
+    let held_a = Gate::new();
+    let held_b = Gate::new();
+    p.script_browse(
+        collection_page("a"),
+        vec![
+            Step::ok(tracks_of(&["a1"])),
+            Step::ok(tracks_of(&["a2"])).gated(&held_a),
+        ],
+    );
+    p.script_browse(
+        collection_page("b"),
+        vec![
+            Step::ok(tracks_of(&["b1"])),
+            Step::ok(tracks_of(&["b1"])).gated(&held_b),
+        ],
+    );
+    p.script_browse(collection_page("c"), vec![Step::ok(tracks_of(&["c1"]))]);
+    let r = rig_with(
+        p,
+        vec![],
+        SessionConfig {
+            collection_cap: 2,
+            ..no_prefetch()
+        },
+    );
+    for (req, id) in [(1, "a"), (2, "b"), (3, "c")] {
+        browse_event(&r, req, collection_page(id));
+        r.settle();
+    }
+    // "b" is still kept, "a" is not.
+    assert_eq!(
+        browse_event(&r, 4, collection_page("b")),
+        results(4, collection_page("b"), tracks_of(&["b1"]))
+    );
+    r.send(Command::Browse {
+        req: 5,
+        page: collection_page("a"),
+    });
+    assert!(
+        !answered(&r.settle_seen(), 5),
+        "answered from an evicted copy"
+    );
+    held_a.release();
+    r.wait_event(|e| *e == results(5, collection_page("a"), tracks_of(&["a2"])));
+    held_b.release();
+}
+
+#[test]
+fn a_sign_out_drops_the_collections_of_the_account() {
+    let p = signed_in_fake();
+    let page = collection_page("x");
+    let gate = Gate::new();
+    p.script_browse(
+        page.clone(),
+        vec![
+            Step::ok(tracks_of(&["mine"])),
+            Step::ok(tracks_of(&["theirs"])).gated(&gate),
+        ],
+    );
+    p.script_sign_in(SignInScript {
+        pending: None,
+        gate: None,
+        outcome: Ok(AccountState::SignedIn {
+            name: Some("Other".into()),
+        }),
+    });
+    let saved: Arc<std::sync::Mutex<Vec<SavedPages>>> = Arc::default();
+    let sink = saved.clone();
+    let r = rig_with(
+        p,
+        vec![],
+        SessionConfig {
+            save_pages: Some(Arc::new(move |pages| sink.lock().unwrap().push(pages))),
+            ..no_prefetch()
+        },
+    );
+    browse_event(&r, 1, page.clone());
+    r.settle();
+    let kept = saved.lock().unwrap().last().cloned().expect("saved");
+    assert_eq!(kept.collections.len(), 1);
+    assert_eq!(kept.collections[0].id, collection_id("x"));
+
+    r.send(Command::SignOut {
+        provider: fake_id(),
+    });
+    r.wait_event(is_account(AccountState::SignedOut));
+    let kept = saved.lock().unwrap().last().cloned().expect("saved");
+    assert!(kept.collections.is_empty(), "{kept:?}");
+
+    // Another account's open of it waits on its own fetch.
+    r.send(Command::SignIn {
+        provider: fake_id(),
+    });
+    r.wait_event(|e| {
+        matches!(
+            e,
+            Event::Account {
+                state: AccountState::SignedIn { .. },
+                ..
+            }
+        )
+    });
+    r.send(Command::Browse {
+        req: 2,
+        page: page.clone(),
+    });
+    assert!(
+        !answered(&r.settle_seen(), 2),
+        "answered with the last account's"
+    );
+    gate.release();
+    r.wait_event(|e| *e == results(2, page.clone(), tracks_of(&["theirs"])));
+}
+
+#[test]
+fn a_kept_collection_answers_a_restart_at_once_unless_of_another_account() {
+    let p = signed_in_fake();
+    let gate = Gate::new();
+    p.script_browse(
+        collection_page("mine"),
+        vec![Step::ok(tracks_of(&["new"])).gated(&gate)],
+    );
+    let saved = |id: &str, account: &str, ids: &[&str]| SavedCollection {
+        id: collection_id(id),
+        part: Arc::new(PagePart {
+            provider: fake_id(),
+            account: Some(account.into()),
+            shelves: tracks_of(ids),
+        }),
+        fetched: 0,
+    };
+    let r = rig_with(
+        p,
+        vec![],
+        SessionConfig {
+            pages: SavedPages {
+                collections: vec![
+                    saved("theirs", "Someone else", &["t"]),
+                    saved("mine", "Me", &["old"]),
+                ],
+                ..SavedPages::default()
+            },
+            ..no_prefetch()
+        },
+    );
+    assert_eq!(
+        browse_event(&r, 1, collection_page("mine")),
+        results(1, collection_page("mine"), tracks_of(&["old"]))
+    );
+    gate.release();
+    r.wait_event(|e| {
+        *e == Event::PageChanged {
+            page: collection_page("mine"),
+            shelves: tracks_of(&["new"]),
+        }
+    });
+    r.provider
+        .script_browse(collection_page("theirs"), vec![Step::ok(tracks_of(&["u"]))]);
+    assert_eq!(
+        browse_event(&r, 2, collection_page("theirs")),
+        results(2, collection_page("theirs"), tracks_of(&["u"]))
+    );
+}
+
+fn home_of_collections(p: &FakeProvider, shelves: Vec<Shelf>) {
+    p.set_has_home(true);
+    p.script_browse(Page::Home, vec![Step::ok(shelves)]);
+}
+
+#[test]
+fn home_fetches_ahead_the_first_of_its_mixes_and_playlists() {
+    let p = signed_in_fake();
+    home_of_collections(
+        &p,
+        vec![
+            collection_shelf(HOME_LIKED, &["l1"]),
+            collection_shelf(HOME_MIXES, &["m1", "m2", "m3"]),
+            collection_shelf(HOME_PLAYLISTS, &["p1", "p2", "p3"]),
+        ],
+    );
+    let r = rig_with(
+        p.clone(),
+        vec![],
+        SessionConfig {
+            prefetch_per_page: 2,
+            ..config()
+        },
+    );
+    browse_event(&r, 1, Page::Home);
+    p.wait_browse_calls(5);
+    let seen = r.settle_seen();
+    let mut calls = p.browse_calls();
+    calls.sort_by_key(|page| format!("{page:?}"));
+    let mut want = vec![
+        Page::Home,
+        collection_page("m1"),
+        collection_page("m2"),
+        collection_page("p1"),
+        collection_page("p2"),
+    ];
+    want.sort_by_key(|page| format!("{page:?}"));
+    assert_eq!(calls, want);
+    // Nobody was shown them, so nothing changed.
+    assert!(
+        !seen.iter().any(|e| matches!(e, Event::PageChanged { .. })),
+        "{seen:?}"
+    );
+}
+
+#[test]
+fn the_library_fetches_ahead_two_at_a_time_and_an_open_then_answers_at_once() {
+    let p = signed_in_fake();
+    p.script_browse(
+        Page::Library,
+        vec![Step::ok(vec![collection_shelf(
+            "Library",
+            &["a", "b", "c"],
+        )])],
+    );
+    let gate = Gate::new();
+    for id in ["a", "b", "c"] {
+        p.script_browse(
+            collection_page(id),
+            vec![Step::ok(tracks_of(&[id])).gated(&gate)],
+        );
+    }
+    let r = rig_with(p.clone(), vec![], config());
+    browse_event(&r, 1, Page::Library);
+    p.wait_browse_calls(3);
+    r.settle();
+    assert_eq!(p.browse_calls().len(), 3, "{:?}", p.browse_calls());
+    gate.release();
+    p.wait_browse_calls(4);
+    r.settle();
+
+    // The open's own fetch is held: only what was fetched ahead can answer.
+    let held = Gate::new();
+    p.script_browse(
+        collection_page("c"),
+        vec![Step::ok(tracks_of(&["c"])).gated(&held)],
+    );
+    assert_eq!(
+        browse_event(&r, 2, collection_page("c")),
+        results(2, collection_page("c"), tracks_of(&["c"]))
+    );
+    held.release();
+}
+
+#[test]
+fn an_open_goes_before_fetching_ahead() {
+    let p = signed_in_fake();
+    p.script_browse(
+        Page::Library,
+        vec![Step::ok(vec![collection_shelf("Library", &["a"])])],
+    );
+    let gate = Gate::new();
+    p.script_browse(
+        collection_page("u"),
+        vec![Step::ok(tracks_of(&["u"])).gated(&gate)],
+    );
+    let r = rig_with(p.clone(), vec![], config());
+    r.send(Command::Browse {
+        req: 1,
+        page: collection_page("u"),
+    });
+    p.wait_browse_calls(1);
+    browse_event(&r, 2, Page::Library);
+    r.settle();
+    assert_eq!(
+        p.browse_calls(),
+        vec![collection_page("u"), Page::Library],
+        "fetched ahead while an open waited"
+    );
+    gate.release();
+    r.wait_event(|e| *e == results(1, collection_page("u"), tracks_of(&["u"])));
+    p.wait_browse_calls(3);
+    assert_eq!(p.browse_calls()[2], collection_page("a"));
+}
+
+#[test]
+fn a_collection_fetched_lately_is_not_fetched_ahead() {
+    let p = signed_in_fake();
+    p.script_browse(
+        Page::Library,
+        vec![Step::ok(vec![collection_shelf("Library", &["a", "b"])])],
+    );
+    let r = rig_with(p.clone(), vec![], config());
+    browse_event(&r, 1, collection_page("a"));
+    r.settle();
+    browse_event(&r, 2, Page::Library);
+    p.wait_browse_calls(3);
+    r.settle();
+    assert_eq!(
+        p.browse_calls(),
+        vec![collection_page("a"), Page::Library, collection_page("b")]
+    );
 }

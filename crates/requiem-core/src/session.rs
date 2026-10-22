@@ -1,18 +1,18 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::fmt;
 use std::panic::{self, AssertUnwindSafe};
 use std::sync::Arc;
 use std::thread::{self, JoinHandle};
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use crossbeam_channel::{Receiver, Sender, bounded, unbounded};
 
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    AccountState, AudioSource, Command, Engine, EngineEvent, EngineEventSink, EnqueueMode, Event,
-    FailureKind, Item, Page, PlayState, Provider, ProviderError, ProviderId, SeekTarget, Shelf,
-    Track, TrackId,
+    AccountState, AudioSource, CollectionId, Command, Engine, EngineEvent, EngineEventSink,
+    EnqueueMode, Event, FailureKind, HOME_MIXES, HOME_PLAYLISTS, Item, Page, PlayState, Provider,
+    ProviderError, ProviderId, SeekTarget, Shelf, Track, TrackId,
 };
 
 /// What a restart restores. `resume` is the queue index Play would start.
@@ -26,7 +26,7 @@ pub struct PersistState {
 /// Called on the session thread; must not block.
 pub type PersistSink = Arc<dyn Fn(PersistState) + Send + Sync>;
 
-/// One provider's answer to Home or Library.
+/// One provider's answer to Home, Library or a collection.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PagePart {
     pub provider: ProviderId,
@@ -35,12 +35,32 @@ pub struct PagePart {
     pub shelves: Vec<Shelf>,
 }
 
-/// The last answers to Home and Library, which a restart answers with at once: only what the
-/// user saw, never a credential.
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+/// The last answer to a collection.
+#[derive(Debug, Clone)]
+pub struct SavedCollection {
+    pub id: CollectionId,
+    /// Shared with the session, so handing the kept collections over copies no tracks.
+    pub part: Arc<PagePart>,
+    /// When it was fetched, in seconds since the Unix epoch.
+    pub fetched: u64,
+}
+
+impl PartialEq for SavedCollection {
+    fn eq(&self, other: &Self) -> bool {
+        self.id == other.id
+            && self.fetched == other.fetched
+            && (Arc::ptr_eq(&self.part, &other.part) || self.part == other.part)
+    }
+}
+
+/// The last answers to Home, Library and the collections opened, which a restart answers with
+/// at once: only what the user saw, never a credential.
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct SavedPages {
     pub home: Vec<PagePart>,
     pub library: Vec<PagePart>,
+    /// Least recently opened first.
+    pub collections: Vec<SavedCollection>,
 }
 
 /// Called on the session thread; must not block.
@@ -56,11 +76,20 @@ pub struct SessionConfig {
     pub subscriber_position_backlog: usize,
     /// Called with a fresh state after every queue, volume or play-state event.
     pub persist: Option<PersistSink>,
-    /// What the last run kept of Home and Library. Parts of accounts not signed in at the
-    /// start are dropped.
+    /// What the last run kept of Home, Library and the collections. Parts of accounts not
+    /// signed in at the start are dropped.
     pub pages: SavedPages,
-    /// Called with Home and Library whenever what is kept of them changes.
+    /// Called with the pages kept whenever they change.
     pub save_pages: Option<PagesSink>,
+    /// At most this many collections are kept; the least recently opened goes first.
+    pub collection_cap: usize,
+    /// When Home or the Library is shown, this many of its collections are fetched ahead of an
+    /// open: of each of Home's mixes and playlists, and of the Library's first.
+    pub prefetch_per_page: usize,
+    /// How many collections are fetched ahead at once.
+    pub prefetch_parallel: usize,
+    /// A collection fetched this recently is not fetched ahead again.
+    pub prefetch_fresh: Duration,
 }
 
 impl fmt::Debug for SessionConfig {
@@ -77,6 +106,10 @@ impl fmt::Debug for SessionConfig {
             .field("persist", &self.persist.is_some())
             .field("pages", &self.pages)
             .field("save_pages", &self.save_pages.is_some())
+            .field("collection_cap", &self.collection_cap)
+            .field("prefetch_per_page", &self.prefetch_per_page)
+            .field("prefetch_parallel", &self.prefetch_parallel)
+            .field("prefetch_fresh", &self.prefetch_fresh)
             .finish()
     }
 }
@@ -92,6 +125,10 @@ impl Default for SessionConfig {
             persist: None,
             pages: SavedPages::default(),
             save_pages: None,
+            collection_cap: 200,
+            prefetch_per_page: 12,
+            prefetch_parallel: 2,
+            prefetch_fresh: Duration::from_secs(10 * 60),
         }
     }
 }
@@ -123,7 +160,7 @@ enum Msg {
         result: Result<Vec<Shelf>, ProviderError>,
         accounts: Vec<(ProviderId, AccountState)>,
     },
-    /// One provider's answer to fetch `run` of Home or Library, with its state after it.
+    /// One provider's answer to fetch `run` of a kept page, with its state after it.
     PageAnswered {
         page: Page,
         run: u64,
@@ -239,7 +276,7 @@ impl PreSlot {
     }
 }
 
-/// A fetch of Home or Library from every signed-in provider that answers it.
+/// A fetch of a kept page from every signed-in provider that answers it.
 struct Run {
     id: u64,
     /// Browses with nothing kept to answer them; the first answer that leaves something to
@@ -252,14 +289,37 @@ struct Run {
     sign_in: Option<ProviderError>,
 }
 
-/// What is kept of Home or Library, and its fetch.
+/// What is kept of Home, Library or a collection, and its fetch.
 #[derive(Default)]
 struct Kept {
     /// Only of accounts that are signed in now.
-    parts: Vec<PagePart>,
+    parts: Vec<Arc<PagePart>>,
     run: Option<Run>,
     /// Fetch again once `run` ends: something changed after it started.
     again: bool,
+}
+
+/// A collection kept.
+#[derive(Default)]
+struct Cached {
+    kept: Kept,
+    /// When the user last opened it, as `Actor::last_open` counts; 0 if never.
+    opened: u64,
+    /// When its part was fetched, in seconds since the Unix epoch.
+    fetched: u64,
+}
+
+fn collection_ids(items: &[Item]) -> impl Iterator<Item = CollectionId> + '_ {
+    items.iter().filter_map(|i| match i {
+        Item::Collection(c) => Some(c.id.clone()),
+        Item::Track(_) => None,
+    })
+}
+
+fn now_unix() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs())
 }
 
 /// Whether `shelves` hold anything to show.
@@ -267,13 +327,13 @@ fn showable(shelves: &[Shelf]) -> bool {
     shelves.iter().any(|s| !s.items.is_empty())
 }
 
-/// What a browse of Home or Library gets with no provider signed in that answers it.
+/// What a browse of a kept page gets with no provider signed in that answers it.
 fn page_sign_in(page: &Page) -> ProviderError {
     ProviderError::SignInRequired(
-        if *page == Page::Home {
-            "sign in to see your music"
-        } else {
-            "sign in to browse your library"
+        match page {
+            Page::Home => "sign in to see your music",
+            Page::Library => "sign in to browse your library",
+            Page::Collection(_) => "sign in to see its tracks",
         }
         .into(),
     )
@@ -316,7 +376,14 @@ struct Actor {
 
     home: Kept,
     library: Kept,
+    collections: HashMap<CollectionId, Cached>,
+    /// Counts the user's opens of collections.
+    last_open: u64,
     last_run: u64,
+    /// Collections to fetch ahead, in turn.
+    prefetch: VecDeque<CollectionId>,
+    /// Collections being fetched ahead.
+    prefetching: HashSet<CollectionId>,
 }
 
 /// The provider's own words, except that a network failure keeps its "network error" prefix.
@@ -490,26 +557,41 @@ impl Actor {
         let kept = |mut parts: Vec<PagePart>| {
             parts.retain(&holds);
             Kept {
-                parts,
+                parts: parts.into_iter().map(Arc::new).collect(),
                 ..Kept::default()
             }
         };
         let saved = std::mem::take(&mut config.pages);
-        let total = saved.home.len() + saved.library.len();
+        let total = saved.home.len() + saved.library.len() + saved.collections.len();
         let home = kept(saved.home);
         let library = kept(saved.library);
-        if home.parts.len() + library.parts.len() != total
-            && let Some(sink) = &config.save_pages
-        {
-            sink(SavedPages {
-                home: home.parts.clone(),
-                library: library.parts.clone(),
-            });
+        let mut collections = HashMap::new();
+        let mut last_open = 0;
+        for c in saved.collections {
+            if c.id.provider != c.part.provider || !holds(&c.part) {
+                continue;
+            }
+            last_open += 1;
+            collections.insert(
+                c.id,
+                Cached {
+                    kept: Kept {
+                        parts: vec![c.part],
+                        ..Kept::default()
+                    },
+                    opened: last_open,
+                    fetched: c.fetched,
+                },
+            );
         }
-        Self {
+        let mut actor = Self {
             home,
             library,
+            collections,
+            last_open,
             last_run: 0,
+            prefetch: VecDeque::new(),
+            prefetching: HashSet::new(),
             providers,
             engine,
             config,
@@ -534,7 +616,13 @@ impl Actor {
             accounts,
             signing_in: HashSet::new(),
             signed_out_while_signing_in: HashSet::new(),
+        };
+        actor.evict();
+        let left = actor.home.parts.len() + actor.library.parts.len() + actor.collections.len();
+        if left != total {
+            actor.save_pages();
         }
+        actor
     }
 
     fn run(mut self, rx: Receiver<Msg>) {
@@ -880,7 +968,16 @@ impl Actor {
 
     fn browse(&mut self, req: u64, page: Page) {
         let targets: Vec<Arc<dyn Provider>> = match &page {
-            Page::Collection(c) => self.provider(&c.provider).into_iter().collect(),
+            // Only a signed-in account's answer is kept, as it can be told from another's.
+            Page::Collection(c) if self.page_targets(&page).is_empty() => {
+                self.provider(&c.provider).into_iter().collect()
+            }
+            Page::Collection(c) => {
+                self.last_open += 1;
+                self.collections.entry(c.clone()).or_default().opened = self.last_open;
+                self.answer_kept(req, page);
+                return;
+            }
             Page::Home | Page::Library => {
                 if self.page_targets(&page).is_empty() {
                     self.emit(Event::BrowseFailed {
@@ -890,19 +987,7 @@ impl Actor {
                     });
                     return;
                 }
-                // Clients never browse on hearing of a change, which carries the shelves, so
-                // fetching on every browse cannot loop.
-                match self.served(&page) {
-                    Some(shelves) => {
-                        self.emit(Event::BrowseResults {
-                            req,
-                            page: page.clone(),
-                            shelves,
-                        });
-                        self.fetch_page(page, None);
-                    }
-                    None => self.fetch_page(page, Some(req)),
-                }
+                self.answer_kept(req, page);
                 return;
             }
         };
@@ -931,11 +1016,37 @@ impl Actor {
         });
     }
 
-    /// The signed-in providers that answer `page`, Home or Library, in provider order.
+    /// Answers a browse of a kept page with what is kept of it and fetches it again, or waits
+    /// on the fetch when nothing is kept.
+    fn answer_kept(&mut self, req: u64, page: Page) {
+        // Clients never browse on hearing of a change, which carries the shelves, so fetching
+        // on every browse cannot loop.
+        match self.served(&page) {
+            Some(shelves) => {
+                self.emit(Event::BrowseResults {
+                    req,
+                    page: page.clone(),
+                    shelves: shelves.clone(),
+                });
+                self.shown(&page, &shelves);
+                self.fetch_page(page, None);
+            }
+            None => self.fetch_page(page, Some(req)),
+        }
+        if self.evict() {
+            self.save_pages();
+        }
+    }
+
+    /// The signed-in providers that answer `page`, in provider order.
     fn page_targets(&self, page: &Page) -> Vec<Arc<dyn Provider>> {
         self.providers
             .iter()
-            .filter(|p| *page != Page::Home || p.has_home())
+            .filter(|p| match page {
+                Page::Home => p.has_home(),
+                Page::Library => true,
+                Page::Collection(c) => p.id() == c.provider,
+            })
             .filter(|p| {
                 matches!(
                     self.account_of(&p.id()),
@@ -950,7 +1061,7 @@ impl Actor {
         match page {
             Page::Home => Some(&self.home),
             Page::Library => Some(&self.library),
-            Page::Collection(_) => None,
+            Page::Collection(c) => self.collections.get(c).map(|c| &c.kept),
         }
     }
 
@@ -958,7 +1069,7 @@ impl Actor {
         match page {
             Page::Home => Some(&mut self.home),
             Page::Library => Some(&mut self.library),
-            Page::Collection(_) => None,
+            Page::Collection(c) => self.collections.get_mut(c).map(|c| &mut c.kept),
         }
     }
 
@@ -979,15 +1090,115 @@ impl Actor {
     }
 
     fn save_pages(&self) {
-        if let Some(sink) = &self.config.save_pages {
-            sink(SavedPages {
-                home: self.home.parts.clone(),
-                library: self.library.parts.clone(),
+        let Some(sink) = &self.config.save_pages else {
+            return;
+        };
+        let mut collections: Vec<(u64, SavedCollection)> = self
+            .collections
+            .iter()
+            .filter_map(|(id, c)| {
+                let saved = SavedCollection {
+                    id: id.clone(),
+                    part: c.kept.parts.first()?.clone(),
+                    fetched: c.fetched,
+                };
+                Some((c.opened, saved))
+            })
+            .collect();
+        // By id after the open, so that the same collections always come in the same order.
+        collections.sort_by(|(a, x), (b, y)| {
+            (a, &x.id.provider.0, &x.id.id).cmp(&(b, &y.id.provider.0, &y.id.id))
+        });
+        let parts = |kept: &Kept| kept.parts.iter().map(|p| (**p).clone()).collect();
+        sink(SavedPages {
+            home: parts(&self.home),
+            library: parts(&self.library),
+            collections: collections.into_iter().map(|(_, c)| c).collect(),
+        });
+    }
+
+    /// Drops the least recently opened collections beyond the cap, except any being fetched,
+    /// and says whether one held anything.
+    fn evict(&mut self) -> bool {
+        let mut dropped = false;
+        while self.collections.len() > self.config.collection_cap {
+            let oldest = self
+                .collections
+                .iter()
+                .filter(|(_, c)| c.kept.run.is_none())
+                .min_by_key(|(_, c)| c.opened)
+                .map(|(id, _)| id.clone());
+            let Some(id) = oldest else {
+                break;
+            };
+            let gone = self.collections.remove(&id).expect("the id was just found");
+            dropped |= !gone.kept.parts.is_empty();
+        }
+        dropped
+    }
+
+    /// Plans fetching ahead the collections `page` shows, when it is Home or the Library: the
+    /// ones an open is likeliest to follow.
+    fn shown(&mut self, page: &Page, shelves: &[Shelf]) {
+        let n = self.config.prefetch_per_page;
+        let ids: Vec<CollectionId> = match page {
+            Page::Home => shelves
+                .iter()
+                .filter(|s| s.title == HOME_MIXES || s.title == HOME_PLAYLISTS)
+                .flat_map(|s| collection_ids(&s.items).take(n))
+                .collect(),
+            Page::Library => shelves
+                .iter()
+                .flat_map(|s| collection_ids(&s.items))
+                .take(n)
+                .collect(),
+            Page::Collection(_) => return,
+        };
+        for id in ids {
+            if !self.prefetch.contains(&id) {
+                self.prefetch.push_back(id);
+            }
+        }
+        self.pump_prefetch();
+    }
+
+    /// Starts fetching ahead the next collections planned, as many at once as the config
+    /// allows, while no collection the user opened is being fetched: those go first.
+    fn pump_prefetch(&mut self) {
+        let fresh = self.config.prefetch_fresh.as_secs();
+        let now = now_unix();
+        while self.prefetching.len() < self.config.prefetch_parallel {
+            let user_waits = self
+                .collections
+                .iter()
+                .any(|(id, c)| c.kept.run.is_some() && !self.prefetching.contains(id));
+            if user_waits {
+                return;
+            }
+            let Some(id) = self.prefetch.pop_front() else {
+                return;
+            };
+            let page = Page::Collection(id.clone());
+            if self.page_targets(&page).is_empty() {
+                continue;
+            }
+            let skip = self.collections.get(&id).is_some_and(|c| {
+                c.kept.run.is_some()
+                    || (!c.kept.parts.is_empty() && now.saturating_sub(c.fetched) < fresh)
             });
+            if skip {
+                continue;
+            }
+            self.collections.entry(id.clone()).or_default();
+            self.prefetching.insert(id);
+            self.fetch_page(page, None);
+            if self.evict() {
+                self.save_pages();
+            }
         }
     }
 
-    /// Starts fetching `page`, Home or Library, from its providers, unless a fetch runs: then
+    /// Starts fetching `page`, a kept one, from its providers, unless a fetch runs: then
     /// `req` waits on that one, which is followed by another if the providers changed since
     /// it started.
     fn fetch_page(&mut self, page: Page, req: Option<u64>) {
@@ -1057,6 +1268,7 @@ impl Actor {
         let before = self.served(&page);
         let current = self.account_of(&provider).cloned();
         let Some(kept) = self.kept_mut(&page) else {
+            self.set_account(provider, account, false);
             return;
         };
         let Some(r) = kept.run.as_mut().filter(|r| r.id == run) else {
@@ -1070,6 +1282,7 @@ impl Actor {
             .find(|(p, _)| *p == provider)
             .map(|(_, s)| s.clone());
         let mut changed = false;
+        let mut fetched = false;
         // The account changed while it answered: neither its answer nor its part from before
         // is the current account's.
         let same = matches!(&asked, Some(AccountState::SignedIn { name })
@@ -1090,14 +1303,15 @@ impl Actor {
                         account: name,
                         shelves,
                     };
+                    fetched = true;
                     match kept.parts.iter_mut().find(|p| p.provider == provider) {
-                        Some(old) if *old == part => {}
+                        Some(old) if **old == part => {}
                         Some(old) => {
-                            *old = part;
+                            *old = Arc::new(part);
                             changed = true;
                         }
                         None => {
-                            kept.parts.push(part);
+                            kept.parts.push(Arc::new(part));
                             changed = true;
                         }
                     }
@@ -1116,6 +1330,14 @@ impl Actor {
             }
         }
         let done = r.left == 0;
+        // Saved only with a change of content: a fetch time lost to a restart costs no more
+        // than one early fetch ahead.
+        if fetched
+            && let Page::Collection(id) = &page
+            && let Some(c) = self.collections.get_mut(id)
+        {
+            c.fetched = now_unix();
+        }
         if changed {
             self.save_pages();
         }
@@ -1150,12 +1372,18 @@ impl Actor {
             }
         }
         let again = done && std::mem::take(&mut kept.again);
+        let browsed = matches!(page, Page::Home | Page::Library);
+        let mut shown = None;
+        // A collection first fetched ahead of an open was never shown, so nothing changed.
+        let unseen = before.is_none() && matches!(page, Page::Collection(_));
         if answered.is_empty() {
             // Browses still waiting are answered with the change once there is one to show.
-            if !unanswered && after != before {
+            if !unanswered && !unseen && after != before {
+                let shelves = after.unwrap_or_default();
+                shown = browsed.then(|| shelves.clone());
                 self.emit(Event::PageChanged {
                     page: page.clone(),
-                    shelves: after.unwrap_or_default(),
+                    shelves,
                 });
             }
         } else if let Some(shelves) = after {
@@ -1166,6 +1394,7 @@ impl Actor {
                     shelves: shelves.clone(),
                 });
             }
+            shown = browsed.then_some(shelves);
         }
         if let Some((waiting, e)) = failed {
             for req in waiting {
@@ -1179,7 +1408,25 @@ impl Actor {
         // After the answer, as it may have signed the provider out.
         self.set_account(provider, account, false);
         if again {
-            self.fetch_page(page, None);
+            self.fetch_page(page.clone(), None);
+        }
+        if done && let Page::Collection(id) = &page {
+            self.prefetching.remove(id);
+            // As after a failed first fetch.
+            let empty = self
+                .collections
+                .get(id)
+                .is_some_and(|c| c.kept.run.is_none() && c.kept.parts.is_empty());
+            if empty {
+                self.collections.remove(id);
+            }
+            if self.evict() {
+                self.save_pages();
+            }
+        }
+        match shown {
+            Some(shelves) => self.shown(&page, &shelves),
+            None => self.pump_prefetch(),
         }
     }
 
@@ -1211,7 +1458,11 @@ impl Actor {
         }
         // What the account that was signed in answered is never shown for another, or for none.
         let mut dropped = false;
-        for kept in [&mut self.home, &mut self.library] {
+        let collections = self.collections.values_mut().map(|c| &mut c.kept);
+        for kept in [&mut self.home, &mut self.library]
+            .into_iter()
+            .chain(collections)
+        {
             let n = kept.parts.len();
             kept.parts.retain(|p| {
                 p.provider != provider
@@ -1219,6 +1470,8 @@ impl Actor {
             });
             dropped |= kept.parts.len() != n;
         }
+        self.collections
+            .retain(|_, c| c.kept.run.is_some() || !c.kept.parts.is_empty());
         if dropped {
             self.save_pages();
         }
