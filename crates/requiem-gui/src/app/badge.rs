@@ -100,10 +100,6 @@ fn image(service: Service, side: CGFloat, ring: bool) -> Retained<NSImage> {
 
 fn draw(service: Service, side: CGFloat, ring: bool) -> Retained<NSImage> {
     let ring = ring.then(theme::bg);
-    let fill = match service {
-        Service::Spotify => theme::spotify_green(),
-        Service::YouTubeMusic => theme::youtube_red(),
-    };
     let draw = RcBlock::new(move |r: NSRect| -> Bool {
         let inset = match &ring {
             Some(ring) => {
@@ -114,17 +110,67 @@ fn draw(service: Service, side: CGFloat, ring: bool) -> Retained<NSImage> {
             None => 0.0,
         };
         let d = r.size.width - 2.0 * inset;
-        let disc = rect(r.origin.x + inset, r.origin.y + inset, d, d);
-        fill.setFill();
-        NSBezierPath::bezierPathWithOvalInRect(disc).fill();
-        let centre = NSPoint::new(disc.origin.x + d / 2.0, disc.origin.y + d / 2.0);
-        match service {
-            Service::Spotify => arcs(centre, d),
-            Service::YouTubeMusic => play(centre, d),
-        }
+        disc(service, rect(r.origin.x + inset, r.origin.y + inset, d, d));
         Bool::YES
     });
     NSImage::imageWithSize_flipped_drawingHandler(NSSize::new(side, side), false, &draw)
+}
+
+/// Both services' discs, each `side` points across, side by side: YouTube Music's in front
+/// and set off from Spotify's by a ring. The image has room for the ring all round.
+pub fn pair(side: CGFloat) -> Retained<NSImage> {
+    thread_local! {
+        static PAIRS: RefCell<HashMap<u64, Retained<NSImage>>> = RefCell::new(HashMap::new());
+    }
+    PAIRS.with(|pairs| {
+        pairs
+            .borrow_mut()
+            .entry(side.to_bits())
+            .or_insert_with(|| draw_pair(side))
+            .clone()
+    })
+}
+
+fn draw_pair(side: CGFloat) -> Retained<NSImage> {
+    let ring = theme::bg();
+    // The front disc covers a third of the back one.
+    let step = side - side / 3.0;
+    let draw = RcBlock::new(move |r: NSRect| -> Bool {
+        let back = rect(r.origin.x, r.origin.y + RING, side, side);
+        disc(Service::Spotify, back);
+        let front = rect(back.origin.x + step, back.origin.y, side, side);
+        ring.setFill();
+        NSBezierPath::bezierPathWithOvalInRect(rect(
+            front.origin.x - RING,
+            front.origin.y - RING,
+            side + 2.0 * RING,
+            side + 2.0 * RING,
+        ))
+        .fill();
+        disc(Service::YouTubeMusic, front);
+        Bool::YES
+    });
+    NSImage::imageWithSize_flipped_drawingHandler(
+        NSSize::new(step + side + RING, side + 2.0 * RING),
+        false,
+        &draw,
+    )
+}
+
+/// `service`'s coloured disc with its mark, filling the square `r`.
+fn disc(service: Service, r: NSRect) {
+    let fill = match service {
+        Service::Spotify => theme::spotify_green(),
+        Service::YouTubeMusic => theme::youtube_red(),
+    };
+    fill.setFill();
+    NSBezierPath::bezierPathWithOvalInRect(r).fill();
+    let d = r.size.width;
+    let centre = NSPoint::new(r.origin.x + d / 2.0, r.origin.y + d / 2.0);
+    match service {
+        Service::Spotify => arcs(centre, d),
+        Service::YouTubeMusic => play(centre, d),
+    }
 }
 
 /// Spotify's mark, simplified: three black arcs stacked on a disc `d` across, the widest on

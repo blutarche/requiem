@@ -6,30 +6,28 @@ use objc2::rc::Retained;
 use objc2::runtime::NSObject;
 use objc2::{DefinedClass, MainThreadOnly, Message, define_class, msg_send};
 use objc2_app_kit::{
-    NSAccessibility, NSAccessibilityGroupRole, NSAttributedStringNSStringDrawing, NSEvent,
-    NSResponder, NSTextAlignment, NSTextField, NSTrackingAreaOptions, NSView,
+    NSAccessibility, NSAccessibilityGroupRole, NSEvent, NSImage, NSImageScaling, NSImageView,
+    NSResponder, NSTrackingAreaOptions, NSView,
 };
 use objc2_core_foundation::CGFloat;
 use objc2_foundation::{MainThreadMarker, NSPoint, NSRect, NSString};
 
-use super::theme::{self, Weight};
+use super::badge;
+use super::theme;
 use super::ui;
-use super::widgets::{self, FLEX_W, PIN_BOTTOM, rect};
-use crate::vm::{Service, ServiceFilter};
+use super::widgets::{self, PIN_BOTTOM, rect};
+use crate::vm::ServiceFilter;
 
 /// The room around the segments, inside the border.
 const INSET: CGFloat = 2.0;
-const FONT_SIZE: CGFloat = 12.0;
-/// The clear space either side of a segment's name.
-const NAME_PAD: CGFloat = 8.0;
-/// What the last segment says when the full name leaves the others too little room.
-const SHORT_YT: &str = "YT Music";
+/// The height of a segment's icon.
+const ICON: CGFloat = 16.0;
 
 pub struct SegmentIvars {
     filter: ServiceFilter,
     active: Cell<bool>,
     hovered: Cell<bool>,
-    label: OnceCell<Retained<NSTextField>>,
+    icon: OnceCell<Retained<NSImageView>>,
 }
 
 define_class!(
@@ -95,32 +93,34 @@ impl Segment {
         mtm: MainThreadMarker,
         frame: NSRect,
         filter: ServiceFilter,
-        text: &str,
+        image: &NSImage,
     ) -> Retained<Self> {
         let this = Self::alloc(mtm).set_ivars(SegmentIvars {
             filter,
             active: Cell::new(false),
             hovered: Cell::new(false),
-            label: OnceCell::new(),
+            icon: OnceCell::new(),
         });
         // SAFETY: `initWithFrame:` is NSView's designated initializer.
         let this: Retained<Self> = unsafe { msg_send![super(this), initWithFrame: frame] };
         widgets::round(&this, theme::RADIUS - INSET);
-        let label = widgets::placed_label(
-            mtm,
-            text,
-            &theme::font(FONT_SIZE, Weight::Medium),
-            &theme::chrome_ink(),
-            0.0,
-            frame.size.height / 2.0,
-            frame.size.width,
-            FLEX_W,
+        let size = image.size();
+        let icon = NSImageView::initWithFrame(
+            NSImageView::alloc(mtm),
+            rect(
+                ((frame.size.width - size.width) / 2.0).round(),
+                ((frame.size.height - size.height) / 2.0).round(),
+                size.width,
+                size.height,
+            ),
         );
-        label.setAlignment(NSTextAlignment::Center);
-        this.addSubview(&label);
-        let _ = this.ivars().label.set(label);
+        icon.setImage(Some(image));
+        icon.setImageScaling(NSImageScaling::ScaleNone);
+        this.addSubview(&icon);
+        let _ = this.ivars().icon.set(icon);
         // The names are spoken in full whatever they show.
         widgets::as_button(&this, filter.label());
+        this.setToolTip(Some(&NSString::from_str(filter.label())));
         this.setAccessibilitySelected(false);
         widgets::track_hover(&this, NSTrackingAreaOptions::empty());
         this.paint();
@@ -146,14 +146,15 @@ impl Segment {
             None
         };
         widgets::fill(self, bg.as_deref());
-        if let Some(l) = iv.label.get() {
-            let (weight, color) = if active {
-                (Weight::SemiBold, theme::ink())
+        if let Some(icon) = iv.icon.get() {
+            let alpha = if active {
+                1.0
+            } else if iv.hovered.get() {
+                0.8
             } else {
-                (Weight::Medium, theme::chrome_ink())
+                0.5
             };
-            l.setFont(Some(&theme::font(FONT_SIZE, weight)));
-            l.setTextColor(Some(&color));
+            icon.setAlphaValue(alpha);
         }
     }
 }
@@ -182,46 +183,28 @@ impl ServiceSwitch {
             frame.size.width - 2.0 * INSET,
             frame.size.height - 2.0 * INSET,
         );
-        // Names are measured in the heavier weight, so the chosen one never outgrows its room.
-        let width = |text: &str| {
-            widgets::attributed(
-                text,
-                &theme::font(FONT_SIZE, Weight::SemiBold),
-                &theme::ink(),
-            )
-            .size()
-            .width
-            .ceil()
-                + 2.0 * NAME_PAD
-        };
-        let names = |short: bool| {
-            ServiceFilter::CHOICES.map(|f| match f {
-                ServiceFilter::Only(Service::YouTubeMusic) if short => SHORT_YT,
-                f => f.label(),
-            })
-        };
-        let natural = |short| names(short).iter().map(|n| width(n)).sum::<CGFloat>();
-        let names = names(natural(false) > inner.size.width);
-        // The names' own widths, with the spare room shared out evenly.
-        let spare = (inner.size.width - names.iter().map(|n| width(n)).sum::<CGFloat>()).max(0.0)
-            / names.len() as CGFloat;
+        let n = ServiceFilter::CHOICES.len();
+        let each = (inner.size.width / n as CGFloat).floor();
         let mut x = inner.origin.x;
         let segments = ServiceFilter::CHOICES
             .into_iter()
-            .zip(names)
             .enumerate()
-            .map(|(i, (filter, name))| {
+            .map(|(i, filter)| {
                 // The last segment takes up whatever the rounding left.
-                let w = if i + 1 == names.len() {
+                let w = if i + 1 == n {
                     inner.origin.x + inner.size.width - x
                 } else {
-                    (width(name) + spare).floor()
+                    each
+                };
+                let image = match filter {
+                    ServiceFilter::All => badge::pair(ICON),
+                    ServiceFilter::Only(service) => badge::mark(service, ICON),
                 };
                 let segment = Segment::new(
                     mtm,
                     rect(x, inner.origin.y, w, inner.size.height),
                     filter,
-                    name,
+                    &image,
                 );
                 x += w;
                 view.addSubview(&segment);
