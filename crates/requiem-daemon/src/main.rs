@@ -4,7 +4,7 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 use crossbeam_channel::{Receiver, RecvTimeoutError, Sender, bounded};
-use requiem_audio::{AudioEngine, AudioOptions};
+use requiem_audio::{AudioEngine, AudioOptions, LazyEngine};
 use requiem_core::{
     Command, EngineEventSink, EnqueueMode, Event, PagesSink, PersistSink, SavedPages, Session,
     SessionConfig,
@@ -130,13 +130,20 @@ fn main() -> ExitCode {
             }
         })
     };
-    let engine = match AudioEngine::new(forward, AudioOptions::default()) {
-        Ok(e) => e,
+    // Search, browsing and sign-in need no sound card, so a missing output must not stop the
+    // daemon; each load tries to open it again.
+    let open_audio = {
+        let forward = forward.clone();
+        move || AudioEngine::new(forward.clone(), AudioOptions::default())
+    };
+    let first = match open_audio() {
+        Ok(e) => Some(e),
         Err(e) => {
-            eprintln!("requiemd: no audio output: {e}");
-            return ExitCode::from(1);
+            eprintln!("requiemd: no audio output yet: {e}");
+            None
         }
     };
+    let engine = LazyEngine::new(forward, open_audio, first);
     let provider = Arc::new(YtMusicProvider::new(YtMusicOptions {
         prefer_aac,
         ..YtMusicOptions::default()
