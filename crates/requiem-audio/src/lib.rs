@@ -1,6 +1,7 @@
 //! Audio engine: decode, resample and output.
 
 mod decode;
+mod lazy;
 mod output;
 
 use std::fmt;
@@ -11,6 +12,8 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use requiem_core::{AudioSource, Engine, EngineEvent, EngineEventSink, FailureKind};
+
+pub use crate::lazy::LazyEngine;
 
 use crate::decode::{Cmd, Job};
 use crate::output::{
