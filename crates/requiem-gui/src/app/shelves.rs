@@ -209,7 +209,9 @@ impl RowScroll {
 }
 
 pub struct CardIvars {
-    shelf: usize,
+    /// The shelf's index in the page's list, which moves when a refresh adds or drops a
+    /// shelf before it.
+    shelf: Cell<usize>,
     index: usize,
     /// Whether the card is a track, which plays and queues; the rest open.
     track: bool,
@@ -310,7 +312,7 @@ define_class!(
         #[unsafe(method(cardAdd:))]
         fn card_add(&self, _sender: Option<&AnyObject>) {
             let iv = self.ivars();
-            ui::with(|ui| ui.card_add(iv.shelf, iv.index));
+            ui::with(|ui| ui.card_add(iv.shelf.get(), iv.index));
         }
 
         #[unsafe(method(validateMenuItem:))]
@@ -353,7 +355,7 @@ impl ShelfCard {
         badge: Option<Service>,
     ) -> Retained<Self> {
         let this = Self::alloc(mtm).set_ivars(CardIvars {
-            shelf,
+            shelf: Cell::new(shelf),
             index,
             track: matches!(item, Item::Track(_)),
             hovered: Cell::new(false),
@@ -456,7 +458,7 @@ impl ShelfCard {
 
     fn activate(&self) {
         let iv = self.ivars();
-        ui::with(|ui| ui.card_clicked(iv.shelf, iv.index));
+        ui::with(|ui| ui.card_clicked(iv.shelf.get(), iv.index));
     }
 }
 
@@ -544,6 +546,64 @@ fn title_keys<'a>(titles: impl Iterator<Item = &'a str>) -> Vec<(String, usize)>
         .collect()
 }
 
+/// What a page's new row is made from.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Fate {
+    /// Old row `n`, whose items have not changed.
+    Same(usize),
+    /// Old row `n`, with different items.
+    Changed(usize),
+    /// Nothing before: a new row.
+    New,
+}
+
+/// Matches a page's new rows to its old ones by `title_keys`, given each row's title and
+/// items. Returns each new row's fate in order, and the old rows no new row continues.
+fn row_fates<T: PartialEq>(old: &[(&str, &[T])], new: &[(&str, &[T])]) -> (Vec<Fate>, Vec<usize>) {
+    let before: HashMap<(String, usize), usize> = title_keys(old.iter().map(|r| r.0))
+        .into_iter()
+        .enumerate()
+        .map(|(i, key)| (key, i))
+        .collect();
+    let mut kept = vec![false; old.len()];
+    let fates = title_keys(new.iter().map(|r| r.0))
+        .into_iter()
+        .zip(new)
+        .map(|(key, (_, items))| match before.get(&key) {
+            Some(&i) => {
+                kept[i] = true;
+                if old[i].1 == *items {
+                    Fate::Same(i)
+                } else {
+                    Fate::Changed(i)
+                }
+            }
+            None => Fate::New,
+        })
+        .collect();
+    let gone = (0..old.len()).filter(|&i| !kept[i]).collect();
+    (fates, gone)
+}
+
+/// Whether a changed row keeps its card for item `i`: the item there is the same as before.
+fn keeps_card<T: PartialEq>(old: &[T], new: &[T], i: usize) -> bool {
+    old.get(i).is_some_and(|o| new.get(i) == Some(o))
+}
+
+/// A row's height without its title, and its document's width.
+fn row_size(items: usize, grid: bool) -> (CGFloat, CGFloat) {
+    if grid {
+        let cols = items.div_ceil(GRID_ROWS) as CGFloat;
+        (
+            GRID_ROWS as CGFloat * GRID_ROW_H,
+            2.0 * PAD + cols * GRID_COL_W + (cols - 1.0) * CARD_GAP,
+        )
+    } else {
+        let n = items as CGFloat;
+        (card_h(), 2.0 * PAD + n * CARD_W + (n - 1.0) * CARD_GAP)
+    }
+}
+
 struct ShelfRow {
     /// The shelf's index in the page's list, which `Intent`s name.
     shelf: usize,
@@ -568,6 +628,75 @@ impl ShelfRow {
     fn clear(&self) {
         for (_, card) in self.cards.borrow_mut().drain() {
             card.removeFromSuperview();
+        }
+    }
+
+    fn remove(&self) {
+        self.clear();
+        self.title.removeFromSuperview();
+        self.back.removeFromSuperview();
+        self.forward.removeFromSuperview();
+        self.scroll.removeFromSuperview();
+    }
+
+    /// Takes on a refreshed shelf of the same title in place: cards whose item is unchanged
+    /// stay, the rest go for `fill` to make again, and the document fits the new items.
+    fn update(&mut self, shelf: usize, new: &Shelf, mixed: bool, changed: bool) {
+        let grid = is_grid(new);
+        // A new layout or badge changes every card.
+        let restyle = grid != self.grid || mixed != self.mixed;
+        self.cards.borrow_mut().retain(|&i, card| {
+            let keep = !restyle && (!changed || keeps_card(&self.items, &new.items, i));
+            if keep {
+                card.ivars().shelf.set(shelf);
+            } else {
+                card.removeFromSuperview();
+            }
+            keep
+        });
+        if changed {
+            self.items = new.items.clone();
+        }
+        (self.shelf, self.grid, self.mixed) = (shelf, grid, mixed);
+        let (row_h, content_w) = row_size(self.items.len(), grid);
+        let size = NSSize::new(content_w, row_h);
+        if self.doc.frame().size != size {
+            self.doc.setFrameSize(size);
+        }
+    }
+
+    /// Moves the row so its title starts at `top`, if it is not there or its height changed.
+    fn place(&mut self, top: CGFloat) {
+        let row_h = self.doc.frame().size.height;
+        let bottom = top + SHELF_TITLE_H + SHELF_TITLE_GAP + row_h;
+        if top == self.top && bottom == self.bottom {
+            return;
+        }
+        let dy = top - self.top;
+        for v in [
+            &*self.title as &NSView,
+            &self.back as &NSView,
+            &self.forward as &NSView,
+        ] {
+            let mut f = v.frame();
+            f.origin.y += dy;
+            v.setFrame(f);
+        }
+        let mut f = self.scroll.frame();
+        f.origin.y = top + SHELF_TITLE_H + SHELF_TITLE_GAP;
+        f.size.height = row_h;
+        self.scroll.setFrame(f);
+        (self.top, self.bottom) = (top, bottom);
+    }
+
+    /// Pulls the row back within its document, after its items shrank.
+    fn clamp_scroll(&self) {
+        let clip = self.scroll.contentView();
+        let at = clip.bounds().origin;
+        let room = (self.doc.frame().size.width - self.scroll.contentSize().width).max(0.0);
+        if at.x > room {
+            clip.scrollToPoint(NSPoint::new(room, at.y));
+            self.scroll.reflectScrolledClipView(&clip);
         }
     }
 
@@ -640,6 +769,10 @@ fn card_h() -> CGFloat {
         + widgets::line_height(&theme::font(12.0, Weight::Regular))
 }
 
+/// A row's scroll view, and its cards by item index.
+#[doc(hidden)]
+pub type RowViews = (Retained<NSScrollView>, Vec<(usize, Retained<NSView>)>);
+
 pub struct Shelves {
     mtm: MainThreadMarker,
     pub view: Retained<NSScrollView>,
@@ -679,149 +812,168 @@ impl Shelves {
     }
 
     /// Replaces the page's shelves; shelves with nothing in them are left out. With
-    /// `keep_scroll`, the page and each shelf found again by its title, and by which of the
-    /// shelves of that title it is, stay scrolled where they were, as far as the new shelves
-    /// reach; otherwise the page starts at its top.
+    /// `keep_scroll`, each shelf found again by its title, and by which of the shelves of that
+    /// title it is, keeps its views: unchanged, it is left alone, and changed, it keeps its
+    /// scroll and the cards of the items it still has in the same place. The page stays
+    /// scrolled where it was, as far as the new shelves reach. Otherwise every row is made
+    /// anew and the page starts at its top.
     pub fn set_shelves(&self, shelves: &[Shelf], keep_scroll: bool) {
-        let kept = keep_scroll.then(|| {
-            let rows = self.rows.borrow();
-            let across: HashMap<(String, usize), CGFloat> =
-                title_keys(rows.iter().map(|r| r.name.as_str()))
-                    .into_iter()
-                    .zip(rows.iter())
-                    .map(|(key, r)| (key, r.scroll.documentVisibleRect().origin.x))
-                    .collect();
-            (self.view.documentVisibleRect().origin.y, across)
-        });
-        let centre = NSNotificationCenter::defaultCenter();
-        // SAFETY: the watcher is an object; removing observers it never added is allowed.
-        unsafe { centre.removeObserver(&self.watcher) };
-        for row in self.rows.borrow_mut().drain(..) {
-            row.clear();
-            row.title.removeFromSuperview();
-            row.back.removeFromSuperview();
-            row.forward.removeFromSuperview();
-            row.scroll.removeFromSuperview();
-        }
-        let width = self.view.contentSize().width;
-        let title_font = theme::font(17.0, Weight::SemiBold);
-        let mut y = TOP_PAD;
-        let mut rows = Vec::new();
+        let shown: Vec<(usize, &Shelf)> = shelves
+            .iter()
+            .enumerate()
+            .filter(|(_, s)| !s.items.is_empty())
+            .collect();
         let mixed = vm::mixed(
             shelves
                 .iter()
                 .flat_map(|s| s.items.iter().map(vm::item_provider)),
         );
-        for (si, shelf) in shelves.iter().enumerate() {
-            if shelf.items.is_empty() {
-                continue;
+        let page_y = self.view.documentVisibleRect().origin.y;
+        let centre = NSNotificationCenter::defaultCenter();
+        // Resizing and moving rows below posts bounds changes; `sync` waits for the end.
+        // SAFETY: the watcher is an object; removing observers it never added is allowed.
+        unsafe { centre.removeObserver(&self.watcher) };
+        let mut old: Vec<Option<ShelfRow>> = std::mem::take(&mut *self.rows.borrow_mut())
+            .into_iter()
+            .map(Some)
+            .collect();
+        let (fates, gone) = if keep_scroll {
+            let before: Vec<(&str, &[Item])> = old
+                .iter()
+                .flatten()
+                .map(|r| (r.name.as_str(), r.items.as_slice()))
+                .collect();
+            let after: Vec<(&str, &[Item])> = shown
+                .iter()
+                .map(|(_, s)| (s.title.as_str(), s.items.as_slice()))
+                .collect();
+            row_fates(&before, &after)
+        } else {
+            (vec![Fate::New; shown.len()], (0..old.len()).collect())
+        };
+        for i in gone {
+            if let Some(row) = old[i].take() {
+                row.remove();
             }
-            let grid = is_grid(shelf);
-            let top = y;
-            let title = widgets::label(self.mtm, &shelf.title, &title_font, &theme::ink());
-            let buttons_w = 2.0 * PAGE_BUTTON + PAGE_GAP;
-            title.setFrame(rect(
-                PAD,
-                y,
-                width - 2.0 * PAD - buttons_w - PAGE_GAP,
-                SHELF_TITLE_H,
-            ));
-            title.setAutoresizingMask(FLEX_W);
-            self.doc.addSubview(&title);
-            let button_y = y + (SHELF_TITLE_H - PAGE_BUTTON) / 2.0;
-            let back = self.page_button(
-                Icon::ChevronLeft,
-                rect(width - PAD - buttons_w, button_y, PAGE_BUTTON, PAGE_BUTTON),
-                rows.len(),
-                sel!(pageBack:),
-                &format!("Show previous in {}", shelf.title),
-            );
-            let forward = self.page_button(
-                Icon::ChevronRight,
-                rect(
-                    width - PAD - PAGE_BUTTON,
-                    button_y,
-                    PAGE_BUTTON,
-                    PAGE_BUTTON,
-                ),
-                rows.len(),
-                sel!(pageForward:),
-                &format!("Show more in {}", shelf.title),
-            );
-            y += SHELF_TITLE_H + SHELF_TITLE_GAP;
-            let (row_h, content_w) = if grid {
-                let cols = shelf.items.len().div_ceil(GRID_ROWS) as CGFloat;
-                (
-                    GRID_ROWS as CGFloat * GRID_ROW_H,
-                    2.0 * PAD + cols * GRID_COL_W + (cols - 1.0) * CARD_GAP,
-                )
-            } else {
-                let n = shelf.items.len() as CGFloat;
-                (card_h(), 2.0 * PAD + n * CARD_W + (n - 1.0) * CARD_GAP)
+        }
+        let width = self.view.contentSize().width;
+        let mut y = TOP_PAD;
+        let mut rows = Vec::with_capacity(shown.len());
+        for (&(si, shelf), fate) in shown.iter().zip(fates) {
+            let row = match fate {
+                Fate::Same(i) | Fate::Changed(i) => {
+                    let mut row = old[i].take().expect("an old row is continued at most once");
+                    row.update(si, shelf, mixed, matches!(fate, Fate::Changed(_)));
+                    row.place(y);
+                    row
+                }
+                Fate::New => self.new_row(si, shelf, mixed, width, y),
             };
-            let scroll = RowScroll::new(self.mtm, rect(0.0, y, width, row_h));
-            scroll.setAutoresizingMask(FLEX_W);
-            scroll.setHasHorizontalScroller(true);
-            scroll.setHasVerticalScroller(false);
-            scroll.setAutohidesScrollers(true);
-            scroll.setDrawsBackground(false);
-            scroll.setBorderType(NSBorderType::NoBorder);
-            scroll.contentView().setDrawsBackground(false);
-            scroll.setFocusRingType(NSFocusRingType::None);
-            // SAFETY: `initWithFrame:` is NSView's designated initializer.
-            let doc: Retained<FlippedView> = unsafe {
-                msg_send![FlippedView::alloc(self.mtm), initWithFrame: rect(0.0, 0.0, content_w, row_h)]
-            };
-            scroll.setDocumentView(Some(&doc));
-            self.doc.addSubview(&scroll);
-            let clip = scroll.contentView();
+            row.back.setTag(rows.len() as isize);
+            row.forward.setTag(rows.len() as isize);
+            y = row.bottom + SHELF_GAP;
+            rows.push(row);
+        }
+        let height = (y - SHELF_GAP + TOP_PAD).max(0.0);
+        if self.doc.frame().size != NSSize::new(width, height) {
+            self.doc.setFrameSize(NSSize::new(width, height));
+        }
+        for row in &rows {
+            let clip = row.scroll.contentView();
             clip.setPostsBoundsChangedNotifications(true);
             observe(&self.watcher, &clip);
-            y += row_h;
-            rows.push(ShelfRow {
-                shelf: si,
-                name: shelf.title.clone(),
-                title,
-                scroll,
-                doc,
-                back,
-                forward,
-                items: shelf.items.clone(),
-                grid,
-                mixed,
-                top,
-                bottom: y,
-                cards: RefCell::new(HashMap::new()),
-            });
-            y += SHELF_GAP;
         }
-        self.doc
-            .setFrameSize(NSSize::new(width, (y - SHELF_GAP + TOP_PAD).max(0.0)));
         let outer = self.view.contentView();
         outer.setPostsBoundsChangedNotifications(true);
         observe(&self.watcher, &outer);
         *self.rows.borrow_mut() = rows;
-        let mut top = NSPoint::ZERO;
-        if let Some((y, across)) = kept {
-            let rows = self.rows.borrow();
-            for (key, row) in title_keys(rows.iter().map(|r| r.name.as_str()))
-                .into_iter()
-                .zip(rows.iter())
-            {
-                let Some(&x) = across.get(&key) else {
-                    continue;
-                };
-                let room = row.doc.frame().size.width - row.scroll.contentSize().width;
-                let clip = row.scroll.contentView();
-                clip.scrollToPoint(NSPoint::new(x.min(room).max(0.0), 0.0));
-                row.scroll.reflectScrolledClipView(&clip);
-            }
-            let room = self.doc.frame().size.height - self.view.contentSize().height;
-            top.y = y.min(room).max(0.0);
+        for row in self.rows.borrow().iter() {
+            row.clamp_scroll();
         }
-        self.view.contentView().scrollToPoint(top);
-        self.view.reflectScrolledClipView(&self.view.contentView());
+        let room = (self.doc.frame().size.height - self.view.contentSize().height).max(0.0);
+        let top = if keep_scroll {
+            page_y.min(room).max(0.0)
+        } else {
+            0.0
+        };
+        if top != outer.bounds().origin.y {
+            outer.scrollToPoint(NSPoint::new(0.0, top));
+            self.view.reflectScrolledClipView(&outer);
+        }
         self.sync();
+    }
+
+    /// A row for `shelf`, the page's shelf `si`, with its title at `top`.
+    fn new_row(
+        &self,
+        si: usize,
+        shelf: &Shelf,
+        mixed: bool,
+        width: CGFloat,
+        top: CGFloat,
+    ) -> ShelfRow {
+        let grid = is_grid(shelf);
+        let title_font = theme::font(17.0, Weight::SemiBold);
+        let title = widgets::label(self.mtm, &shelf.title, &title_font, &theme::ink());
+        let buttons_w = 2.0 * PAGE_BUTTON + PAGE_GAP;
+        title.setFrame(rect(
+            PAD,
+            top,
+            width - 2.0 * PAD - buttons_w - PAGE_GAP,
+            SHELF_TITLE_H,
+        ));
+        title.setAutoresizingMask(FLEX_W);
+        self.doc.addSubview(&title);
+        let button_y = top + (SHELF_TITLE_H - PAGE_BUTTON) / 2.0;
+        let back = self.page_button(
+            Icon::ChevronLeft,
+            rect(width - PAD - buttons_w, button_y, PAGE_BUTTON, PAGE_BUTTON),
+            sel!(pageBack:),
+            &format!("Show previous in {}", shelf.title),
+        );
+        let forward = self.page_button(
+            Icon::ChevronRight,
+            rect(
+                width - PAD - PAGE_BUTTON,
+                button_y,
+                PAGE_BUTTON,
+                PAGE_BUTTON,
+            ),
+            sel!(pageForward:),
+            &format!("Show more in {}", shelf.title),
+        );
+        let y = top + SHELF_TITLE_H + SHELF_TITLE_GAP;
+        let (row_h, content_w) = row_size(shelf.items.len(), grid);
+        let scroll = RowScroll::new(self.mtm, rect(0.0, y, width, row_h));
+        scroll.setAutoresizingMask(FLEX_W);
+        scroll.setHasHorizontalScroller(true);
+        scroll.setHasVerticalScroller(false);
+        scroll.setAutohidesScrollers(true);
+        scroll.setDrawsBackground(false);
+        scroll.setBorderType(NSBorderType::NoBorder);
+        scroll.contentView().setDrawsBackground(false);
+        scroll.setFocusRingType(NSFocusRingType::None);
+        // SAFETY: `initWithFrame:` is NSView's designated initializer.
+        let doc: Retained<FlippedView> = unsafe {
+            msg_send![FlippedView::alloc(self.mtm), initWithFrame: rect(0.0, 0.0, content_w, row_h)]
+        };
+        scroll.setDocumentView(Some(&doc));
+        self.doc.addSubview(&scroll);
+        ShelfRow {
+            shelf: si,
+            name: shelf.title.clone(),
+            title,
+            scroll,
+            doc,
+            back,
+            forward,
+            items: shelf.items.clone(),
+            grid,
+            mixed,
+            top,
+            bottom: y + row_h,
+            cards: RefCell::new(HashMap::new()),
+        }
     }
 
     /// Creates the cards near the visible area and drops those that left it.
@@ -838,6 +990,26 @@ impl Shelves {
             }
             row.update_paging();
         }
+    }
+
+    /// Each row's scroll view, and its cards with their items' indexes, in order: what a test
+    /// checks a refresh kept.
+    #[doc(hidden)]
+    pub fn views(&self) -> Vec<RowViews> {
+        self.rows
+            .borrow()
+            .iter()
+            .map(|row| {
+                let mut cards: Vec<(usize, Retained<NSView>)> = row
+                    .cards
+                    .borrow()
+                    .iter()
+                    .map(|(&i, card)| (i, Retained::into_super(card.clone())))
+                    .collect();
+                cards.sort_by_key(|&(i, _)| i);
+                (Retained::into_super(row.scroll.clone()), cards)
+            })
+            .collect()
     }
 
     /// Updates the paging buttons for the rows' widths, after the window resized.
@@ -885,7 +1057,6 @@ impl Shelves {
         &self,
         icon: Icon,
         frame: NSRect,
-        row: usize,
         action: Sel,
         label: &str,
     ) -> Retained<HoverButton> {
@@ -900,7 +1071,6 @@ impl Shelves {
             theme::RADIUS,
         );
         b.setAutoresizingMask(PIN_RIGHT);
-        b.setTag(row as isize);
         b.set_action(self.watcher.as_ref(), action);
         widgets::accessibility_label(&b, label);
         b.set_shown(false);
@@ -984,6 +1154,69 @@ mod tests {
             title_keys(["Mixes", "New", "Mixes"].into_iter()),
             [key("Mixes", 0), key("New", 0), key("Mixes", 1)]
         );
+    }
+
+    #[test]
+    fn a_refresh_keeps_rows_by_title_and_tells_which_changed() {
+        use Fate::*;
+        let (a, b, c): (&[u8], &[u8], &[u8]) = (&[1, 2], &[3], &[4, 5, 6]);
+        let old = [("Mixes", a), ("New", b)];
+        // Same.
+        assert_eq!(row_fates(&old, &old), (vec![Same(0), Same(1)], vec![]));
+        // Changed: same title, different items.
+        assert_eq!(
+            row_fates(&old, &[("Mixes", a), ("New", c)]),
+            (vec![Same(0), Changed(1)], vec![])
+        );
+        // Added, in the middle.
+        assert_eq!(
+            row_fates(&old, &[("Mixes", a), ("Hot", c), ("New", b)]),
+            (vec![Same(0), New, Same(1)], vec![])
+        );
+        // Removed.
+        assert_eq!(row_fates(&old, &[("New", b)]), (vec![Same(1)], vec![0]));
+        assert_eq!(row_fates(&old, &[]), (vec![], vec![0, 1]));
+        assert_eq!(row_fates::<u8>(&[], &[("New", b)]), (vec![New], vec![]));
+        // Reordered.
+        assert_eq!(
+            row_fates(&old, &[("New", b), ("Mixes", a)]),
+            (vec![Same(1), Same(0)], vec![])
+        );
+    }
+
+    #[test]
+    fn shelves_of_the_same_title_match_in_their_order() {
+        use Fate::*;
+        let (a, b, c): (&[u8], &[u8], &[u8]) = (&[1], &[2], &[3]);
+        let old = [("Mixes", a), ("New", c), ("Mixes", b)];
+        assert_eq!(
+            row_fates(&old, &[("Mixes", a), ("Mixes", c)]),
+            (vec![Same(0), Changed(2)], vec![1])
+        );
+        // Losing the first of two leaves the second's items to the first's place.
+        assert_eq!(
+            row_fates(&old, &[("New", c), ("Mixes", b)]),
+            (vec![Same(1), Changed(0)], vec![2])
+        );
+        // A third of the title is new.
+        assert_eq!(
+            row_fates(
+                &old,
+                &[("Mixes", a), ("New", c), ("Mixes", b), ("Mixes", a)]
+            ),
+            (vec![Same(0), Same(1), Same(2), New], vec![])
+        );
+    }
+
+    #[test]
+    fn a_changed_row_keeps_the_cards_of_items_in_the_same_place() {
+        let old = [1, 2, 3, 4];
+        let new = [1, 9, 3];
+        let kept: Vec<bool> = (0..5).map(|i| keeps_card(&old, &new, i)).collect();
+        assert_eq!(kept, [true, false, true, false, false]);
+        // Growing keeps the old ones; the new places have no card to keep.
+        assert!(keeps_card(&[1], &[1, 2], 0));
+        assert!(!keeps_card(&[1], &[1, 2], 1));
     }
 
     #[test]

@@ -10,6 +10,11 @@ repository.workspace = true
 name = "requiem-gui"
 path = "src/main.rs"
 
+# AppKit views need the main thread, which only a test without the harness runs on.
+[[test]]
+name = "shelves"
+harness = false
+
 [dependencies]
 requiem-core.workspace = true
 requiem-ipc.workspace = true
