@@ -9,6 +9,7 @@ use std::sync::Arc;
 
 mod backend;
 mod client;
+mod covers;
 mod creds;
 mod keys;
 mod logger;
