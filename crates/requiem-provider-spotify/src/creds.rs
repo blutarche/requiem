@@ -305,7 +305,7 @@ mod tests {
             .map(|e| e.unwrap().file_name().into_string().unwrap())
             .collect();
         left.sort();
-        assert_eq!(left, ["ytmusic-session.json", "outside"]);
+        assert_eq!(left, ["outside", "ytmusic-session.json"]);
         assert!(outside.join("keep").exists());
         forget(&path).unwrap();
         // No directory to sweep is not an error.
