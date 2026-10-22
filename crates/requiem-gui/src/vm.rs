@@ -1,6 +1,7 @@
 //! View model: folds daemon events and connection status into `UiState`, and maps user
 //! intents to `Command`s. No AppKit types, so it is unit-tested on every OS.
 
+use std::borrow::Cow;
 use std::io::{self, Read};
 use std::ops::{BitOr, BitOrAssign};
 use std::time::{Duration, Instant};
@@ -223,6 +224,9 @@ pub enum Intent {
     /// Opens `provider`'s browser-session form: Use Browser Session… in Settings and on the
     /// setup sheet.
     UseBrowserSession(ProviderId),
+    /// Shows one service's items, or all of them, on Home, the Library and in search results.
+    /// Local to the window: nothing is sent.
+    SetFilter(ServiceFilter),
 }
 
 /// Where the window is.
@@ -602,6 +606,8 @@ pub struct UiState {
     /// The player's self-update status: `None` before it sends one, while disconnected, and
     /// in dev builds, which show nothing.
     pub update: Option<UpdateStatus>,
+    /// The user's choice of service; `shown_filter` is what it comes to.
+    pub filter: ServiceFilter,
 }
 
 impl Default for UiState {
@@ -627,6 +633,7 @@ impl Default for UiState {
             accounts: Vec::new(),
             setup: None,
             update: None,
+            filter: ServiceFilter::All,
         }
     }
 }
@@ -722,6 +729,7 @@ impl UiState {
             | PaletteAction::ShowQueue
             | PaletteAction::ShowNowPlaying
             | PaletteAction::ShowSettings => true,
+            PaletteAction::ShowServices(_) => self.filter_shown(),
             PaletteAction::Refresh => can.player && self.refreshable(),
             PaletteAction::SignIn(service) => {
                 can.player && self.sign_in_offers().contains(&service.provider())
@@ -748,6 +756,71 @@ impl UiState {
             .iter()
             .filter(|(_, s)| matches!(s, AccountState::SignedIn { .. }))
             .map(|(p, _)| p)
+    }
+
+    /// Whether the sidebar offers the service filter: both services are signed in.
+    pub fn filter_shown(&self) -> bool {
+        Service::ALL
+            .into_iter()
+            .all(|s| self.signed_in().any(|p| *p == s.provider()))
+    }
+
+    /// The filter in force: the user's choice while the sidebar offers it, else All. Signing
+    /// out of the chosen service, or of the other, ends the choice for as long as it lasts.
+    pub fn shown_filter(&self) -> ServiceFilter {
+        if self.filter_shown() {
+            self.filter
+        } else {
+            ServiceFilter::All
+        }
+    }
+
+    /// The one service the pages are filtered to, if any.
+    pub fn shown_service(&self) -> Option<Service> {
+        match self.shown_filter() {
+            ServiceFilter::All => None,
+            ServiceFilter::Only(s) => Some(s),
+        }
+    }
+
+    /// The search results the filter keeps: the rows of the results table.
+    pub fn shown_results(&self) -> Cow<'_, [Track]> {
+        match self.shown_service() {
+            None => Cow::Borrowed(&self.results),
+            Some(s) => Cow::Owned(
+                self.results
+                    .iter()
+                    .filter(|t| s.owns(&t.id.provider))
+                    .cloned()
+                    .collect(),
+            ),
+        }
+    }
+
+    /// Home's shelves as the filter leaves them: the cards of the shelves it empties are gone
+    /// with them, and the rest keep their order. `List::Shelf` indexes this list.
+    pub fn shown_home(&self) -> Cow<'_, [Shelf]> {
+        match self.shown_service() {
+            None => Cow::Borrowed(&self.home.shelves),
+            Some(s) => Cow::Owned(
+                self.home
+                    .shelves
+                    .iter()
+                    .filter_map(|shelf| {
+                        let items: Vec<Item> = shelf
+                            .items
+                            .iter()
+                            .filter(|i| s.owns(item_provider(i)))
+                            .cloned()
+                            .collect();
+                        (!items.is_empty()).then(|| Shelf {
+                            title: shelf.title.clone(),
+                            items,
+                        })
+                    })
+                    .collect(),
+            ),
+        }
     }
 
     /// The providers Sign In applies to: the signed-out ones, the ones that need setting up
@@ -957,15 +1030,17 @@ impl UiState {
         (self.place != Place::Settings).then_some(Place::Library)
     }
 
-    /// The playlists and albums of the Library, in shelf order: the rows of its list.
+    /// The playlists and albums of the Library the filter keeps, in shelf order: the rows of
+    /// its list.
     pub fn library_collections(&self) -> Vec<&Collection> {
+        let service = self.shown_service();
         self.library
             .shelves
             .iter()
             .flat_map(|s| &s.items)
             .filter_map(|i| match i {
-                Item::Collection(c) => Some(c),
-                Item::Track(_) => None,
+                Item::Collection(c) if service.is_none_or(|s| s.owns(&c.id.provider)) => Some(c),
+                Item::Collection(_) | Item::Track(_) => None,
             })
             .collect()
     }
@@ -973,7 +1048,11 @@ impl UiState {
     /// The tracks of `list` from item `from` on.
     fn list_tracks(&self, list: List, from: usize) -> Vec<Track> {
         match list {
-            List::Results => self.results.get(from..).unwrap_or_default().to_vec(),
+            List::Results => self
+                .shown_results()
+                .get(from..)
+                .unwrap_or_default()
+                .to_vec(),
             List::Collection => self
                 .collection
                 .as_ref()
@@ -981,8 +1060,7 @@ impl UiState {
                 .unwrap_or_default()
                 .to_vec(),
             List::Shelf(i) => self
-                .home
-                .shelves
+                .shown_home()
                 .get(i)
                 .and_then(|s| s.items.get(from..))
                 .unwrap_or_default()
@@ -998,7 +1076,7 @@ impl UiState {
     /// Item `index` of `list`, if it is a track.
     fn list_track(&self, list: List, index: usize) -> Option<Track> {
         match list {
-            List::Shelf(i) => match self.home.shelves.get(i)?.items.get(index)? {
+            List::Shelf(i) => match self.shown_home().get(i)?.items.get(index)? {
                 Item::Track(t) => Some(t.clone()),
                 Item::Collection(_) => None,
             },
@@ -1053,13 +1131,16 @@ impl UiState {
 
     /// The results area's empty state, when there are no results.
     pub fn results_empty(&self) -> Option<EmptyText> {
-        if !self.results.is_empty() {
+        if !self.shown_results().is_empty() {
             return None;
         }
         Some(if self.search == SearchStatus::Done {
             EmptyText {
                 heading: "No results".to_owned(),
-                sub: format!("Nothing matched “{}”", self.query),
+                sub: match self.shown_service() {
+                    Some(s) => format!("Nothing from {} matched “{}”", s.name(), self.query),
+                    None => format!("Nothing matched “{}”", self.query),
+                },
                 action: Some("Edit search"),
             }
         } else {
@@ -1578,6 +1659,13 @@ impl Vm {
                 }
                 vec![cmd]
             }
+            Intent::SetFilter(filter) => {
+                if self.ui.filter != filter {
+                    self.ui.filter = filter;
+                    self.dirty |= Dirty::RESULTS | Dirty::HOME | Dirty::LIBRARY | Dirty::ACCOUNT;
+                }
+                Vec::new()
+            }
             Intent::Visit(place) => {
                 self.ui.place = place;
                 self.fetch_place()
@@ -1876,7 +1964,8 @@ impl Vm {
             page.browse = Browse::default();
             page.tracks.clear();
         }
-        self.dirty |= Dirty::HOME | Dirty::LIBRARY | Dirty::COLLECTION | Dirty::ACCOUNT;
+        self.dirty |=
+            Dirty::HOME | Dirty::LIBRARY | Dirty::COLLECTION | Dirty::ACCOUNT | Dirty::RESULTS;
     }
 
     /// `answered` is the state an import was sent from, when this follows its error.
@@ -1922,6 +2011,7 @@ impl Vm {
                 .collect::<Vec<_>>()
         };
         let was = signed_in(&self.ui);
+        let was_filter = self.ui.shown_filter();
         let known = match self.ui.accounts.iter_mut().find(|(p, _)| *p == provider) {
             Some(entry) => {
                 entry.1 = state;
@@ -1933,6 +2023,11 @@ impl Vm {
             }
         };
         self.dirty |= Dirty::ACCOUNT;
+        // The filter ends with the second service's sign-out, and its choice returns with the
+        // sign-in.
+        if self.ui.shown_filter() != was_filter {
+            self.dirty |= Dirty::RESULTS | Dirty::HOME | Dirty::LIBRARY;
+        }
         // Its sign-in choices follow the accounts.
         if matches!(self.ui.home_view(), HomeView::SignedOut(_)) {
             self.dirty |= Dirty::HOME;
@@ -2302,6 +2397,51 @@ impl Service {
     pub fn of(provider: &ProviderId) -> Option<Service> {
         Self::ALL.into_iter().find(|s| s.id() == provider.0)
     }
+
+    /// Whether `provider` is this service.
+    pub fn owns(self, provider: &ProviderId) -> bool {
+        self.id() == provider.0
+    }
+}
+
+/// Which service's items Home, the Library and search results show.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ServiceFilter {
+    #[default]
+    All,
+    Only(Service),
+}
+
+impl ServiceFilter {
+    /// The segments of the sidebar's control, in order.
+    pub const CHOICES: [ServiceFilter; 3] = [
+        ServiceFilter::All,
+        ServiceFilter::Only(Service::Spotify),
+        ServiceFilter::Only(Service::YouTubeMusic),
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            ServiceFilter::All => "All",
+            ServiceFilter::Only(s) => s.name(),
+        }
+    }
+
+    /// The value saved between launches.
+    pub fn key(self) -> &'static str {
+        match self {
+            ServiceFilter::All => "all",
+            ServiceFilter::Only(s) => s.id(),
+        }
+    }
+
+    /// The filter a saved `key` names; any other value is All.
+    pub fn from_key(key: &str) -> ServiceFilter {
+        Service::ALL
+            .into_iter()
+            .find(|s| s.id() == key)
+            .map_or(ServiceFilter::All, ServiceFilter::Only)
+    }
 }
 
 /// What the sign-in panel adds under the code for `provider`.
@@ -2325,6 +2465,8 @@ pub enum PaletteAction {
     ShowQueue,
     ShowNowPlaying,
     ShowSettings,
+    /// Filters Home, the Library and search results to one service, or to all.
+    ShowServices(ServiceFilter),
     Refresh,
     SignIn(Service),
     SignOut(Service),
@@ -2334,7 +2476,7 @@ pub enum PaletteAction {
 }
 
 impl PaletteAction {
-    pub const ALL: [PaletteAction; 20] = [
+    pub const ALL: [PaletteAction; 23] = [
         PaletteAction::PlayPause,
         PaletteAction::Next,
         PaletteAction::Previous,
@@ -2347,6 +2489,9 @@ impl PaletteAction {
         PaletteAction::ShowQueue,
         PaletteAction::ShowNowPlaying,
         PaletteAction::ShowSettings,
+        PaletteAction::ShowServices(ServiceFilter::All),
+        PaletteAction::ShowServices(ServiceFilter::Only(Service::Spotify)),
+        PaletteAction::ShowServices(ServiceFilter::Only(Service::YouTubeMusic)),
         PaletteAction::Refresh,
         PaletteAction::SignIn(Service::Spotify),
         PaletteAction::SignOut(Service::Spotify),
@@ -2371,6 +2516,13 @@ impl PaletteAction {
             PaletteAction::ShowQueue => "Show queue",
             PaletteAction::ShowNowPlaying => "Show now playing",
             PaletteAction::ShowSettings => "Settings",
+            PaletteAction::ShowServices(ServiceFilter::All) => "Show All Services",
+            PaletteAction::ShowServices(ServiceFilter::Only(Service::Spotify)) => {
+                "Show Spotify Only"
+            }
+            PaletteAction::ShowServices(ServiceFilter::Only(Service::YouTubeMusic)) => {
+                "Show YouTube Music Only"
+            }
             PaletteAction::Refresh => "Refresh",
             PaletteAction::SignIn(Service::Spotify) => "Sign in to Spotify\u{2026}",
             PaletteAction::SignOut(Service::Spotify) => "Sign out of Spotify",
@@ -2398,6 +2550,7 @@ impl PaletteAction {
             PaletteAction::ShowNowPlaying => "⌘L",
             PaletteAction::ShowSettings => "⌘,",
             PaletteAction::Refresh => "⌘R",
+            PaletteAction::ShowServices(_) => "",
             PaletteAction::SignIn(_) | PaletteAction::SignOut(_) => "",
             PaletteAction::VolumeUp => "⌘↑",
             PaletteAction::VolumeDown => "⌘↓",
@@ -2408,6 +2561,11 @@ impl PaletteAction {
     /// Sign In and Sign Out are listed only while they apply.
     pub fn is_account(self) -> bool {
         matches!(self, PaletteAction::SignIn(_) | PaletteAction::SignOut(_))
+    }
+
+    /// The palette lists these only while they would act.
+    pub fn listed_only_when_runnable(self) -> bool {
+        self.is_account() || matches!(self, PaletteAction::ShowServices(_))
     }
 
     /// Case-insensitive substring match on the label, in `ALL` order.
@@ -2493,8 +2651,8 @@ mod tests {
             current: Some(0),
         });
         // Without a selection, Play selected and Add to queue wait; with no account, so do the
-        // sign-in actions, and Refresh waits for a browse page.
-        assert_eq!(runnable(&vm, none).len(), PaletteAction::ALL.len() - 7);
+        // sign-in actions and the service filter, and Refresh waits for a browse page.
+        assert_eq!(runnable(&vm, none).len(), PaletteAction::ALL.len() - 10);
         let queue_row = Selection {
             row: true,
             result: false,
@@ -2505,7 +2663,7 @@ mod tests {
             row: true,
             result: true,
         };
-        assert_eq!(runnable(&vm, result).len(), PaletteAction::ALL.len() - 5);
+        assert_eq!(runnable(&vm, result).len(), PaletteAction::ALL.len() - 8);
     }
 
     /// A vm with `n` results from a completed search.
@@ -3485,7 +3643,10 @@ mod tests {
                 PaletteAction::ShowSearch,
                 PaletteAction::ShowLibrary,
                 PaletteAction::ShowQueue,
-                PaletteAction::ShowNowPlaying
+                PaletteAction::ShowNowPlaying,
+                PaletteAction::ShowServices(ServiceFilter::All),
+                PaletteAction::ShowServices(ServiceFilter::Only(Service::Spotify)),
+                PaletteAction::ShowServices(ServiceFilter::Only(Service::YouTubeMusic)),
             ]
         );
         assert_eq!(
@@ -3509,8 +3670,8 @@ mod tests {
         assert_eq!(
             keys,
             [
-                "Space", "⌘→", "⌘←", "↩", "⌘↩", "⌘F", "⌘1", "⌘2", "⌘3", "⌘4", "⌘L", "⌘,", "⌘R", "",
-                "", "", "", "⌘↑", "⌘↓", ""
+                "Space", "⌘→", "⌘←", "↩", "⌘↩", "⌘F", "⌘1", "⌘2", "⌘3", "⌘4", "⌘L", "⌘,", "", "",
+                "", "⌘R", "", "", "", "", "⌘↑", "⌘↓", ""
             ]
         );
     }
@@ -6222,5 +6383,391 @@ mod tests {
         assert!(vm.ui().can_check_for_updates());
         assert_eq!(vm.ui().auto_update(), Some(false));
         assert!(vm.check_for_updates());
+    }
+
+    /// A track of `provider`, titled by `id`.
+    fn from(provider: &ProviderId, id: &str) -> Track {
+        let mut t = track(id, 200);
+        t.id.provider = provider.clone();
+        t
+    }
+
+    fn collection_of(provider: &ProviderId, id: &str) -> Collection {
+        let mut c = collection(id);
+        c.id.provider = provider.clone();
+        c
+    }
+
+    fn ids(tracks: &[Track]) -> Vec<&str> {
+        tracks.iter().map(|t| t.id.id.as_str()).collect()
+    }
+
+    /// Search results that take the services in turn, Spotify first: 0 to 5.
+    fn alternating() -> Vec<Track> {
+        (0..6)
+            .map(|i| from(&[spotify(), provider()][i % 2], &i.to_string()))
+            .collect()
+    }
+
+    /// A connected vm with both services signed in.
+    fn both_signed_in() -> Vm {
+        let mut vm = connected();
+        vm.apply(signed_in());
+        vm.apply(spotify_signed_in());
+        vm.take_dirty();
+        vm
+    }
+
+    fn search_lands(vm: &mut Vm, tracks: Vec<Track>) {
+        let req = search_req(vm, "q");
+        vm.apply(Event::SearchResults { req, tracks });
+    }
+
+    const ONLY_SPOTIFY: ServiceFilter = ServiceFilter::Only(Service::Spotify);
+    const ONLY_YT: ServiceFilter = ServiceFilter::Only(Service::YouTubeMusic);
+
+    #[test]
+    fn the_saved_filter_is_read_by_its_key_and_anything_else_is_all() {
+        for filter in ServiceFilter::CHOICES {
+            assert_eq!(ServiceFilter::from_key(filter.key()), filter);
+        }
+        assert_eq!(ONLY_SPOTIFY.key(), "spotify");
+        assert_eq!(ONLY_YT.key(), "ytmusic");
+        assert_eq!(ServiceFilter::All.key(), "all");
+        for unknown in ["", "Spotify", "youtube", "all ", "tidal"] {
+            assert_eq!(ServiceFilter::from_key(unknown), ServiceFilter::All);
+        }
+        assert_eq!(UiState::default().filter, ServiceFilter::All);
+    }
+
+    #[test]
+    fn the_filter_is_offered_only_while_both_services_are_signed_in() {
+        let mut vm = connected();
+        let can = |vm: &Vm, a| vm.ui().can_run(a, Selection::default());
+        let actions = ServiceFilter::CHOICES.map(PaletteAction::ShowServices);
+        assert!(!vm.ui().filter_shown());
+        assert!(!actions.iter().any(|&a| can(&vm, a)));
+        vm.apply(signed_in());
+        assert!(!vm.ui().filter_shown());
+        vm.apply(spotify_account(AccountState::SignedOut));
+        assert!(!vm.ui().filter_shown());
+        assert!(!actions.iter().any(|&a| can(&vm, a)));
+        vm.apply(spotify_signed_in());
+        assert!(vm.ui().filter_shown());
+        assert!(actions.iter().all(|&a| can(&vm, a)));
+        assert!(actions.iter().all(|a| a.listed_only_when_runnable()));
+        let labels: Vec<_> = actions.iter().map(|a| a.label()).collect();
+        assert_eq!(
+            labels,
+            [
+                "Show All Services",
+                "Show Spotify Only",
+                "Show YouTube Music Only"
+            ]
+        );
+    }
+
+    #[test]
+    fn choosing_a_service_filters_search_results_and_sends_nothing() {
+        let mut vm = both_signed_in();
+        search_lands(&mut vm, alternating());
+        vm.take_commands();
+        vm.take_dirty();
+        assert_eq!(
+            ids(&vm.ui().shown_results()),
+            ["0", "1", "2", "3", "4", "5"]
+        );
+
+        assert!(vm.intent(Intent::SetFilter(ONLY_SPOTIFY)).is_empty());
+        assert!(vm.take_commands().is_empty());
+        let dirty = vm.take_dirty();
+        assert!(dirty.contains(Dirty::RESULTS | Dirty::HOME | Dirty::LIBRARY | Dirty::ACCOUNT));
+        assert_eq!(ids(&vm.ui().shown_results()), ["0", "2", "4"]);
+        // The daemon's answer is kept whole, so another choice needs no search.
+        assert_eq!(vm.ui().results.len(), 6);
+
+        vm.intent(Intent::SetFilter(ONLY_YT));
+        assert_eq!(ids(&vm.ui().shown_results()), ["1", "3", "5"]);
+        vm.intent(Intent::SetFilter(ServiceFilter::All));
+        assert_eq!(vm.ui().shown_results().len(), 6);
+
+        // Choosing what is chosen already changes nothing.
+        vm.take_dirty();
+        vm.intent(Intent::SetFilter(ServiceFilter::All));
+        assert!(vm.take_dirty().is_empty());
+    }
+
+    #[test]
+    fn a_service_with_no_results_says_so() {
+        let mut vm = both_signed_in();
+        search_lands(&mut vm, vec![from(&spotify(), "0")]);
+        assert_eq!(vm.ui().results_empty(), None);
+        vm.intent(Intent::SetFilter(ONLY_YT));
+        assert!(vm.ui().shown_results().is_empty());
+        let empty = vm.ui().results_empty().unwrap();
+        assert_eq!(empty.heading, "No results");
+        assert_eq!(empty.sub, "Nothing from YouTube Music matched “q”");
+    }
+
+    #[test]
+    fn playing_from_a_filtered_list_queues_the_visible_tracks_from_the_clicked_one() {
+        let mut vm = both_signed_in();
+        search_lands(&mut vm, alternating());
+        vm.intent(Intent::SetFilter(ONLY_SPOTIFY));
+        // The rows are Spotify's 0, 2 and 4; the second, 2, is clicked.
+        let cmds = vm.intent(Intent::PlayFrom {
+            list: List::Results,
+            from: 1,
+        });
+        assert_eq!(
+            cmds,
+            vec![
+                Command::Enqueue {
+                    tracks: vec![from(&spotify(), "2"), from(&spotify(), "4")],
+                    mode: EnqueueMode::Replace
+                },
+                Command::PlayIndex(0)
+            ]
+        );
+        assert_eq!(
+            vm.intent(Intent::Append {
+                list: List::Results,
+                index: 2
+            }),
+            vec![Command::Enqueue {
+                tracks: vec![from(&spotify(), "4")],
+                mode: EnqueueMode::Append
+            }]
+        );
+        let Command::Enqueue { tracks, .. } = &vm.intent(Intent::AppendAll(List::Results))[0]
+        else {
+            panic!("expected an enqueue");
+        };
+        assert_eq!(ids(tracks), ["0", "2", "4"]);
+        // Past the visible rows is past the list, though the answer has more.
+        let past = vm.intent(Intent::PlayFrom {
+            list: List::Results,
+            from: 3,
+        });
+        assert!(past.is_empty());
+    }
+
+    /// Home's shelves: Liked 0 to 3 alternate, one shelf is YouTube Music's alone, Mixes
+    /// holds a playlist each, and one shelf is empty.
+    fn mixed_home() -> Vec<Shelf> {
+        let items = |tracks: &[(&ProviderId, &str)]| {
+            tracks
+                .iter()
+                .map(|(p, id)| Item::Track(from(p, id)))
+                .collect()
+        };
+        let (s, y) = (spotify(), provider());
+        vec![
+            shelf(
+                "Liked",
+                items(&[(&s, "0"), (&y, "1"), (&s, "2"), (&y, "3")]),
+            ),
+            shelf("Quick picks", items(&[(&y, "4")])),
+            shelf(
+                "Mixes",
+                vec![
+                    Item::Collection(collection_of(&s, "m0")),
+                    Item::Collection(collection_of(&y, "m1")),
+                ],
+            ),
+            shelf("Nothing", Vec::new()),
+        ]
+    }
+
+    fn home_with(shelves: Vec<Shelf>) -> Vm {
+        let (mut vm, req) = home();
+        vm.apply(signed_in());
+        vm.apply(spotify_signed_in());
+        vm.apply(results(req, Page::Home, shelves));
+        vm.take_commands();
+        vm.take_dirty();
+        vm
+    }
+
+    #[test]
+    fn filtering_home_keeps_one_services_cards_and_hides_the_shelves_it_empties() {
+        let mut vm = home_with(mixed_home());
+        let titles = |vm: &Vm| -> Vec<String> {
+            vm.ui()
+                .shown_home()
+                .iter()
+                .map(|s| s.title.clone())
+                .collect()
+        };
+        let card_ids = |vm: &Vm, shelf: usize| -> Vec<String> {
+            vm.ui().shown_home()[shelf]
+                .items
+                .iter()
+                .map(|i| match i {
+                    Item::Track(t) => t.id.id.clone(),
+                    Item::Collection(c) => c.id.id.clone(),
+                })
+                .collect()
+        };
+        assert_eq!(
+            titles(&vm),
+            ["Liked", "Quick picks", "Mixes", "Nothing"],
+            "All shows the page as it came"
+        );
+
+        vm.intent(Intent::SetFilter(ONLY_SPOTIFY));
+        assert_eq!(titles(&vm), ["Liked", "Mixes"]);
+        assert_eq!(card_ids(&vm, 0), ["0", "2"]);
+        assert_eq!(card_ids(&vm, 1), ["m0"]);
+
+        vm.intent(Intent::SetFilter(ONLY_YT));
+        assert_eq!(titles(&vm), ["Liked", "Quick picks", "Mixes"]);
+        assert_eq!(card_ids(&vm, 0), ["1", "3"]);
+        assert_eq!(card_ids(&vm, 1), ["4"]);
+        assert_eq!(card_ids(&vm, 2), ["m1"]);
+        // The page's own shelves are untouched.
+        assert_eq!(vm.ui().home.shelves.len(), 4);
+    }
+
+    #[test]
+    fn a_card_plays_and_adds_from_the_shelves_the_filter_leaves() {
+        let mut vm = home_with(mixed_home());
+        vm.intent(Intent::SetFilter(ONLY_YT));
+        // The shelves are Liked, Quick picks and Mixes, whose one playlist has no track.
+        let cmds = vm.intent(Intent::PlayFrom {
+            list: List::Shelf(0),
+            from: 1,
+        });
+        assert_eq!(
+            cmds,
+            vec![
+                Command::Enqueue {
+                    tracks: vec![from(&provider(), "3")],
+                    mode: EnqueueMode::Replace
+                },
+                Command::PlayIndex(0)
+            ]
+        );
+        assert_eq!(
+            vm.intent(Intent::Append {
+                list: List::Shelf(1),
+                index: 0
+            }),
+            vec![Command::Enqueue {
+                tracks: vec![from(&provider(), "4")],
+                mode: EnqueueMode::Append
+            }]
+        );
+        assert!(
+            vm.intent(Intent::PlayFrom {
+                list: List::Shelf(2),
+                from: 0
+            })
+            .is_empty()
+        );
+
+        // With Spotify's, Mixes is the second shelf, and there is no third.
+        vm.intent(Intent::SetFilter(ONLY_SPOTIFY));
+        let cmds = vm.intent(Intent::PlayFrom {
+            list: List::Shelf(0),
+            from: 1,
+        });
+        assert_eq!(
+            cmds[0],
+            Command::Enqueue {
+                tracks: vec![from(&spotify(), "2")],
+                mode: EnqueueMode::Replace
+            }
+        );
+        assert!(
+            vm.intent(Intent::PlayFrom {
+                list: List::Shelf(2),
+                from: 0
+            })
+            .is_empty()
+        );
+    }
+
+    #[test]
+    fn filtering_the_library_keeps_one_services_playlists() {
+        let mut vm = connected();
+        vm.apply(signed_in());
+        let lib = browses(&vm.take_commands());
+        let [(req, Page::Library)] = lib.as_slice() else {
+            panic!("expected the Library fetch, got {lib:?}");
+        };
+        vm.apply(spotify_signed_in());
+        let (s, y) = (spotify(), provider());
+        let items = [(&s, "a"), (&y, "b"), (&s, "c"), (&y, "d")]
+            .into_iter()
+            .map(|(p, id)| Item::Collection(collection_of(p, id)))
+            .collect();
+        // The second sign-in asked again; its answer is the one that lands.
+        let again = browses(&vm.take_commands());
+        let [(req2, Page::Library)] = again.as_slice() else {
+            panic!("expected the Library fetch again, got {again:?}");
+        };
+        assert!(req2 > req);
+        vm.apply(results(*req2, Page::Library, vec![shelf("Library", items)]));
+        let rows = |vm: &Vm| -> Vec<String> {
+            vm.ui()
+                .library_collections()
+                .iter()
+                .map(|c| c.id.id.clone())
+                .collect()
+        };
+        assert_eq!(rows(&vm), ["a", "b", "c", "d"]);
+        vm.intent(Intent::SetFilter(ONLY_SPOTIFY));
+        assert_eq!(rows(&vm), ["a", "c"]);
+        vm.intent(Intent::SetFilter(ONLY_YT));
+        assert_eq!(rows(&vm), ["b", "d"]);
+    }
+
+    #[test]
+    fn the_filter_ends_while_either_service_is_signed_out_and_returns_with_it() {
+        let mut vm = both_signed_in();
+        search_lands(&mut vm, alternating());
+        vm.intent(Intent::SetFilter(ONLY_YT));
+        assert_eq!(vm.ui().shown_filter(), ONLY_YT);
+        assert_eq!(vm.ui().shown_service(), Some(Service::YouTubeMusic));
+        vm.take_dirty();
+
+        // The chosen service signs out: everything shows again, and the control goes.
+        vm.apply(account(AccountState::SignedOut));
+        assert_eq!(vm.ui().shown_filter(), ServiceFilter::All);
+        assert_eq!(vm.ui().shown_results().len(), 6);
+        assert!(!vm.ui().filter_shown());
+        assert!(
+            vm.take_dirty()
+                .contains(Dirty::RESULTS | Dirty::HOME | Dirty::LIBRARY)
+        );
+        // The choice is kept for its service's return.
+        assert_eq!(vm.ui().filter, ONLY_YT);
+        vm.apply(signed_in());
+        assert_eq!(ids(&vm.ui().shown_results()), ["1", "3", "5"]);
+
+        // The other one's sign-out ends it too.
+        vm.apply(spotify_account(AccountState::SignedOut));
+        assert_eq!(vm.ui().shown_filter(), ServiceFilter::All);
+        assert_eq!(vm.ui().shown_results().len(), 6);
+    }
+
+    #[test]
+    fn a_saved_filter_waits_for_the_accounts_a_new_connection_brings() {
+        let mut vm = connected();
+        vm.intent(Intent::SetFilter(ONLY_SPOTIFY));
+        search_lands(&mut vm, alternating());
+        assert_eq!(vm.ui().shown_results().len(), 6);
+        vm.apply(spotify_signed_in());
+        assert_eq!(vm.ui().shown_results().len(), 6);
+        vm.apply(signed_in());
+        assert_eq!(ids(&vm.ui().shown_results()), ["0", "2", "4"]);
+        // A reconnect forgets the accounts until the snapshot tells them again.
+        vm.link(Link::Lost(LinkError::NotResponding));
+        vm.take_dirty();
+        vm.link(Link::Connected);
+        assert_eq!(vm.ui().shown_results().len(), 6);
+        assert!(vm.take_dirty().contains(Dirty::RESULTS));
+        assert_eq!(vm.ui().filter, ONLY_SPOTIFY);
     }
 }

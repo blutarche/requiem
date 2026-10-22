@@ -12,7 +12,7 @@ usage: requiem-gui [--demo] [--smoke] [--snapshot <png>] [--view <view>]
                      and its covers have loaded (20 s at most); exits 1 if the page fails
   --view <view>      the view shown at start: home (default), search, library, queue,
                      settings or palette; with --demo also home-scrolled, home-shelf-paged,
-                     home-signed-out, collection, now-playing, now-playing-empty,
+                     home-spotify, home-signed-out, collection, now-playing, now-playing-empty,
                      now-playing-last, library-signed-out, library-unavailable, signin,
                      signin-setup, settings-setup, settings-session, empty, disconnected,
                      toast, out-of-date, update-ready, update-failed, not-updatable or
@@ -32,6 +32,8 @@ pub enum View {
     HomeScrolled,
     /// Demo only: Home with its first shelf of cards paged forward once.
     HomeShelfPaged,
+    /// Demo only: Home filtered to Spotify.
+    HomeSpotify,
     /// Demo only: Home with both accounts signed out.
     HomeSignedOut,
     /// Demo only: a playlist's tracks, opened from the Library.
@@ -73,7 +75,7 @@ pub enum View {
 }
 
 impl View {
-    const NAMES: [(&str, View); 27] = [
+    const NAMES: [(&str, View); 28] = [
         ("home", View::Home),
         ("search", View::Search),
         ("library", View::Library),
@@ -82,6 +84,7 @@ impl View {
         ("palette", View::Palette),
         ("home-scrolled", View::HomeScrolled),
         ("home-shelf-paged", View::HomeShelfPaged),
+        ("home-spotify", View::HomeSpotify),
         ("home-signed-out", View::HomeSignedOut),
         ("collection", View::Collection),
         ("now-playing", View::NowPlaying),
@@ -263,6 +266,7 @@ mod tests {
         for (name, view) in [
             ("home-scrolled", View::HomeScrolled),
             ("home-shelf-paged", View::HomeShelfPaged),
+            ("home-spotify", View::HomeSpotify),
             ("home-signed-out", View::HomeSignedOut),
             ("collection", View::Collection),
             ("now-playing", View::NowPlaying),

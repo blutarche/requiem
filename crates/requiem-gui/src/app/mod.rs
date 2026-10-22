@@ -6,6 +6,8 @@ mod badge;
 mod bar;
 mod now_playing;
 mod palette;
+mod prefs;
+mod service_switch;
 mod settings;
 mod shelves;
 mod snapshot;
@@ -1030,7 +1032,9 @@ pub fn run(args: Args) {
         let (vm, daemon) = demo::start_in(args.view);
         (vm, Backend::Demo(RefCell::new(daemon)))
     } else {
-        (Vm::new(), Backend::Live(Live::start()))
+        let mut vm = Vm::new();
+        vm.intent(Intent::SetFilter(prefs::service_filter()));
+        (vm, Backend::Live(Live::start()))
     };
     let ui = Ui::new(mtm, vm, backend, &delegate);
     ui::install(ui.clone());
@@ -1050,7 +1054,7 @@ pub fn run(args: Args) {
                 ui.shelves.page(row, true);
             }
         }
-        View::HomeSignedOut => ui.show(AppView::Home),
+        View::HomeSpotify | View::HomeSignedOut => ui.show(AppView::Home),
         View::Library
         | View::LibrarySignedOut
         | View::LibraryUnavailable
