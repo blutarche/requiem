@@ -9,5 +9,7 @@ pub mod testing;
 #[cfg(test)]
 mod tests;
 
-pub use session::{PersistSink, PersistState, Session, SessionConfig};
+pub use session::{
+    PagePart, PagesSink, PersistSink, PersistState, SavedPages, Session, SessionConfig,
+};
 pub use types::*;

@@ -8,7 +8,7 @@ use std::time::Duration;
 
 use crate::{
     AccountState, AudioSource, ByteSource, Engine, EngineEvent, EngineEventSink, FormatHint, Page,
-    Provider, ProviderError, ProviderId, Shelf, Track, TrackId,
+    PageSink, Provider, ProviderError, ProviderId, Shelf, Track, TrackId,
 };
 
 const WAIT: Duration = Duration::from_secs(5);
@@ -131,6 +131,7 @@ struct ProviderState {
     sign_out_calls: usize,
     account: AccountState,
     has_home: bool,
+    changed: Option<PageSink>,
 }
 
 impl Default for ProviderState {
@@ -152,6 +153,7 @@ impl Default for ProviderState {
             sign_out_calls: 0,
             account: AccountState::SignedOut,
             has_home: false,
+            changed: None,
         }
     }
 }
@@ -235,6 +237,12 @@ impl FakeProvider {
 
     pub fn set_has_home(&self, has_home: bool) {
         self.state.lock().unwrap().has_home = has_home;
+    }
+
+    /// Tells the session that `page` has newer content, as a provider may.
+    pub fn say_changed(&self, page: Page) {
+        let sink = self.state.lock().unwrap().changed.clone();
+        sink.expect("no session has asked to hear of changes")(page);
     }
 
     pub fn browse_calls(&self) -> Vec<Page> {
@@ -345,6 +353,10 @@ impl Provider for FakeProvider {
 
     fn has_home(&self) -> bool {
         self.state.lock().unwrap().has_home
+    }
+
+    fn on_page_changed(&self, changed: PageSink) {
+        self.state.lock().unwrap().changed = Some(changed);
     }
 
     fn account(&self) -> AccountState {

@@ -534,6 +534,8 @@ fn page_offset(
 struct ShelfRow {
     /// The shelf's index in the page's list, which `Intent`s name.
     shelf: usize,
+    /// The shelf's title, which a refreshed page finds it again by.
+    name: String,
     title: Retained<NSTextField>,
     scroll: Retained<RowScroll>,
     doc: Retained<FlippedView>,
@@ -663,8 +665,19 @@ impl Shelves {
         }
     }
 
-    /// Replaces the page's shelves; shelves with nothing in them are left out.
-    pub fn set_shelves(&self, shelves: &[Shelf]) {
+    /// Replaces the page's shelves; shelves with nothing in them are left out. With
+    /// `keep_scroll`, the page and each shelf found again by its title stay scrolled where they
+    /// were, as far as the new shelves reach; otherwise the page starts at its top.
+    pub fn set_shelves(&self, shelves: &[Shelf], keep_scroll: bool) {
+        let kept = keep_scroll.then(|| {
+            let across: HashMap<String, CGFloat> = self
+                .rows
+                .borrow()
+                .iter()
+                .map(|r| (r.name.clone(), r.scroll.documentVisibleRect().origin.x))
+                .collect();
+            (self.view.documentVisibleRect().origin.y, across)
+        });
         let centre = NSNotificationCenter::defaultCenter();
         // SAFETY: the watcher is an object; removing observers it never added is allowed.
         unsafe { centre.removeObserver(&self.watcher) };
@@ -752,6 +765,7 @@ impl Shelves {
             y += row_h;
             rows.push(ShelfRow {
                 shelf: si,
+                name: shelf.title.clone(),
                 title,
                 scroll,
                 doc,
@@ -772,7 +786,21 @@ impl Shelves {
         outer.setPostsBoundsChangedNotifications(true);
         observe(&self.watcher, &outer);
         *self.rows.borrow_mut() = rows;
-        self.view.contentView().scrollToPoint(NSPoint::ZERO);
+        let mut top = NSPoint::ZERO;
+        if let Some((y, across)) = kept {
+            for row in self.rows.borrow().iter() {
+                let Some(&x) = across.get(&row.name) else {
+                    continue;
+                };
+                let room = row.doc.frame().size.width - row.scroll.contentSize().width;
+                let clip = row.scroll.contentView();
+                clip.scrollToPoint(NSPoint::new(x.min(room).max(0.0), 0.0));
+                row.scroll.reflectScrolledClipView(&clip);
+            }
+            let room = self.doc.frame().size.height - self.view.contentSize().height;
+            top.y = y.min(room).max(0.0);
+        }
+        self.view.contentView().scrollToPoint(top);
         self.view.reflectScrolledClipView(&self.view.contentView());
         self.sync();
     }

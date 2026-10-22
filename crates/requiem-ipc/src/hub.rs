@@ -130,7 +130,8 @@ impl Mirror {
             | Event::BrowseFailed { .. }
             | Event::AccountError { .. }
             | Event::TrackFailed { .. }
-            | Event::ProviderBroken { .. } => {}
+            | Event::ProviderBroken { .. }
+            | Event::PageChanged { .. } => {}
         }
     }
 

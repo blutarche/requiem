@@ -340,6 +340,8 @@ pub struct Ui {
     banner_inset: Cell<CGFloat>,
     home_page: Retained<NSView>,
     pub shelves: Shelves,
+    /// The service Home's shelves on screen are shown for, while they show.
+    home_shown: Cell<Option<Option<Service>>>,
     home_state: EmptyState,
     library_page: Retained<NSView>,
     library_head: Retained<NSView>,
@@ -727,6 +729,7 @@ impl Ui {
             banner_inset: Cell::new(0.0),
             home_page,
             shelves,
+            home_shown: Cell::new(None),
             home_state,
             library_page,
             library_head,
@@ -2242,7 +2245,11 @@ impl Ui {
     fn show_home(&self, view: &HomeView, shelves: &[Shelf], only: Option<Service>) {
         let ready =
             *view == HomeView::Page(PageView::Ready) && shelves.iter().any(|s| !s.items.is_empty());
-        self.shelves.set_shelves(if ready { shelves } else { &[] });
+        // New shelves for the same page, as a refresh brings, keep the place the user scrolled to.
+        let same = ready && self.home_shown.get() == Some(only);
+        self.home_shown.set(ready.then_some(only));
+        self.shelves
+            .set_shelves(if ready { shelves } else { &[] }, same);
         self.shelves.view.setHidden(!ready);
         self.home_state.view.setHidden(ready);
         match view {

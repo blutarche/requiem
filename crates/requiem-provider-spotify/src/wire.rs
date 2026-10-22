@@ -1,6 +1,7 @@
 //! The helper protocol. Each connection carries one JSON request line, answered by JSON lines;
 //! after an `attach` it carries any number of `read` lines, each answered by a header line and
-//! that many bytes, until the daemon closes it.
+//! that many bytes, until the daemon closes it. A `watch` is answered by a `changed` line each
+//! time a page has newer content than the helper last gave, until either side hangs up.
 
 use std::io::{self, BufRead, Read, Write};
 
@@ -25,6 +26,13 @@ pub(crate) enum Request {
     Read { offset: u64, len: usize },
     SignIn,
     SignOut,
+    Watch,
+}
+
+/// A page has newer content than the helper last gave for it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub(crate) struct Changed {
+    pub changed: Page,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -222,6 +230,12 @@ mod tests {
         );
         assert_eq!(json(&Request::SignIn), r#"{"op":"sign_in"}"#);
         assert_eq!(json(&Request::SignOut), r#"{"op":"sign_out"}"#);
+        assert_eq!(json(&Request::Watch), r#"{"op":"watch"}"#);
+        let changed = serde_json::to_string(&Changed {
+            changed: Page::Library,
+        })
+        .unwrap();
+        assert_eq!(changed, r#"{"changed":"Library"}"#);
         let browse = Request::Browse {
             page: Page::Collection(CollectionId {
                 provider: ProviderId("spotify".into()),

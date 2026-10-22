@@ -10,7 +10,7 @@ use std::io::{self, Read, Seek, SeekFrom};
 use std::os::unix::fs::DirBuilderExt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Mutex, PoisonError};
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use futures_util::StreamExt;
@@ -36,7 +36,7 @@ use serde_json::Value;
 use tokio::runtime::Runtime;
 use tokio::sync::Notify;
 
-use crate::covers::{AlbumCover, COVER_TRACKS, Covers, MOSAIC_COVERS, cover_choice};
+use crate::covers::{AlbumCover, COVER_TRACKS, Covers, InTime, MOSAIC_COVERS, Whole, cover_choice};
 use crate::keys::Keys;
 use crate::logger::redact;
 use crate::server::{Backend, Stream};
@@ -61,9 +61,11 @@ const ROOTLIST_PAGE: usize = 120;
 const MAX_PAGES: usize = 50;
 /// One whole-playlist fetch for a rootlist row, librespot's own retries included.
 const FULL_PLAYLIST_TIMEOUT: Duration = Duration::from_secs(10);
-/// All of a Library's whole-playlist fetches; rows still waiting then keep the rootlist's
-/// details, so the Library answers well within the daemon's call timeout.
-const FULL_PLAYLISTS_BUDGET: Duration = Duration::from_secs(30);
+/// How long an answer waits for the whole playlists its incomplete rows need; rows still
+/// waiting then are left out of it, and told of once they land.
+const INLINE_BUDGET: Duration = Duration::from_secs(5);
+/// How long a background lookup for a cover or a whole playlist may take.
+const BACKGROUND_BUDGET: Duration = Duration::from_secs(30);
 /// As many as YouTube Music's provider shows.
 const MAX_COLLECTION_TRACKS: usize = 1000;
 /// Home's most recently liked tracks.
@@ -87,7 +89,7 @@ pub(crate) struct Librespot {
     keys: Keys<(SpotifyId, FileId), AudioKey>,
     prepared: Mutex<PreparedStreams<Prep>>,
     flow: SignInFlow,
-    covers: Covers,
+    covers: Arc<Covers>,
 }
 
 /// `AudioKey` prints itself in `Debug`, so this has none.
@@ -162,7 +164,7 @@ impl Librespot {
             keys: Keys::new(),
             prepared: Mutex::new(PreparedStreams::new()),
             flow: SignInFlow::default(),
-            covers: Covers::new(),
+            covers: Arc::new(Covers::new()),
         }
     }
 
@@ -431,6 +433,18 @@ impl Backend for Librespot {
         let path = self.creds.clone().ok_or_else(no_place)?;
         let r#gen = self.flow.start();
         self.rt.block_on(self.sign_in_async(&path, r#gen, pending))
+    }
+
+    /// Home and Library show covers and playlists that background lookups find.
+    fn watch(&self, changed: &mut dyn FnMut(Page) -> bool) {
+        let mut changes = self.covers.subscribe();
+        self.rt.block_on(async {
+            while changes.changed().await.is_ok() {
+                if !changed(Page::Home) || !changed(Page::Library) {
+                    return;
+                }
+            }
+        });
     }
 
     fn sign_out(&self) -> Result<(), ProviderError> {
@@ -811,8 +825,12 @@ fn liked_card() -> Collection {
 }
 
 /// The rootlist's playlists in order, each completed where the rootlist left it incomplete and
-/// given a cover where it has none.
-async fn playlists(session: &Session, covers: &Covers) -> Result<Vec<Collection>, ProviderError> {
+/// given the cover found for it where it has none. Never waits for a cover, and for a whole
+/// playlist only [`INLINE_BUDGET`].
+async fn playlists(
+    session: &Session,
+    covers: &Arc<Covers>,
+) -> Result<Vec<Collection>, ProviderError> {
     let mut rows = Vec::new();
     let mut from = 0;
     for _ in 0..MAX_PAGES {
@@ -834,22 +852,23 @@ async fn playlists(session: &Session, covers: &Covers) -> Result<Vec<Collection>
             break;
         }
     }
-    let deadline = tokio::time::Instant::now() + FULL_PLAYLISTS_BUDGET;
-    let collections: Vec<_> = futures_util::stream::iter(rows)
-        .map(|row| listed(session, covers, row, deadline))
-        .buffered(METADATA_IN_FLIGHT)
-        .collect()
-        .await;
+    let until = tokio::time::Instant::now() + INLINE_BUDGET;
+    let collections = futures_util::future::join_all(
+        rows.into_iter()
+            .map(|row| listed(session, covers, row, until)),
+    )
+    .await;
     Ok(collections.into_iter().flatten().collect())
 }
 
-/// `row` as a Library card. A row that is incomplete is fetched whole for its details; one
-/// still without artwork then gets a cover, or stays blank if none can be had by `deadline`.
+/// `row` as a Library card. A row that is incomplete is completed from the whole playlist, or
+/// left out if that isn't had by `until`; one still without artwork gets the cover found for
+/// it, if any.
 async fn listed(
     session: &Session,
-    covers: &Covers,
+    covers: &Arc<Covers>,
     row: RootlistRow,
-    deadline: tokio::time::Instant,
+    until: tokio::time::Instant,
 ) -> Option<Collection> {
     let RootlistRow {
         id,
@@ -859,18 +878,33 @@ async fn listed(
     } = row;
     let mut first = None;
     if incomplete {
-        let full = full_playlist(session, &id, deadline).await;
-        if let Full::Playlist(list) = &full {
-            first = Some(first_tracks(list));
+        let fetch = {
+            let session = session.clone();
+            let covers = covers.clone();
+            move || async move {
+                let _permit = covers.permits.acquire().await.ok()?;
+                let deadline = tokio::time::Instant::now() + BACKGROUND_BUDGET;
+                whole_playlist(&session, &id, deadline).await
+            }
+        };
+        let InTime::Got(whole) = covers.whole_by(id, &revision, until, fetch).await else {
+            return None;
+        };
+        if let Some(Whole::Found { first: f, .. }) = &whole {
+            first = Some(f.clone());
         }
-        collection = completed(collection, full)?;
+        collection = completed(collection, whole)?;
     }
     if collection.artwork_url.is_none() {
-        collection.artwork_url = covers
-            .resolve(id, &revision, || {
-                find_cover(session, covers, id, first, deadline)
-            })
-            .await;
+        let find = {
+            let session = session.clone();
+            let covers = covers.clone();
+            move || async move {
+                let deadline = tokio::time::Instant::now() + BACKGROUND_BUDGET;
+                find_cover(&session, &covers, id, first, deadline).await
+            }
+        };
+        collection.artwork_url = covers.cover_now(id, &revision, find);
     }
     Some(collection)
 }
@@ -898,13 +932,17 @@ async fn find_cover(
     let ids = match first {
         Some(ids) => ids,
         None => {
-            let Full::Playlist(list) = full_playlist(session, &id, deadline).await else {
+            let whole = {
+                let _permit = covers.permits.acquire().await.ok()?;
+                whole_playlist(session, &id, deadline).await
+            };
+            let Some(Whole::Found { art, first, .. }) = whole else {
                 return None;
             };
-            if let Some(art) = list.attributes.as_ref().and_then(playlist_artwork) {
-                return Some(Some(art));
+            if art.is_some() {
+                return Some(art);
             }
-            first_tracks(&list)
+            first
         }
     };
     let until = deadline.min(tokio::time::Instant::now() + FULL_PLAYLIST_TIMEOUT);
@@ -915,15 +953,14 @@ async fn find_cover(
 }
 
 /// The album covers of `ids`' tracks in order, read [`MOSAIC_COVERS`] tracks at a time until
-/// there are that many distinct albums. `None` if a track's details failed and that left the
-/// albums short of that: the cover would not be the playlist's.
+/// there are that many distinct albums. `None` if a track's details failed: the cover might
+/// not be the playlist's.
 async fn album_covers(
     session: &Session,
     covers: &Covers,
     ids: Vec<SpotifyId>,
 ) -> Option<Vec<AlbumCover>> {
     let mut found = Vec::new();
-    let mut failed = false;
     for chunk in ids.chunks(MOSAIC_COVERS) {
         let results = futures_util::future::join_all(chunk.iter().map(|id| async move {
             let _permit = covers.permits.acquire().await.ok()?;
@@ -933,17 +970,14 @@ async fn album_covers(
         }))
         .await;
         for t in results {
-            match t {
-                Some(t) => found.extend(album_cover(&t)),
-                None => failed = true,
-            }
+            found.extend(album_cover(&t?));
         }
         let distinct: HashSet<_> = found.iter().map(|a| &a.album).collect();
         if distinct.len() >= MOSAIC_COVERS {
             return Some(found);
         }
     }
-    (!failed).then_some(found)
+    Some(found)
 }
 
 fn album_cover(t: &SpotifyTrack) -> Option<AlbumCover> {
@@ -1043,51 +1077,63 @@ fn songs(n: i32) -> String {
     }
 }
 
-/// A whole playlist fetched for an incomplete rootlist row.
-pub(crate) enum Full {
-    Playlist(Box<SelectedListContent>),
-    /// Spotify has no such playlist.
-    NotFound,
-    /// Timed out, refused or unreadable.
-    Failed,
-}
-
-/// `row` completed from `full`: its name, size and artwork where the playlist has them, else
-/// the rootlist's. `None` drops a playlist that doesn't exist.
-pub(crate) fn completed(mut row: Collection, full: Full) -> Option<Collection> {
-    let list = match full {
-        Full::Playlist(list) => list,
-        Full::NotFound => return None,
-        Full::Failed => return Some(row),
+/// `row` completed from `whole`: its name, size and artwork where the playlist has them, else
+/// the rootlist's, which a failed fetch, `None`, keeps. `None` drops a playlist that doesn't
+/// exist.
+pub(crate) fn completed(mut row: Collection, whole: Option<Whole>) -> Option<Collection> {
+    let (name, length, art) = match whole {
+        Some(Whole::Found {
+            name, length, art, ..
+        }) => (name, length, art),
+        Some(Whole::NotFound) => return None,
+        None => return Some(row),
     };
-    let attrs = list.attributes.as_ref();
-    if let Some(name) = attrs.map(ListAttributes::name).filter(|n| !n.is_empty()) {
-        row.title = name.to_owned();
+    if let Some(name) = name {
+        row.title = name;
     }
-    if let Some(n) = list.length {
+    if let Some(n) = length {
         row.subtitle = Some(songs(n));
     }
-    if let Some(art) = attrs.and_then(playlist_artwork) {
+    if let Some(art) = art {
         row.artwork_url = Some(art);
     }
     Some(row)
 }
 
-/// The whole playlist `id`, given up on at `deadline` at the latest.
-async fn full_playlist(session: &Session, id: &SpotifyId, deadline: tokio::time::Instant) -> Full {
+/// What a fetched playlist tells of itself for its row.
+pub(crate) fn whole_of(list: &SelectedListContent) -> Whole {
+    let attrs = list.attributes.as_ref();
+    Whole::Found {
+        name: attrs
+            .map(ListAttributes::name)
+            .filter(|n| !n.is_empty())
+            .map(str::to_owned),
+        length: list.length,
+        art: attrs.and_then(playlist_artwork),
+        first: first_tracks(list),
+    }
+}
+
+/// The whole playlist `id`, given up on at `deadline` at the latest: `None` if timed out,
+/// refused or unreadable.
+async fn whole_playlist(
+    session: &Session,
+    id: &SpotifyId,
+    deadline: tokio::time::Instant,
+) -> Option<Whole> {
     let until = deadline.min(tokio::time::Instant::now() + FULL_PLAYLIST_TIMEOUT);
     let fetched = tokio::time::timeout_at(until, session.spclient().get_playlist(id)).await;
     let why = match fetched {
         Ok(Ok(bytes)) => match SelectedListContent::parse_from_bytes(&bytes) {
-            Ok(list) => return Full::Playlist(Box::new(list)),
+            Ok(list) => return Some(whole_of(&list)),
             Err(e) => e.to_string(),
         },
-        Ok(Err(e)) if e.kind == ErrorKind::NotFound => return Full::NotFound,
+        Ok(Err(e)) if e.kind == ErrorKind::NotFound => return Some(Whole::NotFound),
         Ok(Err(e)) => shown(&e),
         Err(_) => "timed out".to_owned(),
     };
     eprintln!("[spotify] kept a playlist's rootlist details: {why}");
-    Full::Failed
+    None
 }
 
 fn playlist_artwork(a: &ListAttributes) -> Option<String> {
@@ -1454,7 +1500,7 @@ mod tests {
     fn a_whole_playlist_completes_its_row() {
         let got = completed(
             row("Hardcore Rock Mix", None, Some("old")),
-            Full::Playlist(whole("Hardcore Rock Mix", Some(50), Some("new"))),
+            Some(whole_of(&whole("Hardcore Rock Mix", Some(50), Some("new")))),
         )
         .unwrap();
         assert_eq!(got.title, "Hardcore Rock Mix");
@@ -1463,7 +1509,7 @@ mod tests {
 
         let got = completed(
             row("Playlist", Some("30 songs"), Some("old")),
-            Full::Playlist(whole("Named", None, None)),
+            Some(whole_of(&whole("Named", None, None))),
         )
         .unwrap();
         assert_eq!(got.title, "Named");
@@ -1473,16 +1519,19 @@ mod tests {
         // The whole playlist's own 0 is real.
         let got = completed(
             row("Empty", None, None),
-            Full::Playlist(whole("", Some(0), None)),
+            Some(whole_of(&whole("", Some(0), None))),
         );
         assert_eq!(got.unwrap().subtitle.as_deref(), Some("0 songs"));
     }
 
     #[test]
     fn a_missing_playlist_goes_and_a_failed_fetch_keeps_the_row() {
-        assert_eq!(completed(row("Playlist", None, None), Full::NotFound), None);
+        assert_eq!(
+            completed(row("Playlist", None, None), Some(Whole::NotFound)),
+            None
+        );
         let kept = row("Metalcore Mix", None, Some("art"));
-        assert_eq!(completed(kept.clone(), Full::Failed), Some(kept));
+        assert_eq!(completed(kept.clone(), None), Some(kept));
     }
 
     fn playlist(id: &str, title: &str) -> Collection {

@@ -775,6 +775,48 @@ fn browse_results_go_only_to_the_requester_and_accounts_to_everyone() {
 }
 
 #[test]
+fn a_changed_page_is_told_to_every_client() {
+    let rig = rig();
+    let p = &rig.provider;
+    let shelf = |id: &str| requiem_core::Shelf {
+        title: "Playlists".into(),
+        items: vec![requiem_core::Item::Track(track(id))],
+    };
+    p.script_browse(
+        requiem_core::Page::Library,
+        vec![Step::ok(vec![shelf("old")]), Step::ok(vec![shelf("new")])],
+    );
+    p.script_sign_in(requiem_core::testing::SignInScript {
+        pending: None,
+        gate: None,
+        outcome: Ok(AccountState::SignedIn { name: None }),
+    });
+    let (a, arx) = rig.client(Role::Gui);
+    let (_b, brx) = rig.client(Role::Cli);
+    take(&arx, IDLE_SNAPSHOT);
+    take(&brx, IDLE_SNAPSHOT);
+    a.send(Command::SignIn {
+        provider: ProviderId("fake".into()),
+    })
+    .unwrap();
+    next_event(&arx);
+    next_event(&brx);
+    a.send(Command::Browse {
+        req: 1,
+        page: requiem_core::Page::Library,
+    })
+    .unwrap();
+    assert!(matches!(next_event(&arx), Event::BrowseResults { .. }));
+
+    p.say_changed(requiem_core::Page::Library);
+    let changed = Event::PageChanged {
+        page: requiem_core::Page::Library,
+    };
+    assert_eq!(next_event(&arx), changed);
+    assert_eq!(next_event(&brx), changed);
+}
+
+#[test]
 fn an_imported_clients_json_is_a_plain_string_on_the_wire() {
     let json = r#"{"client_id":"id","client_secret":"s"}"#;
     let cmd = Command::ImportSignInClient {

@@ -28,3 +28,6 @@ semver.workspace = true
 
 [target.'cfg(target_os = "linux")'.dependencies]
 requiem-linux.workspace = true
+
+[dev-dependencies]
+requiem-core = { workspace = true, features = ["test-util"] }

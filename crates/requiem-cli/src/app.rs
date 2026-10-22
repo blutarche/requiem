@@ -160,6 +160,8 @@ struct Ui {
     /// What `play <n>` and `open <n>` number: `None` until the latest search or browse has
     /// returned.
     listing: Option<Vec<Item>>,
+    /// The page the listing is of, if it is Home or Library.
+    listed: Option<Page>,
     accounts: Vec<(ProviderId, AccountState)>,
     sign_in: Option<SignInWait>,
     sign_out: Option<AccountWait>,
@@ -258,10 +260,11 @@ impl Hub {
                 &format!("search failed: {error}"),
                 json!({ "type": "search_failed", "error": error }),
             ),
-            Event::BrowseResults { req, shelves, .. } => {
+            Event::BrowseResults { req, page, shelves } => {
                 if req != ui.latest_req {
                     return;
                 }
+                ui.listed = matches!(page, Page::Home | Page::Library).then_some(page);
                 ui.listing = Some(self.print_shelves(shelves));
                 ui.seen.results = true;
             }
@@ -288,6 +291,20 @@ impl Hub {
                 );
             }
             Event::Account { provider, state } => self.on_account(&mut ui, provider, state),
+            // The listing stays as it was, so the numbers printed keep meaning what they did.
+            Event::PageChanged { page } => {
+                if ui.listed.as_ref() == Some(&page) {
+                    let name = if page == Page::Home {
+                        "home"
+                    } else {
+                        "library"
+                    };
+                    self.emit(
+                        &format!("{name} changed; run {name} again to see it"),
+                        json!({ "type": "page_changed", "page": name }),
+                    );
+                }
+            }
             Event::AccountError { provider, error } => {
                 if let Some(w) = ui.sign_in.as_mut().filter(|w| w.provider == provider) {
                     w.failed = true;
@@ -765,6 +782,7 @@ impl<'a> App<'a> {
             ui: Mutex::new(Ui {
                 latest_req: 0,
                 listing: None,
+                listed: None,
                 accounts: Vec::new(),
                 sign_in: None,
                 sign_out: None,
@@ -1064,6 +1082,7 @@ impl<'a> App<'a> {
         let mut ui = self.hub.lock_ui();
         ui.latest_req += 1;
         ui.listing = None;
+        ui.listed = None;
         ui.seen.results = false;
         ui.latest_req
     }

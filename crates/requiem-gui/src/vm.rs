@@ -1187,9 +1187,11 @@ pub struct Vm {
     /// The newest req of search and browse alike, so no two share one.
     last_req: u64,
     pending_req: Option<u64>,
-    /// The req each browse page waits on, by `Slot`. A page drops answers to any other req, but
-    /// only its own newer fetch supersedes it: a slow Home answer is not lost to a Library load.
-    pending_browse: [Option<u64>; 3],
+    /// The req each browse page waits on, by `Slot`, and whether the fetch was the player's
+    /// idea rather than the user's, so its failure goes unsaid. A page drops answers to any
+    /// other req, but only its own newer fetch supersedes it: a slow Home answer is not lost to
+    /// a Library load.
+    pending_browse: [Option<(u64, bool)>; 3],
     last_toast: u64,
     dirty: Dirty,
     seek_hold: Option<Hold<Duration>>,
@@ -1430,7 +1432,7 @@ impl Vm {
                 self.failed_toast = Some(self.last_toast);
             }
             Event::BrowseResults { req, shelves, .. } => {
-                if let Some(slot) = self.take_browse(req) {
+                if let Some((slot, _)) = self.take_browse(req) {
                     self.land(slot, shelves);
                 }
             }
@@ -1439,14 +1441,16 @@ impl Vm {
                 error,
                 sign_in_required,
             } => {
-                if let Some(slot) = self.take_browse(req) {
+                if let Some((slot, silent)) = self.take_browse(req) {
                     let refreshing = self
                         .browse_mut(slot)
                         .filter(|b| !sign_in_required && b.load == Load::Refreshing);
                     if let Some(browse) = refreshing {
                         // The stale shelves stay; only the refresh failed.
                         browse.load = Load::Done;
-                        self.toast(format!("Couldn’t refresh {}: {error}", slot.name()), true);
+                        if !silent {
+                            self.toast(format!("Couldn’t refresh {}: {error}", slot.name()), true);
+                        }
                     } else {
                         self.set_browse(
                             slot,
@@ -1487,6 +1491,22 @@ impl Vm {
                     ),
                     true,
                 );
+            }
+            Event::PageChanged { page } => {
+                let slot = match page {
+                    Page::Home => Some(Slot::Home),
+                    Page::Library => Some(Slot::Library),
+                    Page::Collection(_) => None,
+                };
+                // Refetched quietly, the shelves on screen staying until the answer lands.
+                if let Some(slot) = slot
+                    && self
+                        .browse_mut(slot)
+                        .is_some_and(|b| matches!(b.load, Load::Done | Load::Refreshing))
+                {
+                    let fetch = self.fetch(slot, true);
+                    self.outbox.extend(fetch);
+                }
             }
         }
     }
@@ -1691,7 +1711,7 @@ impl Vm {
                         return Vec::new();
                     }
                 };
-                self.fetch(slot).into_iter().collect()
+                self.fetch(slot, false).into_iter().collect()
             }
             Intent::SignIn(provider) if can.player && self.knows(&provider) => {
                 if self.ui.needs_setup(&provider).is_none() {
@@ -1843,11 +1863,17 @@ impl Vm {
         }]
     }
 
-    /// The slot that waits on `req`, which then waits on none.
-    fn take_browse(&mut self, req: u64) -> Option<Slot> {
-        Slot::ALL.into_iter().find(|&slot| {
+    /// The slot that waits on `req`, which then waits on none, and whether its fetch was silent.
+    fn take_browse(&mut self, req: u64) -> Option<(Slot, bool)> {
+        Slot::ALL.into_iter().find_map(|slot| {
             let waiting = &mut self.pending_browse[slot as usize];
-            (*waiting == Some(req)).then(|| *waiting = None).is_some()
+            match *waiting {
+                Some((r, silent)) if r == req => {
+                    *waiting = None;
+                    Some((slot, silent))
+                }
+                _ => None,
+            }
         })
     }
 
@@ -1899,8 +1925,9 @@ impl Vm {
 
     /// Requests `slot`'s page. A page with shelves keeps them, refreshing, until the answer
     /// lands; one without shows a loading state. Nothing goes out while disconnected; the
-    /// reconnect asks again. Library needs a signed-in account.
-    fn fetch(&mut self, slot: Slot) -> Option<Command> {
+    /// reconnect asks again. Library needs a signed-in account. A `silent` fetch that fails
+    /// says nothing, unless it replaces one the user asked for.
+    fn fetch(&mut self, slot: Slot, silent: bool) -> Option<Command> {
         if !self.ui.controls().player {
             return None;
         }
@@ -1915,7 +1942,9 @@ impl Vm {
             }
         };
         self.last_req += 1;
-        self.pending_browse[slot as usize] = Some(self.last_req);
+        let waiting = &mut self.pending_browse[slot as usize];
+        let silent = silent && waiting.is_none_or(|(_, s)| s);
+        *waiting = Some((self.last_req, silent));
         match self.browse_mut(slot) {
             // Nothing on screen changes, so nothing is redrawn.
             Some(browse) if !browse.shelves.is_empty() => browse.load = Load::Refreshing,
@@ -1949,7 +1978,7 @@ impl Vm {
         if *load != Load::Idle {
             return Vec::new();
         }
-        self.fetch(slot).into_iter().collect()
+        self.fetch(slot, false).into_iter().collect()
     }
 
     /// A connection starts over: nothing asked before it is answered, and the snapshot that
@@ -2037,15 +2066,24 @@ impl Vm {
             return;
         }
         // The snapshot after a connect only adds providers, and Home was asked for with it.
-        if known && self.ui.home.load != Load::Idle {
-            let fetch = self.fetch(Slot::Home);
+        let home = known && self.ui.home.load != Load::Idle;
+        // Shelves of an account signed out, or another's since, are never shown again; a
+        // sign-in that only adds one keeps them until the new answer.
+        if was.iter().any(|a| !now.contains(a)) {
+            for slot in [Slot::Home, Slot::Library] {
+                self.pending_browse[slot as usize] = None;
+                self.set_browse(slot, Browse::default());
+            }
+        }
+        if home {
+            let fetch = self.fetch(Slot::Home, true);
             self.outbox.extend(fetch);
         }
         if now.is_empty() {
             self.pending_browse[Slot::Library as usize] = None;
             self.set_browse(Slot::Library, Browse::default());
         } else {
-            let fetch = self.fetch(Slot::Library);
+            let fetch = self.fetch(Slot::Library, true);
             self.outbox.extend(fetch);
         }
     }
@@ -4807,9 +4845,10 @@ mod tests {
                 .filter(|(_, p)| *p == Page::Home)
                 .count()
         };
-        // Signed out, then pending: Home lost its only account.
+        // Signed out, then pending: Home lost an account, whose shelves go.
         assert_eq!(home_fetches(&mut vm), 1);
-        assert_eq!(vm.ui().home.load, Load::Refreshing);
+        assert_eq!(vm.ui().home.load, Load::Loading);
+        assert!(vm.ui().home.shelves.is_empty());
         vm.apply(signed_in());
         assert_eq!(home_fetches(&mut vm), 1);
         // The same state announced again changes nothing.
@@ -4934,7 +4973,7 @@ mod tests {
     }
 
     #[test]
-    fn a_new_account_name_refetches_home_and_library_without_clearing() {
+    fn a_new_account_name_refetches_home_and_library_from_scratch() {
         let mut vm = loaded();
         vm.apply(account(AccountState::SignedIn {
             name: Some("Grace".into()),
@@ -4947,10 +4986,111 @@ mod tests {
             ),
             "{cmds:?}"
         );
+        // Ada's shelves are never shown as Grace's.
+        assert_eq!(vm.ui().home.load, Load::Loading);
+        assert_eq!(vm.ui().library.load, Load::Loading);
+        assert!(vm.ui().home.shelves.is_empty());
+        assert!(vm.ui().library.shelves.is_empty());
+    }
+
+    #[test]
+    fn a_second_sign_in_keeps_the_shelves_and_its_failed_refetch_says_nothing() {
+        let mut vm = loaded();
+        vm.apply(spotify_account(AccountState::SignedOut));
+        vm.apply(spotify_signed_in());
+        let cmds = browses(&vm.take_commands());
+        assert_eq!(cmds.len(), 2, "{cmds:?}");
         assert_eq!(vm.ui().home.load, Load::Refreshing);
         assert_eq!(vm.ui().library.load, Load::Refreshing);
         assert_eq!(vm.ui().home.shelves[0].title, "Quick picks");
+        for (req, _) in cmds {
+            vm.apply(Event::BrowseFailed {
+                req,
+                error: "timeout".into(),
+                sign_in_required: false,
+            });
+        }
+        assert_eq!(vm.ui().home.load, Load::Done);
         assert_eq!(vm.ui().library.shelves[0].title, "Playlists");
+        assert!(vm.ui().toast.is_none(), "{:?}", vm.ui().toast);
+    }
+
+    #[test]
+    fn a_signed_out_service_takes_its_shelves_with_it() {
+        let mut vm = loaded();
+        vm.apply(spotify_signed_in());
+        for (req, page) in browses(&vm.take_commands()) {
+            vm.apply(results(req, page, vec![shelf("Both", track_items(2))]));
+        }
+        vm.apply(spotify_account(AccountState::SignedOut));
+        let cmds = browses(&vm.take_commands());
+        assert_eq!(cmds.len(), 2, "{cmds:?}");
+        assert_eq!(vm.ui().home.load, Load::Loading);
+        assert_eq!(vm.ui().library.load, Load::Loading);
+        assert!(vm.ui().home.shelves.is_empty());
+        assert!(vm.ui().library.shelves.is_empty());
+    }
+
+    #[test]
+    fn a_changed_page_on_screen_is_fetched_again_quietly() {
+        let mut vm = loaded();
+        vm.apply(Event::PageChanged { page: Page::Home });
+        let cmds = browses(&vm.take_commands());
+        let [(req, Page::Home)] = cmds.as_slice() else {
+            panic!("expected one Home fetch, got {cmds:?}");
+        };
+        assert_eq!(vm.ui().home.load, Load::Refreshing);
+        assert_eq!(vm.ui().home.shelves[0].title, "Quick picks");
+        assert!(!vm.take_dirty().contains(Dirty::HOME), "nothing to redraw");
+        vm.apply(Event::BrowseFailed {
+            req: *req,
+            error: "network error".into(),
+            sign_in_required: false,
+        });
+        assert_eq!(vm.ui().home.load, Load::Done);
+        assert_eq!(vm.ui().home.shelves[0].title, "Quick picks");
+        assert!(vm.ui().toast.is_none(), "{:?}", vm.ui().toast);
+
+        vm.apply(Event::PageChanged {
+            page: Page::Library,
+        });
+        let req = browses(&vm.take_commands())[0].0;
+        vm.apply(results(
+            req,
+            Page::Library,
+            vec![shelf("Fresh", track_items(1))],
+        ));
+        assert_eq!(vm.ui().library.load, Load::Done);
+        assert_eq!(vm.ui().library.shelves[0].title, "Fresh");
+    }
+
+    #[test]
+    fn a_changed_page_not_yet_shown_is_left_for_its_visit() {
+        let (mut vm, _) = home();
+        vm.apply(signed_in());
+        vm.take_commands();
+        // Home is still loading; the Library's first answer is on its way.
+        for page in [Page::Home, Page::Library] {
+            vm.apply(Event::PageChanged { page });
+        }
+        assert!(browses(&vm.take_commands()).is_empty());
+    }
+
+    #[test]
+    fn a_change_while_the_user_refreshes_still_reports_the_failure() {
+        let mut vm = loaded();
+        vm.intent(Intent::Refresh);
+        vm.apply(Event::PageChanged { page: Page::Home });
+        let req = browses(&vm.take_commands())[0].0;
+        vm.apply(Event::BrowseFailed {
+            req,
+            error: "network error".into(),
+            sign_in_required: false,
+        });
+        assert_eq!(
+            vm.ui().toast.as_ref().map(|t| t.text.as_str()),
+            Some("Couldn’t refresh Home: network error")
+        );
     }
 
     #[test]

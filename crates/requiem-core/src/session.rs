@@ -1,8 +1,9 @@
 use std::collections::HashSet;
 use std::fmt;
+use std::panic::{self, AssertUnwindSafe};
 use std::sync::Arc;
 use std::thread::{self, JoinHandle};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crossbeam_channel::{Receiver, Sender, bounded, unbounded};
 
@@ -25,6 +26,26 @@ pub struct PersistState {
 /// Called on the session thread; must not block.
 pub type PersistSink = Arc<dyn Fn(PersistState) + Send + Sync>;
 
+/// One provider's answer to Home or Library.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PagePart {
+    pub provider: ProviderId,
+    /// The name of the account that answered.
+    pub account: Option<String>,
+    pub shelves: Vec<Shelf>,
+}
+
+/// The last answers to Home and Library, which a restart answers with at once: only what the
+/// user saw, never a credential.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct SavedPages {
+    pub home: Vec<PagePart>,
+    pub library: Vec<PagePart>,
+}
+
+/// Called on the session thread; must not block.
+pub type PagesSink = Arc<dyn Fn(SavedPages) + Send + Sync>;
+
 #[derive(Clone)]
 pub struct SessionConfig {
     pub resolve_retry_delay: Duration,
@@ -35,6 +56,11 @@ pub struct SessionConfig {
     pub subscriber_position_backlog: usize,
     /// Called with a fresh state after every queue, volume or play-state event.
     pub persist: Option<PersistSink>,
+    /// What the last run kept of Home and Library. Parts of accounts not signed in at the
+    /// start are dropped.
+    pub pages: SavedPages,
+    /// Called with Home and Library whenever what is kept of them changes.
+    pub save_pages: Option<PagesSink>,
 }
 
 impl fmt::Debug for SessionConfig {
@@ -49,6 +75,8 @@ impl fmt::Debug for SessionConfig {
                 &self.subscriber_position_backlog,
             )
             .field("persist", &self.persist.is_some())
+            .field("pages", &self.pages)
+            .field("save_pages", &self.save_pages.is_some())
             .finish()
     }
 }
@@ -62,6 +90,8 @@ impl Default for SessionConfig {
             prev_restart_threshold: Duration::from_secs(3),
             subscriber_position_backlog: 64,
             persist: None,
+            pages: SavedPages::default(),
+            save_pages: None,
         }
     }
 }
@@ -93,6 +123,16 @@ enum Msg {
         result: Result<Vec<Shelf>, ProviderError>,
         accounts: Vec<(ProviderId, AccountState)>,
     },
+    /// One provider's answer to fetch `run` of Home or Library, with its state after it.
+    PageAnswered {
+        page: Page,
+        run: u64,
+        provider: ProviderId,
+        result: Result<Vec<Shelf>, ProviderError>,
+        account: AccountState,
+    },
+    /// A provider says `page` has newer content than it gave.
+    ProviderChanged(Page),
     Account {
         provider: ProviderId,
         state: AccountState,
@@ -199,6 +239,35 @@ impl PreSlot {
     }
 }
 
+/// A fetch of Home or Library from every signed-in provider that answers it.
+struct Run {
+    id: u64,
+    /// Browses with nothing kept to answer them; the first provider's answer does.
+    waiting: Vec<u64>,
+    /// The providers asked, with their states when asked.
+    asked: Vec<(ProviderId, AccountState)>,
+    left: usize,
+    hard: Option<ProviderError>,
+    sign_in: Option<ProviderError>,
+}
+
+/// How long after a `PageChanged` a browse that the kept parts answer fetches nothing more:
+/// clients browse again on hearing it, and a provider whose content differs on every fetch
+/// would otherwise keep them at it.
+const CHANGED_QUIET: Duration = Duration::from_secs(10);
+
+/// What is kept of Home or Library, and its fetch.
+#[derive(Default)]
+struct Kept {
+    /// Only of accounts that are signed in now.
+    parts: Vec<PagePart>,
+    run: Option<Run>,
+    /// Fetch again once `run` ends: something changed after it started.
+    again: bool,
+    /// When the last `PageChanged` for it went out.
+    changed_at: Option<Instant>,
+}
+
 struct Actor {
     providers: Vec<Arc<dyn Provider>>,
     engine: Box<dyn Engine>,
@@ -233,6 +302,10 @@ struct Actor {
     signing_in: HashSet<ProviderId>,
     /// Providers whose running sign-in a `SignOut` ended: its failure is not an error.
     signed_out_while_signing_in: HashSet<ProviderId>,
+
+    home: Kept,
+    library: Kept,
+    last_run: u64,
 }
 
 /// The provider's own words, except that a network failure keeps its "network error" prefix.
@@ -357,6 +430,15 @@ fn merge_library(answers: Vec<Vec<Shelf>>) -> Vec<Shelf> {
     }]
 }
 
+/// `answers` are each provider's shelves, in provider order.
+fn merge(page: &Page, answers: Vec<Vec<Shelf>>) -> Vec<Shelf> {
+    match page {
+        Page::Home => merge_home(answers),
+        Page::Library => merge_library(answers),
+        Page::Collection(_) => answers.into_iter().flatten().collect(),
+    }
+}
+
 fn resolve_with_retry(
     provider: &dyn Provider,
     track: &TrackId,
@@ -375,11 +457,48 @@ impl Actor {
     fn new(
         providers: Vec<Arc<dyn Provider>>,
         engine: Box<dyn Engine>,
-        config: SessionConfig,
+        mut config: SessionConfig,
         tx: Sender<Msg>,
     ) -> Self {
-        let accounts = providers.iter().map(|p| (p.id(), p.account())).collect();
+        let accounts: Vec<(ProviderId, AccountState)> =
+            providers.iter().map(|p| (p.id(), p.account())).collect();
+        for p in &providers {
+            let tx = tx.clone();
+            p.on_page_changed(Arc::new(move |page| {
+                let _ = tx.send(Msg::ProviderChanged(page));
+            }));
+        }
+        // Parts of accounts signed out since are dropped now: a later sign-in may be another
+        // account that the name can't tell apart.
+        let holds = |part: &PagePart| {
+            accounts.iter().any(|(p, s)| {
+                *p == part.provider
+                    && matches!(s, AccountState::SignedIn { name } if *name == part.account)
+            })
+        };
+        let kept = |mut parts: Vec<PagePart>| {
+            parts.retain(&holds);
+            Kept {
+                parts,
+                ..Kept::default()
+            }
+        };
+        let saved = std::mem::take(&mut config.pages);
+        let total = saved.home.len() + saved.library.len();
+        let home = kept(saved.home);
+        let library = kept(saved.library);
+        if home.parts.len() + library.parts.len() != total
+            && let Some(sink) = &config.save_pages
+        {
+            sink(SavedPages {
+                home: home.parts.clone(),
+                library: library.parts.clone(),
+            });
+        }
         Self {
+            home,
+            library,
+            last_run: 0,
             providers,
             engine,
             config,
@@ -451,6 +570,14 @@ impl Actor {
                         self.set_account(provider, state, false);
                     }
                 }
+                Msg::PageAnswered {
+                    page,
+                    run,
+                    provider,
+                    result,
+                    account,
+                } => self.page_answered(page, run, provider, result, account),
+                Msg::ProviderChanged(page) => self.provider_changed(page),
                 Msg::Account { provider, state } => self.set_account(provider, state, false),
                 Msg::SignOutDone {
                     provider,
@@ -744,19 +871,7 @@ impl Actor {
         let targets: Vec<Arc<dyn Provider>> = match &page {
             Page::Collection(c) => self.provider(&c.provider).into_iter().collect(),
             Page::Home | Page::Library => {
-                let signed_in: Vec<_> = self
-                    .providers
-                    .iter()
-                    .filter(|p| page != Page::Home || p.has_home())
-                    .filter(|p| {
-                        matches!(
-                            self.account_of(&p.id()),
-                            Some(AccountState::SignedIn { .. })
-                        )
-                    })
-                    .cloned()
-                    .collect();
-                if signed_in.is_empty() {
+                if self.page_targets(&page).is_empty() {
                     let why = if page == Page::Home {
                         "sign in to see your music"
                     } else {
@@ -770,7 +885,24 @@ impl Actor {
                     });
                     return;
                 }
-                signed_in
+                match self.served(&page) {
+                    Some(shelves) => {
+                        self.emit(Event::BrowseResults {
+                            req,
+                            page: page.clone(),
+                            shelves,
+                        });
+                        let quiet = self
+                            .kept(&page)
+                            .and_then(|k| k.changed_at)
+                            .is_some_and(|at| at.elapsed() < CHANGED_QUIET);
+                        if !quiet {
+                            self.fetch_page(page, None);
+                        }
+                    }
+                    None => self.fetch_page(page, Some(req)),
+                }
+                return;
             }
         };
         if targets.is_empty() {
@@ -787,11 +919,7 @@ impl Actor {
                 let page = page.clone();
                 move |p| p.browse(&page)
             });
-            let result = result.map(|answers| match page {
-                Page::Home => merge_home(answers),
-                Page::Library => merge_library(answers),
-                Page::Collection(_) => answers.into_iter().flatten().collect(),
-            });
+            let result = result.map(|answers| merge(&page, answers));
             let accounts = targets.iter().map(|p| (p.id(), p.account())).collect();
             let _ = tx.send(Msg::Browsed {
                 req,
@@ -800,6 +928,259 @@ impl Actor {
                 accounts,
             });
         });
+    }
+
+    /// The signed-in providers that answer `page`, Home or Library, in provider order.
+    fn page_targets(&self, page: &Page) -> Vec<Arc<dyn Provider>> {
+        self.providers
+            .iter()
+            .filter(|p| *page != Page::Home || p.has_home())
+            .filter(|p| {
+                matches!(
+                    self.account_of(&p.id()),
+                    Some(AccountState::SignedIn { .. })
+                )
+            })
+            .cloned()
+            .collect()
+    }
+
+    fn kept(&self, page: &Page) -> Option<&Kept> {
+        match page {
+            Page::Home => Some(&self.home),
+            Page::Library => Some(&self.library),
+            Page::Collection(_) => None,
+        }
+    }
+
+    fn kept_mut(&mut self, page: &Page) -> Option<&mut Kept> {
+        match page {
+            Page::Home => Some(&mut self.home),
+            Page::Library => Some(&mut self.library),
+            Page::Collection(_) => None,
+        }
+    }
+
+    /// The kept parts of `page` merged, as all of them landing at once would be; `None` when
+    /// none is kept.
+    fn served(&self, page: &Page) -> Option<Vec<Shelf>> {
+        let kept = self.kept(page)?;
+        let answers: Vec<Vec<Shelf>> = self
+            .page_targets(page)
+            .iter()
+            .filter_map(|p| {
+                let id = p.id();
+                let part = kept.parts.iter().find(|part| part.provider == id)?;
+                Some(part.shelves.clone())
+            })
+            .collect();
+        (!answers.is_empty()).then(|| merge(page, answers))
+    }
+
+    fn save_pages(&self) {
+        if let Some(sink) = &self.config.save_pages {
+            sink(SavedPages {
+                home: self.home.parts.clone(),
+                library: self.library.parts.clone(),
+            });
+        }
+    }
+
+    /// Starts fetching `page`, Home or Library, from its providers, unless a fetch runs: then
+    /// `req` waits on that one, which is followed by another if the providers changed since
+    /// it started.
+    fn fetch_page(&mut self, page: Page, req: Option<u64>) {
+        let targets = self.page_targets(&page);
+        let asked: Vec<(ProviderId, AccountState)> = targets
+            .iter()
+            .map(|p| {
+                let id = p.id();
+                let state = self.account_of(&id).cloned();
+                (id, state.unwrap_or(AccountState::SignedOut))
+            })
+            .collect();
+        let id = self.last_run + 1;
+        let Some(kept) = self.kept_mut(&page) else {
+            return;
+        };
+        if let Some(run) = &mut kept.run {
+            run.waiting.extend(req);
+            if run.asked != asked {
+                kept.again = true;
+            }
+            return;
+        }
+        if targets.is_empty() {
+            return;
+        }
+        kept.run = Some(Run {
+            id,
+            waiting: req.into_iter().collect(),
+            asked,
+            left: targets.len(),
+            hard: None,
+            sign_in: None,
+        });
+        self.last_run = id;
+        for p in targets {
+            let tx = self.tx.clone();
+            let page = page.clone();
+            thread::spawn(move || {
+                let result = panic::catch_unwind(AssertUnwindSafe(|| p.browse(&page)))
+                    .unwrap_or_else(|_| {
+                        eprintln!("requiem: browse worker panicked");
+                        Err(ProviderError::Unplayable("the browse failed".into()))
+                    });
+                let _ = tx.send(Msg::PageAnswered {
+                    page,
+                    run: id,
+                    provider: p.id(),
+                    result,
+                    account: p.account(),
+                });
+            });
+        }
+    }
+
+    /// Takes one provider's answer into what is kept of `page`. The first that leaves
+    /// something to show answers the browses waiting; any later change is a `PageChanged`.
+    fn page_answered(
+        &mut self,
+        page: Page,
+        run: u64,
+        provider: ProviderId,
+        result: Result<Vec<Shelf>, ProviderError>,
+        account: AccountState,
+    ) {
+        let before = self.served(&page);
+        let current = self.account_of(&provider).cloned();
+        let Some(kept) = self.kept_mut(&page) else {
+            return;
+        };
+        let Some(r) = kept.run.as_mut().filter(|r| r.id == run) else {
+            self.set_account(provider, account, false);
+            return;
+        };
+        r.left -= 1;
+        let asked = r
+            .asked
+            .iter()
+            .find(|(p, _)| *p == provider)
+            .map(|(_, s)| s.clone());
+        let mut changed = false;
+        // The account changed while it answered: neither its answer nor its part from before
+        // is the current account's.
+        let same = matches!(&asked, Some(AccountState::SignedIn { name })
+            if account == AccountState::SignedIn { name: name.clone() })
+            && current == asked;
+        if !same {
+            let n = kept.parts.len();
+            kept.parts.retain(|p| p.provider != provider);
+            changed = kept.parts.len() != n;
+        }
+        match result {
+            Ok(shelves) => {
+                if let Some(AccountState::SignedIn { name }) = asked
+                    && same
+                {
+                    let part = PagePart {
+                        provider: provider.clone(),
+                        account: name,
+                        shelves,
+                    };
+                    match kept.parts.iter_mut().find(|p| p.provider == provider) {
+                        Some(old) if *old == part => {}
+                        Some(old) => {
+                            *old = part;
+                            changed = true;
+                        }
+                        None => {
+                            kept.parts.push(part);
+                            changed = true;
+                        }
+                    }
+                }
+            }
+            Err(e @ ProviderError::SignInRequired(_)) => {
+                r.sign_in.get_or_insert(e);
+                let n = kept.parts.len();
+                kept.parts.retain(|p| p.provider != provider);
+                changed |= kept.parts.len() != n;
+            }
+            // The part kept from before stays: stale beats none.
+            Err(e) => {
+                eprintln!("requiem: browse on {} failed: {e}", provider.0);
+                r.hard.get_or_insert(e);
+            }
+        }
+        let done = r.left == 0;
+        if changed {
+            self.save_pages();
+        }
+        let after = self.served(&page);
+        let Some(kept) = self.kept_mut(&page) else {
+            return;
+        };
+        let Some(r) = kept.run.as_mut() else {
+            return;
+        };
+        let answered = if after.is_some() {
+            std::mem::take(&mut r.waiting)
+        } else {
+            Vec::new()
+        };
+        let mut failed = None;
+        if done {
+            let r = kept.run.take().expect("the run is current");
+            if !r.waiting.is_empty() {
+                let e = r
+                    .hard
+                    .or(r.sign_in)
+                    .unwrap_or_else(|| ProviderError::Unplayable("no provider answered".into()));
+                failed = Some((r.waiting, e));
+            }
+        }
+        let again = done && std::mem::take(&mut kept.again);
+        if answered.is_empty() {
+            if after != before {
+                kept.changed_at = Some(Instant::now());
+                self.emit(Event::PageChanged { page: page.clone() });
+            }
+        } else if let Some(shelves) = after {
+            for req in answered {
+                self.emit(Event::BrowseResults {
+                    req,
+                    page: page.clone(),
+                    shelves: shelves.clone(),
+                });
+            }
+        }
+        if let Some((waiting, e)) = failed {
+            for req in waiting {
+                self.emit(Event::BrowseFailed {
+                    req,
+                    sign_in_required: matches!(e, ProviderError::SignInRequired(_)),
+                    error: e.to_string(),
+                });
+            }
+        }
+        // After the answer, as it may have signed the provider out.
+        self.set_account(provider, account, false);
+        if again {
+            self.fetch_page(page, None);
+        }
+    }
+
+    /// A provider's newer content is fetched for a page that has been answered.
+    fn provider_changed(&mut self, page: Page) {
+        let Some(kept) = self.kept_mut(&page) else {
+            return;
+        };
+        if kept.run.is_some() {
+            kept.again = true;
+        } else if !kept.parts.is_empty() {
+            self.fetch_page(page, None);
+        }
     }
 
     fn account_of(&self, provider: &ProviderId) -> Option<&AccountState> {
@@ -815,6 +1196,19 @@ impl Actor {
             Some((_, known)) if *known == state && !force => return,
             Some((_, known)) => *known = state.clone(),
             None => self.accounts.push((provider.clone(), state.clone())),
+        }
+        // What the account that was signed in answered is never shown for another, or for none.
+        let mut dropped = false;
+        for kept in [&mut self.home, &mut self.library] {
+            let n = kept.parts.len();
+            kept.parts.retain(|p| {
+                p.provider != provider
+                    || matches!(&state, AccountState::SignedIn { name } if *name == p.account)
+            });
+            dropped |= kept.parts.len() != n;
+        }
+        if dropped {
+            self.save_pages();
         }
         self.emit(Event::Account { provider, state });
     }

@@ -6,7 +6,8 @@ use std::time::{Duration, Instant};
 use crossbeam_channel::{Receiver, RecvTimeoutError, Sender, bounded};
 use requiem_audio::{AudioEngine, AudioOptions};
 use requiem_core::{
-    Command, EngineEventSink, EnqueueMode, Event, PersistSink, Session, SessionConfig,
+    Command, EngineEventSink, EnqueueMode, Event, PagesSink, PersistSink, SavedPages, Session,
+    SessionConfig,
 };
 use requiem_ipc::{Instance, ServeError, Server, ServerHooks};
 use requiem_provider_spotify::{SpotifyOptions, SpotifyProvider};
@@ -37,6 +38,7 @@ macro_rules! debug {
 }
 
 mod idle;
+mod pages;
 mod persist;
 mod ui;
 #[cfg(target_os = "macos")]
@@ -147,6 +149,7 @@ fn main() -> ExitCode {
     let state_path = persist::state_path();
     let restored = state_path.as_deref().and_then(persist::load);
     // Nothing is sent to the writer before the server is up, so an early return writes nothing.
+    let pages_path = state_path.as_deref().map(pages::path);
     let (persist_sink, writer) = match state_path {
         Some(path) => {
             let (tx, handle) = persist::spawn_writer(path, restored.clone());
@@ -157,6 +160,17 @@ fn main() -> ExitCode {
         }
         None => (None, None),
     };
+    let (kept_pages, pages_sink, pages_writer) = match pages_path {
+        Some(path) => {
+            let kept = pages::load(&path);
+            let (tx, handle) = pages::spawn_writer(path, kept.clone());
+            let sink: PagesSink = Arc::new(move |pages| {
+                let _ = tx.send(pages);
+            });
+            (kept, Some(sink), Some(handle))
+        }
+        None => (SavedPages::default(), None, None),
+    };
     let session = Session::spawn(
         vec![spotify, provider],
         move |sink| {
@@ -165,6 +179,8 @@ fn main() -> ExitCode {
         },
         SessionConfig {
             persist: persist_sink,
+            pages: kept_pages,
+            save_pages: pages_sink,
             ..SessionConfig::default()
         },
     );
@@ -219,7 +235,7 @@ fn main() -> ExitCode {
         drop(done_tx);
     });
     debug!("shutting down");
-    shut_down(server, writer, &updater);
+    shut_down(server, [writer, pages_writer], &updater);
     ExitCode::SUCCESS
 }
 
@@ -252,11 +268,11 @@ fn self_test() -> ExitCode {
     }
 }
 
-/// Stops serving, waits for the state writer, then installs a ready update.
-fn shut_down(server: Server, writer: Option<JoinHandle<()>>, updater: &Updater) {
-    // Shutting the Session down drops its sink and so closes the writer's channel.
-    let join = |writer: Option<JoinHandle<()>>| {
-        if let Some(writer) = writer {
+/// Stops serving, waits for the state writers, then installs a ready update.
+fn shut_down(server: Server, writers: [Option<JoinHandle<()>>; 2], updater: &Updater) {
+    // Shutting the Session down drops its sinks and so closes the writers' channels.
+    let join = |writers: [Option<JoinHandle<()>>; 2]| {
+        for writer in writers.into_iter().flatten() {
             let _ = writer.join();
         }
     };
@@ -265,12 +281,12 @@ fn shut_down(server: Server, writer: Option<JoinHandle<()>>, updater: &Updater) 
         Some(update::Install::Restart(ready)) => {
             let gui = server.clients().gui > 0;
             let instance = server.shutdown_keeping_lock();
-            join(writer);
+            join(writers);
             updater.restart(ready, instance, gui);
         }
         finished => {
             server.shutdown();
-            join(writer);
+            join(writers);
             if let Some(update::Install::AtExit(ready)) = finished {
                 updater.install_at_exit(ready);
             }
@@ -280,7 +296,7 @@ fn shut_down(server: Server, writer: Option<JoinHandle<()>>, updater: &Updater) 
     {
         let _ = updater;
         server.shutdown();
-        join(writer);
+        join(writers);
     }
 }
 
