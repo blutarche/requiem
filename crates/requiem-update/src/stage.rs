@@ -448,9 +448,9 @@ mod tests {
         let dir = TempDir::new();
         let folder = dir.path().join("saved");
         let state = dir.path().join("state.json");
-        let token = dir.path().join("google-token.json");
+        let session = dir.path().join("ytmusic-session.json");
         fs::write(&state, b"old state").unwrap();
-        let saved = Saved::new(&folder, &[&state, &token], |_| {}).unwrap();
+        let saved = Saved::new(&folder, &[&state, &session], |_| {}).unwrap();
         let copy = folder.join("0");
         assert_eq!(fs::read(&copy).unwrap(), b"old state");
         let mode = |p: &Path| fs::metadata(p).unwrap().permissions().mode() & 0o777;
@@ -461,11 +461,11 @@ mod tests {
         );
 
         fs::write(&state, b"new state").unwrap();
-        fs::write(&token, b"new token").unwrap();
+        fs::write(&session, b"new session").unwrap();
         saved.restore().unwrap();
         assert_eq!(fs::read(&state).unwrap(), b"old state");
         assert_eq!(mode(&state), 0o600);
-        assert!(!token.exists());
+        assert!(!session.exists());
         saved.remove().unwrap();
         assert!(!folder.exists());
     }
