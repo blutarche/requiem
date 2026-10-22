@@ -295,6 +295,16 @@ impl FakeProvider {
         assert!(!res.timed_out(), "timed out waiting for {n} search calls");
     }
 
+    /// Counts calls on entry, so it also fires for a browse still held in a step.
+    pub fn wait_browse_calls(&self, n: usize) {
+        let st = self.state.lock().unwrap();
+        let (_st, res) = self
+            .called
+            .wait_timeout_while(st, WAIT, |s| s.browse_calls.len() < n)
+            .unwrap();
+        assert!(!res.timed_out(), "timed out waiting for {n} browse calls");
+    }
+
     /// Counts calls on entry, so it also fires for a sign-out still held by its gate.
     pub fn wait_sign_out_calls(&self, n: usize) {
         let st = self.state.lock().unwrap();

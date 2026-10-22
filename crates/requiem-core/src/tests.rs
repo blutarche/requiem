@@ -120,6 +120,13 @@ impl Rig {
         self.wait_event(|e| matches!(e, Event::Volume(_)));
     }
 
+    /// `settle`, returning the events it passed over.
+    fn settle_seen(&self) -> Vec<Event> {
+        std::thread::sleep(Duration::from_millis(50));
+        self.send(Command::SetVolume(100));
+        self.events_until(1, |e| matches!(e, Event::Volume(_)))
+    }
+
     /// Lets detached workers finish and post their results, then drains the inbox.
     fn settle(&self) {
         std::thread::sleep(Duration::from_millis(50));
@@ -2297,9 +2304,6 @@ fn a_kept_home_answers_at_once_then_says_when_a_fetch_changed_it() {
         }
     });
     assert_eq!(browse_event(&r, 3, Page::Home), results(3, Page::Home, new));
-    // Browsing again on hearing of the change fetches nothing more.
-    r.settle();
-    assert_eq!(a.browse_calls().len(), 2);
 }
 
 #[test]
@@ -2455,9 +2459,9 @@ fn a_kept_page_of_another_account_is_dropped_at_the_start() {
         req: 1,
         page: Page::Library,
     });
-    r.settle();
     assert!(
-        r.rx.try_iter()
+        r.settle_seen()
+            .iter()
             .all(|e| !matches!(e, Event::BrowseResults { .. })),
         "answered while the fetch was held"
     );
@@ -2546,6 +2550,197 @@ fn a_provider_saying_its_page_changed_has_it_fetched_again() {
         }
     });
     assert_eq!(a.browse_calls(), vec![Page::Home, Page::Home]);
+}
+
+fn is_answer(e: &Event) -> bool {
+    matches!(e, Event::BrowseResults { .. } | Event::BrowseFailed { .. })
+}
+
+#[test]
+fn an_empty_first_answer_waits_for_a_provider_with_something_to_show() {
+    let (a, b) = pair();
+    for p in [&a, &b] {
+        p.set_has_home(true);
+        p.set_account(signed_in());
+    }
+    let gate = Gate::new();
+    let slow = vec![track_shelf("Slow", "first", &["a1"])];
+    a.script_browse(Page::Home, vec![Step::ok(slow.clone()).gated(&gate)]);
+    b.script_browse(Page::Home, vec![Step::ok(Vec::new())]);
+    let r = rig_with(a, vec![b.clone()], config());
+    r.send(Command::Browse {
+        req: 1,
+        page: Page::Home,
+    });
+    b.wait_browse_calls(1);
+    let mut seen = r.settle_seen();
+    gate.release();
+    if !seen.iter().any(is_answer) {
+        seen.extend(r.events_until(1, is_answer));
+    }
+    let shown: Vec<_> = seen
+        .into_iter()
+        .filter(|e| is_answer(e) || matches!(e, Event::PageChanged { .. }))
+        .collect();
+    assert_eq!(shown, [results(1, Page::Home, slow)]);
+}
+
+#[test]
+fn a_page_empty_everywhere_is_answered_once_every_provider_is_in() {
+    let (a, b) = pair();
+    for p in [&a, &b] {
+        p.set_has_home(true);
+        p.set_account(signed_in());
+    }
+    let gate = Gate::new();
+    a.script_browse(Page::Home, vec![Step::ok(Vec::new()).gated(&gate)]);
+    b.script_browse(Page::Home, vec![Step::ok(Vec::new())]);
+    let r = rig_with(a, vec![b.clone()], config());
+    r.send(Command::Browse {
+        req: 1,
+        page: Page::Home,
+    });
+    b.wait_browse_calls(1);
+    let seen = r.settle_seen();
+    gate.release();
+    assert!(
+        !seen.iter().any(is_answer),
+        "answered before every provider was in: {seen:?}"
+    );
+    assert_eq!(r.wait_event(is_answer), results(1, Page::Home, Vec::new()));
+}
+
+#[test]
+fn a_provider_signed_in_right_after_a_change_is_fetched_on_the_next_browse() {
+    let (a, b) = pair();
+    for p in [&a, &b] {
+        p.set_has_home(true);
+    }
+    a.set_account(signed_in());
+    a.script_browse(
+        Page::Home,
+        vec![
+            Step::ok(vec![track_shelf("Mixes", "first", &["a1"])]),
+            Step::ok(vec![track_shelf("Mixes", "first", &["a2"])]),
+            Step::ok(vec![track_shelf("Mixes", "first", &["a2"])]),
+        ],
+    );
+    b.script_browse(
+        Page::Home,
+        vec![Step::ok(vec![track_shelf("Theirs", "second", &["b1"])])],
+    );
+    b.script_sign_in(SignInScript {
+        pending: None,
+        gate: None,
+        outcome: Ok(signed_in()),
+    });
+    let r = rig_with(a, vec![b.clone()], config());
+    browse_event(&r, 1, Page::Home);
+    r.settle();
+    browse_event(&r, 2, Page::Home);
+    r.wait_event(|e| {
+        matches!(
+            e,
+            Event::PageChanged {
+                page: Page::Home,
+                ..
+            }
+        )
+    });
+    r.send(Command::SignIn {
+        provider: ProviderId("second".into()),
+    });
+    r.wait_event(|e| {
+        matches!(e, Event::Account { provider, state: AccountState::SignedIn { .. } }
+            if provider.0 == "second")
+    });
+    browse_event(&r, 3, Page::Home);
+    b.wait_browse_calls(1);
+    r.wait_event(|e| {
+        matches!(
+            e,
+            Event::PageChanged {
+                page: Page::Home,
+                ..
+            }
+        )
+    });
+}
+
+#[test]
+fn a_browse_right_after_a_change_still_fetches_again() {
+    let a = FakeProvider::new("first");
+    a.set_has_home(true);
+    a.set_account(signed_in());
+    a.script_browse(
+        Page::Home,
+        vec![
+            Step::ok(vec![track_shelf("Mixes", "first", &["a1"])]),
+            Step::ok(vec![track_shelf("Mixes", "first", &["a2"])]),
+            Step::ok(vec![track_shelf("Mixes", "first", &["a3"])]),
+        ],
+    );
+    let r = rig_with(a.clone(), vec![], config());
+    browse_event(&r, 1, Page::Home);
+    r.settle();
+    browse_event(&r, 2, Page::Home);
+    r.wait_event(|e| {
+        matches!(
+            e,
+            Event::PageChanged {
+                page: Page::Home,
+                ..
+            }
+        )
+    });
+    assert_eq!(
+        browse_event(&r, 3, Page::Home),
+        results(3, Page::Home, vec![track_shelf("Mixes", "first", &["a2"])])
+    );
+    a.wait_browse_calls(3);
+    r.wait_event(|e| {
+        matches!(
+            e,
+            Event::PageChanged {
+                page: Page::Home,
+                ..
+            }
+        )
+    });
+}
+
+#[test]
+fn a_browse_waiting_on_a_provider_that_signs_out_asks_for_sign_in() {
+    let a = FakeProvider::new("first");
+    a.set_has_home(true);
+    a.set_account(signed_in());
+    let gate = Gate::new();
+    a.script_browse(
+        Page::Home,
+        vec![Step::ok(vec![track_shelf("Mixes", "first", &["a1"])]).gated(&gate)],
+    );
+    let r = rig_with(a.clone(), vec![], config());
+    r.send(Command::Browse {
+        req: 1,
+        page: Page::Home,
+    });
+    a.wait_browse_calls(1);
+    r.send(Command::SignOut {
+        provider: ProviderId("first".into()),
+    });
+    r.wait_event(|e| {
+        matches!(e, Event::Account { provider, state: AccountState::SignedOut }
+            if provider.0 == "first")
+    });
+    gate.release();
+    assert_eq!(
+        r.wait_event(is_answer),
+        Event::BrowseFailed {
+            req: 1,
+            error: "sign-in required: sign in to see your music".into(),
+            sign_in_required: true,
+        }
+    );
 }
 
 #[test]
