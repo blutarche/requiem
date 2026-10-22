@@ -14,9 +14,9 @@ use serde::{Deserialize, Serialize};
 const VERSION: u32 = 1;
 const MAX_FILE_BYTES: u64 = 16 * 1024 * 1024;
 /// A state is written once no newer one has arrived for this long...
-const QUIET: Duration = Duration::from_millis(500);
+pub(crate) const QUIET: Duration = Duration::from_millis(500);
 /// ...or this long after the first unwritten one.
-const MAX_DELAY: Duration = Duration::from_secs(2);
+pub(crate) const MAX_DELAY: Duration = Duration::from_secs(2);
 
 #[derive(Serialize)]
 struct FileOut<'a> {
@@ -78,18 +78,9 @@ pub fn load(path: &Path) -> Option<PersistState> {
 
 /// `Ok(None)` when the file is missing.
 pub fn read(path: &Path) -> Result<Option<PersistState>, String> {
-    let file = match fs::File::open(path) {
-        Ok(f) => f,
-        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
-        Err(e) => return Err(format!("state file unreadable: {e}")),
+    let Some(bytes) = read_capped(path, "state")? else {
+        return Ok(None);
     };
-    let mut bytes = Vec::new();
-    file.take(MAX_FILE_BYTES + 1)
-        .read_to_end(&mut bytes)
-        .map_err(|e| format!("state file unreadable: {e}"))?;
-    if bytes.len() as u64 > MAX_FILE_BYTES {
-        return Err(format!("state file over {MAX_FILE_BYTES} bytes, ignoring"));
-    }
     let parsed: FileIn =
         serde_json::from_slice(&bytes).map_err(|e| format!("state file unparsable: {e}"))?;
     if parsed.version != VERSION {
@@ -103,7 +94,36 @@ pub fn read(path: &Path) -> Result<Option<PersistState>, String> {
     }))
 }
 
+/// The file's bytes, `Ok(None)` when it is missing; `what` names it in errors.
+pub(crate) fn read_capped(path: &Path, what: &str) -> Result<Option<Vec<u8>>, String> {
+    let file = match fs::File::open(path) {
+        Ok(f) => f,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(format!("{what} file unreadable: {e}")),
+    };
+    let mut bytes = Vec::new();
+    file.take(MAX_FILE_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|e| format!("{what} file unreadable: {e}"))?;
+    if bytes.len() as u64 > MAX_FILE_BYTES {
+        return Err(format!("{what} file over {MAX_FILE_BYTES} bytes, ignoring"));
+    }
+    Ok(Some(bytes))
+}
+
 fn save(path: &Path, state: &PersistState) -> io::Result<()> {
+    let json = serde_json::to_vec(&FileOut {
+        version: VERSION,
+        volume: state.volume,
+        resume: state.resume,
+        queue: &state.tracks,
+    })
+    .map_err(io::Error::other)?;
+    write_atomic(path, &json)
+}
+
+/// Replaces `path` with `bytes` whole, creating its directory private if missing.
+pub(crate) fn write_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
     let dir = path
         .parent()
         .ok_or_else(|| io::Error::other("state path has no parent"))?;
@@ -113,18 +133,11 @@ fn save(path: &Path, state: &PersistState) -> io::Result<()> {
             .mode(0o700)
             .create(dir)?;
     }
-    let json = serde_json::to_vec(&FileOut {
-        version: VERSION,
-        volume: state.volume,
-        resume: state.resume,
-        queue: &state.tracks,
-    })
-    .map_err(io::Error::other)?;
     let mut tmp = path.as_os_str().to_owned();
     tmp.push(".tmp");
     let tmp = PathBuf::from(tmp);
     let result = fs::File::create(&tmp)
-        .and_then(|mut f| f.write_all(&json))
+        .and_then(|mut f| f.write_all(bytes))
         .and_then(|()| fs::rename(&tmp, path));
     if result.is_err() {
         let _ = fs::remove_file(&tmp);
@@ -147,31 +160,44 @@ fn spawn_writer_with(
     quiet: Duration,
     max_delay: Duration,
 ) -> (Sender<PersistState>, JoinHandle<()>) {
+    spawn_saver("requiemd-persist", loaded, quiet, max_delay, move |s| {
+        save(&path, s)
+    })
+}
+
+/// A writer thread like `spawn_writer`'s for any value, which `save` writes.
+pub(crate) fn spawn_saver<T: PartialEq + Send + 'static>(
+    name: &str,
+    loaded: Option<T>,
+    quiet: Duration,
+    max_delay: Duration,
+    save: impl Fn(&T) -> io::Result<()> + Send + 'static,
+) -> (Sender<T>, JoinHandle<()>) {
     let (tx, rx) = unbounded();
     let handle = thread::Builder::new()
-        .name("requiemd-persist".into())
-        .spawn(move || write_loop(&rx, &path, loaded, quiet, max_delay))
+        .name(name.into())
+        .spawn(move || write_loop(&rx, loaded, quiet, max_delay, save))
         .expect("spawn persist thread");
     (tx, handle)
 }
 
-fn write_loop(
-    rx: &Receiver<PersistState>,
-    path: &Path,
-    mut written: Option<PersistState>,
+fn write_loop<T: PartialEq>(
+    rx: &Receiver<T>,
+    mut written: Option<T>,
     quiet: Duration,
     max_delay: Duration,
+    save: impl Fn(&T) -> io::Result<()>,
 ) {
     // The newest unwritten state, when the first one arrived, and when the latest did.
-    let mut pending: Option<(PersistState, Instant, Instant)> = None;
-    let mut flush = |pending: &mut Option<(PersistState, Instant, Instant)>| {
+    let mut pending: Option<(T, Instant, Instant)> = None;
+    let mut flush = |pending: &mut Option<(T, Instant, Instant)>| {
         let Some((state, ..)) = pending.take() else {
             return;
         };
         if written.as_ref() == Some(&state) {
             return;
         }
-        match save(path, &state) {
+        match save(&state) {
             Ok(()) => written = Some(state),
             Err(e) => debug!("saving state failed: {e}"),
         }
