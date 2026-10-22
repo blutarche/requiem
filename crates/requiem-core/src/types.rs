@@ -319,8 +319,8 @@ pub enum Command {
     SetVolume(u8),
     Shutdown,
     /// Answered with `BrowseResults` or `BrowseFailed` under the same `req`. Home and Library
-    /// may be answered with what was kept of them, or with the providers that answered first;
-    /// a `PageChanged` follows if the rest changes them.
+    /// may be answered with what was kept of them, or with the providers that answered first
+    /// once they have something to show; a `PageChanged` follows if the rest changes them.
     Browse {
         req: u64,
         page: Page,
