@@ -17,7 +17,8 @@ use serde::Serialize;
 use crate::logger::redact;
 use crate::sys;
 use crate::wire::{
-    self, Attached, Chunk, Done, MAX_READ, Pending, Prepared, Request, Shelves, SignInLine, Tracks,
+    self, Attached, Changed, Chunk, Done, MAX_READ, Pending, Prepared, Request, Shelves,
+    SignInLine, Tracks,
 };
 
 /// What the helper serves. Every method blocks.
@@ -32,6 +33,9 @@ pub trait Backend: Send + Sync + 'static {
     fn sign_in(&self, pending: &mut dyn FnMut(Pending)) -> Result<(), ProviderError>;
     /// Also ends a pending sign-in.
     fn sign_out(&self) -> Result<(), ProviderError>;
+    /// Calls `changed` with each page that gets newer content than the backend last gave for
+    /// it, until `changed` returns false. A backend whose pages never change returns at once.
+    fn watch(&self, _changed: &mut dyn FnMut(Page) -> bool) {}
 }
 
 /// An attached stream's playable bytes.
@@ -154,6 +158,15 @@ fn handle(conn: UnixStream, backend: &dyn Backend) -> io::Result<()> {
                 let _ = wire::write_line(&mut w, &SignInLine::Pending(p)).and_then(|()| w.flush());
             });
             reply(&mut w, result.map(|()| SignInLine::SignedIn {}))
+        }
+        Request::Watch => {
+            // Ends once a line can't be written: the daemon hung up.
+            backend.watch(&mut |changed| {
+                wire::write_line(&mut w, &Changed { changed })
+                    .and_then(|()| w.flush())
+                    .is_ok()
+            });
+            Ok(())
         }
         Request::Attach { stream } => match backend.attach(&stream) {
             Ok(s) => serve_stream(&mut r, &mut w, s),
@@ -301,6 +314,14 @@ pub(crate) mod tests {
             *self.signed_out.lock().unwrap() = true;
             Ok(())
         }
+
+        fn watch(&self, changed: &mut dyn FnMut(Page) -> bool) {
+            for page in [Page::Home, Page::Library] {
+                if !changed(page) {
+                    return;
+                }
+            }
+        }
     }
 
     fn start(tmp: &TempDir) -> (std::path::PathBuf, Arc<FakeBackend>) {
@@ -356,6 +377,11 @@ pub(crate) mod tests {
         let d: Done = wire::read_reply(&mut r).unwrap();
         assert!(d.ok);
         assert!(*fake.signed_out.lock().unwrap());
+        let (mut r, _w) = request(&path, &Request::Watch);
+        for page in [Page::Home, Page::Library] {
+            let c: Changed = wire::read_reply(&mut r).unwrap();
+            assert_eq!(c.changed, page);
+        }
 
         // A connection that says nothing is a readiness check, and a bad line gets an error.
         drop(UnixStream::connect(&path).unwrap());

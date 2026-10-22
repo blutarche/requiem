@@ -106,6 +106,11 @@ impl Backend for Fake {
         self.wake.notify_all();
         Ok(())
     }
+
+    /// Each helper says once that the Library changed.
+    fn watch(&self, changed: &mut dyn FnMut(Page) -> bool) {
+        changed(Page::Library);
+    }
 }
 
 fn main() -> ExitCode {
@@ -161,6 +166,11 @@ fn run(tmp: &Path) {
         credentials: Some(creds.clone()),
     });
 
+    let (changed_tx, changed) = mpsc::channel();
+    p.on_page_changed(Arc::new(move |page| {
+        let _ = changed_tx.send(page);
+    }));
+
     // Signed out: nothing starts.
     assert_eq!(p.account(), AccountState::SignedOut);
     assert!(matches!(
@@ -186,6 +196,8 @@ fn run(tmp: &Path) {
     assert_eq!(mode, 0o600);
     // The running helper is reused.
     assert_eq!(helper_pid(&p), first);
+    // What the helper says has changed reaches the session.
+    assert_eq!(changed.recv_timeout(WAIT), Ok(Page::Library));
 
     // A stream reads, seeks and ends like the file it stands for.
     let AudioSource::Encoded { mut bytes, .. } = resolve(&p, "data");
@@ -217,6 +229,8 @@ fn run(tmp: &Path) {
     assert!(took < Duration::from_secs(15), "{took:?}");
     let second = helper_pid(&p);
     assert_ne!(second, first);
+    // A new helper is watched too.
+    assert_eq!(changed.recv_timeout(WAIT), Ok(Page::Library));
     // The provider reaped the dead one when it replaced it.
     // SAFETY: as in `exits`.
     assert_eq!(unsafe { libc::waitpid(first, &mut 0, libc::WNOHANG) }, -1);

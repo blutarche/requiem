@@ -10,14 +10,14 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use requiem_core::{
-    AccountState, AudioSource, FormatHint, Page, Provider, ProviderError, ProviderId, Shelf, Track,
-    TrackId,
+    AccountState, AudioSource, FormatHint, Page, PageSink, Provider, ProviderError, ProviderId,
+    Shelf, Track, TrackId,
 };
 use serde::de::DeserializeOwned;
 
 use crate::source::HelperSource;
 use crate::wire::{
-    self, Done, Pending, Prepared, ReplyError, Request, Shelves, SignInLine, Tracks,
+    self, Changed, Done, Pending, Prepared, ReplyError, Request, Shelves, SignInLine, Tracks,
 };
 use crate::{HELPER_ARG, PROVIDER_ID, creds};
 
@@ -65,6 +65,7 @@ pub struct SpotifyProvider {
     credentials: Option<PathBuf>,
     helper: Mutex<Option<Child>>,
     pending: Mutex<Option<Pending>>,
+    changed: Mutex<Option<PageSink>>,
 }
 
 fn locked<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -98,6 +99,7 @@ impl SpotifyProvider {
             credentials: opts.credentials,
             helper: Mutex::new(None),
             pending: Mutex::new(None),
+            changed: Mutex::new(None),
         }
     }
 
@@ -108,6 +110,7 @@ impl SpotifyProvider {
             credentials,
             helper: Mutex::new(None),
             pending: Mutex::new(None),
+            changed: Mutex::new(None),
         }
     }
 
@@ -162,9 +165,37 @@ impl SpotifyProvider {
             .spawn()
             .map_err(|e| ProviderError::Network(format!("cannot start the Spotify helper: {e}")))?;
         let conn = wait_ready(&mut child, socket);
+        if conn.is_ok() {
+            self.watch(socket);
+        }
         // Kept even when it failed to answer: the next call kills and replaces it.
         *helper = Some(child);
         conn
+    }
+
+    /// Passes on what the helper on `socket` says has changed, until it goes.
+    fn watch(&self, socket: &Path) {
+        let Some(sink) = locked(&self.changed).clone() else {
+            return;
+        };
+        let socket = socket.to_owned();
+        let spawned = thread::Builder::new()
+            .name("spotify-watch".into())
+            .spawn(move || {
+                let Ok(conn) = UnixStream::connect(&socket) else {
+                    return;
+                };
+                if wire::write_line(&mut &conn, &Request::Watch).is_err() {
+                    return;
+                }
+                let mut r = BufReader::new(conn);
+                while let Ok(Changed { changed }) = read_reply::<Changed>(&mut r) {
+                    sink(changed);
+                }
+            });
+        if let Err(e) = spawned {
+            eprintln!("[spotify] {e}");
+        }
     }
 
     fn open(&self, req: &Request, timeout: Option<Duration>) -> Result<UnixStream, ProviderError> {
@@ -243,6 +274,10 @@ impl Provider for SpotifyProvider {
 
     fn has_home(&self) -> bool {
         true
+    }
+
+    fn on_page_changed(&self, changed: PageSink) {
+        *locked(&self.changed) = Some(changed);
     }
 
     fn account(&self) -> AccountState {
