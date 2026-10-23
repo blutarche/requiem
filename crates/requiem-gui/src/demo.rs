@@ -958,7 +958,12 @@ impl Daemon {
                             .collect(),
                     }],
                 };
-                vec![Event::BrowseResults { req, page, shelves }]
+                vec![Event::BrowseResults {
+                    req,
+                    page,
+                    shelves,
+                    about: None,
+                }]
             }
             Command::Shutdown
             | Command::Cue(_)

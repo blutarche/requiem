@@ -76,6 +76,16 @@ pub struct Shelf {
     pub items: Vec<Item>,
 }
 
+/// A provider's answer to a page.
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+pub struct Browsed {
+    /// The collection the page is about, as the provider sees it now: an artist, with its
+    /// photo. `None` for Home, the Library, albums and playlists.
+    #[serde(default)]
+    pub about: Option<Collection>,
+    pub shelves: Vec<Shelf>,
+}
+
 /// The most artists, the most albums and the most playlists a provider gives for one search.
 pub const SEARCH_COLLECTIONS: usize = 12;
 
@@ -186,8 +196,8 @@ pub trait Provider: Send + Sync {
     fn resolve(&self, track: &TrackId) -> Result<AudioSource, ProviderError>;
 
     /// Blocking; called on a worker thread.
-    fn browse(&self, _page: &Page) -> Result<Vec<Shelf>, ProviderError> {
-        Ok(Vec::new())
+    fn browse(&self, _page: &Page) -> Result<Browsed, ProviderError> {
+        Ok(Browsed::default())
     }
 
     /// Whether `Page::Home` is meaningful for this provider.
@@ -418,6 +428,9 @@ pub enum Event {
         req: u64,
         page: Page,
         shelves: Vec<Shelf>,
+        /// As [`Browsed::about`].
+        #[serde(default)]
+        about: Option<Collection>,
     },
     BrowseFailed {
         req: u64,
@@ -442,5 +455,8 @@ pub enum Event {
     PageChanged {
         page: Page,
         shelves: Vec<Shelf>,
+        /// As [`Browsed::about`].
+        #[serde(default)]
+        about: Option<Collection>,
     },
 }

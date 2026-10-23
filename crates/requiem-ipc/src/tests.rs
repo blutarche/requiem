@@ -382,6 +382,7 @@ fn artists_and_artist_pages_round_trip() {
                     items: vec![Item::Collection(artist.clone())],
                 },
             ],
+            about: Some(artist.clone()),
         }),
     ];
     let mut buf = Vec::new();
@@ -428,6 +429,7 @@ fn a_tracks_artist_ids_round_trip_and_old_tracks_have_none() {
         ServerMsg::Event(Event::PageChanged {
             page: Page::Home,
             shelves: Vec::new(),
+            about: None,
         }),
     ];
     let mut buf = Vec::new();
@@ -867,6 +869,7 @@ fn browse_results_go_only_to_the_requester_and_accounts_to_everyone() {
             req: 3,
             page,
             shelves: vec![shelf],
+            about: None,
         }
     );
     b.send(Command::Browse {
@@ -941,6 +944,7 @@ fn a_changed_page_is_told_to_every_client() {
     let changed = Event::PageChanged {
         page: requiem_core::Page::Library,
         shelves: vec![shelf("new")],
+        about: None,
     };
     assert_eq!(next_event(&arx), changed);
     assert_eq!(next_event(&brx), changed);

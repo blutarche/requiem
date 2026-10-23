@@ -5,7 +5,7 @@
 
 use std::io::{self, BufRead, Read, Write};
 
-use requiem_core::{Page, ProviderError, Shelf, Track};
+use requiem_core::{Collection, Page, ProviderError, Shelf, Track};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
@@ -43,6 +43,9 @@ pub(crate) struct Tracks {
 #[derive(Debug, Serialize, Deserialize)]
 pub(crate) struct Shelves {
     pub shelves: Vec<Shelf>,
+    /// As [`requiem_core::Browsed::about`].
+    #[serde(default)]
+    pub about: Option<Collection>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]

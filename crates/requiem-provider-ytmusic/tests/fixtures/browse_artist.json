@@ -2767,5 +2767,54 @@
     }
    ]
   }
+ },
+ "header": {
+  "musicImmersiveHeaderRenderer": {
+   "title": {
+    "runs": [
+     {
+      "text": "Daft Punk"
+     }
+    ]
+   },
+   "thumbnail": {
+    "musicThumbnailRenderer": {
+     "thumbnail": {
+      "thumbnails": [
+       {
+        "url": "https://lh3.googleusercontent.com/qLhu6Py_4_xoBsoubKQsXlhOQGqU9YU1ZRAbFusF0LlrPkXbbpu7bEh-k_ZtE4JwLgubvucAQqcK1hRk=w540-h225-p-l90-rj",
+        "width": 540,
+        "height": 225
+       },
+       {
+        "url": "https://lh3.googleusercontent.com/qLhu6Py_4_xoBsoubKQsXlhOQGqU9YU1ZRAbFusF0LlrPkXbbpu7bEh-k_ZtE4JwLgubvucAQqcK1hRk=w816-h340-p-l90-rj",
+        "width": 816,
+        "height": 340
+       },
+       {
+        "url": "https://lh3.googleusercontent.com/qLhu6Py_4_xoBsoubKQsXlhOQGqU9YU1ZRAbFusF0LlrPkXbbpu7bEh-k_ZtE4JwLgubvucAQqcK1hRk=w1080-h450-p-l90-rj",
+        "width": 1080,
+        "height": 450
+       }
+      ]
+     },
+     "thumbnailCrop": "MUSIC_THUMBNAIL_CROP_UNSPECIFIED",
+     "thumbnailScale": "MUSIC_THUMBNAIL_SCALE_ASPECT_FILL",
+     "trackingParams": "CAQQhL8CIhMI8oSQ9KDQlwMVc5pWAR3d9xFu"
+    }
+   },
+   "monthlyListenerCount": {
+    "runs": [
+     {
+      "text": "68.1M monthly audience"
+     }
+    ],
+    "accessibility": {
+     "accessibilityData": {
+      "label": "68.1 million monthly audience"
+     }
+    }
+   }
+  }
  }
 }

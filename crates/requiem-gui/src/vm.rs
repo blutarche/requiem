@@ -1763,8 +1763,16 @@ impl Vm {
             Event::BrowseFailed { req, .. } if self.pending_top == Some(req) => {
                 self.pending_top = None;
             }
-            Event::BrowseResults { req, shelves, .. } => {
+            Event::BrowseResults {
+                req,
+                shelves,
+                about,
+                ..
+            } => {
                 if let Some((slot, _)) = self.take_browse(req) {
+                    if slot == Slot::Collection {
+                        self.take_about(about);
+                    }
                     self.land(slot, shelves);
                 }
             }
@@ -1826,7 +1834,11 @@ impl Vm {
             }
             // Taken as they come, never fetched again: a fetch would start the player fetching
             // anew, and a page that differs on every fetch would never settle.
-            Event::PageChanged { page, shelves } => {
+            Event::PageChanged {
+                page,
+                shelves,
+                about,
+            } => {
                 if let Page::Collection(id) = &page
                     && self
                         .ui
@@ -1847,6 +1859,9 @@ impl Vm {
                         .is_some_and(|c| c.collection.id == id)
                         .then_some(Slot::Collection),
                 };
+                if slot == Some(Slot::Collection) {
+                    self.take_about(about);
+                }
                 // A page not asked for yet gets the newest on its visit. One still loading
                 // shows these until its own answer, which is as new or newer, lands.
                 let load = slot.and_then(|slot| match self.browse_mut(slot)?.load {
@@ -2259,6 +2274,24 @@ impl Vm {
                 _ => None,
             }
         })
+    }
+
+    /// Shows the photo and subtitle of what the open collection's page is about, keeping its
+    /// title and id, and whatever `about` leaves out: a page opened from a song has neither.
+    fn take_about(&mut self, about: Option<Collection>) {
+        let (Some(about), Some(page)) = (about, &mut self.ui.collection) else {
+            return;
+        };
+        let shown = &mut page.collection;
+        for (new, old) in [
+            (about.artwork_url, &mut shown.artwork_url),
+            (about.subtitle, &mut shown.subtitle),
+        ] {
+            if new.is_some() && new != *old {
+                *old = new;
+                self.dirty |= Dirty::COLLECTION;
+            }
+        }
     }
 
     fn land(&mut self, slot: Slot, shelves: Vec<Shelf>) {
@@ -2800,7 +2833,7 @@ pub fn go_to_artist(track: &Track) -> GoToArtist {
 }
 
 /// Artist `name`'s page `id`, as a song links to it: its header names the artist alone, as
-/// the song gives no photo.
+/// the song gives no photo, until the page's answer says what it is about.
 pub fn artist_page(name: &str, id: &CollectionId) -> Collection {
     Collection {
         id: id.clone(),
@@ -5099,7 +5132,12 @@ mod tests {
     }
 
     fn results(req: u64, page: Page, shelves: Vec<Shelf>) -> Event {
-        Event::BrowseResults { req, page, shelves }
+        Event::BrowseResults {
+            req,
+            page,
+            shelves,
+            about: None,
+        }
     }
 
     #[test]
@@ -5532,7 +5570,11 @@ mod tests {
     }
 
     fn changed(page: Page, shelves: Vec<Shelf>) -> Event {
-        Event::PageChanged { page, shelves }
+        Event::PageChanged {
+            page,
+            shelves,
+            about: None,
+        }
     }
 
     #[test]
@@ -6873,6 +6915,7 @@ mod tests {
         vm.apply(Event::PageChanged {
             page: Page::Collection(artist("ar0").id),
             shelves: artist_page(1),
+            about: None,
         });
         assert_eq!(vm.ui().list_tracks(List::TopArtist, 0).len(), 1);
     }
@@ -7199,6 +7242,73 @@ mod tests {
         assert_eq!(
             (&page.collection, page.from, page.tracks.len()),
             (&album, Place::Search, 2)
+        );
+    }
+
+    #[test]
+    fn an_artist_opened_from_a_song_shows_the_photo_and_audience_its_page_is_about() {
+        let mut vm = connected();
+        vm.apply(signed_in());
+        vm.take_commands();
+        let GoToArtist::One(artist) = go_to_artist(&linked("t")) else {
+            panic!("expected t's artist");
+        };
+        let cmds = browses(&vm.intent(Intent::OpenCollection {
+            collection: artist.clone(),
+            from: Place::Queue,
+        }));
+        let header = |vm: &Vm| vm.ui().collection.as_ref().unwrap().collection.clone();
+        assert_eq!(header(&vm).artwork_url, None);
+
+        let about = Collection {
+            title: "Another name".into(),
+            subtitle: Some("Artist \u{2022} 1M monthly audience".into()),
+            artwork_url: Some("https://example.test/photo.jpg".into()),
+            ..artist.clone()
+        };
+        vm.take_dirty();
+        vm.apply(Event::BrowseResults {
+            req: cmds[0].0,
+            page: cmds[0].1.clone(),
+            shelves: vec![shelf("Top songs", vec![Item::Track(track("s", 200))])],
+            about: Some(about.clone()),
+        });
+        assert!(vm.take_dirty().contains(Dirty::COLLECTION));
+        assert_eq!(
+            header(&vm),
+            Collection {
+                subtitle: about.subtitle.clone(),
+                artwork_url: about.artwork_url.clone(),
+                ..artist.clone()
+            }
+        );
+
+        // What a later answer leaves out stays; another collection's says nothing of this one.
+        vm.apply(Event::PageChanged {
+            page: cmds[0].1.clone(),
+            shelves: Vec::new(),
+            about: Some(Collection {
+                subtitle: Some("Artist".into()),
+                artwork_url: None,
+                ..about.clone()
+            }),
+        });
+        vm.apply(Event::PageChanged {
+            page: Page::Collection(page_id("other")),
+            shelves: Vec::new(),
+            about: Some(Collection {
+                id: page_id("other"),
+                subtitle: Some("Other".into()),
+                ..about.clone()
+            }),
+        });
+        assert_eq!(
+            header(&vm),
+            Collection {
+                subtitle: Some("Artist".into()),
+                artwork_url: about.artwork_url.clone(),
+                ..artist
+            }
         );
     }
 

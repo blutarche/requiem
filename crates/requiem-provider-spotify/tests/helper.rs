@@ -14,7 +14,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use requiem_core::{
-    AccountState, AudioSource, Page, Provider, ProviderError, ProviderId, Shelf, Track, TrackId,
+    AccountState, AudioSource, Browsed, Page, Provider, ProviderError, ProviderId, Track, TrackId,
 };
 use requiem_provider_spotify::{
     Backend, HELPER_ARG, Pending, SpotifyOptions, SpotifyProvider, Stream, serve,
@@ -73,8 +73,8 @@ impl Backend for Fake {
         }])
     }
 
-    fn browse(&self, _page: &Page) -> Result<Vec<Shelf>, ProviderError> {
-        Ok(Vec::new())
+    fn browse(&self, _page: &Page) -> Result<Browsed, ProviderError> {
+        Ok(Browsed::default())
     }
 
     fn prepare(&self, track: &str) -> Result<String, ProviderError> {
