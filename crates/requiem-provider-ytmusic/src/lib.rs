@@ -655,6 +655,7 @@ mod tests {
             rig.music.script(SEARCH_URL, 200, unfiltered);
             let found = rig.provider().search("one more time", 5).unwrap();
             assert_eq!(names(&found.artists), ARTIST_NAMES);
+            assert!(!found.top_artist, "the search is about none of them");
             assert_eq!(found.albums.len(), 6);
             assert_eq!(found.albums[0].id.id, "browse:MPREb_K8qWMWVqXGi");
             assert_eq!(found.playlists.len(), 6);
@@ -740,6 +741,7 @@ mod tests {
                 "LCD Soundsystem"
             ]
         );
+        assert!(found.top_artist, "the search is about the card's artist");
         let lead = &found.artists[0];
         assert_eq!(lead.id.id, "browse:UCRr1xG_2WIDs18a6cIiCxeA");
         assert_eq!(lead.kind, CollectionKind::Artist);
@@ -765,6 +767,7 @@ mod tests {
         rig.music.script(SEARCH_URL, 200, SEARCH);
         let found = rig.provider().search("daft punk", 5).unwrap();
         assert!(found.artists.is_empty());
+        assert!(!found.top_artist);
         assert_eq!(found.tracks.len(), 5);
         assert_eq!((found.albums.len(), found.playlists.len()), (6, 6));
 
@@ -778,6 +781,7 @@ mod tests {
             .script_browse(BROWSE_URL, "UCRr1xG_2WIDs18a6cIiCxeA", 200, ARTIST);
         let found = rig.provider().search("daft punk", 5).unwrap();
         assert_eq!(names(&found.artists), ["Daft Punk"]);
+        assert!(found.top_artist);
         assert_eq!(found.tracks.len(), 5);
         assert_eq!(found.albums.len(), SEARCH_COLLECTIONS);
     }

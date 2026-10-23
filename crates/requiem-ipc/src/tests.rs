@@ -364,6 +364,7 @@ fn artists_and_artist_pages_round_trip() {
             results: SearchResults {
                 tracks: tracks(&["a"]),
                 artists: vec![artist.clone()],
+                top_artist: true,
                 ..SearchResults::default()
             },
         }),
@@ -391,6 +392,10 @@ fn artists_and_artist_pages_round_trip() {
     assert_eq!(
         wire.pointer("/Event/SearchResults/results/artists/0/kind"),
         Some(&serde_json::json!("Artist"))
+    );
+    assert_eq!(
+        wire.pointer("/Event/SearchResults/results/top_artist"),
+        Some(&serde_json::json!(true))
     );
     let mut r = Cursor::new(buf);
     for m in &msgs {

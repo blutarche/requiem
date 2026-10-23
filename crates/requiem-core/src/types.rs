@@ -72,6 +72,9 @@ pub struct SearchResults {
     pub artists: Vec<Collection>,
     pub albums: Vec<Collection>,
     pub playlists: Vec<Collection>,
+    /// The search is about `artists[0]`: the provider matched the query to that artist, as
+    /// opposed to listing artists whose names merely resemble it.
+    pub top_artist: bool,
 }
 
 /// Home shelves every provider names alike, so the merge makes one of each.

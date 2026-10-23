@@ -723,6 +723,9 @@ pub struct UiState {
     pub artists: Vec<Collection>,
     pub albums: Vec<Collection>,
     pub playlists: Vec<Collection>,
+    /// Whether the last search is about its first artist, rather than finding artists whose
+    /// names resemble it.
+    pub about_artist: bool,
     /// The kind of result the Search page lists. It outlasts queries, and ends with the app.
     pub search_chip: SearchChip,
     /// The page of an artist the search found, fetched for its top songs: its id, and the
@@ -766,6 +769,7 @@ impl Default for UiState {
             artists: Vec::new(),
             albums: Vec::new(),
             playlists: Vec::new(),
+            about_artist: false,
             search_chip: SearchChip::All,
             top_artist: None,
             queue: Vec::new(),
@@ -955,11 +959,19 @@ impl UiState {
         self.shown_collections(&self.artists)
     }
 
-    /// The top songs of the first artist the filter keeps, once its page has landed.
+    /// The artist the last search is about, if the filter keeps it: the top result.
+    fn lead_artist(&self) -> Option<&Collection> {
+        let first = self.artists.first().filter(|_| self.about_artist)?;
+        self.shown_service()
+            .is_none_or(|s| s.owns(&first.id.provider))
+            .then_some(first)
+    }
+
+    /// The top songs of the lead artist, once its page has landed.
     fn top_artist_songs(&self) -> Option<&[Track]> {
-        let first = self.shown_artists().first()?.id.clone();
+        let lead = &self.lead_artist()?.id;
         match &self.top_artist {
-            Some((id, Some(songs))) if *id == first => Some(songs),
+            Some((id, Some(songs))) if id == lead => Some(songs),
             _ => None,
         }
     }
@@ -1385,8 +1397,8 @@ impl UiState {
     }
 
     /// What the Search page shows: the chips once there are results, and the chosen kind of
-    /// them. The service switch filters every kind. The top result is the first artist the
-    /// filter keeps, else the first song.
+    /// them. The service switch filters every kind. The top result is the artist the search
+    /// is about, if the filter keeps it, else the first song.
     pub fn search_view(&self) -> SearchView {
         let chosen = self.search_chip;
         let songs = self.shown_results();
@@ -1414,7 +1426,7 @@ impl UiState {
             Some(empty) => SearchBody::Empty(empty),
             None => match chosen {
                 SearchChip::All => {
-                    let top = match artists.first() {
+                    let top = match self.lead_artist() {
                         Some(artist) => Some(TopResult::Artist {
                             artist: artist.clone(),
                             playable: self.top_artist_playable(),
@@ -1660,6 +1672,7 @@ impl Vm {
                     self.ui.artists = results.artists;
                     self.ui.albums = results.albums;
                     self.ui.playlists = results.playlists;
+                    self.ui.about_artist = results.top_artist;
                     self.ui.search = SearchStatus::Done;
                     self.dirty |= Dirty::RESULTS | Dirty::SEARCH_STATUS;
                     self.ui.top_artist = None;
@@ -2311,13 +2324,13 @@ impl Vm {
         })
     }
 
-    /// Asks for the page of the first artist the filter keeps, for its top songs, unless it
-    /// has been asked for since the search landed. Its failure goes unsaid.
+    /// Asks for the page of the lead artist, for its top songs, unless it has been asked for
+    /// since the search landed. Its failure goes unsaid.
     fn fetch_top_artist(&mut self) -> Option<Command> {
         if !self.ui.controls().player {
             return None;
         }
-        let id = self.ui.shown_artists().first()?.id.clone();
+        let id = self.ui.lead_artist()?.id.clone();
         if self
             .ui
             .top_artist
@@ -6686,6 +6699,7 @@ mod tests {
             artists: Vec::new(),
             albums,
             playlists,
+            top_artist: false,
         }
     }
 
@@ -6724,14 +6738,16 @@ mod tests {
     }
 
     /// A connected vm with a search landed that found songs 0 to 5 and artists `artists`, all
-    /// of YouTube Music; returns the req of the top artist's fetch.
-    fn found_artists(artists: &[&str]) -> (Vm, Option<u64>) {
+    /// of YouTube Music, and is about the first artist if `about`; returns the req of the top
+    /// artist's fetch.
+    fn found_artists(artists: &[&str], about: bool) -> (Vm, Option<u64>) {
         let mut vm = connected();
         vm.apply(signed_in());
         vm.take_commands();
         let results = SearchResults {
             tracks: (0..6).map(|i| from(&provider(), &i.to_string())).collect(),
             artists: artists.iter().map(|id| artist(id)).collect(),
+            top_artist: about,
             ..SearchResults::default()
         };
         search_finds(&mut vm, "q", results);
@@ -6750,7 +6766,7 @@ mod tests {
 
     #[test]
     fn the_top_result_is_the_first_artist_and_plays_its_top_songs_once_they_land() {
-        let (mut vm, req) = found_artists(&["ar0", "ar1"]);
+        let (mut vm, req) = found_artists(&["ar0", "ar1"], true);
         let req = req.expect("a fetch of the top artist's page");
         let all = |vm: &Vm| match vm.ui().search_view().body {
             SearchBody::All {
@@ -6800,8 +6816,60 @@ mod tests {
     }
 
     #[test]
+    fn artists_a_search_is_not_about_are_listed_with_the_first_song_on_top() {
+        let (mut vm, req) = found_artists(&["ar0", "ar1"], false);
+        assert_eq!(req, None, "no artist's page is fetched");
+        let SearchBody::All {
+            top,
+            songs,
+            artists,
+            ..
+        } = vm.ui().search_view().body
+        else {
+            panic!("All lists every kind");
+        };
+        assert_eq!(top_song(top).as_deref(), Some("0"));
+        assert_eq!(ids(&songs), ["1", "2", "3", "4"]);
+        assert_eq!(collection_ids(&artists), ["ar0", "ar1"]);
+        vm.intent(Intent::SetSearchChip(SearchChip::Artists));
+        let SearchBody::Collections { items, .. } = vm.ui().search_view().body else {
+            panic!("Artists lists a grid");
+        };
+        assert_eq!(collection_ids(&items), ["ar0", "ar1"]);
+    }
+
+    #[test]
+    fn a_filter_that_hides_the_artist_a_search_is_about_puts_a_song_on_top() {
+        let mut vm = both_signed_in();
+        search_finds(
+            &mut vm,
+            "q",
+            SearchResults {
+                tracks: alternating(),
+                artists: vec![
+                    collection_of(&provider(), "yt0"),
+                    collection_of(&spotify(), "sp0"),
+                ],
+                top_artist: true,
+                ..SearchResults::default()
+            },
+        );
+        vm.take_commands();
+        vm.intent(Intent::SetFilter(ONLY_SPOTIFY));
+        assert!(
+            browses(&vm.take_commands()).is_empty(),
+            "nothing is fetched"
+        );
+        let SearchBody::All { top, artists, .. } = vm.ui().search_view().body else {
+            panic!("All lists every kind");
+        };
+        assert_eq!(top_song(top).as_deref(), Some("0"));
+        assert_eq!(collection_ids(&artists), ["sp0"]);
+    }
+
+    #[test]
     fn without_artists_the_top_result_is_the_first_song_and_nothing_is_fetched() {
-        let (vm, req) = found_artists(&[]);
+        let (vm, req) = found_artists(&[], true);
         assert_eq!(req, None);
         let SearchBody::All { top, songs, .. } = vm.ui().search_view().body else {
             panic!("All lists every kind");
@@ -6812,7 +6880,7 @@ mod tests {
 
     #[test]
     fn a_failed_top_artist_fetch_leaves_play_off_quietly_and_a_reconnect_asks_again() {
-        let (mut vm, req) = found_artists(&["ar0"]);
+        let (mut vm, req) = found_artists(&["ar0"], true);
         vm.apply(Event::BrowseFailed {
             req: req.unwrap(),
             error: "timeout".into(),
@@ -6833,7 +6901,7 @@ mod tests {
 
     #[test]
     fn the_artists_chip_lists_the_artists_as_a_grid() {
-        let (mut vm, _) = found_artists(&["ar0", "ar1"]);
+        let (mut vm, _) = found_artists(&["ar0", "ar1"], true);
         vm.intent(Intent::SetSearchChip(SearchChip::Artists));
         let SearchBody::Collections { items, mixed } = vm.ui().search_view().body else {
             panic!("Artists lists a grid");
@@ -6847,6 +6915,7 @@ mod tests {
             "q",
             SearchResults {
                 artists: vec![artist("ar0")],
+                top_artist: true,
                 ..SearchResults::default()
             },
         );
@@ -6863,7 +6932,7 @@ mod tests {
 
     #[test]
     fn an_artist_page_plays_and_queues_its_top_songs_and_backs_out_of_its_albums() {
-        let (mut vm, _) = found_artists(&["ar0"]);
+        let (mut vm, _) = found_artists(&["ar0"], true);
         let cmds = browses(&vm.intent(Intent::OpenCollection {
             collection: artist("ar0"),
             from: Place::Search,

@@ -739,6 +739,7 @@ pub fn search_results() -> SearchResults {
         artists: search_artists(),
         albums,
         playlists,
+        top_artist: true,
     }
 }
 

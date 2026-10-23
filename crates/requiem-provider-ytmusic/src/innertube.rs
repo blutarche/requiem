@@ -287,7 +287,10 @@ impl InnertubeClient {
             .into_iter()
             .chain(releases.singles)
             .collect();
+        // The card's artist leads the merged artists.
+        let top_artist = !top.is_empty();
         Ok(SearchResults {
+            top_artist,
             tracks: tracks?,
             artists: merge_collections(top, left_out(artists, "artists"), SEARCH_COLLECTIONS),
             albums: merge_collections(own_albums, left_out(albums, "albums"), SEARCH_COLLECTIONS),
