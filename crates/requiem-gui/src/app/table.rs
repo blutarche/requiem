@@ -9,9 +9,9 @@ use objc2::rc::{Retained, Weak};
 use objc2::runtime::{AnyObject, NSObject, ProtocolObject, Sel};
 use objc2::{DefinedClass, MainThreadOnly, Message, define_class, msg_send, sel};
 use objc2_app_kit::{
-    NSAccessibility, NSAccessibilityCellRole, NSAttributedStringNSStringDrawing, NSBezierPath,
-    NSBorderType, NSColor, NSControlTextEditingDelegate, NSEvent, NSFocusRingType, NSMenu,
-    NSMenuDelegate, NSMenuItem, NSResponder, NSScrollView, NSTableColumn,
+    NSAccessibility, NSAccessibilityCellRole, NSApplication, NSAttributedStringNSStringDrawing,
+    NSBezierPath, NSBorderType, NSColor, NSControlTextEditingDelegate, NSEvent, NSEventType,
+    NSFocusRingType, NSMenu, NSMenuDelegate, NSMenuItem, NSResponder, NSScrollView, NSTableColumn,
     NSTableColumnResizingOptions, NSTableRowView, NSTableView, NSTableViewColumnAutoresizingStyle,
     NSTableViewDataSource, NSTableViewDelegate, NSTableViewSelectionHighlightStyle,
     NSTableViewStyle, NSTextAlignment, NSTextField, NSTrackingAreaOptions,
@@ -454,7 +454,34 @@ fn spoken_title(title: &str, current: bool, played: bool, badge: Option<Service>
 
 pub struct KeyTableIvars {
     focused: Cell<bool>,
+    /// Focus came by the keyboard, or a key was pressed in the table since; only then does
+    /// the ring show.
+    by_key: Cell<bool>,
     ring: OnceCell<Retained<FocusRing>>,
+}
+
+/// Whether focus that arrives while handling an event of `kind` came by the keyboard: a key
+/// press did it, no mouse did, and with neither in hand, as after a deferred change, a key
+/// pressed `recently` did.
+fn focus_by_key(kind: Option<NSEventType>, recently: bool) -> bool {
+    match kind {
+        Some(NSEventType::KeyDown) => true,
+        Some(
+            NSEventType::LeftMouseDown
+            | NSEventType::LeftMouseUp
+            | NSEventType::RightMouseDown
+            | NSEventType::RightMouseUp
+            | NSEventType::OtherMouseDown
+            | NSEventType::OtherMouseUp,
+        ) => false,
+        _ => recently,
+    }
+}
+
+/// Whether the table's ring shows: it has focus, which came by the keyboard, and no selected
+/// row shows it instead.
+fn ring_shown(focused: bool, by_key: bool, selected: bool) -> bool {
+    focused && by_key && !selected
 }
 
 pub struct PassScrollIvars {
@@ -526,9 +553,25 @@ define_class!(
             // SAFETY: forwards to the superclass implementation.
             let ok: bool = unsafe { msg_send![super(self), becomeFirstResponder] };
             if ok {
+                let kind = NSApplication::sharedApplication(self.mtm())
+                    .currentEvent()
+                    .map(|e| e.r#type());
+                self.ivars()
+                    .by_key
+                    .set(focus_by_key(kind, widgets::key_quiet()));
                 self.set_focused(true);
             }
             ok
+        }
+
+        /// A key in a table the mouse gave focus to shows the ring from then on.
+        #[unsafe(method(keyDown:))]
+        fn key_down(&self, event: &NSEvent) {
+            if !self.ivars().by_key.replace(true) {
+                self.show_focus();
+            }
+            // SAFETY: forwards to the superclass implementation.
+            let _: () = unsafe { msg_send![super(self), keyDown: event] };
         }
 
         #[unsafe(method(resignFirstResponder))]
@@ -547,6 +590,7 @@ impl KeyTable {
     fn new_table(mtm: MainThreadMarker, frame: NSRect) -> Retained<NSTableView> {
         let this = Self::alloc(mtm).set_ivars(KeyTableIvars {
             focused: Cell::new(false),
+            by_key: Cell::new(false),
             ring: OnceCell::new(),
         });
         // SAFETY: `initWithFrame:` is NSView's designated initializer.
@@ -569,10 +613,12 @@ impl KeyTable {
         self.show_focus();
     }
 
-    /// The ring, while the table has focus and no selected row to show it.
+    /// The ring, while the table has focus that came by the keyboard and no selected row to
+    /// show it.
     fn show_focus(&self) {
         if let Some(ring) = self.ivars().ring.get() {
-            ring.setHidden(!(self.focused() && self.selectedRow() < 0));
+            let by_key = self.ivars().by_key.get();
+            ring.setHidden(!ring_shown(self.focused(), by_key, self.selectedRow() >= 0));
         }
     }
 }
@@ -1474,6 +1520,33 @@ mod tests {
 
     fn named(titles: &[&str]) -> Vec<RowText> {
         titles.iter().map(|t| row(t, "", "", "")).collect()
+    }
+
+    #[test]
+    fn only_focus_that_came_by_the_keyboard_rings_the_table() {
+        // Tab, ↓ from the field, and an open by Return all land during the key press.
+        assert!(focus_by_key(Some(NSEventType::KeyDown), false));
+        // A click opens a page on the mouse's release, or focuses the table on its press,
+        // whatever key went just before.
+        for mouse in [
+            NSEventType::LeftMouseDown,
+            NSEventType::LeftMouseUp,
+            NSEventType::RightMouseUp,
+            NSEventType::OtherMouseUp,
+        ] {
+            assert!(!focus_by_key(Some(mouse), true), "{mouse:?}");
+        }
+        // Deferred, focus goes by whether a key was just pressed.
+        assert!(focus_by_key(None, true));
+        assert!(!focus_by_key(None, false));
+        assert!(!focus_by_key(Some(NSEventType::AppKitDefined), false));
+
+        assert!(ring_shown(true, true, false));
+        // A mouse-opened page shows no ring.
+        assert!(!ring_shown(true, false, false));
+        // A selected row shows focus instead, and an unfocused table shows none.
+        assert!(!ring_shown(true, true, true));
+        assert!(!ring_shown(false, true, false));
     }
 
     #[test]

@@ -103,7 +103,8 @@ pub fn motion(duration: Duration) -> Duration {
     }
 }
 
-fn key_quiet() -> bool {
+/// A key the app noted was pressed a moment ago.
+pub fn key_quiet() -> bool {
     keyboard_quiet(LAST_KEY.with(Cell::get), Instant::now())
 }
 
