@@ -1,6 +1,6 @@
 //! Live smoke tests against YouTube. Run with `-- --ignored live_ --test-threads=1`.
-//! `live_home` and `live_library` need a signed-in account: point `REQUIEM_GOOGLE_CLIENT_FILE` and
-//! `REQUIEM_GOOGLE_TOKEN_FILE` at the client JSON and at the token a `signin` saved.
+//! `live_home` and `live_library` need a signed-in account: the browser session a
+//! `signin-browser ytmusic` kept.
 
 use std::io::{Read, Seek, SeekFrom};
 use std::time::{Duration, Instant};
@@ -127,19 +127,21 @@ fn live_home() {
     let home = p.browse(&Page::Home).unwrap();
     println!("home: {:?}", summary(&home));
     let titles: Vec<&str> = home.iter().map(|s| s.title.as_str()).collect();
-    assert_eq!(titles, ["Liked songs", "Your playlists"]);
+    assert_eq!(titles.first(), Some(&"Liked songs"));
+    assert_eq!(titles.last(), Some(&"Your playlists"));
     assert!(home[0].items.len() <= 20);
     assert!(home[0].items.iter().all(|i| matches!(i, Item::Track(_))));
+    let playlists = home.last().unwrap();
     assert!(
-        home[1]
+        playlists
             .items
             .iter()
             .all(|i| matches!(i, Item::Collection(_)))
     );
-    let Some(Item::Collection(liked)) = home[1].items.first() else {
-        panic!("no Liked videos first");
+    let Some(Item::Collection(liked)) = playlists.items.first() else {
+        panic!("no Liked music first");
     };
-    assert_eq!(liked.title, "Liked videos");
+    assert_eq!(liked.title, "Liked music");
 }
 
 #[test]
@@ -151,7 +153,7 @@ fn live_library() {
     assert!(matches!(account, AccountState::SignedIn { .. }));
     let library = p.browse(&Page::Library).unwrap();
     println!("library: {:?}", summary(&library));
-    let page = first_collection(&library).expect("liked videos");
+    let page = first_collection(&library).expect("liked music");
     let liked = p.browse(&page).unwrap();
     println!("{page:?}: {:?}", summary(&liked));
     for item in liked.iter().flat_map(|s| &s.items).take(3) {

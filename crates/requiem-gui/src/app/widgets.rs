@@ -18,9 +18,9 @@ use objc2_app_kit::{
     NSAnimationContext, NSApplication, NSAttributedStringNSStringDrawing,
     NSAutoresizingMaskOptions, NSBezierPath, NSButton, NSCellImagePosition, NSColor, NSControl,
     NSEvent, NSEventMask, NSEventTrackingRunLoopMode, NSEventType, NSFocusRingType, NSFont,
-    NSImage, NSImageScaling, NSImageView, NSLineBreakMode, NSResponder, NSSecureTextField,
-    NSTextAlignment, NSTextField, NSTrackingArea, NSTrackingAreaOptions, NSView, NSWindow,
-    NSWindowOcclusionState, NSWorkspace,
+    NSImage, NSImageScaling, NSImageView, NSLineBreakMode, NSResponder, NSTextAlignment,
+    NSTextField, NSTrackingArea, NSTrackingAreaOptions, NSView, NSWindow, NSWindowOcclusionState,
+    NSWorkspace,
 };
 use objc2_core_foundation::CGFloat;
 use objc2_foundation::{
@@ -1027,42 +1027,6 @@ define_class!(
     }
 );
 
-define_class!(
-    /// The editable part of a `SecretField`: a `FieldText` that shows dots, which VoiceOver
-    /// doesn't read out.
-    // SAFETY: NSSecureTextField has no subclassing requirements; no Drop impl.
-    #[unsafe(super(
-        NSSecureTextField,
-        NSTextField,
-        NSControl,
-        NSView,
-        NSResponder,
-        objc2_foundation::NSObject
-    ))]
-    #[thread_kind = MainThreadOnly]
-    #[ivars = FieldIvars]
-    pub struct SecretText;
-
-    impl SecretText {
-        #[unsafe(method(becomeFirstResponder))]
-        fn become_first_responder(&self) -> bool {
-            // SAFETY: forwards to the superclass implementation.
-            let ok: bool = unsafe { msg_send![super(self), becomeFirstResponder] };
-            if ok {
-                set_focused(self.ivars(), true);
-            }
-            ok
-        }
-
-        #[unsafe(method(textDidEndEditing:))]
-        fn text_did_end_editing(&self, notification: &NSNotification) {
-            // SAFETY: forwards to the superclass implementation.
-            let _: () = unsafe { msg_send![super(self), textDidEndEditing: notification] };
-            set_focused(self.ivars(), false);
-        }
-    }
-);
-
 fn set_focused(iv: &FieldIvars, focused: bool) {
     if iv.focused.replace(focused) == focused {
         return;
@@ -1201,35 +1165,6 @@ impl Field {
 
     pub fn set_value(&self, v: &str) {
         self.text.setStringValue(&NSString::from_str(v));
-    }
-}
-
-/// A `Field` for a secret.
-pub struct SecretField {
-    pub ring: Retained<NSView>,
-    pub text: Retained<SecretText>,
-}
-
-impl SecretField {
-    pub fn new(mtm: MainThreadMarker, frame: NSRect, mask: Mask, placeholder: &str) -> SecretField {
-        let (ring, boxv, tframe) = Field::parts(mtm, frame, mask, None);
-        let text = SecretText::alloc(mtm).set_ivars(FieldIvars::default());
-        // SAFETY: `initWithFrame:` is NSTextField's designated initializer.
-        let text: Retained<SecretText> = unsafe { msg_send![super(text), initWithFrame: tframe] };
-        Field::fit(&text, text.ivars(), &ring, &boxv, placeholder);
-        SecretField { ring, text }
-    }
-
-    pub fn is(&self, control: &NSControl) -> bool {
-        std::ptr::eq::<NSControl>(control, &****self.text)
-    }
-
-    pub fn value(&self) -> String {
-        self.text.stringValue().to_string()
-    }
-
-    pub fn clear(&self) {
-        self.text.setStringValue(&NSString::new());
     }
 }
 

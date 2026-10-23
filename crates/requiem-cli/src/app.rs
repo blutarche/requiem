@@ -21,11 +21,10 @@ const SYNC_TIMEOUT: Duration = Duration::from_secs(2);
 const SIGN_IN_START: Duration = Duration::from_secs(60);
 /// How long `signin` waits past the code's expiry for the provider to report it.
 const SIGN_IN_GRACE: Duration = Duration::from_secs(30);
-/// How long `signout`, `signin-client` and `signin-browser` wait for the provider to report
-/// it; Google's revoke, the slowest part, gives up within 15 s.
+/// How long `signout` and `signin-browser` wait for the provider to report it.
 const SIGN_OUT_WAIT: Duration = Duration::from_secs(30);
-/// The largest file `signin-client` or `signin-browser` sends; providers take no more.
-const MAX_CLIENT_FILE: u64 = 64 * 1024;
+/// The largest file `signin-browser` sends; providers take no more.
+const MAX_PASTE: u64 = 64 * 1024;
 
 /// How long `update check` waits: a check, a 10 min download, then staging.
 const UPDATE_CHECK_WAIT: Duration = Duration::from_secs(12 * 60);
@@ -55,14 +54,11 @@ commands:
   sleep <secs>          wait (fractional ok)
   await <results|playing|stopped|nowplaying> [timeout_secs=30]
                         wait for that event since the last play/next/prev/search/browse
-  signin [provider]     sign in (spotify or ytmusic; default: the first not signed in): prints
-                        a code to enter on another device and waits until it is entered or
-                        expires
+  signin [provider]     sign in (default: the first not signed in). spotify prints a code to
+                        enter on another device and waits until it is entered or expires;
+                        ytmusic says to use signin-browser
   signout [provider]    sign out (spotify or ytmusic; default: the first signed in) and forget
                         the saved sign-in; waits until the provider reports it
-  signin-client <provider> <path>
-                        give the provider your own OAuth client, the JSON file its console
-                        downloads (ytmusic: Google Cloud); waits until the provider reports it
   signin-browser <provider> <path|->
                         sign in with the request headers copied from a signed-in browser tab
                         (ytmusic: a music.youtube.com request named browse), saved to a file;
@@ -145,7 +141,7 @@ struct SignInWait {
     failed: bool,
 }
 
-/// A `signout` or `signin-client` waiting for the daemon's answer.
+/// A `signout` or `signin-browser` waiting for the daemon's answer.
 struct AccountWait {
     provider: ProviderId,
     /// The first state reported after the request.
@@ -674,8 +670,8 @@ fn unix_now() -> u64 {
         .map_or(0, |d| d.as_secs())
 }
 
-/// The file's text, up to `MAX_CLIENT_FILE` bytes. Errors never quote it.
-fn read_client_file(path: &str) -> Result<String, String> {
+/// The file's text, up to `MAX_PASTE` bytes. Errors never quote it.
+fn read_file(path: &str) -> Result<String, String> {
     read_capped(File::open(path).map_err(|e| e.to_string())?)
 }
 
@@ -685,18 +681,18 @@ pub fn read_paste(path: &str) -> Result<String, String> {
     if path == "-" {
         read_capped(io::stdin().lock())
     } else {
-        read_client_file(path)
+        read_file(path)
     }
 }
 
 fn read_capped(reader: impl Read) -> Result<String, String> {
     let mut bytes = Vec::new();
     reader
-        .take(MAX_CLIENT_FILE + 1)
+        .take(MAX_PASTE + 1)
         .read_to_end(&mut bytes)
         .map_err(|e| e.to_string())?;
-    if bytes.len() as u64 > MAX_CLIENT_FILE {
-        return Err(format!("over {} KiB", MAX_CLIENT_FILE / 1024));
+    if bytes.len() as u64 > MAX_PASTE {
+        return Err(format!("over {} KiB", MAX_PASTE / 1024));
     }
     String::from_utf8(bytes).map_err(|_| "not UTF-8 text".to_owned())
 }
@@ -887,7 +883,6 @@ impl<'a> App<'a> {
             },
             "signin" => return self.sign_in(cmd, arg),
             "signout" => return self.sign_out(cmd, arg),
-            "signin-client" => return self.import_client(cmd, arg),
             "signin-browser" => return self.import_browser(cmd, arg),
             "account" => {
                 let ui = self.accounts_known(None);
@@ -1244,27 +1239,8 @@ impl<'a> App<'a> {
         self.failed()
     }
 
-    /// Reads the client file at the path in `arg` and sends it.
-    fn import_client(&self, cmd: &str, arg: &str) -> Flow {
-        let Some((name, path)) = arg
-            .split_once(char::is_whitespace)
-            .map(|(p, f)| (p, f.trim()))
-        else {
-            self.hub.error("usage: signin-client <provider> <path>");
-            return self.failed();
-        };
-        let json = match read_client_file(path) {
-            Ok(json) => json,
-            Err(e) => {
-                self.hub.error(&format!("signin-client: {path}: {e}"));
-                return self.failed();
-            }
-        };
-        self.send_import(cmd, name, json)
-    }
-
-    /// `signin-client` for the headers of a signed-in browser tab's request, read from the
-    /// file at the path in `arg`.
+    /// Signs in with the headers of a signed-in browser tab's request, read from the file at
+    /// the path in `arg`.
     fn import_browser(&self, cmd: &str, arg: &str) -> Flow {
         let Some((name, path)) = arg
             .split_once(char::is_whitespace)
@@ -1280,7 +1256,7 @@ impl<'a> App<'a> {
             ));
             return self.failed();
         }
-        match read_client_file(path) {
+        match read_file(path) {
             Ok(paste) => self.browser_session(cmd, name, &paste),
             Err(e) => {
                 self.hub.error(&format!("signin-browser: {path}: {e}"));

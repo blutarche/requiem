@@ -283,9 +283,7 @@ pub enum Icon {
     LogOut,
     Copy,
     ExternalLink,
-    FolderOpen,
     BookOpen,
-    KeyRound,
     ClipboardPaste,
 }
 
@@ -312,9 +310,7 @@ impl Icon {
             Icon::LogOut => include_bytes!("../../assets/icons/log-out.svg"),
             Icon::Copy => include_bytes!("../../assets/icons/copy.svg"),
             Icon::ExternalLink => include_bytes!("../../assets/icons/external-link.svg"),
-            Icon::FolderOpen => include_bytes!("../../assets/icons/folder-open.svg"),
             Icon::BookOpen => include_bytes!("../../assets/icons/book-open.svg"),
-            Icon::KeyRound => include_bytes!("../../assets/icons/key-round.svg"),
             Icon::ClipboardPaste => include_bytes!("../../assets/icons/clipboard-paste.svg"),
         }
     }
@@ -377,9 +373,7 @@ mod tests {
             Icon::LogOut,
             Icon::Copy,
             Icon::ExternalLink,
-            Icon::FolderOpen,
             Icon::BookOpen,
-            Icon::KeyRound,
             Icon::ClipboardPaste,
         ] {
             assert!(icon.image(16.0).is_some(), "{icon:?}");

@@ -104,14 +104,14 @@ mod tests {
 
     fn account(state: AccountState) -> Event {
         Event::Account {
-            provider: ProviderId("ytmusic".into()),
+            provider: ProviderId("spotify".into()),
             state,
         }
     }
 
     fn pending() -> AccountState {
         AccountState::Pending {
-            verification_url: "https://www.google.com/device".into(),
+            verification_url: "https://example.com/device".into(),
             user_code: "GQVQ-JKEC".into(),
             expires_at_unix: 1_800_000_000,
         }

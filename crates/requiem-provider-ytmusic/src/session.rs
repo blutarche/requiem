@@ -1,14 +1,13 @@
 //! A YouTube Music browser session: the cookie of a signed-in music.youtube.com tab, checked
-//! with YouTube Music and kept beside the Google sign-in. Innertube takes it where it refuses
-//! OAuth tokens, so Home, the Library and private playlists come as music.youtube.com shows
-//! them. Search and playback never carry it.
+//! with YouTube Music and kept in the provider's folder. Home, the Library and private
+//! playlists come with it as music.youtube.com shows them. Search and playback never carry it.
 
 use std::fmt::{self, Write as _};
-use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::thread;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use requiem_core::{
     AccountState, Collection, CollectionId, CollectionKind, HOME_LIKED, HOME_MIXES, HOME_PLAYLISTS,
@@ -20,7 +19,7 @@ use serde_json::{Value, json};
 use crate::IpFamily;
 use crate::browser::{self, BrowserHeaders};
 use crate::clients::{MUSIC_CLIENT_ID, MUSIC_CLIENT_VERSION, MUSIC_ORIGIN, MUSIC_UA};
-use crate::google::{Clock, commit, private_dir, read_capped, stage_private, staged_path, tighten};
+use crate::files::{commit, private_dir, read_capped, remove, stage_private, tighten};
 use crate::innertube::{InnertubeClient, status_error};
 use crate::log::debug;
 use crate::parse::{
@@ -54,6 +53,7 @@ const NO_NAME: &str = "YouTube Music named no account for that session";
 const NO_HOME: &str = "YouTube Music showed no Home for that session";
 const CHANGED: &str =
     "YouTube Music was signed out while that session was checked, so it wasn't kept";
+pub(crate) const NO_HOME_DIR: &str = "no usable HOME, so there is nowhere to keep a session";
 
 /// The plist `tmutil addexclusion` writes, read back on macOS 26: Time Machine skips the file.
 #[cfg(target_os = "macos")]
@@ -133,9 +133,23 @@ fn locked<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
     m.lock().unwrap_or_else(|e| e.into_inner())
 }
 
-/// Where the session is kept: beside the Google sign-in.
-pub(crate) fn path_beside(token: Option<&Path>) -> Option<PathBuf> {
-    Some(token?.parent()?.join(FILE_NAME))
+pub(crate) trait Clock: Send + Sync {
+    fn unix(&self) -> u64;
+}
+
+pub(crate) struct SystemClock;
+
+impl Clock for SystemClock {
+    fn unix(&self) -> u64 {
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_or(0, |d| d.as_secs())
+    }
+}
+
+/// Where the session is kept in the provider's folder `dir`.
+pub(crate) fn path_in(dir: Option<&Path>) -> Option<PathBuf> {
+    Some(dir?.join(FILE_NAME))
 }
 
 fn load(path: &Path) -> Option<Signed> {
@@ -212,18 +226,6 @@ pub(crate) fn exclude_from_backups(path: &Path) {
 
 #[cfg(not(target_os = "macos"))]
 pub(crate) fn exclude_from_backups(_: &Path) {}
-
-/// Deletes the session file and any copy a save left behind; a missing one is no error. The
-/// copy goes first, so on an error the file is still there.
-fn remove(path: &Path) -> io::Result<()> {
-    for p in [staged_path(path), path.to_owned()] {
-        match fs::remove_file(p) {
-            Err(e) if e.kind() != io::ErrorKind::NotFound => return Err(e),
-            _ => {}
-        }
-    }
-    Ok(())
-}
 
 /// A continuation token as a query value.
 fn query_value(s: &str) -> String {
@@ -373,10 +375,7 @@ impl BrowserSession {
     pub(crate) fn import(&self, paste: &str) -> Result<(), ProviderError> {
         let headers = browser::parse_paste(paste).map_err(ProviderError::SignInRequired)?;
         let Some(path) = self.path.clone() else {
-            return Err(ProviderError::SignInRequired(
-                "no usable HOME: set REQUIEM_GOOGLE_TOKEN_FILE to where the sign-in should be kept"
-                    .into(),
-            ));
+            return Err(ProviderError::SignInRequired(NO_HOME_DIR.into()));
         };
         let checked = |f: Failure| match f {
             Failure::SignedOut | Failure::Forbidden => {
@@ -581,10 +580,11 @@ impl BrowserSession {
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
     use std::os::unix::fs::PermissionsExt;
 
     use super::*;
-    use crate::google::SystemClock;
+    use crate::files::staged_path;
     use crate::testing::{FakeMusic, TempDir};
 
     // Synthetic responses built to ytmusicapi's paths; every value in them is made up.
@@ -618,7 +618,7 @@ mod tests {
         }
 
         fn path(&self) -> PathBuf {
-            path_beside(Some(&self.tmp.path().join("requiem/google-token.json"))).unwrap()
+            path_in(Some(&self.tmp.path().join("requiem"))).unwrap()
         }
 
         fn session(&self) -> BrowserSession {

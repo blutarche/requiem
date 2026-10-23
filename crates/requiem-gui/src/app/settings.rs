@@ -4,11 +4,11 @@ use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
 use objc2::rc::Retained;
-use objc2::runtime::{AnyObject, ProtocolObject, Sel};
+use objc2::runtime::{AnyObject, Sel};
 use objc2::{MainThreadOnly, Message, msg_send, sel};
 use objc2_app_kit::{
-    NSAccessibility, NSAccessibilityGroupRole, NSBorderType, NSControl, NSFocusRingType,
-    NSLineBreakMode, NSScrollView, NSTextField, NSTextFieldDelegate, NSView,
+    NSAccessibility, NSAccessibilityGroupRole, NSBorderType, NSFocusRingType, NSLineBreakMode,
+    NSScrollView, NSTextField, NSView,
 };
 use objc2_core_foundation::CGFloat;
 use objc2_foundation::{MainThreadMarker, NSRect, NSSize};
@@ -20,8 +20,7 @@ use super::shelves::FlippedView;
 use super::theme::{self, Icon, Weight};
 use super::ui;
 use super::widgets::{
-    self, FLEX_H, FLEX_W, Field, HoverButton, LABEL_ICON, Mask, PIN_LEFT, PIN_RIGHT, PIN_TOP,
-    SecretField, rect,
+    self, FLEX_H, FLEX_W, Field, HoverButton, LABEL_ICON, Mask, PIN_LEFT, PIN_RIGHT, PIN_TOP, rect,
 };
 use crate::vm::{self, AccountRow, AccountRowState, Service};
 
@@ -38,11 +37,8 @@ const TEXT_X: CGFloat = PAD + BADGE + 12.0;
 const ACTION_H: CGFloat = 32.0;
 const BUTTON_H: CGFloat = 36.0;
 const GAP: CGFloat = 8.0;
-const FIELD_W: CGFloat = 440.0;
 /// The wrapped notes' widest line.
 const NOTE_W: CGFloat = 560.0;
-/// A field's focus ring reaches this far past its box.
-const RING: CGFloat = 2.0;
 
 /// A view whose subviews lay out top down.
 fn flipped(mtm: MainThreadMarker, mask: Mask) -> Retained<FlippedView> {
@@ -143,7 +139,7 @@ pub struct SettingsPage {
     rows: RefCell<Vec<Rc<AccountView>>>,
     /// What the rows show; their buttons' tags index it.
     shown: RefCell<Vec<AccountRow>>,
-    /// The buttons' target and the fields' delegate.
+    /// The buttons' target.
     target: Retained<Delegate>,
 }
 
@@ -207,7 +203,7 @@ impl SettingsPage {
     }
 
     /// Shows `rows`. With `speak`, a row whose status changed says so, as does a newly
-    /// refused client. True while a row shows a sign-in code, whose expiry needs redrawing.
+    /// refused session. True while a row shows a sign-in code, whose expiry needs redrawing.
     pub fn set(&self, rows: Vec<AccountRow>, speak: bool) -> bool {
         let mtm = self.view.mtm();
         let made = self.rows.borrow().len();
@@ -248,10 +244,6 @@ impl SettingsPage {
         self.rows.borrow().clone()
     }
 
-    fn view_at(&self, i: usize) -> Option<Rc<AccountView>> {
-        self.rows.borrow().get(i).cloned()
-    }
-
     /// Row `i` as shown.
     pub fn row(&self, i: usize) -> Option<AccountRow> {
         self.shown.borrow().get(i).cloned()
@@ -263,53 +255,6 @@ impl SettingsPage {
             AccountRowState::Session(f) if !f.checking => Some(r.provider.clone()),
             _ => None,
         })
-    }
-
-    /// Row `i`'s provider, and what its client form holds while it shows one.
-    pub fn client(&self, i: usize) -> Option<(ProviderId, String, String)> {
-        let row = self.row(i)?;
-        if !matches!(row.state, AccountRowState::Setup(_)) {
-            return None;
-        }
-        let v = self.view_at(i)?;
-        Some((row.provider, v.form.id.value(), v.form.secret.value()))
-    }
-
-    pub fn clear_secret(&self, i: usize) {
-        if let Some(v) = self.view_at(i) {
-            v.form.secret.clear();
-            v.form.update_save();
-        }
-    }
-
-    /// The row whose client form `control` is a field of.
-    pub fn form_row(&self, control: &NSControl) -> Option<usize> {
-        self.views()
-            .iter()
-            .position(|v| v.form.id.is(control) || v.form.secret.is(control))
-    }
-
-    /// Enables Save once both of row `i`'s fields hold something.
-    pub fn fields_changed(&self, i: usize) {
-        if let Some(v) = self.view_at(i) {
-            v.form.update_save();
-        }
-    }
-
-    /// Puts the cursor in the first shown client form's Client ID field.
-    pub fn focus_form(&self) {
-        let field = self
-            .views()
-            .iter()
-            .find(|v| !v.view.isHidden() && !v.form.view.isHidden())
-            .map(|v| v.form.id.text.retain());
-        let Some(field) = field else {
-            return;
-        };
-        if let Some(window) = self.view.window() {
-            window.makeFirstResponder(Some(&field));
-        }
-        field.scrollRectToVisible(field.bounds());
     }
 
     /// Redraws the sign-in codes' expiry; true while any shows.
@@ -329,8 +274,8 @@ impl SettingsPage {
     }
 }
 
-/// An account's row: the service's badge, name and state, its button, and below them the
-/// sign-in code, the ways to sign in, or the chosen form.
+/// An account's row: the service's badge, name and state, its buttons, and below them the
+/// sign-in code or the session form.
 struct AccountView {
     /// A VoiceOver group named for the service and its state.
     view: Retained<FlippedView>,
@@ -342,29 +287,20 @@ struct AccountView {
     action: Retained<HoverButton>,
     /// The action's label, whose padded image is rebuilt only when it changes.
     labelled: Cell<Option<(&'static str, Icon)>>,
-    /// Use Browser Session…: the default while nothing can sign in, else `session`.
-    session_default: Retained<HoverButton>,
+    /// Use Browser Session…, beside Sign Out….
     session: Retained<HoverButton>,
-    /// Change Google Client…, or Use Google Client… while nothing can sign in.
-    change: Retained<HoverButton>,
-    /// The title `change` shows.
-    change_title: Cell<&'static str>,
     code: CodeView,
-    form: FormView,
     session_form: SessionFormView,
     /// The status last shown, which a change is announced against.
     said: RefCell<String>,
 }
 
-const CHANGE_CLIENT: &str = "Change Google Client\u{2026}";
-const USE_CLIENT: &str = "Use Google Client\u{2026}";
 const USE_SESSION: &str = "Use Browser Session\u{2026}";
 
 impl AccountView {
     /// Row `i`; its buttons are tagged with `i`.
     fn new(mtm: MainThreadMarker, i: usize, target: &Delegate) -> AccountView {
         let tag = i as isize;
-        let delegate = ProtocolObject::<dyn NSTextFieldDelegate>::from_ref(target);
         let target: &AnyObject = target.as_ref();
         let view = flipped(mtm, FLEX_W);
         view.setAccessibilityElement(true);
@@ -385,44 +321,21 @@ impl AccountView {
         let action = button(mtm, false, "", None, target, sel!(settingsSignIn:), tag);
         action.setAutoresizingMask(PIN_RIGHT);
         action.setFrameSize(NSSize::new(action.frame().size.width, ACTION_H));
-        let use_session = |primary| {
-            button(
-                mtm,
-                primary,
-                USE_SESSION,
-                Some(Icon::ClipboardPaste),
-                target,
-                sel!(useBrowserSession:),
-                tag,
-            )
-        };
-        let (session_default, session) = (use_session(true), use_session(false));
-        let change = button(
+        let session = button(
             mtm,
             false,
-            CHANGE_CLIENT,
-            Some(Icon::KeyRound),
+            USE_SESSION,
+            Some(Icon::ClipboardPaste),
             target,
-            sel!(changeClient:),
+            sel!(useBrowserSession:),
             tag,
         );
         let code = CodeView::new(mtm, target, tag);
-        let form = FormView::new(mtm, target, delegate, tag);
         let session_form = SessionFormView::new(mtm, target, tag);
-        for v in [
-            &rule,
-            &badge as &NSView,
-            &name,
-            &status,
-            &action,
-            &session_default,
-            &session,
-            &change,
-        ] {
+        for v in [&rule, &badge as &NSView, &name, &status, &action, &session] {
             view.addSubview(v);
         }
         view.addSubview(&code.view);
-        view.addSubview(&form.view);
         view.addSubview(&session_form.view);
         AccountView {
             view,
@@ -432,12 +345,8 @@ impl AccountView {
             status,
             action,
             labelled: Cell::new(None),
-            session_default,
             session,
-            change,
-            change_title: Cell::new(CHANGE_CLIENT),
             code,
-            form,
             session_form,
             said: RefCell::new(String::new()),
         }
@@ -472,14 +381,7 @@ impl AccountView {
             unsafe { self.action.setAction(Some(sel)) };
         }
         self.action.set_shown(action.is_some());
-        let first = row.state == AccountRowState::NeedsSetup;
-        self.session_default.set_shown(row.methods && first);
-        self.session.set_shown(row.methods && !first);
-        self.change.set_shown(row.methods);
-        let title = if first { USE_CLIENT } else { CHANGE_CLIENT };
-        if self.change_title.replace(title) != title {
-            relabel(&self.change, title, Some(Icon::KeyRound), BUTTON_H);
-        }
+        self.session.set_shown(row.methods);
         match &row.state {
             AccountRowState::Pending {
                 verification_url,
@@ -491,17 +393,12 @@ impl AccountView {
             _ => self.code.view.setHidden(true),
         }
         match &row.state {
-            AccountRowState::Setup(form) => self.form.show(form, speak),
-            _ => self.form.hide(),
-        }
-        match &row.state {
             AccountRowState::Session(form) => self.session_form.show(form, speak),
             _ => self.session_form.hide(),
         }
     }
 
     fn hide(&self) {
-        self.form.hide();
         self.session_form.hide();
         self.view.setHidden(true);
         self.said.borrow_mut().clear();
@@ -536,26 +433,14 @@ impl AccountView {
             y += h + 16.0;
         }
         if row.methods {
-            let buttons = [&self.session_default, &self.session, &self.change];
-            y = flow(&buttons.map(|b| &**b), TEXT_X, y, w - PAD) + 16.0;
+            y = flow(&[&self.session], TEXT_X, y, w - PAD) + 16.0;
         }
-        match row.state {
-            AccountRowState::Setup(_) => {
-                // The fields' focus rings reach past the form's left edge.
-                let (v, form_w) = (&self.form.view, detail_w + RING);
-                v.setFrame(rect(TEXT_X - RING, y, form_w, 0.0));
-                let h = self.form.place(form_w);
-                v.setFrameSize(NSSize::new(form_w, h));
-                y += h + 16.0;
-            }
-            AccountRowState::Session(_) => {
-                let v = &self.session_form.view;
-                v.setFrame(rect(TEXT_X, y, detail_w, 0.0));
-                let h = self.session_form.place(detail_w);
-                v.setFrameSize(NSSize::new(detail_w, h));
-                y += h + 16.0;
-            }
-            _ => {}
+        if let AccountRowState::Session(_) = row.state {
+            let v = &self.session_form.view;
+            v.setFrame(rect(TEXT_X, y, detail_w, 0.0));
+            let h = self.session_form.place(detail_w);
+            v.setFrameSize(NSSize::new(detail_w, h));
+            y += h + 16.0;
         }
         let h = if y > ROW_H { y - 16.0 + PAD } else { ROW_H };
         self.view.setFrameSize(NSSize::new(w, h));
@@ -660,168 +545,6 @@ impl CodeView {
             y = wrap_at(&self.notice, 0.0, y + GAP, note_w);
         }
         flow(&[&self.copy, &self.open, &self.cancel], 0.0, y + 16.0, w)
-    }
-}
-
-/// The form for the user's own Google client: its ID and secret, or its file.
-struct FormView {
-    view: Retained<FlippedView>,
-    /// Why the form shows, or in red why the last client was refused.
-    note: Retained<NSTextField>,
-    id_label: Retained<NSTextField>,
-    id: Field,
-    secret_label: Retained<NSTextField>,
-    secret: SecretField,
-    save: Retained<HoverButton>,
-    choose: Retained<HoverButton>,
-    guide: Retained<HoverButton>,
-    cancel: Retained<HoverButton>,
-}
-
-impl FormView {
-    fn new(
-        mtm: MainThreadMarker,
-        target: &AnyObject,
-        delegate: &ProtocolObject<dyn NSTextFieldDelegate>,
-        tag: isize,
-    ) -> FormView {
-        let view = flipped(mtm, FLEX_W);
-        let note = wrapping(mtm, 12.0);
-        note.setSelectable(true);
-        let field_label = |text: &str| {
-            let l = widgets::label(
-                mtm,
-                text,
-                &theme::font(12.0, Weight::Medium),
-                &theme::ink_2(),
-            );
-            // The field it names carries the name.
-            widgets::hide_from_accessibility(&l);
-            l
-        };
-        let id_label = field_label("Client ID");
-        let secret_label = field_label("Client secret");
-        let field = rect(RING, 0.0, FIELD_W, Field::H);
-        let id = Field::new(
-            mtm,
-            field,
-            PIN_LEFT,
-            "123-abc.apps.googleusercontent.com",
-            None,
-        );
-        let secret = SecretField::new(mtm, field, PIN_LEFT, "GOCSPX-\u{2026}");
-        // SAFETY: the fields' delegate is weak. It is the app delegate, which `app::run` holds
-        // in a local until `app.run()`, which never returns.
-        unsafe {
-            id.text.setDelegate(Some(delegate));
-            secret.text.setDelegate(Some(delegate));
-        }
-        widgets::accessibility_label(&id.text, "Client ID");
-        widgets::accessibility_label(&secret.text, "Client secret");
-        let save = button(mtm, true, "Save", None, target, sel!(saveClient:), tag);
-        let choose = button(
-            mtm,
-            false,
-            "Choose Client File\u{2026}",
-            Some(Icon::FolderOpen),
-            target,
-            sel!(settingsChooseClientFile:),
-            tag,
-        );
-        let guide = button(
-            mtm,
-            false,
-            "Setup Guide",
-            Some(Icon::BookOpen),
-            target,
-            sel!(openSetupGuide:),
-            tag,
-        );
-        let cancel = button(mtm, false, "Cancel", None, target, sel!(cancelSetup:), tag);
-        for v in [&note, &id_label, &secret_label] {
-            view.addSubview(v);
-        }
-        view.addSubview(&id.ring);
-        view.addSubview(&secret.ring);
-        for b in [&save, &choose, &guide, &cancel] {
-            view.addSubview(b);
-        }
-        view.setHidden(true);
-        let form = FormView {
-            view,
-            note,
-            id_label,
-            id,
-            secret_label,
-            secret,
-            save,
-            choose,
-            guide,
-            cancel,
-        };
-        form.update_save();
-        form
-    }
-
-    fn show(&self, form: &vm::ClientForm, speak: bool) {
-        match &form.error {
-            Some(e) => {
-                if speak && self.note.stringValue().to_string() != *e {
-                    widgets::announce(self.view.mtm(), e);
-                }
-                widgets::set_text(&self.note, e);
-                self.note.setTextColor(Some(&theme::bad()));
-            }
-            None => {
-                widgets::set_text(&self.note, &form.reason);
-                self.note.setTextColor(Some(&theme::muted()));
-            }
-        }
-        self.view.setHidden(false);
-        self.update_save();
-    }
-
-    /// Collapses the form, emptied, so the next one starts blank.
-    fn hide(&self) {
-        if self.view.isHidden() {
-            return;
-        }
-        let editing =
-            self.id.text.currentEditor().is_some() || self.secret.text.currentEditor().is_some();
-        if editing && let Some(window) = self.view.window() {
-            window.makeFirstResponder(None);
-        }
-        self.id.set_value("");
-        self.secret.clear();
-        self.view.setHidden(true);
-    }
-
-    fn update_save(&self) {
-        self.save
-            .set_enabled(vm::client_filled(&self.id.value(), &self.secret.value()));
-    }
-
-    /// Lays the form out `w` wide, its fields' rings `RING` in; returns its height.
-    fn place(&self, w: CGFloat) -> CGFloat {
-        let x = RING;
-        let field_w = (w - x).clamp(0.0, FIELD_W);
-        let mut y = wrap_at(&self.note, x, 0.0, (w - x).min(NOTE_W));
-        y = line_at(&self.id_label, x, y + 12.0, field_w) + 6.0;
-        self.id.ring.setFrame(rect(
-            0.0,
-            y - RING,
-            field_w + 2.0 * RING,
-            Field::H + 2.0 * RING,
-        ));
-        y = line_at(&self.secret_label, x, y + Field::H + 12.0, field_w) + 6.0;
-        self.secret.ring.setFrame(rect(
-            0.0,
-            y - RING,
-            field_w + 2.0 * RING,
-            Field::H + 2.0 * RING,
-        ));
-        let buttons = [&self.save, &self.choose, &self.guide, &self.cancel];
-        flow(&buttons.map(|b| &**b), x, y + Field::H + 16.0, w)
     }
 }
 

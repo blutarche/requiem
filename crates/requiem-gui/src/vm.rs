@@ -2,13 +2,13 @@
 //! intents to `Command`s. No AppKit types, so it is unit-tested on every OS.
 
 use std::borrow::Cow;
-use std::io::{self, Read};
+use std::io;
 use std::ops::{BitOr, BitOrAssign};
 use std::time::{Duration, Instant};
 
 use requiem_core::{
-    AccountState, Collection, Command, EnqueueMode, Event, Item, NO_OAUTH_CLIENT, Page, PlayState,
-    ProviderId, Redacted, SeekTarget, Shelf, Track, TrackId,
+    AccountState, Collection, Command, EnqueueMode, Event, Item, Page, PlayState, ProviderId,
+    Redacted, SeekTarget, Shelf, Track, TrackId,
 };
 use requiem_ipc::{UpdateState, UpdateStatus};
 
@@ -34,8 +34,6 @@ const STUCK_HINT: &str = "If this persists, choose Quit and Stop Music from the 
                           menu-bar icon, then reopen Requiem.";
 /// How long the answer to Check for Updates… stays when there is nothing new.
 pub const UP_TO_DATE_FOR: Duration = Duration::from_secs(4);
-/// The largest client file the setup sheet sends; providers take no more.
-const MAX_CLIENT_FILE: u64 = 64 * 1024;
 /// The largest browser session the session form sends; providers take no more.
 const MAX_PASTE: usize = 64 * 1024;
 /// A YouTube Music row's status while its pasted session is checked.
@@ -207,22 +205,15 @@ pub enum Intent {
     },
     /// Fetches the current page again, if it is a browse page.
     Refresh,
-    /// Starts a sign-in, or opens the setup sheet for a provider that needs setting up first.
+    /// Starts a sign-in; for a provider that signs in with a browser session, opens its form.
     SignIn(ProviderId),
     SignOut(ProviderId),
-    /// The setup sheet's chosen client file, or the client Settings' form built: its text, or
-    /// why it couldn't be read or was refused.
-    ImportClient(Result<Redacted, String>),
     /// The session form's paste, as `session_json` wrapped it, or why it was refused.
     ImportSession(Result<Redacted, String>),
-    /// The setup sheet's Cancel, and each form's.
+    /// The session form's Cancel.
     CancelSetup,
-    /// Opens `provider`'s client form, as the setup sheet does, whatever its account's state:
-    /// Settings' Change Google Client… and Use Google Client…, and its form's Save and Choose
-    /// Client File….
-    ChangeClient(ProviderId),
-    /// Opens `provider`'s browser-session form: Use Browser Session… in Settings and on the
-    /// setup sheet.
+    /// Opens `provider`'s browser-session form, whatever its account's state: Use Browser
+    /// Session… in Settings.
     UseBrowserSession(ProviderId),
     /// Shows one service's items, or all of them, on Home, the Library and in search results.
     /// Local to the window: nothing is sent.
@@ -326,15 +317,6 @@ pub enum LibraryView {
         user_code: String,
         expires_at_unix: u64,
     },
-    /// The setup sheet: `provider` needs its client before it can sign in.
-    Setup {
-        provider: ProviderId,
-        /// Why, as the provider puts it; `None` when it only says there is no client yet,
-        /// which the sheet's steps already say.
-        reason: Option<String>,
-        /// Why the last client file was refused; shown instead of `reason`.
-        error: Option<String>,
-    },
     SignedIn {
         name: Option<String>,
         page: PageView,
@@ -349,27 +331,16 @@ pub enum HomeView {
     Page(PageView),
 }
 
-/// The setup sheet, while it is open; in Settings, the form chosen.
+/// Settings' browser-session form, while it is open.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Setup {
     pub provider: ProviderId,
-    /// Settings' open form; none while only the sheet is open.
-    pub form: Option<Form>,
     pub error: Option<String>,
-    /// A client was sent and not answered yet; a `SignedOut` answer starts the sign-in.
+    /// A session was sent and not answered yet.
     pub importing: bool,
-    /// The account's state when the last client was sent. After an error answers it, the
+    /// The account's state when the last session was sent. After an error answers it, the
     /// `Account` that follows tells a refusal, unchanged, from an import that stood.
     sent_from: Option<AccountState>,
-}
-
-/// How Settings signs YouTube Music in.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Form {
-    /// The user's own Google client.
-    Client,
-    /// Request headers copied from a signed-in browser tab.
-    Session,
 }
 
 /// An account's row in Settings.
@@ -379,9 +350,8 @@ pub struct AccountRow {
     pub state: AccountRowState,
     /// One line on the account, which VoiceOver reads after the service's name.
     pub status: String,
-    /// The row offers its ways to sign in: Use Browser Session…, and Change Google Client…,
-    /// or Use Google Client… while it needs setting up. The provider takes both, and neither
-    /// form is open.
+    /// The row offers Use Browser Session… beside Sign Out…: the provider signs in with one,
+    /// is signed in, and its form is closed.
     pub methods: bool,
 }
 
@@ -398,25 +368,10 @@ pub enum AccountRowState {
         user_code: String,
         expires_at_unix: u64,
     },
-    /// Nothing can sign in until a way is chosen: Use Browser Session…, the default, or Use
-    /// Google Client….
-    NeedsSetup,
-    /// The client form.
-    Setup(ClientForm),
     /// The browser-session form.
     Session(SessionForm),
     /// Why the provider can't sign in; nothing to do.
     Unavailable(String),
-}
-
-/// Settings' form for the user's own Google client: an ID, a secret, or the downloaded file.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ClientForm {
-    /// Why the form shows, as the provider puts it, or what setting up or changing the client
-    /// takes.
-    pub reason: String,
-    /// Why the last client was refused; shown instead of `reason`.
-    pub error: Option<String>,
 }
 
 /// Settings' form for a session pasted from a signed-in browser tab.
@@ -426,36 +381,6 @@ pub struct SessionForm {
     pub error: Option<String>,
     /// A paste was sent and not answered yet.
     pub checking: bool,
-}
-
-/// What every Google OAuth client ID ends in.
-const GOOGLE_CLIENT_ID_END: &str = ".apps.googleusercontent.com";
-/// The client form's note while it changes a client.
-const CHANGE_CLIENT: &str = "Enter the new client's ID and secret, or choose its file.";
-/// The client form's note while there is no client yet.
-const NEW_CLIENT: &str = "Enter your Google Cloud client's ID and secret, or choose its JSON file.";
-
-/// Why a provider needs setting up, as the provider puts it, unless it only says there is no
-/// client yet: the provider's text for that names a file path, and the GUI asks its own way.
-fn shown_reason(reason: &str) -> Option<&str> {
-    (!reason.starts_with(NO_OAUTH_CLIENT)).then_some(reason)
-}
-
-/// The client JSON Settings' Save sends for a typed client ID and secret, which the provider
-/// reads as it reads a downloaded file's "installed" part; or why they were refused.
-pub fn client_json(id: &str, secret: &str) -> Result<Redacted, String> {
-    let (id, secret) = (id.trim(), secret.trim());
-    if !client_filled(id, secret) {
-        return Err("Enter the client ID and the client secret.".to_owned());
-    }
-    if !id.ends_with(GOOGLE_CLIENT_ID_END) {
-        return Err(format!(
-            "That isn't a Google client ID. It ends in {GOOGLE_CLIENT_ID_END}."
-        ));
-    }
-    Ok(Redacted(
-        serde_json::json!({ "client_id": id, "client_secret": secret }).to_string(),
-    ))
 }
 
 /// The import Paste from Clipboard sends for the pasteboard's text, which the provider reads
@@ -478,13 +403,8 @@ pub fn session_json(paste: &str) -> Result<Redacted, String> {
     ))
 }
 
-/// Whether both of the client form's fields hold more than whitespace; Save waits for that.
-pub fn client_filled(id: &str, secret: &str) -> bool {
-    !id.trim().is_empty() && !secret.trim().is_empty()
-}
-
-/// Whether `provider` signs in with the user's own client: YouTube Music, with a Google one.
-fn takes_client(provider: &ProviderId) -> bool {
+/// Whether `provider` signs in with a session pasted from a browser: YouTube Music.
+fn takes_session(provider: &ProviderId) -> bool {
     Service::of(provider) == Some(Service::YouTubeMusic)
 }
 
@@ -495,7 +415,7 @@ pub fn sign_out_info(provider: &ProviderId) -> String {
     let mut info = format!(
         "Your {service} playlists, albums and Home shelves leave Requiem until you sign in again."
     );
-    if takes_client(provider) {
+    if takes_session(provider) {
         info.push_str(
             " If you signed in with a browser session, Requiem can't sign that browser out; log \
              out there to end it.",
@@ -530,23 +450,6 @@ pub fn expires_text(expires_at_unix: u64, now_unix: u64) -> String {
         0 => "Code expired".to_owned(),
         left => format!("Code expires in {} min", left.div_ceil(60)),
     }
-}
-
-/// The text of the client file the setup sheet's file panel chose, opened or not; the error
-/// is the sheet's.
-pub fn read_client_file(file: io::Result<impl Read>) -> Result<Redacted, String> {
-    let mut bytes = Vec::new();
-    file.and_then(|f| f.take(MAX_CLIENT_FILE + 1).read_to_end(&mut bytes))
-        .map_err(|e| format!("Couldn’t read that file: {e}"))?;
-    if bytes.len() as u64 > MAX_CLIENT_FILE {
-        return Err(format!(
-            "That file is larger than {} KiB; choose the client JSON you downloaded.",
-            MAX_CLIENT_FILE / 1024
-        ));
-    }
-    String::from_utf8(bytes)
-        .map(Redacted)
-        .map_err(|_| "That file isn’t text; choose the client JSON you downloaded.".to_owned())
 }
 
 /// A change to the queue: to one row, by index, or to all of it.
@@ -823,8 +726,8 @@ impl UiState {
         }
     }
 
-    /// The providers Sign In applies to: the signed-out ones, the ones that need setting up
-    /// first, and every one when the Library or Home failed for want of a sign-in.
+    /// The providers Sign In applies to: the signed-out ones, and every one when the Library or
+    /// Home failed for want of a sign-in.
     pub fn sign_in_offers(&self) -> Vec<ProviderId> {
         let rejected = [&self.library.load, &self.home.load].into_iter().any(|l| {
             matches!(
@@ -837,22 +740,12 @@ impl UiState {
         });
         self.accounts
             .iter()
-            .filter(|(p, s)| {
+            .filter(|(_, s)| {
                 matches!(s, AccountState::SignedOut)
                     || (rejected && matches!(s, AccountState::SignedIn { .. }))
-                    || self.needs_setup(p).is_some()
             })
             .map(|(p, _)| p.clone())
             .collect()
-    }
-
-    /// Why `provider` can't sign in until the user gives it a client, if it is one that takes
-    /// one: its `Unavailable` text.
-    pub fn needs_setup(&self, provider: &ProviderId) -> Option<&str> {
-        match self.account_state(provider)? {
-            AccountState::Unavailable(reason) if takes_client(provider) => Some(reason),
-            _ => None,
-        }
     }
 
     /// The current place is a browse page that a fetch would fill.
@@ -876,21 +769,11 @@ impl UiState {
         }
     }
 
-    /// The setup sheet shows first, as the user's latest choice, then a pending sign-in, then
-    /// the Library once any provider is signed in; with none, the sign-in choices. A provider
-    /// with its sheet open needs setup, so it has no sign-in pending.
+    /// A pending sign-in shows first, then the Library once any provider is signed in; with
+    /// none, the sign-in choices.
     pub fn library_view(&self) -> LibraryView {
         if self.accounts.is_empty() {
             return LibraryView::Loading;
-        }
-        if let Some(setup) = &self.setup
-            && let Some(reason) = self.needs_setup(&setup.provider)
-        {
-            return LibraryView::Setup {
-                provider: setup.provider.clone(),
-                reason: shown_reason(reason).map(str::to_owned),
-                error: setup.error.clone(),
-            };
         }
         if let Some((
             provider,
@@ -947,9 +830,8 @@ impl UiState {
         }
     }
 
-    /// Settings' account rows, one per provider, in the session's order. A provider that
-    /// needs setting up offers its ways to sign in until one is chosen; the chosen form shows,
-    /// as does one opened to change how a provider signs in.
+    /// Settings' account rows, one per provider, in the session's order. A provider's open
+    /// session form shows in place of its state.
     pub fn settings_view(&self) -> Vec<AccountRow> {
         self.accounts
             .iter()
@@ -957,39 +839,26 @@ impl UiState {
                 let setup = self
                     .setup
                     .as_ref()
-                    .filter(|s| s.provider == *provider && takes_client(provider));
-                let form = setup.and_then(|s| s.form);
-                let error = setup.and_then(|s| s.error.clone());
-                let checking = setup.is_some_and(|s| s.importing && s.form == Some(Form::Session));
-                let reason = self.needs_setup(provider);
+                    .filter(|s| s.provider == *provider && takes_session(provider));
+                let checking = setup.is_some_and(|s| s.importing);
                 let status = match account {
                     _ if checking => CHECKING.to_owned(),
                     AccountState::SignedIn { name: Some(n) } => format!("Signed in as {n}"),
                     AccountState::SignedIn { name: None } => "Signed in".to_owned(),
                     AccountState::SignedOut => "Not signed in".to_owned(),
                     AccountState::Pending { .. } => "Signing in".to_owned(),
-                    _ if reason.is_some() => "Sign-in isn't set up".to_owned(),
                     AccountState::Unavailable(text) => text.clone(),
                 };
-                let state = match (form, reason, account) {
-                    (Some(Form::Session), _, _) => {
-                        AccountRowState::Session(SessionForm { error, checking })
-                    }
-                    (Some(Form::Client), reason, _) => AccountRowState::Setup(ClientForm {
-                        reason: match reason {
-                            Some(r) => shown_reason(r).unwrap_or(NEW_CLIENT),
-                            None => CHANGE_CLIENT,
-                        }
-                        .to_owned(),
-                        error,
+                let state = match (setup, account) {
+                    (Some(s), _) => AccountRowState::Session(SessionForm {
+                        error: s.error.clone(),
+                        checking,
                     }),
-                    (None, Some(_), _) => AccountRowState::NeedsSetup,
-                    (None, None, AccountState::SignedIn { name }) => {
+                    (None, AccountState::SignedIn { name }) => {
                         AccountRowState::SignedIn { name: name.clone() }
                     }
-                    (None, None, AccountState::SignedOut) => AccountRowState::SignedOut,
+                    (None, AccountState::SignedOut) => AccountRowState::SignedOut,
                     (
-                        None,
                         None,
                         AccountState::Pending {
                             verification_url,
@@ -1001,13 +870,15 @@ impl UiState {
                         user_code: user_code.clone(),
                         expires_at_unix: *expires_at_unix,
                     },
-                    (None, None, AccountState::Unavailable(text)) => {
+                    (None, AccountState::Unavailable(text)) => {
                         AccountRowState::Unavailable(text.clone())
                     }
                 };
                 AccountRow {
                     provider: provider.clone(),
-                    methods: takes_client(provider) && form.is_none(),
+                    methods: takes_session(provider)
+                        && setup.is_none()
+                        && matches!(account, AccountState::SignedIn { .. }),
                     state,
                     status,
                 }
@@ -1015,19 +886,14 @@ impl UiState {
             .collect()
     }
 
-    /// Whether Change Google Client… asks first: the account is signed in, and a client with
-    /// another ID signs it out.
-    pub fn change_client_asks(&self, provider: &ProviderId) -> bool {
-        matches!(
-            self.account_state(provider),
-            Some(AccountState::SignedIn { .. })
-        )
-    }
-
-    /// Where Sign In takes the window: the Library, which shows the code or the setup sheet;
-    /// or nowhere from Settings, whose rows show both.
-    pub fn sign_in_place(&self) -> Option<Place> {
-        (self.place != Place::Settings).then_some(Place::Library)
+    /// Where Sign In to `provider` takes the window: Settings, for a session form; else the
+    /// Library, which shows the code; or nowhere from Settings, whose rows show both.
+    pub fn sign_in_place(&self, provider: &ProviderId) -> Option<Place> {
+        match self.place {
+            Place::Settings => None,
+            _ if takes_session(provider) => Some(Place::Settings),
+            _ => Some(Place::Library),
+        }
     }
 
     /// The playlists and albums of the Library the filter keeps, in shelf order: the rows of
@@ -1721,34 +1587,16 @@ impl Vm {
                 };
                 self.fetch(slot, false).into_iter().collect()
             }
-            Intent::SignIn(provider) if can.player && self.knows(&provider) => {
-                if self.ui.needs_setup(&provider).is_none() {
-                    // The Library's sheet would cover the code this sign-in shows. Another
-                    // provider's change of client, which only Settings shows, stays open.
-                    let covers = self.ui.setup.as_ref().is_some_and(|s| {
-                        s.provider == provider || self.ui.needs_setup(&s.provider).is_some()
-                    });
-                    if covers {
-                        self.ui.setup = None;
-                        self.dirty |= Dirty::LIBRARY;
-                    }
-                    return vec![Command::SignIn { provider }];
-                }
-                self.open_setup(provider, None);
-                Vec::new()
-            }
-            Intent::ChangeClient(provider) if takes_client(&provider) && self.knows(&provider) => {
-                self.open_setup(provider, Some(Form::Client));
-                Vec::new()
-            }
-            Intent::UseBrowserSession(provider)
-                if takes_client(&provider) && self.knows(&provider) =>
+            Intent::SignIn(provider) | Intent::UseBrowserSession(provider)
+                if takes_session(&provider) && self.knows(&provider) =>
             {
-                self.open_setup(provider, Some(Form::Session));
+                self.open_setup(provider);
                 Vec::new()
             }
-            Intent::ImportClient(file) => self.import(Form::Client, file, can.player),
-            Intent::ImportSession(paste) => self.import(Form::Session, paste, can.player),
+            Intent::SignIn(provider) if can.player && self.knows(&provider) => {
+                vec![Command::SignIn { provider }]
+            }
+            Intent::ImportSession(paste) => self.import(paste, can.player),
             Intent::CancelSetup => {
                 if self.ui.setup.take().is_some() {
                     self.dirty |= Dirty::LIBRARY;
@@ -1809,37 +1657,27 @@ impl Vm {
         self.ui.account_state(provider).is_some()
     }
 
-    /// Opens the setup sheet for `provider`, and in Settings `form`, if any. One already open
-    /// for it keeps its error, unless it changes form.
-    fn open_setup(&mut self, provider: ProviderId, form: Option<Form>) {
-        match &mut self.ui.setup {
-            Some(setup) if setup.provider == provider => {
-                if form.is_some() && setup.form != form {
-                    setup.form = form;
-                    setup.error = None;
-                    self.dirty |= Dirty::LIBRARY;
-                }
-            }
-            _ => {
-                self.ui.setup = Some(Setup {
-                    provider,
-                    form,
-                    error: None,
-                    importing: false,
-                    sent_from: None,
-                });
-                self.dirty |= Dirty::LIBRARY;
-            }
+    /// Opens the session form for `provider`. One already open for it keeps its error.
+    fn open_setup(&mut self, provider: ProviderId) {
+        if self
+            .ui
+            .setup
+            .as_ref()
+            .is_some_and(|s| s.provider == provider)
+        {
+            return;
         }
+        self.ui.setup = Some(Setup {
+            provider,
+            error: None,
+            importing: false,
+            sent_from: None,
+        });
+        self.dirty |= Dirty::LIBRARY;
     }
 
-    /// Sends the open setup's client or session as `form`, or shows why it can't.
-    fn import(
-        &mut self,
-        form: Form,
-        json: Result<Redacted, String>,
-        connected: bool,
-    ) -> Vec<Command> {
+    /// Sends the open form's session, or shows why it can't.
+    fn import(&mut self, json: Result<Redacted, String>, connected: bool) -> Vec<Command> {
         let from = self
             .ui
             .setup
@@ -1849,7 +1687,6 @@ impl Vm {
         let Some(setup) = &mut self.ui.setup else {
             return Vec::new();
         };
-        setup.form = Some(form);
         self.dirty |= Dirty::LIBRARY;
         let json = match json {
             Ok(json) if connected => json,
@@ -2014,26 +1851,19 @@ impl Vm {
     ) {
         // Unchanged after its error, the import was refused, and the form keeps the error.
         let refused = answered.as_ref() == Some(&state);
-        // The sheet closes once its provider is set up, and an import it sent goes on to the
-        // sign-in it was for. One that stood despite its error says what it could not finish.
+        // The form closes once the session it sent is answered, or once the account changes
+        // under it. One that stood despite its error says what it could not finish.
+        let changed = self.ui.account_state(&provider) != Some(&state);
         if !refused
             && let Some(setup) = self.ui.setup.take_if(|s| {
-                s.provider == provider && !matches!(state, AccountState::Unavailable(_))
+                s.provider == provider && (s.importing || answered.is_some() || changed)
             })
         {
             let stood = answered.is_some();
             let sent = setup.importing || stood;
-            if sent && state == AccountState::SignedOut {
-                self.outbox.push(Command::SignIn {
-                    provider: provider.clone(),
-                });
-            }
             if stood && let Some(error) = setup.error {
                 self.toast(error, true);
-            } else if sent
-                && setup.form == Some(Form::Session)
-                && matches!(state, AccountState::SignedIn { .. })
-            {
+            } else if sent && matches!(state, AccountState::SignedIn { .. }) {
                 self.session_saved = true;
                 let service = provider_name(&provider.0);
                 self.toast(format!("Signed in to {service}. {CLEAR_CLIPBOARD}"), false);
@@ -4716,7 +4546,7 @@ mod tests {
             LibraryView::SignedOut(vec![provider()])
         );
         let pending = AccountState::Pending {
-            verification_url: "https://www.google.com/device".into(),
+            verification_url: "https://www.spotify.com/pair".into(),
             user_code: "WXYZ-ABCD".into(),
             expires_at_unix: 1_000,
         };
@@ -4725,7 +4555,7 @@ mod tests {
             vm.ui().library_view(),
             LibraryView::Pending {
                 provider: provider(),
-                verification_url: "https://www.google.com/device".into(),
+                verification_url: "https://www.spotify.com/pair".into(),
                 user_code: "WXYZ-ABCD".into(),
                 expires_at_unix: 1_000,
             }
@@ -4744,13 +4574,13 @@ mod tests {
     #[test]
     fn sign_in_commands_name_the_accounts_provider() {
         let mut vm = connected();
-        assert!(vm.intent(Intent::SignIn(provider())).is_empty());
+        assert!(vm.intent(Intent::SignIn(spotify())).is_empty());
         vm.apply(account(AccountState::SignedOut));
         vm.apply(spotify_account(AccountState::SignedOut));
         assert_eq!(
-            vm.intent(Intent::SignIn(provider())),
+            vm.intent(Intent::SignIn(spotify())),
             vec![Command::SignIn {
-                provider: provider()
+                provider: spotify()
             }]
         );
         assert_eq!(
@@ -4771,7 +4601,7 @@ mod tests {
         let mut vm = connected();
         vm.apply(account(AccountState::SignedOut));
         vm.apply(account(AccountState::Pending {
-            verification_url: "https://www.google.com/device".into(),
+            verification_url: "https://www.spotify.com/pair".into(),
             user_code: "WXYZ-ABCD".into(),
             expires_at_unix: 1_000,
         }));
@@ -5327,312 +5157,6 @@ mod tests {
         assert!(vm.intent(Intent::Refresh).is_empty());
     }
 
-    /// Connected, with YouTube Music missing its client and its setup sheet open.
-    fn setting_up() -> Vm {
-        let mut vm = connected();
-        vm.apply(account(AccountState::Unavailable("no client".into())));
-        assert!(vm.intent(Intent::SignIn(provider())).is_empty());
-        vm.take_dirty();
-        vm
-    }
-
-    fn sheet(error: Option<&str>) -> LibraryView {
-        LibraryView::Setup {
-            provider: provider(),
-            reason: Some("no client".into()),
-            error: error.map(str::to_owned),
-        }
-    }
-
-    const CLIENT: &str = r#"{"installed":{"client_id":"id","client_secret":"s"}}"#;
-
-    fn import(vm: &mut Vm) -> Vec<Command> {
-        vm.intent(Intent::ImportClient(Ok(CLIENT.into())))
-    }
-
-    #[test]
-    fn no_client_yet_is_asked_for_in_the_guis_words() {
-        let mut vm = connected();
-        vm.apply(account(AccountState::Unavailable(format!(
-            "{NO_OAUTH_CLIENT}: save the JSON of a \"TVs and Limited Input devices\" client to \
-             /Users/x/Library/Application Support/requiem/google-client.json"
-        ))));
-        vm.intent(Intent::SignIn(provider()));
-        assert_eq!(
-            vm.ui().library_view(),
-            LibraryView::Setup {
-                provider: provider(),
-                reason: None,
-                error: None,
-            }
-        );
-        vm.intent(Intent::ChangeClient(provider()));
-        assert_eq!(
-            first_row(&vm).state,
-            AccountRowState::Setup(ClientForm {
-                reason: NEW_CLIENT.into(),
-                error: None,
-            })
-        );
-        // Any other reason still shows, as does a refused client.
-        vm.apply(account(AccountState::Unavailable(
-            "no usable HOME: set REQUIEM_GOOGLE_CLIENT_FILE".into(),
-        )));
-        vm.apply(Event::AccountError {
-            provider: provider(),
-            error: "not a Google OAuth client".into(),
-        });
-        assert_eq!(
-            first_row(&vm).state,
-            AccountRowState::Setup(ClientForm {
-                reason: "no usable HOME: set REQUIEM_GOOGLE_CLIENT_FILE".into(),
-                error: Some("not a Google OAuth client".into()),
-            })
-        );
-        assert_eq!(
-            vm.ui().library_view(),
-            LibraryView::Setup {
-                provider: provider(),
-                reason: Some("no usable HOME: set REQUIEM_GOOGLE_CLIENT_FILE".into()),
-                error: Some("not a Google OAuth client".into()),
-            }
-        );
-    }
-
-    #[test]
-    fn a_provider_that_needs_setup_is_offered_and_opens_the_sheet() {
-        let mut vm = connected();
-        vm.apply(account(AccountState::Unavailable("no client".into())));
-        vm.apply(spotify_account(AccountState::SignedOut));
-        assert_eq!(vm.ui().sign_in_offers(), [provider(), spotify()]);
-        assert_eq!(vm.ui().needs_setup(&provider()), Some("no client"));
-        assert_eq!(vm.ui().needs_setup(&spotify()), None);
-        assert!(vm.ui().can_run(
-            PaletteAction::SignIn(Service::YouTubeMusic),
-            Selection::default()
-        ));
-        assert_eq!(
-            vm.ui().library_view(),
-            LibraryView::SignedOut(vec![provider(), spotify()])
-        );
-        // Only YouTube Music takes a client from the user.
-        vm.apply(spotify_account(AccountState::Unavailable("nope".into())));
-        assert_eq!(vm.ui().sign_in_offers(), [provider()]);
-        assert_eq!(vm.ui().needs_setup(&spotify()), None);
-
-        vm.take_dirty();
-        assert!(vm.intent(Intent::SignIn(provider())).is_empty());
-        assert_eq!(vm.ui().library_view(), sheet(None));
-        assert!(vm.take_dirty().contains(Dirty::LIBRARY));
-        assert!(vm.intent(Intent::CancelSetup).is_empty());
-        assert_eq!(
-            vm.ui().library_view(),
-            LibraryView::SignedOut(vec![provider()])
-        );
-        assert_eq!(vm.ui().toast, None);
-    }
-
-    #[test]
-    fn an_imported_client_starts_the_sign_in() {
-        let mut vm = setting_up();
-        assert_eq!(
-            import(&mut vm),
-            [Command::ImportSignInClient {
-                provider: provider(),
-                json: CLIENT.into(),
-            }]
-        );
-        assert_eq!(vm.ui().library_view(), sheet(None));
-        vm.apply(account(AccountState::SignedOut));
-        assert_eq!(
-            vm.take_commands(),
-            [Command::SignIn {
-                provider: provider()
-            }]
-        );
-        assert_eq!(vm.ui().setup, None);
-    }
-
-    const UNCONFIRMED: &str = "signed out on this computer, but Google did not confirm; remove requiem's access at https://myaccount.google.com/permissions";
-
-    fn form_error(vm: &Vm) -> Option<String> {
-        match first_row(vm).state {
-            AccountRowState::Setup(f) => f.error,
-            other => panic!("{other:?}"),
-        }
-    }
-
-    #[test]
-    fn an_import_that_stood_still_signs_in_and_says_what_it_could_not_finish() {
-        let mut vm = connected();
-        vm.apply(signed_in());
-        vm.take_commands();
-        vm.intent(Intent::ChangeClient(provider()));
-        assert_eq!(import(&mut vm).len(), 1);
-        // The player's order: the error, then the new state.
-        vm.apply(Event::AccountError {
-            provider: provider(),
-            error: UNCONFIRMED.into(),
-        });
-        // Alone, it reads as a refusal: an older player sends nothing more.
-        assert_eq!(form_error(&vm).as_deref(), Some(UNCONFIRMED));
-        assert!(!vm.ui().setup.as_ref().unwrap().importing);
-        vm.apply(account(AccountState::SignedOut));
-        assert_eq!(
-            vm.take_commands(),
-            [Command::SignIn {
-                provider: provider()
-            }]
-        );
-        assert_eq!(vm.ui().setup, None);
-        let toast = vm.ui().toast.as_ref().unwrap();
-        assert!(toast.error && toast.text == UNCONFIRMED, "{toast:?}");
-    }
-
-    #[test]
-    fn a_refused_import_keeps_its_form_through_the_unchanged_state() {
-        let refused = "not a Google OAuth client";
-        let refuse = |vm: &mut Vm| {
-            assert_eq!(import(vm).len(), 1);
-            vm.apply(Event::AccountError {
-                provider: provider(),
-                error: refused.into(),
-            });
-        };
-        let mut vm = connected();
-        vm.apply(signed_in());
-        vm.take_commands();
-        vm.intent(Intent::ChangeClient(provider()));
-        refuse(&mut vm);
-        vm.apply(signed_in());
-        assert_eq!(form_error(&vm).as_deref(), Some(refused));
-        assert!(vm.take_commands().is_empty());
-        assert_eq!(vm.ui().toast, None);
-        // So does one that needs setting up.
-        let mut vm = setting_up();
-        refuse(&mut vm);
-        vm.apply(account(AccountState::Unavailable("no client".into())));
-        assert_eq!(form_error(&vm).as_deref(), Some(refused));
-        // From an older player, the error comes alone, and a later change answers nothing.
-        let mut vm = connected();
-        vm.apply(signed_in());
-        vm.take_commands();
-        vm.intent(Intent::ChangeClient(provider()));
-        refuse(&mut vm);
-        vm.apply(Event::Volume(50));
-        vm.apply(account(AccountState::SignedOut));
-        assert_eq!(vm.ui().setup, None);
-        assert!(
-            !vm.take_commands()
-                .iter()
-                .any(|c| matches!(c, Command::SignIn { .. }))
-        );
-        assert_eq!(vm.ui().toast, None);
-    }
-
-    #[test]
-    fn a_refused_client_shows_on_the_sheet() {
-        let mut vm = setting_up();
-        import(&mut vm);
-        vm.apply(Event::AccountError {
-            provider: provider(),
-            error: "not a Google OAuth client".into(),
-        });
-        assert_eq!(vm.ui().toast, None);
-        assert_eq!(
-            vm.ui().library_view(),
-            sheet(Some("not a Google OAuth client"))
-        );
-        assert!(vm.take_dirty().contains(Dirty::LIBRARY));
-        // Another provider's error is still a toast.
-        vm.apply(Event::AccountError {
-            provider: spotify(),
-            error: "the code expired".into(),
-        });
-        assert!(vm.ui().toast.is_some());
-        // A file that couldn't be read sends nothing.
-        let unread = Err("Couldn’t read that file".to_owned());
-        assert!(vm.intent(Intent::ImportClient(unread)).is_empty());
-        assert_eq!(
-            vm.ui().library_view(),
-            sheet(Some("Couldn’t read that file"))
-        );
-        // The next file clears it, and a still missing client keeps the sheet.
-        assert_eq!(import(&mut vm).len(), 1);
-        assert_eq!(vm.ui().library_view(), sheet(None));
-        vm.apply(account(AccountState::Unavailable("no client".into())));
-        assert_eq!(vm.ui().library_view(), sheet(None));
-        assert!(vm.take_commands().is_empty());
-    }
-
-    #[test]
-    fn the_sheet_closes_without_a_sign_in_it_did_not_ask_for() {
-        // Set up elsewhere: the sheet closes, and the sign-in waits for the user.
-        let mut vm = setting_up();
-        vm.apply(account(AccountState::SignedOut));
-        assert_eq!(vm.ui().setup, None);
-        assert!(vm.take_commands().is_empty());
-        // Already signed in once the client is in: nothing to start.
-        let mut vm = setting_up();
-        import(&mut vm);
-        vm.apply(signed_in());
-        assert_eq!(vm.ui().setup, None);
-        assert!(
-            !vm.take_commands()
-                .iter()
-                .any(|c| matches!(c, Command::SignIn { .. }))
-        );
-        // Another provider's pending sign-in stays under the sheet, the user's latest choice.
-        let mut vm = setting_up();
-        vm.apply(spotify_account(AccountState::Pending {
-            verification_url: "https://www.spotify.com/pair".into(),
-            user_code: "ABC123".into(),
-            expires_at_unix: 1_000,
-        }));
-        assert_eq!(vm.ui().library_view(), sheet(None));
-        vm.intent(Intent::CancelSetup);
-        assert!(matches!(
-            vm.ui().library_view(),
-            LibraryView::Pending { .. }
-        ));
-        // Signing in to it closes the sheet, which would cover its code.
-        assert!(vm.intent(Intent::SignIn(provider())).is_empty());
-        assert_eq!(vm.ui().library_view(), sheet(None));
-        vm.take_dirty();
-        assert_eq!(
-            vm.intent(Intent::SignIn(spotify())),
-            [Command::SignIn {
-                provider: spotify()
-            }]
-        );
-        assert_eq!(vm.ui().setup, None);
-        assert!(vm.take_dirty().contains(Dirty::LIBRARY));
-        // A new connection starts the Library over.
-        vm.link(Link::Lost(LinkError::NotResponding));
-        vm.link(Link::Connected);
-        vm.apply(account(AccountState::Unavailable("no client".into())));
-        assert_eq!(
-            vm.ui().library_view(),
-            LibraryView::SignedOut(vec![provider()])
-        );
-        assert!(import(&mut vm).is_empty());
-    }
-
-    #[test]
-    fn a_client_chosen_while_disconnected_says_so() {
-        let mut vm = setting_up();
-        vm.link(Link::Lost(LinkError::NotResponding));
-        vm.take_dirty();
-        assert!(import(&mut vm).is_empty());
-        let setup = vm.ui().setup.as_ref().unwrap();
-        assert_eq!(
-            setup.error.as_deref(),
-            Some("Not connected to the player. Try again in a moment.")
-        );
-        assert!(!setup.importing);
-        assert!(vm.take_dirty().contains(Dirty::LIBRARY));
-    }
-
     /// The first account row in Settings.
     fn first_row(vm: &Vm) -> AccountRow {
         vm.ui().settings_view().remove(0)
@@ -5652,6 +5176,7 @@ mod tests {
             }
         );
         assert_eq!(row.status, "Signed in as Ada");
+        // Signed in, it offers another session.
         assert!(row.methods);
         vm.apply(account(AccountState::SignedIn { name: None }));
         assert_eq!(first_row(&vm).status, "Signed in");
@@ -5660,6 +5185,7 @@ mod tests {
         let row = first_row(&vm);
         assert_eq!(row.state, AccountRowState::SignedOut);
         assert_eq!(row.status, "Not signed in");
+        assert!(!row.methods);
 
         vm.apply(account(pending()));
         let row = first_row(&vm);
@@ -5673,22 +5199,19 @@ mod tests {
         );
         assert_eq!(row.status, "Signing in");
 
-        // Nothing can sign in until a way is chosen.
-        vm.apply(account(AccountState::Unavailable("no client".into())));
+        vm.apply(account(AccountState::Unavailable("no usable HOME".into())));
         let row = first_row(&vm);
-        assert_eq!(row.state, AccountRowState::NeedsSetup);
-        assert_eq!(row.status, "Sign-in isn't set up");
-        assert!(row.methods);
-
-        // A provider that takes no client from the user is only unavailable.
-        let mut vm = connected();
-        vm.apply(spotify_account(AccountState::Unavailable(
-            "no helper".into(),
-        )));
-        let row = first_row(&vm);
-        assert_eq!(row.state, AccountRowState::Unavailable("no helper".into()));
-        assert_eq!(row.status, "no helper");
+        assert_eq!(
+            row.state,
+            AccountRowState::Unavailable("no usable HOME".into())
+        );
+        assert_eq!(row.status, "no usable HOME");
         assert!(!row.methods);
+
+        // A provider that takes no session never offers one.
+        let mut vm = connected();
+        vm.apply(spotify_signed_in());
+        assert!(!first_row(&vm).methods);
     }
 
     #[test]
@@ -5720,39 +5243,73 @@ mod tests {
                 ),
             ]
         );
-        assert!(!rows[0].methods && rows[1].methods);
+        assert!(rows.iter().all(|r| !r.methods));
     }
 
     #[test]
-    fn the_client_form_shows_only_for_the_provider_that_needs_it() {
-        let mut vm = setting_up();
+    fn signing_in_to_youtube_music_opens_its_session_form() {
+        let mut vm = connected();
+        vm.apply(account(AccountState::SignedOut));
         vm.apply(spotify_account(AccountState::SignedOut));
-        // The sheet alone opens no form: Settings offers the ways to sign in.
-        let rows = vm.ui().settings_view();
-        assert_eq!(rows[0].state, AccountRowState::NeedsSetup);
-        assert_eq!(rows[1].state, AccountRowState::SignedOut);
-        // A file chosen on the sheet opens the client form, which shows its refusal too.
-        import(&mut vm);
-        vm.apply(Event::AccountError {
-            provider: provider(),
-            error: "not a Google OAuth client".into(),
-        });
+        assert_eq!(vm.ui().sign_in_offers(), [provider(), spotify()]);
+        assert!(vm.ui().can_run(
+            PaletteAction::SignIn(Service::YouTubeMusic),
+            Selection::default()
+        ));
+        vm.take_dirty();
+        // No device sign-in: the form opens, and nothing is sent.
+        assert!(vm.intent(Intent::SignIn(provider())).is_empty());
+        assert!(vm.take_dirty().contains(Dirty::LIBRARY));
+        let row = first_row(&vm);
         assert_eq!(
-            first_row(&vm).state,
-            AccountRowState::Setup(ClientForm {
-                reason: "no client".into(),
-                error: Some("not a Google OAuth client".into()),
+            row.state,
+            AccountRowState::Session(SessionForm {
+                error: None,
+                checking: false,
             })
         );
-        assert!(!first_row(&vm).methods);
-        // Cancel closes it, and the ways to sign in show again.
-        vm.intent(Intent::CancelSetup);
-        assert_eq!(first_row(&vm).state, AccountRowState::NeedsSetup);
-        // A provider that takes no client has no form to open.
-        assert!(vm.intent(Intent::ChangeClient(spotify())).is_empty());
+        assert_eq!(row.status, "Not signed in");
+        assert!(!row.methods);
+        // The Library still offers both.
+        assert_eq!(
+            vm.ui().library_view(),
+            LibraryView::SignedOut(vec![provider(), spotify()])
+        );
+        // Another service's sign-in leaves it open.
+        assert_eq!(
+            vm.intent(Intent::SignIn(spotify())),
+            [Command::SignIn {
+                provider: spotify()
+            }]
+        );
+        assert!(matches!(first_row(&vm).state, AccountRowState::Session(_)));
+        // Cancel closes it.
+        assert!(vm.intent(Intent::CancelSetup).is_empty());
+        assert_eq!(first_row(&vm).state, AccountRowState::SignedOut);
+        assert_eq!(vm.ui().toast, None);
+        // A provider that takes no session has no form to open.
         assert!(vm.intent(Intent::UseBrowserSession(spotify())).is_empty());
         assert_eq!(vm.ui().setup, None);
-        assert_eq!(vm.ui().settings_view()[1].state, AccountRowState::SignedOut);
+        // A new connection closes it.
+        vm.intent(Intent::SignIn(provider()));
+        vm.link(Link::Lost(LinkError::NotResponding));
+        vm.link(Link::Connected);
+        assert_eq!(vm.ui().setup, None);
+    }
+
+    #[test]
+    fn a_youtube_music_with_nowhere_to_keep_a_session_is_only_unavailable() {
+        let mut vm = connected();
+        vm.apply(account(AccountState::Unavailable("no usable HOME".into())));
+        assert!(vm.ui().sign_in_offers().is_empty());
+        assert_eq!(
+            vm.ui().library_view(),
+            LibraryView::Unavailable("no usable HOME".into())
+        );
+        assert!(!vm.ui().can_run(
+            PaletteAction::SignIn(Service::YouTubeMusic),
+            Selection::default()
+        ));
     }
 
     #[test]
@@ -5795,23 +5352,25 @@ mod tests {
     }
 
     #[test]
-    fn a_sign_in_from_settings_stays_in_settings() {
+    fn sign_in_goes_where_its_code_or_form_shows() {
         let mut vm = connected();
         vm.apply(spotify_account(AccountState::SignedOut));
-        vm.apply(account(AccountState::Unavailable("no client".into())));
-        // Elsewhere, the Library shows the code or the setup sheet.
+        vm.apply(account(AccountState::SignedOut));
+        // Elsewhere, Spotify's code shows in the Library, and YouTube Music's form in Settings.
         vm.intent(Intent::Visit(Place::Home));
-        assert_eq!(vm.ui().sign_in_place(), Some(Place::Library));
+        assert_eq!(vm.ui().sign_in_place(&spotify()), Some(Place::Library));
+        assert_eq!(vm.ui().sign_in_place(&provider()), Some(Place::Settings));
 
         vm.intent(Intent::Visit(Place::Settings));
-        assert_eq!(vm.ui().sign_in_place(), None);
+        assert_eq!(vm.ui().sign_in_place(&spotify()), None);
+        assert_eq!(vm.ui().sign_in_place(&provider()), None);
         assert_eq!(
             vm.intent(Intent::SignIn(spotify())),
             [Command::SignIn {
                 provider: spotify()
             }]
         );
-        // Its row shows the code, and the other's row the ways to sign in.
+        // Its row shows the code, and the other's row its form.
         vm.apply(spotify_account(pending()));
         assert!(vm.intent(Intent::SignIn(provider())).is_empty());
         let states: Vec<_> = vm
@@ -5823,219 +5382,22 @@ mod tests {
         assert!(
             matches!(
                 states.as_slice(),
-                [AccountRowState::Pending { .. }, AccountRowState::NeedsSetup]
+                [AccountRowState::Pending { .. }, AccountRowState::Session(_)]
             ),
             "{states:?}"
         );
     }
 
-    #[test]
-    fn a_sign_in_to_another_service_keeps_a_client_form_open() {
-        let mut vm = connected();
-        vm.apply(account(AccountState::SignedOut));
-        vm.apply(spotify_account(AccountState::SignedOut));
-        vm.intent(Intent::Visit(Place::Settings));
-        vm.intent(Intent::ChangeClient(provider()));
-        let form = first_row(&vm).state;
-        assert!(matches!(form, AccountRowState::Setup(_)), "{form:?}");
-        assert_eq!(
-            vm.intent(Intent::SignIn(spotify())),
-            [Command::SignIn {
-                provider: spotify()
-            }]
-        );
-        assert_eq!(first_row(&vm).state, form);
-        // Signing in to its own account closes it.
-        assert_eq!(
-            vm.intent(Intent::SignIn(provider())),
-            [Command::SignIn {
-                provider: provider()
-            }]
-        );
-        assert_eq!(vm.ui().setup, None);
-        assert_eq!(first_row(&vm).state, AccountRowState::SignedOut);
-    }
-
-    const CLIENT_ID: &str = "123-abc.apps.googleusercontent.com";
-    const SECRET: &str = "GOCSPX-not-a-real-secret";
-
-    #[test]
-    fn a_typed_client_reads_as_a_client_file_does() {
-        let json = client_json(&format!("  {CLIENT_ID}\n"), &format!(" {SECRET} ")).unwrap();
-        let root: serde_json::Value = serde_json::from_str(&json.0).unwrap();
-        // As the provider reads it: an "installed" part if there is one, else the top level.
-        let client = root.get("installed").unwrap_or(&root);
-        let keys: Vec<&str> = client
-            .as_object()
-            .unwrap()
-            .keys()
-            .map(String::as_str)
-            .collect();
-        assert_eq!(keys, ["client_id", "client_secret"]);
-        assert_eq!(client["client_id"].as_str(), Some(CLIENT_ID));
-        assert!(
-            client["client_secret"].as_str() == Some(SECRET),
-            "the secret didn't round-trip"
-        );
-        // Quotes and backslashes are escaped, not spliced in.
-        let odd = r#"a"b\c"#;
-        let json = client_json(CLIENT_ID, odd).unwrap();
-        let root: serde_json::Value = serde_json::from_str(&json.0).unwrap();
-        assert!(
-            root["client_secret"].as_str() == Some(odd),
-            "the secret didn't round-trip"
-        );
-    }
-
-    #[test]
-    fn a_typed_client_is_checked_before_it_is_sent() {
-        // `err`, so a wrongly accepted client never prints its secret.
-        let refused = |id: &str, secret: &str| client_json(id, secret).err();
-        let empty = Some("Enter the client ID and the client secret.".to_owned());
-        assert_eq!(refused("", SECRET), empty);
-        assert_eq!(refused(CLIENT_ID, "  "), empty);
-        assert_eq!(refused(" \t", ""), empty);
-        let not_google = Some(
-            "That isn't a Google client ID. It ends in .apps.googleusercontent.com.".to_owned(),
-        );
-        assert_eq!(refused("123-abc", SECRET), not_google);
-        assert_eq!(
-            refused("123-abc.apps.googleusercontent.com.example", SECRET),
-            not_google
-        );
-        assert_eq!(refused(&format!(" {CLIENT_ID} "), SECRET), None);
-        // Save waits for both fields.
-        assert!(!client_filled("", SECRET));
-        assert!(!client_filled(CLIENT_ID, " "));
-        assert!(client_filled("x", "y"));
-        // A refused client shows on the form and sends nothing.
-        let mut vm = setting_up();
-        let bad = client_json("123-abc", SECRET);
-        assert!(vm.intent(Intent::ImportClient(bad)).is_empty());
-        assert!(matches!(
-            &first_row(&vm).state,
-            AccountRowState::Setup(f) if f.error == not_google
-        ));
-    }
-
-    #[test]
-    fn the_secret_is_sent_but_neither_kept_nor_printed_by_the_vm() {
-        let typed = Intent::ImportClient(client_json(CLIENT_ID, SECRET));
-        assert!(
-            !format!("{typed:?}").contains(SECRET),
-            "the intent printed the secret"
-        );
-        let mut vm = setting_up();
-        let cmds = vm.intent(Intent::ImportClient(client_json(CLIENT_ID, SECRET)));
-        let [Command::ImportSignInClient { provider: p, json }] = cmds.as_slice() else {
-            panic!("expected one client import");
-        };
-        assert_eq!(*p, provider());
-        assert!(json.0.contains(SECRET), "the import lost the secret");
-        // Debug output, which logs use, and the vm's state hold no copy.
-        assert!(
-            !format!("{cmds:?}").contains(SECRET),
-            "the command printed the secret"
-        );
-        assert!(
-            !format!("{vm:?}").contains(SECRET),
-            "the vm kept the secret"
-        );
-        // The answer starts the sign-in, still without one.
-        vm.apply(account(AccountState::SignedOut));
-        assert_eq!(
-            vm.take_commands(),
-            [Command::SignIn {
-                provider: provider()
-            }]
-        );
-        assert!(
-            !format!("{vm:?}").contains(SECRET),
-            "the vm kept the secret"
-        );
-    }
-
-    #[test]
-    fn changing_the_client_of_a_signed_in_account_asks_first() {
-        let mut vm = connected();
-        vm.apply(signed_in());
-        vm.apply(spotify_signed_in());
-        assert!(vm.ui().change_client_asks(&provider()));
-        assert!(first_row(&vm).methods);
-
-        // Asked and answered, the form opens over the account, and Cancel closes it.
-        vm.take_dirty();
-        assert!(vm.intent(Intent::ChangeClient(provider())).is_empty());
-        assert!(vm.take_dirty().contains(Dirty::LIBRARY));
-        let r = first_row(&vm);
-        assert_eq!(
-            r.state,
-            AccountRowState::Setup(ClientForm {
-                reason: CHANGE_CLIENT.into(),
-                error: None,
-            })
-        );
-        assert_eq!(r.status, "Signed in as Ada");
-        assert!(!r.methods);
-        // The Library keeps its list: its sheet is for a provider that needs setting up.
-        assert!(matches!(
-            vm.ui().library_view(),
-            LibraryView::SignedIn { .. }
-        ));
-        vm.intent(Intent::CancelSetup);
-        assert_eq!(
-            first_row(&vm).state,
-            AccountRowState::SignedIn {
-                name: Some("Ada".into())
-            }
-        );
-
-        // A client with another ID signs the account out, and its sign-in starts.
-        vm.intent(Intent::ChangeClient(provider()));
-        let sent = vm.intent(Intent::ImportClient(client_json(CLIENT_ID, SECRET)));
-        assert_eq!(sent.len(), 1);
-        vm.apply(account(AccountState::SignedOut));
-        assert!(vm.take_commands().contains(&Command::SignIn {
-            provider: provider()
-        }));
-        assert_eq!(vm.ui().setup, None);
-
-        // Signed out or signing in, there is nothing to lose, so it doesn't ask.
-        assert!(!vm.ui().change_client_asks(&provider()));
-        vm.apply(account(pending()));
-        assert!(!vm.ui().change_client_asks(&provider()));
-        assert!(first_row(&vm).methods);
-    }
-
-    #[test]
-    fn a_client_file_is_read_up_to_64_kib_of_text() {
-        let read = |bytes: Vec<u8>| read_client_file(Ok(io::Cursor::new(bytes)));
-        assert_eq!(read(CLIENT.into()), Ok(Redacted::from(CLIENT)));
-        assert_eq!(
-            read(vec![b' '; 64 * 1024]).map(|s| s.0.len()),
-            Ok(64 * 1024)
-        );
-        let big = read(vec![b' '; 64 * 1024 + 1]).unwrap_err();
-        assert!(big.contains("larger than 64 KiB"), "{big}");
-        let binary = read(vec![0xff, 0xfe]).unwrap_err();
-        assert!(binary.contains("isn’t text"), "{binary}");
-        let missing = read_client_file(Err::<io::Cursor<Vec<u8>>, _>(io::Error::from(
-            io::ErrorKind::NotFound,
-        )))
-        .unwrap_err();
-        assert!(missing.starts_with("Couldn’t read that file"), "{missing}");
-    }
-
     /// Made-up request headers, as a browser's developer tools copy them.
     const PASTE: &str = "cookie: SID=not-a-real-cookie; __Secure-3PAPISID=fake\n\"quoted\"\\";
 
-    /// Settings, with YouTube Music missing its client and its session form open.
+    /// Settings, with YouTube Music signed out and its session form open.
     fn pasting() -> Vm {
         let mut vm = connected();
-        vm.apply(account(AccountState::Unavailable("no client".into())));
+        vm.apply(account(AccountState::SignedOut));
         vm.intent(Intent::Visit(Place::Settings));
         vm.take_dirty();
-        assert!(vm.intent(Intent::UseBrowserSession(provider())).is_empty());
+        assert!(vm.intent(Intent::SignIn(provider())).is_empty());
         vm
     }
 
@@ -6047,58 +5409,36 @@ mod tests {
     }
 
     #[test]
-    fn use_browser_session_opens_its_form_in_place_of_the_choice() {
-        let mut vm = pasting();
-        assert!(vm.take_dirty().contains(Dirty::LIBRARY));
+    fn a_signed_in_account_can_take_another_session() {
+        let mut vm = connected();
+        vm.apply(signed_in());
+        vm.take_commands();
+        vm.intent(Intent::Visit(Place::Settings));
+        assert!(first_row(&vm).methods);
+        assert!(vm.intent(Intent::UseBrowserSession(provider())).is_empty());
         let row = first_row(&vm);
-        assert_eq!(
-            row.state,
-            AccountRowState::Session(SessionForm {
-                error: None,
-                checking: false,
-            })
-        );
-        assert_eq!(row.status, "Sign-in isn't set up");
+        assert!(matches!(row.state, AccountRowState::Session(_)));
+        assert_eq!(row.status, "Signed in as Ada");
         assert!(!row.methods);
-        // One form at a time: choosing the client form replaces it, with no error carried over.
-        vm.intent(Intent::ImportSession(Err(
-            "The clipboard has no text.".into()
-        )));
-        assert_eq!(
-            session_form(&vm).error.as_deref(),
-            Some("The clipboard has no text.")
-        );
-        vm.intent(Intent::ChangeClient(provider()));
-        assert!(matches!(
-            first_row(&vm).state,
-            AccountRowState::Setup(ClientForm { error: None, .. })
-        ));
-        vm.intent(Intent::UseBrowserSession(provider()));
-        assert_eq!(session_form(&vm).error, None);
         // Opened again, it keeps its error.
         vm.intent(Intent::ImportSession(Err(
             "The clipboard has no text.".into()
         )));
         vm.intent(Intent::UseBrowserSession(provider()));
         assert!(session_form(&vm).error.is_some());
-        vm.intent(Intent::CancelSetup);
-        assert_eq!(first_row(&vm).state, AccountRowState::NeedsSetup);
-        // A signed-in account offers it too, beside its client.
+        // The same state told again leaves it open; a change under it closes it.
         vm.apply(signed_in());
-        assert!(first_row(&vm).methods);
-        vm.intent(Intent::UseBrowserSession(provider()));
-        assert!(matches!(first_row(&vm).state, AccountRowState::Session(_)));
-        assert_eq!(first_row(&vm).status, "Signed in as Ada");
-    }
-
-    #[test]
-    fn the_setup_sheet_opens_the_session_form_in_settings() {
-        let mut vm = setting_up();
-        assert_eq!(first_row(&vm).state, AccountRowState::NeedsSetup);
-        vm.intent(Intent::UseBrowserSession(provider()));
-        assert!(matches!(first_row(&vm).state, AccountRowState::Session(_)));
-        // The Library still shows the sheet, for a provider that can't sign in yet.
-        assert_eq!(vm.ui().library_view(), sheet(None));
+        assert!(session_form(&vm).error.is_some());
+        vm.apply(account(AccountState::SignedOut));
+        assert_eq!(vm.ui().setup, None);
+        assert_eq!(first_row(&vm).state, AccountRowState::SignedOut);
+        assert_eq!(vm.ui().toast, None);
+        assert!(!vm.take_session_saved());
+        assert!(
+            !vm.take_commands()
+                .iter()
+                .any(|c| matches!(c, Command::SignIn { .. }))
+        );
     }
 
     #[test]
@@ -6138,10 +5478,11 @@ mod tests {
         // Neither the commands' Debug, which logs use, nor the vm's state holds the paste.
         assert!(!format!("{cmds:?}").contains("not-a-real-cookie"));
         assert!(!format!("{vm:?}").contains("not-a-real-cookie"));
-        // A client's import that stands clears nothing.
-        let mut vm = setting_up();
-        import(&mut vm);
+        // A form closed by a sign-in it didn't send clears nothing.
+        let mut vm = pasting();
         vm.apply(signed_in());
+        assert_eq!(vm.ui().setup, None);
+        assert_eq!(vm.ui().toast, None);
         assert!(!vm.take_session_saved());
     }
 
@@ -6154,7 +5495,7 @@ mod tests {
             provider: provider(),
             error: refused.into(),
         });
-        vm.apply(account(AccountState::Unavailable("no client".into())));
+        vm.apply(account(AccountState::SignedOut));
         assert_eq!(
             session_form(&vm),
             SessionForm {
@@ -6162,10 +5503,22 @@ mod tests {
                 checking: false,
             }
         );
-        assert_eq!(first_row(&vm).status, "Sign-in isn't set up");
+        assert_eq!(first_row(&vm).status, "Not signed in");
         assert_eq!(vm.ui().toast, None);
         assert!(!vm.take_session_saved());
         assert!(vm.take_commands().is_empty());
+        // From an older player the error comes alone, and a later change answers nothing.
+        let mut vm = pasting();
+        vm.intent(Intent::ImportSession(session_json(PASTE)));
+        vm.apply(Event::AccountError {
+            provider: provider(),
+            error: refused.into(),
+        });
+        vm.apply(Event::Volume(50));
+        vm.apply(signed_in());
+        assert_eq!(vm.ui().setup, None);
+        assert_eq!(vm.ui().toast, None);
+        assert!(!vm.take_session_saved());
         // So is one sent while disconnected.
         let mut vm = pasting();
         vm.link(Link::Lost(LinkError::NotResponding));
@@ -6177,6 +5530,33 @@ mod tests {
             session_form(&vm).error.as_deref(),
             Some("Not connected to the player. Try again in a moment.")
         );
+    }
+
+    #[test]
+    fn an_import_that_stood_despite_its_error_says_what_it_could_not_finish() {
+        let unfinished = "signed in, but the old session could not be removed";
+        let mut vm = connected();
+        vm.apply(signed_in());
+        vm.take_commands();
+        vm.intent(Intent::UseBrowserSession(provider()));
+        assert_eq!(
+            vm.intent(Intent::ImportSession(session_json(PASTE))).len(),
+            1
+        );
+        // The player's order: the error, then the new state.
+        vm.apply(Event::AccountError {
+            provider: provider(),
+            error: unfinished.into(),
+        });
+        // Alone, it reads as a refusal.
+        assert_eq!(session_form(&vm).error.as_deref(), Some(unfinished));
+        assert!(!vm.ui().setup.as_ref().unwrap().importing);
+        vm.apply(account(AccountState::SignedIn {
+            name: Some("Bo".into()),
+        }));
+        assert_eq!(vm.ui().setup, None);
+        let toast = vm.ui().toast.as_ref().unwrap();
+        assert!(toast.error && toast.text == unfinished, "{toast:?}");
     }
 
     #[test]
@@ -6214,12 +5594,12 @@ mod tests {
 
     #[test]
     fn the_sign_in_text_names_the_whole_address() {
-        let hint = sign_in_hint("https://www.google.com/device");
+        let hint = sign_in_hint("https://www.spotify.com/pair");
         assert_eq!(
             hint,
-            "On any device, go to www.google.com/device and enter this code."
+            "On any device, go to www.spotify.com/pair and enter this code."
         );
-        assert!(hint.contains("/device"));
+        assert!(hint.contains("/pair"));
         assert!(sign_in_hint("example.com/x/").contains("example.com/x and"));
     }
 

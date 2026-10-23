@@ -55,21 +55,6 @@ pub(crate) trait Transport: Send + Sync {
     fn reset(&self);
 }
 
-/// Google's OAuth and YouTube Data API endpoints.
-pub(crate) trait ApiHttp: Send + Sync {
-    /// GET `url` with `query` percent-encoded onto it. Statuses are returned as values.
-    fn get(
-        &self,
-        url: &str,
-        query: &[(&str, &str)],
-        headers: &[(&str, &str)],
-    ) -> Result<HttpResponse, ProviderError>;
-
-    /// POST `form` url-encoded. Secrets belong here and never in a URL, which transport
-    /// errors may quote.
-    fn post_form(&self, url: &str, form: &[(&str, &str)]) -> Result<HttpResponse, ProviderError>;
-}
-
 /// One agent per family, built lazily: ureq fixes the family at agent construction.
 pub(crate) struct UreqTransport {
     agents: Mutex<[Option<Agent>; 3]>,
@@ -203,42 +188,6 @@ impl Transport for UreqTransport {
 
     fn reset(&self) {
         *self.agents.lock().unwrap_or_else(|e| e.into_inner()) = [None, None, None];
-    }
-}
-
-fn api_response(
-    resp: Result<ureq::http::Response<ureq::Body>, ureq::Error>,
-) -> Result<HttpResponse, ProviderError> {
-    let resp = resp.map_err(|e| ProviderError::Network(e.to_string()))?;
-    let status = resp.status().as_u16();
-    let body = read_limited(resp.into_body(), MAX_API_BODY)
-        .map_err(|e| ProviderError::Network(e.to_string()))?;
-    Ok(HttpResponse { status, body })
-}
-
-impl ApiHttp for UreqTransport {
-    fn get(
-        &self,
-        url: &str,
-        query: &[(&str, &str)],
-        headers: &[(&str, &str)],
-    ) -> Result<HttpResponse, ProviderError> {
-        let mut req = self
-            .agent(IpFamily::Any)
-            .get(url)
-            .query_pairs(query.iter().copied());
-        for (k, v) in headers {
-            req = req.header(*k, *v);
-        }
-        api_response(req.call())
-    }
-
-    fn post_form(&self, url: &str, form: &[(&str, &str)]) -> Result<HttpResponse, ProviderError> {
-        api_response(
-            self.agent(IpFamily::Any)
-                .post(url)
-                .send_form(form.iter().copied()),
-        )
     }
 }
 

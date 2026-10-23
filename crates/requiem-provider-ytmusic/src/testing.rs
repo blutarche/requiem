@@ -1,4 +1,4 @@
-//! Test doubles for Google's and YouTube Music's endpoints.
+//! Test doubles for YouTube Music's endpoints.
 
 use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
@@ -10,112 +10,15 @@ use requiem_core::ProviderError;
 
 use crate::IpFamily;
 use crate::range::{FetchError, RangeResponse};
-use crate::transport::{ApiHttp, HttpResponse, Transport};
+use crate::transport::{HttpResponse, Transport};
 
 type Pairs = Vec<(String, String)>;
-
-pub(crate) struct Call {
-    pub url: String,
-    pub query: Pairs,
-    pub headers: Pairs,
-    pub form: Pairs,
-}
-
-/// Replies are scripted per URL and served in order; an unscripted call is a network error.
-#[derive(Default)]
-pub(crate) struct FakeApi {
-    replies: Mutex<HashMap<String, VecDeque<(u16, String)>>>,
-    calls: Mutex<Vec<Call>>,
-}
 
 fn owned(pairs: &[(&str, &str)]) -> Pairs {
     pairs
         .iter()
         .map(|(k, v)| ((*k).to_owned(), (*v).to_owned()))
         .collect()
-}
-
-impl FakeApi {
-    pub(crate) fn script(&self, url: &str, status: u16, body: &str) {
-        self.replies
-            .lock()
-            .unwrap()
-            .entry(url.to_owned())
-            .or_default()
-            .push_back((status, body.to_owned()));
-    }
-
-    pub(crate) fn calls(&self) -> Vec<String> {
-        self.calls
-            .lock()
-            .unwrap()
-            .iter()
-            .map(|c| c.url.clone())
-            .collect()
-    }
-
-    fn pick(&self, url: &str, f: impl Fn(&Call) -> Pairs) -> Vec<Pairs> {
-        self.calls
-            .lock()
-            .unwrap()
-            .iter()
-            .filter(|c| c.url == url)
-            .map(f)
-            .collect()
-    }
-
-    pub(crate) fn forms(&self, url: &str) -> Vec<Pairs> {
-        self.pick(url, |c| c.form.clone())
-    }
-
-    pub(crate) fn headers(&self, url: &str) -> Vec<Pairs> {
-        self.pick(url, |c| c.headers.clone())
-    }
-
-    pub(crate) fn queries(&self, url: &str) -> Vec<Pairs> {
-        self.pick(url, |c| c.query.clone())
-    }
-
-    fn reply(&self, call: Call) -> Result<HttpResponse, ProviderError> {
-        let url = call.url.clone();
-        self.calls.lock().unwrap().push(call);
-        let (status, body) = self
-            .replies
-            .lock()
-            .unwrap()
-            .get_mut(&url)
-            .and_then(VecDeque::pop_front)
-            .ok_or_else(|| ProviderError::Network(format!("unscripted {url}")))?;
-        Ok(HttpResponse {
-            status,
-            body: body.into_bytes(),
-        })
-    }
-}
-
-impl ApiHttp for FakeApi {
-    fn get(
-        &self,
-        url: &str,
-        query: &[(&str, &str)],
-        headers: &[(&str, &str)],
-    ) -> Result<HttpResponse, ProviderError> {
-        self.reply(Call {
-            url: url.to_owned(),
-            query: owned(query),
-            headers: owned(headers),
-            form: Vec::new(),
-        })
-    }
-
-    fn post_form(&self, url: &str, form: &[(&str, &str)]) -> Result<HttpResponse, ProviderError> {
-        self.reply(Call {
-            url: url.to_owned(),
-            query: Vec::new(),
-            headers: Vec::new(),
-            form: owned(form),
-        })
-    }
 }
 
 pub(crate) struct MusicCall {

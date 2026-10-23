@@ -14,9 +14,8 @@ usage: requiem-gui [--demo] [--smoke] [--snapshot <png>] [--view <view>]
                      settings or palette; with --demo also home-scrolled, home-shelf-paged,
                      home-spotify, home-signed-out, collection, now-playing, now-playing-empty,
                      now-playing-last, library-signed-out, library-unavailable, signin,
-                     signin-setup, settings-setup, settings-session, empty, disconnected,
-                     toast, out-of-date, update-ready, update-failed, not-updatable or
-                     up-to-date";
+                     settings-session, empty, disconnected, toast, out-of-date,
+                     update-ready, update-failed, not-updatable or up-to-date";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum View {
@@ -46,14 +45,10 @@ pub enum View {
     NowPlayingLast,
     /// Demo only: the Library with both accounts signed out.
     LibrarySignedOut,
-    /// Demo only: the Library with no Google client set up.
+    /// Demo only: the Library with YouTube Music unable to sign in.
     LibraryUnavailable,
     /// Demo only: the Library showing a Spotify sign-in code.
     SignIn,
-    /// Demo only: the Library's YouTube Music setup sheet.
-    SignInSetup,
-    /// Demo only: Settings with YouTube Music offering its ways to sign in.
-    SettingsSetup,
     /// Demo only: Settings with YouTube Music's browser-session form open.
     SettingsSession,
     /// Demo only: the search view before any query.
@@ -75,7 +70,7 @@ pub enum View {
 }
 
 impl View {
-    const NAMES: [(&str, View); 28] = [
+    const NAMES: [(&str, View); 26] = [
         ("home", View::Home),
         ("search", View::Search),
         ("library", View::Library),
@@ -93,8 +88,6 @@ impl View {
         ("library-signed-out", View::LibrarySignedOut),
         ("library-unavailable", View::LibraryUnavailable),
         ("signin", View::SignIn),
-        ("signin-setup", View::SignInSetup),
-        ("settings-setup", View::SettingsSetup),
         ("settings-session", View::SettingsSession),
         ("empty", View::Empty),
         ("disconnected", View::Disconnected),
@@ -275,8 +268,6 @@ mod tests {
             ("library-signed-out", View::LibrarySignedOut),
             ("library-unavailable", View::LibraryUnavailable),
             ("signin", View::SignIn),
-            ("signin-setup", View::SignInSetup),
-            ("settings-setup", View::SettingsSetup),
             ("settings-session", View::SettingsSession),
             ("empty", View::Empty),
             ("disconnected", View::Disconnected),

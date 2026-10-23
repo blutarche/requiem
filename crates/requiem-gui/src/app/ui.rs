@@ -2,7 +2,6 @@
 //! the backend.
 
 use std::cell::{Cell, RefCell};
-use std::fs::File;
 use std::rc::Rc;
 use std::time::{Duration, Instant};
 
@@ -15,15 +14,13 @@ use objc2_app_kit::{
     NSAlert, NSAlertFirstButtonReturn, NSAnimatablePropertyContainer, NSApplication,
     NSAttributedStringNSStringDrawing, NSColor, NSControl, NSEvent, NSFont, NSFontAttributeName,
     NSForegroundColorAttributeName, NSImage, NSLineBreakMode, NSMenu, NSMenuItem, NSModalResponse,
-    NSModalResponseOK, NSMutableParagraphStyle, NSOpenPanel, NSParagraphStyleAttributeName,
-    NSPasteboard, NSPasteboardTypeString, NSResponder, NSTextAlignment, NSTextField,
-    NSTextFieldDelegate, NSTrackingAreaOptions, NSView, NSWindow, NSWindowStyleMask,
-    NSWindowTitleVisibility, NSWorkspace,
+    NSMutableParagraphStyle, NSParagraphStyleAttributeName, NSPasteboard, NSPasteboardTypeString,
+    NSResponder, NSTextAlignment, NSTextField, NSTextFieldDelegate, NSTrackingAreaOptions, NSView,
+    NSWindow, NSWindowStyleMask, NSWindowTitleVisibility, NSWorkspace,
 };
 use objc2_core_foundation::CGFloat;
 use objc2_foundation::{
-    MainThreadMarker, NSArray, NSAttributedString, NSDictionary, NSPoint, NSRect, NSSize, NSString,
-    NSURL,
+    MainThreadMarker, NSAttributedString, NSDictionary, NSPoint, NSRect, NSSize, NSString, NSURL,
 };
 use requiem_core::ProviderId;
 use requiem_core::{Collection, Item, Shelf, Track};
@@ -174,18 +171,6 @@ const BACK_H: CGFloat = 28.0;
 const BUTTON_H: CGFloat = 36.0;
 const SIGN_IN_W: CGFloat = 560.0;
 const SIGN_IN_H: CGFloat = 280.0;
-const SETUP_W: CGFloat = 560.0;
-/// With two lines of buttons.
-const SETUP_H: CGFloat = 374.0;
-const SETUP_HEADING: &str = "Set up YouTube Music sign-in";
-const SETUP_INTRO: &str =
-    "Use Browser Session\u{2026} needs no setup. To use your own Google Cloud client:";
-const SETUP_STEPS: &str = "\
-1. Create a Google Cloud project and enable the YouTube Data API v3.
-2. Set up the OAuth consent screen and publish the app, or sign-in expires after 7 days.
-3. Create an OAuth client of type \"TVs and Limited Input devices\" and download its JSON.
-4. Choose that file, or enter the client's ID and secret in Settings.";
-const SETUP_GUIDE: &str = "https://github.com/blutarche/requiem#youtube-music";
 const HOW_TO_COPY: &str = "https://github.com/blutarche/requiem#sign-in-with-your-browser-session";
 /// How often the sign-in panel's countdown is redrawn.
 const EXPIRY_TICK: Duration = Duration::from_secs(30);
@@ -298,13 +283,6 @@ struct SignInPanel {
     cancel: Retained<HoverButton>,
 }
 
-/// The Library's sheet for a provider that needs the user's own client before it can sign in.
-struct SetupPanel {
-    view: Retained<NSView>,
-    /// The provider's reason, or in red why the chosen file was refused.
-    note: Retained<NSTextField>,
-}
-
 /// An open collection's cover, name and buttons.
 struct CollectionHead {
     view: Retained<NSView>,
@@ -349,7 +327,6 @@ pub struct Ui {
     library_table: Table,
     library_state: EmptyState,
     sign_in: SignInPanel,
-    setup: SetupPanel,
     expiry_scheduled: Cell<bool>,
     collection_page: Retained<NSView>,
     collection_head: CollectionHead,
@@ -631,12 +608,10 @@ impl Ui {
             sel!(libraryAction:),
         );
         let sign_in = Self::sign_in_panel(mtm, mw, mh, target);
-        let setup = Self::setup_panel(mtm, mw, mh, target);
         library_page.addSubview(&library_head);
         library_page.addSubview(&library_table.view);
         library_page.addSubview(&library_state.view);
         library_page.addSubview(&sign_in.view);
-        library_page.addSubview(&setup.view);
         main.addSubview(&library_page);
 
         // Collection page.
@@ -737,7 +712,6 @@ impl Ui {
             library_table,
             library_state,
             sign_in,
-            setup,
             expiry_scheduled: Cell::new(false),
             collection_page,
             collection_head,
@@ -766,136 +740,6 @@ impl Ui {
         ui.search.set_value(&query);
         ui.show(AppView::Home);
         ui
-    }
-
-    fn setup_panel(
-        mtm: MainThreadMarker,
-        mw: CGFloat,
-        mh: CGFloat,
-        target: &AnyObject,
-    ) -> SetupPanel {
-        let view = widgets::view(
-            mtm,
-            rect(
-                ((mw - SETUP_W) / 2.0).round(),
-                ((mh - SETUP_H) / 2.0 + 8.0).round(),
-                SETUP_W,
-                SETUP_H,
-            ),
-            PIN_LEFT | PIN_RIGHT | PIN_TOP | PIN_BOTTOM,
-        );
-        let centred = |text: &str, font: &NSFont, color: &NSColor, mid_y: CGFloat| {
-            let l = widgets::placed_label(mtm, text, font, color, 0.0, mid_y, SETUP_W, FLEX_W);
-            l.setAlignment(NSTextAlignment::Center);
-            l
-        };
-        let heading = centred(
-            SETUP_HEADING,
-            &theme::font(16.0, Weight::SemiBold),
-            &theme::ink(),
-            SETUP_H - 20.0,
-        );
-        let intro = centred(
-            SETUP_INTRO,
-            &theme::font(14.0, Weight::Regular),
-            &theme::muted(),
-            SETUP_H - 48.0,
-        );
-        // Wrapped, `top` down for `lines` lines.
-        let wrapped = |l: &NSTextField, font: &NSFont, top: CGFloat, lines: CGFloat| {
-            l.setUsesSingleLineMode(false);
-            l.setMaximumNumberOfLines(0);
-            l.setLineBreakMode(NSLineBreakMode::ByWordWrapping);
-            let h = lines * widgets::line_height(font);
-            let mut f = l.frame();
-            f.origin.y = top - h;
-            f.size.height = h;
-            l.setFrame(f);
-        };
-        let steps_font = theme::font(13.0, Weight::Regular);
-        let steps = widgets::placed_label(
-            mtm,
-            "",
-            &steps_font,
-            &theme::ink(),
-            20.0,
-            0.0,
-            SETUP_W - 40.0,
-            FLEX_W,
-        );
-        steps.setAttributedStringValue(&numbered(SETUP_STEPS, &steps_font));
-        wrapped(&steps, &steps_font, SETUP_H - 66.0, 6.75);
-        let note_font = theme::font(12.0, Weight::Regular);
-        let note = centred("", &note_font, &theme::muted(), 0.0);
-        wrapped(&note, &note_font, SETUP_H - 200.0, 3.0);
-        note.setSelectable(true);
-        let buttons = [
-            (
-                "Use Browser Session\u{2026}",
-                Some(Icon::ClipboardPaste),
-                sel!(sheetUseBrowserSession:),
-                false,
-            ),
-            (
-                "Choose Client File\u{2026}",
-                Some(Icon::FolderOpen),
-                sel!(chooseClientFile:),
-                true,
-            ),
-            (
-                "Enter Client ID\u{2026}",
-                Some(Icon::KeyRound),
-                sel!(enterClientID:),
-                false,
-            ),
-            (
-                "Setup Guide",
-                Some(Icon::BookOpen),
-                sel!(openSetupGuide:),
-                false,
-            ),
-            ("Cancel", None, sel!(cancelSetup:), false),
-        ]
-        .map(|(title, icon, action, primary)| {
-            let frame = rect(0.0, 0.0, 0.0, BUTTON_H);
-            let b = if primary {
-                HoverButton::primary(mtm, frame)
-            } else {
-                HoverButton::secondary(mtm, frame)
-            };
-            b.set_action(target, action);
-            let image = icon.and_then(|i| i.image(LABEL_ICON));
-            let w = b.set_label_image(title, image.as_deref());
-            (b, w)
-        });
-        // Centred lines as wide as the text, the last 20 above the bottom.
-        let mut lines: Vec<Vec<&(Retained<HoverButton>, CGFloat)>> = vec![Vec::new()];
-        let mut line_w = 0.0;
-        for button in &buttons {
-            let w = button.1;
-            if line_w > 0.0 && line_w + 8.0 + w > SETUP_W - 40.0 {
-                lines.push(Vec::new());
-                line_w = 0.0;
-            }
-            line_w += if line_w > 0.0 { 8.0 + w } else { w };
-            lines.last_mut().unwrap().push(button);
-        }
-        for (i, line) in lines.iter().rev().enumerate() {
-            let y = 20.0 + i as CGFloat * (BUTTON_H + 8.0);
-            let total =
-                line.iter().map(|(_, w)| w).sum::<CGFloat>() + 8.0 * (line.len() as CGFloat - 1.0);
-            let mut x = ((SETUP_W - total) / 2.0).round();
-            for (b, w) in line {
-                b.setFrame(rect(x, y, *w, BUTTON_H));
-                x += w + 8.0;
-                view.addSubview(b);
-            }
-        }
-        for v in [&heading, &intro, &steps, &note] {
-            view.addSubview(v);
-        }
-        view.setHidden(true);
-        SetupPanel { view, note }
     }
 
     fn sign_in_panel(
@@ -1485,10 +1329,10 @@ impl Ui {
         }
     }
 
-    /// Starts a sign-in, or opens the setup sheet for a provider that needs it first, and
-    /// shows where the code or the sheet appears.
+    /// Starts a sign-in, or opens the session form for a provider that takes one, and shows
+    /// where the code or the form appears.
     pub fn sign_in(&self, provider: ProviderId) {
-        let to = self.vm.borrow().ui().sign_in_place();
+        let to = self.vm.borrow().ui().sign_in_place(&provider);
         self.intent(Intent::SignIn(provider));
         if let Some(place) = to {
             self.show(AppView::of(place));
@@ -1594,53 +1438,10 @@ impl Ui {
         }
     }
 
-    /// The setup sheet's Choose Client File…: sends the chosen file, and the sign-in starts
-    /// once the provider takes it.
-    pub fn choose_client_file(&self) {
-        let open = self.vm.borrow().ui().setup.is_some();
-        if !open {
-            return;
-        }
-        let panel = NSOpenPanel::openPanel(self.mtm);
-        panel.setCanChooseFiles(true);
-        panel.setCanChooseDirectories(false);
-        panel.setAllowsMultipleSelection(false);
-        // Its replacement takes UTTypes, which this crate has no bindings for.
-        #[allow(deprecated)]
-        panel.setAllowedFileTypes(Some(&NSArray::from_retained_slice(&[NSString::from_str(
-            "json",
-        )])));
-        // The panel's run loop goes on delivering the player's events, which borrow the view
-        // model, so nothing here may hold it.
-        if panel.runModal() != NSModalResponseOK {
-            return;
-        }
-        let Some(path) = panel.URLs().firstObject().and_then(|url| url.path()) else {
-            return;
-        };
-        let file = vm::read_client_file(File::open(path.to_string()));
-        self.intent(Intent::ImportClient(file));
-    }
-
-    pub fn open_setup_guide(&self) {
-        if let Some(url) = NSURL::URLWithString(&NSString::from_str(SETUP_GUIDE)) {
-            NSWorkspace::sharedWorkspace().openURL(&url);
-        }
-    }
-
     /// The session form's How to Copy: the README's steps for each browser.
     pub fn how_to_copy(&self) {
         if let Some(url) = NSURL::URLWithString(&NSString::from_str(HOW_TO_COPY)) {
             NSWorkspace::sharedWorkspace().openURL(&url);
-        }
-    }
-
-    /// The setup sheet's Use Browser Session…: Settings, with the session form open.
-    pub fn sheet_use_browser_session(&self) {
-        let view = self.vm.borrow().ui().library_view();
-        if let LibraryView::Setup { provider, .. } = view {
-            self.intent(Intent::UseBrowserSession(provider));
-            self.show(AppView::Settings);
         }
     }
 
@@ -1695,16 +1496,6 @@ impl Ui {
         self.intent(Intent::CancelSetup);
     }
 
-    /// The setup sheet's Enter Client ID…: Settings, with the cursor in the client form.
-    pub fn enter_client_id(&self) {
-        let view = self.vm.borrow().ui().library_view();
-        if let LibraryView::Setup { provider, .. } = view {
-            self.intent(Intent::ChangeClient(provider));
-        }
-        self.show(AppView::Settings);
-        self.settings.focus_form();
-    }
-
     /// Settings' Sign In… on row `i`.
     pub fn settings_sign_in(&self, i: usize) {
         if let Some(row) = self.settings.row(i) {
@@ -1741,60 +1532,6 @@ impl Ui {
     pub fn settings_cancel_sign_in(&self, i: usize) {
         if let Some(row) = self.settings.row(i) {
             self.intent(Intent::SignOut(row.provider));
-        }
-    }
-
-    /// Change Google Client… on row `i`: opens its client form, asking first while the
-    /// account is signed in, which a new client ends.
-    pub fn change_client(&self, i: usize) {
-        let Some(row) = self.settings.row(i) else {
-            return;
-        };
-        let provider = row.provider;
-        let asks = self.vm.borrow().ui().change_client_asks(&provider);
-        if !asks {
-            self.open_client_form(provider);
-            return;
-        }
-        let service = vm::provider_name(&provider.0).to_owned();
-        self.ask(
-            "Change the Google client?",
-            &format!(
-                "You'll be signed out of {service} and need to sign in again with the new client."
-            ),
-            "Change",
-            false,
-            move |ui| ui.open_client_form(provider.clone()),
-        );
-    }
-
-    fn open_client_form(&self, provider: ProviderId) {
-        self.intent(Intent::ChangeClient(provider));
-        self.settings.focus_form();
-    }
-
-    /// The client form's Save on row `i`, or Return in its fields: sends the typed client,
-    /// which the provider takes as it takes a file, and empties the secret field once it is
-    /// sent.
-    pub fn save_client(&self, i: usize) {
-        let Some((provider, id, secret)) = self.settings.client(i) else {
-            return;
-        };
-        if !vm::client_filled(&id, &secret) {
-            return;
-        }
-        let client = vm::client_json(&id, &secret);
-        self.intent(Intent::ChangeClient(provider));
-        if self.run(Intent::ImportClient(client)) {
-            self.settings.clear_secret(i);
-        }
-    }
-
-    /// The client form's Choose Client File… on row `i`.
-    pub fn settings_choose_client_file(&self, i: usize) {
-        if let Some(row) = self.settings.row(i) {
-            self.intent(Intent::ChangeClient(row.provider));
-            self.choose_client_file();
         }
     }
 
@@ -2297,7 +2034,6 @@ impl Ui {
 
     fn show_library(&self, view: &LibraryView, rows: Vec<table::RowText>, only: Option<Service>) {
         let panel = matches!(view, LibraryView::Pending { .. });
-        let setup = matches!(view, LibraryView::Setup { .. });
         let list = matches!(
             view,
             LibraryView::SignedIn {
@@ -2307,10 +2043,9 @@ impl Ui {
         ) && !rows.is_empty();
         let head = matches!(view, LibraryView::SignedIn { .. });
         self.sign_in.view.setHidden(!panel);
-        self.setup.view.setHidden(!setup);
         self.library_head.setHidden(!head);
         self.library_table.view.setHidden(!list);
-        self.library_state.view.setHidden(panel || setup || list);
+        self.library_state.view.setHidden(panel || list);
         let state = &self.library_state;
         match view {
             LibraryView::Loading => state.set(Icon::Library, "Loading Library", "", None),
@@ -2332,9 +2067,6 @@ impl Ui {
                 user_code,
                 expires_at_unix,
             } => self.show_sign_in(provider, verification_url, user_code, *expires_at_unix),
-            LibraryView::Setup { reason, error, .. } => {
-                self.show_setup(reason.as_deref(), error.as_deref())
-            }
             LibraryView::SignedIn { name, page } => {
                 widgets::set_text(
                     &self.library_who,
@@ -2353,24 +2085,6 @@ impl Ui {
             .set_rows(if list { rows } else { Vec::new() }, None);
         if list {
             self.library_table.deselect();
-        }
-    }
-
-    fn show_setup(&self, reason: Option<&str>, error: Option<&str>) {
-        let note = &self.setup.note;
-        match error {
-            Some(e) => {
-                // Settings' form, showing the same error, says it there.
-                if note.stringValue().to_string() != e && self.view.get() != AppView::Settings {
-                    widgets::announce(self.mtm, e);
-                }
-                widgets::set_text(note, e);
-                note.setTextColor(Some(&theme::bad()));
-            }
-            None => {
-                widgets::set_text(note, reason.unwrap_or_default());
-                note.setTextColor(Some(&theme::muted()));
-            }
         }
     }
 

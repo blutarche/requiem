@@ -589,7 +589,6 @@ fn newer_player(app: &Path, current: &Version, reexeced: bool) -> Option<Version
 fn restart_files() -> Vec<PathBuf> {
     [
         persist::state_path(),
-        requiem_provider_ytmusic::token_file(),
         requiem_provider_ytmusic::session_file(),
         requiem_provider_spotify::credentials_file(),
     ]
@@ -980,10 +979,9 @@ mod tests {
     #[test]
     fn a_restart_saves_every_sign_in() {
         let files = restart_files();
-        let token = requiem_provider_ytmusic::token_file().expect("a home folder");
         let session = requiem_provider_ytmusic::session_file().expect("a home folder");
-        assert_eq!(session.parent(), token.parent());
-        for f in [&token, &session] {
+        let spotify = requiem_provider_spotify::credentials_file().expect("a home folder");
+        for f in [&session, &spotify] {
             assert!(files.contains(f), "{} isn't saved", f.display());
         }
     }
