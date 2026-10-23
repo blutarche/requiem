@@ -195,6 +195,31 @@ const MIXES: [&str; 8] = [
     "Quiet Hours",
 ];
 
+/// The albums a search finds: title, artist, type and year.
+const SEARCH_ALBUMS: [(&str, &str, &str, u16); 8] = [
+    ("Low Tide Radio", "Hollow Coast", "Album", 2019),
+    ("Night Drive", "Northbound Echo", "Single", 2024),
+    ("After Hours Transit", "Velvet Static", "Album", 2021),
+    ("Glasshouse", "Mira Vance", "Album", 2022),
+    ("Orbit Hymns", "The Lantern Choir", "Album", 2018),
+    ("Route Nine", "Northbound Echo", "EP", 2023),
+    ("Signal & Noise", "Cobalt Garden", "Album", 2020),
+    ("Small Hours", "Elias Wren", "Album", 2017),
+];
+
+/// The playlists a search finds: title and song count.
+const SEARCH_PLAYLISTS: [(&str, usize); 6] = [
+    ("Night Drive Essentials", 48),
+    ("Midnight Highway", 72),
+    ("Synthwave Night Drive", 35),
+    (
+        "Driving Through the City Lights After Everyone Else Has Gone Home",
+        120,
+    ),
+    ("Late Night Radio", 61),
+    ("Slow Roads", 27),
+];
+
 const LIBRARY_ADJECTIVES: [&str; 5] = ["Golden", "Quiet", "Midnight", "Early", "Slow"];
 const LIBRARY_NOUNS: [&str; 4] = ["Mornings", "Roads", "Rooms", "Waves"];
 
@@ -204,6 +229,8 @@ const HOME_PLAYLIST_ART: usize = 42;
 const HOME_MIX_ART: usize = 50;
 const LIBRARY_ART: usize = 60;
 const LIBRARY_LEN: usize = 20;
+const SEARCH_ALBUM_ART: usize = LIBRARY_ART + LIBRARY_LEN;
+const SEARCH_PLAYLIST_ART: usize = SEARCH_ALBUM_ART + SEARCH_ALBUMS.len();
 const COLLECTION_LEN: usize = 15;
 
 fn demo_url(i: usize) -> String {
@@ -215,7 +242,8 @@ pub fn covers() -> Vec<(String, usize)> {
     let mut out: Vec<(String, usize)> = (0..RESULTS.len())
         .filter_map(|i| artwork_url(i).map(|u| (u, i)))
         .collect();
-    out.extend((HOME_TRACK_ART..LIBRARY_ART + LIBRARY_LEN).map(|i| (demo_url(i), i)));
+    let end = SEARCH_PLAYLIST_ART + SEARCH_PLAYLISTS.len();
+    out.extend((HOME_TRACK_ART..end).map(|i| (demo_url(i), i)));
     out
 }
 
@@ -433,6 +461,53 @@ pub fn results() -> Vec<Track> {
         .collect()
 }
 
+/// What every demo search finds. Only YouTube Music finds albums and playlists, as in the
+/// player; one of each has no cover, to show the placeholder.
+pub fn search_results() -> SearchResults {
+    let collection =
+        |kind, id: String, title: &str, subtitle: String, art: Option<usize>| Collection {
+            id: CollectionId {
+                provider: ytmusic(),
+                id,
+            },
+            kind,
+            title: title.to_owned(),
+            subtitle: Some(subtitle),
+            artwork_url: art.map(demo_url),
+        };
+    let albums = SEARCH_ALBUMS
+        .iter()
+        .enumerate()
+        .map(|(i, (title, artist, kind, year))| {
+            collection(
+                CollectionKind::Album,
+                format!("demo-search-album-{i:02}"),
+                title,
+                format!("{kind} \u{2022} {artist} \u{2022} {year}"),
+                (i != 5).then_some(SEARCH_ALBUM_ART + i),
+            )
+        })
+        .collect();
+    let playlists = SEARCH_PLAYLISTS
+        .iter()
+        .enumerate()
+        .map(|(i, (title, songs))| {
+            collection(
+                CollectionKind::Playlist,
+                format!("demo-search-playlist-{i:02}"),
+                title,
+                format!("YouTube Music \u{2022} {songs} songs"),
+                (i != 3).then_some(SEARCH_PLAYLIST_ART + i),
+            )
+        })
+        .collect();
+    SearchResults {
+        tracks: results(),
+        albums,
+        playlists,
+    }
+}
+
 /// Stands in for the daemon: commands update the fake state where that is trivial.
 #[derive(Debug)]
 pub struct Daemon {
@@ -506,7 +581,7 @@ impl Daemon {
                 req,
                 results: SearchResults {
                     tracks: self.results.clone(),
-                    ..SearchResults::default()
+                    ..search_results()
                 },
             }],
             Command::Enqueue { tracks, mode } => {
@@ -961,6 +1036,44 @@ mod tests {
                 .iter()
                 .all(|t| t.id.provider == c.id.provider)
         );
+    }
+
+    #[test]
+    fn a_search_finds_youtube_music_albums_and_playlists_with_cached_covers() {
+        let mut daemon = Daemon::default();
+        let Some(Event::SearchResults { results, .. }) = daemon
+            .apply(Command::Search {
+                req: 1,
+                query: QUERY.into(),
+            })
+            .pop()
+        else {
+            panic!("a search is answered with results");
+        };
+        assert_eq!(results.tracks, daemon.results);
+        assert_eq!(results.albums.len(), SEARCH_ALBUMS.len());
+        assert_eq!(results.playlists.len(), SEARCH_PLAYLISTS.len());
+        assert!(
+            results
+                .albums
+                .iter()
+                .all(|a| a.kind == CollectionKind::Album)
+        );
+        assert!(
+            results
+                .playlists
+                .iter()
+                .all(|p| p.kind == CollectionKind::Playlist)
+        );
+        let collections: Vec<_> = results.albums.iter().chain(&results.playlists).collect();
+        assert!(collections.iter().all(|c| c.id.provider == ytmusic()));
+        let cached: Vec<String> = covers().into_iter().map(|(url, _)| url).collect();
+        let arts: Vec<_> = collections
+            .iter()
+            .filter_map(|c| c.artwork_url.as_ref())
+            .collect();
+        assert_eq!(arts.len(), collections.len() - 2);
+        assert!(arts.iter().all(|u| cached.contains(u)));
     }
 
     #[test]
