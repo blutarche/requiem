@@ -66,6 +66,7 @@ impl Backend for Fake {
             },
             title: process::id().to_string(),
             artists: Vec::new(),
+            artist_ids: Vec::new(),
             album: None,
             duration: None,
             artwork_url: None,

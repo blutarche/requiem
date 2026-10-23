@@ -20,9 +20,11 @@ use librespot_core::authentication::Credentials;
 use librespot_core::cache::Cache;
 use librespot_core::error::ErrorKind;
 use librespot_core::{Error, FileId, Session, SessionConfig, SpotifyId, SpotifyUri};
+use librespot_metadata::album::AlbumType;
+use librespot_metadata::artist::Artists;
 use librespot_metadata::audio::{AudioFileFormat, AudioFiles, AudioItem};
 use librespot_metadata::image::{Image, ImageSize};
-use librespot_metadata::{Album, Metadata, Track as SpotifyTrack};
+use librespot_metadata::{Album, Artist, Metadata, Track as SpotifyTrack};
 use librespot_oauth::DeviceAuthClientBuilder;
 use librespot_protocol::context_page::ContextPage;
 use librespot_protocol::context_track::ContextTrack;
@@ -90,6 +92,16 @@ const LIKED_ID: &str = "collection";
 const LIKED_ARTWORK: &str = "https://misc.scdn.co/liked-songs/liked-songs-640.png";
 const PLAYLIST_PREFIX: &str = "playlist:";
 const ALBUM_PREFIX: &str = "album:";
+const ARTIST_PREFIX: &str = "spotify:artist:";
+/// An artist page's top songs, at most.
+const ARTIST_TOP_SONGS: usize = 10;
+/// An artist page's albums, and its singles and EPs, at most each; as many as YouTube Music's
+/// artist page shows.
+const ARTIST_RELEASES: usize = 10;
+/// The shelves of an artist's page, named as YouTube Music's provider names them.
+const ARTIST_TOP: &str = "Top songs";
+const ARTIST_ALBUMS: &str = "Albums";
+const ARTIST_SINGLES: &str = "Singles & EPs";
 
 pub(crate) struct Librespot {
     rt: Runtime,
@@ -268,6 +280,9 @@ impl Librespot {
     }
 
     async fn collection(&self, id: &str) -> Result<Vec<Shelf>, ProviderError> {
+        if let Some(artist) = artist_of(id) {
+            return self.artist(artist).await;
+        }
         let session = self.session().await?;
         let opens = Opens::from_id(id)
             .ok_or_else(|| ProviderError::Unplayable(format!("no Spotify collection {id}")))?;
@@ -289,6 +304,22 @@ impl Librespot {
             title,
             items: tracks.into_iter().map(Item::Track).collect(),
         }])
+    }
+
+    /// Artist `id`'s page: its top songs where the account is, then its albums, and its singles
+    /// and EPs, each in its latest release.
+    async fn artist(&self, id: SpotifyId) -> Result<Vec<Shelf>, ProviderError> {
+        let session = self.session().await?;
+        let artist = Artist::get(&session, &SpotifyUri::Artist { id })
+            .await
+            .map_err(|e| api_error("artist", &e))?;
+        let wants = ArtistWants::of(&artist, &session.country());
+        let releases = wants.albums.iter().chain(&wants.singles).copied().collect();
+        let (top, releases) = tokio::join!(tracks(&session, wants.top), albums(&session, releases));
+        let (albums, singles) = releases?
+            .into_iter()
+            .partition(|(id, _)| wants.albums.contains(id));
+        Ok(artist_shelves(top?, albums, singles))
     }
 
     async fn prepare_async(&self, track: &str) -> Result<String, ProviderError> {
@@ -670,6 +701,7 @@ pub(crate) fn best_file(files: &AudioFiles) -> Option<(FileId, usize)> {
 /// Track details for `ids`, in order and at most [`METADATA_IN_FLIGHT`] requests at a time.
 async fn tracks(session: &Session, ids: Vec<SpotifyId>) -> Result<Vec<Track>, ProviderError> {
     let found = all_found(
+        "track details",
         futures_util::stream::iter(ids)
             .map(|id| async move {
                 SpotifyTrack::get(session, &SpotifyUri::Track { id })
@@ -686,6 +718,7 @@ async fn tracks(session: &Session, ids: Vec<SpotifyId>) -> Result<Vec<Track>, Pr
 /// limited, fails them all and stops the rest: a list cut short would pass for the whole one.
 /// A track Spotify no longer has is left out; only if every one is gone is that an error.
 async fn all_found<T>(
+    what: &str,
     lookups: impl futures_util::Stream<Item = Result<T, Error>>,
 ) -> Result<Vec<T>, ProviderError> {
     let mut lookups = std::pin::pin!(lookups);
@@ -694,7 +727,7 @@ async fn all_found<T>(
     while let Some(r) = lookups.next().await {
         match r {
             Ok(t) => out.push(t),
-            Err(e) => match api_error("track details", &e) {
+            Err(e) => match api_error(what, &e) {
                 ProviderError::Unplayable(_) => {
                     gone.get_or_insert(e);
                 }
@@ -703,9 +736,9 @@ async fn all_found<T>(
         }
     }
     match gone {
-        Some(e) if out.is_empty() => Err(api_error("track details", &e)),
+        Some(e) if out.is_empty() => Err(api_error(what, &e)),
         Some(e) => {
-            eprintln!("[spotify] left out tracks without details: {}", shown(&e));
+            eprintln!("[spotify] left out some without {what}: {}", shown(&e));
             Ok(out)
         }
         None => Ok(out),
@@ -720,6 +753,7 @@ fn to_track(id: SpotifyId, t: SpotifyTrack) -> Track {
             id: id.to_base62(),
         },
         title: t.name,
+        artist_ids: artist_ids(&t.artists),
         artists: t.artists.0.into_iter().map(|a| a.name).collect(),
         album: Some(t.album.name).filter(|n| !n.is_empty()),
         duration: u64::try_from(t.duration)
@@ -727,6 +761,137 @@ fn to_track(id: SpotifyId, t: SpotifyTrack) -> Track {
             .filter(|ms| *ms > 0)
             .map(Duration::from_millis),
         artwork_url,
+    }
+}
+
+/// The page of each of `artists`.
+fn artist_ids(artists: &Artists) -> Vec<Option<CollectionId>> {
+    artists
+        .iter()
+        .map(|a| match a.id {
+            SpotifyUri::Artist { id } => Some(artist_page(id)),
+            _ => None,
+        })
+        .collect()
+}
+
+fn artist_page(id: SpotifyId) -> CollectionId {
+    CollectionId {
+        provider: provider(),
+        id: format!("{ARTIST_PREFIX}{}", id.to_base62()),
+    }
+}
+
+/// The artist a collection id opens, if it is an artist's.
+fn artist_of(id: &str) -> Option<SpotifyId> {
+    SpotifyId::from_base62(id.strip_prefix(ARTIST_PREFIX)?).ok()
+}
+
+/// Album details for `ids`, in order and at most [`METADATA_IN_FLIGHT`] requests at a time.
+async fn albums(
+    session: &Session,
+    ids: Vec<SpotifyId>,
+) -> Result<Vec<(SpotifyId, Album)>, ProviderError> {
+    all_found(
+        "album details",
+        futures_util::stream::iter(ids)
+            .map(|id| async move {
+                Album::get(session, &SpotifyUri::Album { id })
+                    .await
+                    .map(|a| (id, a))
+            })
+            .buffered(METADATA_IN_FLIGHT),
+    )
+    .await
+}
+
+/// What an artist's page needs looked up.
+#[derive(Debug, PartialEq)]
+struct ArtistWants {
+    top: Vec<SpotifyId>,
+    albums: Vec<SpotifyId>,
+    singles: Vec<SpotifyId>,
+}
+
+impl ArtistWants {
+    /// The top songs for `country`, else for everywhere, else for the first country listed;
+    /// and the latest release of each album, and of each single and EP.
+    fn of(artist: &Artist, country: &str) -> Self {
+        let mut top = artist.top_tracks.for_country(country).0;
+        if top.is_empty()
+            && let Some(first) = artist.top_tracks.first()
+        {
+            top.clone_from(&first.tracks.0);
+        }
+        let top = top
+            .iter()
+            .filter_map(|uri| match uri {
+                SpotifyUri::Track { id } => Some(*id),
+                _ => None,
+            })
+            .take(ARTIST_TOP_SONGS)
+            .collect();
+        Self {
+            top,
+            albums: releases(artist.albums_current()),
+            singles: releases(artist.singles_current()),
+        }
+    }
+}
+
+fn releases<'a>(uris: impl Iterator<Item = &'a SpotifyUri>) -> Vec<SpotifyId> {
+    uris.filter_map(|uri| match uri {
+        SpotifyUri::Album { id } => Some(*id),
+        _ => None,
+    })
+    .take(ARTIST_RELEASES)
+    .collect()
+}
+
+/// An artist's page, each shelf left out when empty. The release cards leave out the artist,
+/// whose page it is: "Album • 2013", "EP • 2020".
+fn artist_shelves(
+    top: Vec<Track>,
+    albums: Vec<(SpotifyId, Album)>,
+    singles: Vec<(SpotifyId, Album)>,
+) -> Vec<Shelf> {
+    let cards = |releases: Vec<(SpotifyId, Album)>| -> Vec<Item> {
+        releases
+            .into_iter()
+            .map(|(id, album)| Item::Collection(release_card(id, &album)))
+            .collect()
+    };
+    let shelves: [(&str, Vec<Item>); 3] = [
+        (ARTIST_TOP, top.into_iter().map(Item::Track).collect()),
+        (ARTIST_ALBUMS, cards(albums)),
+        (ARTIST_SINGLES, cards(singles)),
+    ];
+    shelves
+        .into_iter()
+        .filter(|(_, items)| !items.is_empty())
+        .map(|(title, items)| Shelf {
+            title: title.to_owned(),
+            items,
+        })
+        .collect()
+}
+
+fn release_card(id: SpotifyId, album: &Album) -> Collection {
+    let kind = match album.album_type {
+        AlbumType::SINGLE => "Single",
+        AlbumType::EP => "EP",
+        AlbumType::COMPILATION => "Compilation",
+        _ => "Album",
+    };
+    let year = album.date.year();
+    let subtitle = if year > 0 {
+        format!("{kind} \u{2022} {year}")
+    } else {
+        kind.to_owned()
+    };
+    Collection {
+        subtitle: Some(subtitle),
+        ..album_card(id, album)
     }
 }
 
@@ -1149,13 +1314,20 @@ fn station_track(t: &Value) -> Option<Track> {
             .map(str::to_owned)
     };
     let meta = t.get("metadata");
+    let artists: Vec<String> = text(meta, "artist_name").into_iter().collect();
+    let artist_uri = text(meta, "artist_uri").or_else(|| text(Some(t), "artist_uri"));
+    let artist_ids = artists
+        .iter()
+        .map(|_| artist_of(artist_uri.as_deref()?).map(artist_page))
+        .collect();
     Some(Track {
         id: TrackId {
             provider: provider(),
             id: id.to_base62(),
         },
         title: text(meta, "title").or_else(|| text(Some(t), "name"))?,
-        artists: text(meta, "artist_name").into_iter().collect(),
+        artists,
+        artist_ids,
         album: text(meta, "album_title"),
         duration: None,
         artwork_url: text(meta, "image_url")
@@ -1630,7 +1802,9 @@ pub(crate) fn search_term(q: &str) -> String {
 mod tests {
     use std::io::Cursor;
 
+    use librespot_protocol::metadata as proto;
     use librespot_protocol::playlist4_external::{ListItems, MetaItem, PictureSize};
+    use protobuf::{EnumOrUnknown, MessageField};
 
     use super::*;
     use crate::testing::TempDir;
@@ -1666,7 +1840,10 @@ mod tests {
             .build()
             .unwrap();
         let found = |lookups: Vec<Result<u8, Error>>| {
-            rt.block_on(all_found(futures_util::stream::iter(lookups)))
+            rt.block_on(all_found(
+                "track details",
+                futures_util::stream::iter(lookups),
+            ))
         };
         let limited = || Error::resource_exhausted(io::Error::other("rate limited"));
         let gone = || Error::not_found(io::Error::other("no such track"));
@@ -2031,6 +2208,7 @@ mod tests {
             },
             title: "Song".into(),
             artists: Vec::new(),
+            artist_ids: Vec::new(),
             album: None,
             duration: None,
             artwork_url: None,
@@ -2136,6 +2314,208 @@ mod tests {
         SpotifyId::from_base62(s).unwrap()
     }
 
+    fn gid(s: &str) -> Option<Vec<u8>> {
+        Some(b62(s).to_raw().to_vec())
+    }
+
+    fn proto_album(id: &str, name: &str, kind: proto::album::Type, year: i32) -> proto::Album {
+        proto::Album {
+            gid: gid(id),
+            name: Some(name.into()),
+            type_: Some(EnumOrUnknown::new(kind)),
+            date: MessageField::some(proto::Date {
+                year: Some(year),
+                ..Default::default()
+            }),
+            ..Default::default()
+        }
+    }
+
+    fn album(id: &str, name: &str, kind: proto::album::Type, year: i32) -> (SpotifyId, Album) {
+        let album = Album::try_from(&proto_album(id, name, kind, year)).unwrap();
+        (b62(id), album)
+    }
+
+    #[test]
+    fn a_tracks_artists_open_their_spotify_pages() {
+        let artist = |id: &str, name: &str| proto::Artist {
+            gid: gid(id),
+            name: Some(name.into()),
+            ..Default::default()
+        };
+        let msg = proto::Track {
+            gid: gid("0FakeTrack100000000000"),
+            name: Some("Song".into()),
+            album: MessageField::some(proto_album(
+                "0FakeAlbum100000000000",
+                "Record",
+                proto::album::Type::ALBUM,
+                2013,
+            )),
+            artist: vec![
+                artist("0FakeArtist10000000000", "First"),
+                artist("0FakeArtist20000000000", "Second"),
+            ],
+            duration: Some(200_000),
+            ..Default::default()
+        };
+        let t = to_track(
+            b62("0FakeTrack100000000000"),
+            SpotifyTrack::try_from(&msg).unwrap(),
+        );
+        assert_eq!(t.artists, ["First", "Second"]);
+        let page = |id: &str| CollectionId {
+            provider: provider(),
+            id: id.into(),
+        };
+        assert_eq!(
+            t.artist_ids,
+            [
+                Some(page("spotify:artist:0FakeArtist10000000000")),
+                Some(page("spotify:artist:0FakeArtist20000000000")),
+            ]
+        );
+        assert_eq!(
+            t.artist_pages().next(),
+            Some(("First", &page("spotify:artist:0FakeArtist10000000000")))
+        );
+        // The id opens the artist's page, and only an artist id does.
+        assert_eq!(
+            artist_of("spotify:artist:0FakeArtist10000000000"),
+            Some(b62("0FakeArtist10000000000"))
+        );
+        assert_eq!(artist_of("album:0FakeAlbum100000000000"), None);
+        assert_eq!(artist_of("spotify:artist:not-base62"), None);
+    }
+
+    fn proto_artist(top: Vec<(&str, usize)>, albums: usize) -> proto::Artist {
+        let top_track = top
+            .into_iter()
+            .map(|(country, n)| proto::TopTracks {
+                country: Some(country.into()),
+                track: (0..n)
+                    .map(|i| proto::Track {
+                        gid: gid(&format!("0Top{country:0>2}{i:016}")),
+                        ..Default::default()
+                    })
+                    .collect(),
+                ..Default::default()
+            })
+            .collect();
+        let release = |id: String| proto::Album {
+            gid: gid(&id),
+            ..Default::default()
+        };
+        // The first album has an older release too, which the page leaves out.
+        let album_group = (0..albums)
+            .map(|i| proto::AlbumGroup {
+                album: (0..if i == 0 { 2 } else { 1 })
+                    .map(|v| release(format!("0FakeAlbum{v}{i:011}")))
+                    .collect(),
+                ..Default::default()
+            })
+            .collect();
+        let single_group = vec![proto::AlbumGroup {
+            album: vec![release("0FakeSingle00000000000".into())],
+            ..Default::default()
+        }];
+        proto::Artist {
+            gid: gid("0FakeArtist10000000000"),
+            name: Some("Band".into()),
+            top_track,
+            album_group,
+            single_group,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn an_artists_page_wants_its_top_songs_where_the_account_is_and_its_latest_releases() {
+        let artist = Artist::try_from(&proto_artist(vec![("SE", 3), ("US", 12)], 11)).unwrap();
+        let wants = ArtistWants::of(&artist, "US");
+        let top: Vec<SpotifyId> = (0..10).map(|i| b62(&format!("0TopUS{i:016}"))).collect();
+        assert_eq!(wants.top, top, "the account's country, at most 10");
+        let albums: Vec<SpotifyId> = (0..10)
+            .map(|i| b62(&format!("0FakeAlbum0{i:011}")))
+            .collect();
+        assert_eq!(
+            wants.albums, albums,
+            "each album's latest release, at most 10"
+        );
+        assert_eq!(wants.singles, [b62("0FakeSingle00000000000")]);
+
+        // A country the artist has no top songs for takes the first listed...
+        let first = ArtistWants::of(&artist, "FR");
+        assert_eq!(first.top.len(), 3);
+        assert_eq!(first.top[0], b62(&format!("0TopSE{:016}", 0)));
+        // ...unless there are top songs for everywhere.
+        let global = Artist::try_from(&proto_artist(vec![("SE", 3), ("", 2)], 0)).unwrap();
+        let wants = ArtistWants::of(&global, "FR");
+        assert_eq!(
+            wants.top,
+            [
+                b62(&format!("0Top00{:016}", 0)),
+                b62(&format!("0Top00{:016}", 1))
+            ]
+        );
+        assert!(wants.albums.is_empty());
+
+        let none = Artist::try_from(&proto_artist(Vec::new(), 0)).unwrap();
+        assert!(ArtistWants::of(&none, "US").top.is_empty());
+    }
+
+    #[test]
+    fn an_artists_page_has_its_top_songs_then_albums_then_singles_and_eps() {
+        let song = Track {
+            id: TrackId {
+                provider: provider(),
+                id: "0FakeTrack100000000000".into(),
+            },
+            title: "Song".into(),
+            artists: vec!["Band".into()],
+            artist_ids: vec![Some(artist_page(b62("0FakeArtist10000000000")))],
+            album: None,
+            duration: None,
+            artwork_url: None,
+        };
+        let albums = vec![album(
+            "0FakeAlbum100000000000",
+            "Record",
+            proto::album::Type::ALBUM,
+            2013,
+        )];
+        let singles = vec![
+            album(
+                "0FakeSingle00000000000",
+                "Hit",
+                proto::album::Type::SINGLE,
+                2005,
+            ),
+            album("0FakeEP000000000000000", "Four", proto::album::Type::EP, 0),
+        ];
+        let shelves = artist_shelves(vec![song.clone()], albums.clone(), singles);
+        let titles: Vec<&str> = shelves.iter().map(|s| s.title.as_str()).collect();
+        assert_eq!(titles, ["Top songs", "Albums", "Singles & EPs"]);
+        assert_eq!(shelves[0].items, [Item::Track(song)]);
+        let card = |shelf: usize, i: usize| match &shelves[shelf].items[i] {
+            Item::Collection(c) => c.clone(),
+            Item::Track(t) => panic!("{} is no card", t.title),
+        };
+        let record = card(1, 0);
+        // It opens as the album's own page.
+        assert_eq!(record.id, Opens::Album(b62("0FakeAlbum100000000000")).id());
+        assert_eq!(record.kind, CollectionKind::Album);
+        assert_eq!(record.title, "Record");
+        assert_eq!(record.subtitle.as_deref(), Some("Album \u{2022} 2013"));
+        assert_eq!(card(2, 0).subtitle.as_deref(), Some("Single \u{2022} 2005"));
+        // Without a year, the kind alone.
+        assert_eq!(card(2, 1).subtitle.as_deref(), Some("EP"));
+
+        let shelves = artist_shelves(Vec::new(), albums, Vec::new());
+        let titles: Vec<&str> = shelves.iter().map(|s| s.title.as_str()).collect();
+        assert_eq!(titles, ["Albums"], "empty shelves are left out");
+    }
+
     #[test]
     fn recently_played_gives_contexts_and_the_track_played_last() {
         let played = parse_recently_played(RECENTLY_PLAYED_FIXTURE.as_bytes()).unwrap();
@@ -2215,6 +2595,7 @@ mod tests {
                 },
                 title: "First Song".into(),
                 artists: vec!["First Band".into()],
+                artist_ids: vec![Some(artist_page(b62("0FakeBand1000000000000")))],
                 album: Some("First Record".into()),
                 duration: None,
                 artwork_url: Some(format!(
@@ -2224,7 +2605,7 @@ mod tests {
         );
         // Without metadata, the name is the title.
         assert_eq!(tracks[2].title, "Bare Song");
-        assert!(tracks[2].artists.is_empty());
+        assert!(tracks[2].artists.is_empty() && tracks[2].artist_ids.is_empty());
         assert_eq!(tracks[2].artwork_url, None);
         assert!(matches!(
             parse_station(b"{\"tracks\":null}"),
