@@ -8,7 +8,7 @@ use std::time::Instant;
 
 use requiem_core::{
     AccountState, AudioSource, ByteSource, CollectionId, FormatHint, Item, Page, Provider,
-    ProviderId, TrackId,
+    ProviderId, Shelf, TrackId,
 };
 use symphonia::core::codecs::audio::{AudioDecoder, AudioDecoderOptions};
 use symphonia::core::codecs::registry::CodecRegistry;
@@ -224,15 +224,21 @@ fn live_home() {
         assert!(!shelf.items.is_empty());
     }
     let titles: Vec<_> = home.iter().map(|s| s.title.as_str()).collect();
-    assert_eq!(titles, ["Liked songs", "Mixes", "Your playlists"]);
-    assert!(home[0].items.len() <= 20);
-    assert!(home[0].items.iter().all(|i| matches!(i, Item::Track(_))));
-    assert!(
-        home[1..]
-            .iter()
-            .flat_map(|s| &s.items)
-            .all(|i| matches!(i, Item::Collection(_)))
+    assert_eq!(
+        titles,
+        [
+            "Liked songs",
+            "Mixes",
+            "Your playlists",
+            "Listen again",
+            "Quick picks"
+        ]
     );
+    let tracks = |s: &Shelf| s.items.iter().all(|i| matches!(i, Item::Track(_)));
+    let cards = |s: &Shelf| s.items.iter().all(|i| matches!(i, Item::Collection(_)));
+    assert!(home[0].items.len() <= 20);
+    assert!(tracks(&home[0]) && tracks(&home[4]));
+    assert!(home[1..4].iter().all(cards));
     let Some(Item::Collection(liked)) = home[2].items.first() else {
         panic!("no Liked Songs first");
     };

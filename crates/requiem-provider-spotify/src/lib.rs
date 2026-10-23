@@ -13,6 +13,7 @@ mod covers;
 mod creds;
 mod keys;
 mod logger;
+mod recent;
 mod server;
 mod source;
 mod sys;

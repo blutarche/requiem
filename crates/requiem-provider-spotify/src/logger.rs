@@ -20,6 +20,15 @@ impl Log for Warn {
     fn flush(&self) {}
 }
 
+/// A debug line on stderr when `REQUIEM_LOG=debug`, as the YouTube Music provider's. Never pass
+/// URIs or account details.
+pub(crate) fn debug(msg: std::fmt::Arguments<'_>) {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    if *ON.get_or_init(|| std::env::var("REQUIEM_LOG").is_ok_and(|v| v == "debug")) {
+        eprintln!("[spotify] {msg}");
+    }
+}
+
 pub(crate) fn init() {
     if log::set_logger(&Warn).is_ok() {
         log::set_max_level(LevelFilter::Warn);

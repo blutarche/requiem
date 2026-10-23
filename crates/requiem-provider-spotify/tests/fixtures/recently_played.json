@@ -1,0 +1,38 @@
+{
+  "playContexts": [
+    {
+      "uri": "spotify:playlist:0FakeMix10000000000000",
+      "lastPlayedTime": 1792656211475,
+      "lastPlayedTrackUri": "spotify:track:0FakeSeed1000000000000"
+    },
+    {
+      "uri": "spotify:album:0FakeAlbum100000000000",
+      "lastPlayedTime": 1792499407596,
+      "lastPlayedTrackUri": "spotify:track:0FakeTrack200000000000"
+    },
+    {
+      "uri": "spotify:artist:0FakeArtist10000000000",
+      "lastPlayedTime": 1792495447299,
+      "lastPlayedTrackUri": "spotify:track:0FakeTrack300000000000"
+    },
+    {
+      "uri": "spotify:user:fakeuser:collection",
+      "lastPlayedTime": 1792400000000,
+      "lastPlayedTrackUri": "spotify:track:0FakeTrack400000000000"
+    },
+    {
+      "uri": "spotify:playlist:0FakeMix10000000000000",
+      "lastPlayedTime": 1792300000000,
+      "lastPlayedTrackUri": "spotify:track:0FakeTrack500000000000"
+    },
+    {
+      "uri": "spotify:show:0FakeShow1000000000000",
+      "lastPlayedTime": 1792200000000,
+      "lastPlayedTrackUri": "spotify:episode:0FakeEpisode1000000000"
+    },
+    {
+      "uri": "spotify:playlist:0FakeOwn10000000000000",
+      "lastPlayedTime": 1792100000000
+    }
+  ]
+}
