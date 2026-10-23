@@ -9,7 +9,8 @@ mod palette;
 mod prefs;
 mod service_switch;
 mod settings;
-mod shelves;
+#[doc(hidden)]
+pub mod shelves;
 mod snapshot;
 mod table;
 pub mod theme;
