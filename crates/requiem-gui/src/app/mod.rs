@@ -184,11 +184,6 @@ define_class!(
             }
         }
 
-        #[unsafe(method(signOutOfAccount:))]
-        fn sign_out_of_account(&self, sender: Option<&AnyObject>) {
-            ui::with(|ui| ui.sign_out_menu(sender));
-        }
-
         #[unsafe(method(libraryAction:))]
         fn library_action(&self, sender: Option<&AnyObject>) {
             let index = sender_tag(sender).and_then(|t| usize::try_from(t).ok());
@@ -1050,7 +1045,9 @@ pub fn run(args: Args) {
         View::Library | View::LibrarySignedOut | View::LibraryUnavailable | View::SignIn => {
             ui.show(AppView::Library)
         }
-        View::Collection | View::Artist | View::ArtistSpotify => ui.show(AppView::Collection),
+        View::Collection | View::Artist | View::ArtistSpotify | View::Album => {
+            ui.show(AppView::Collection)
+        }
         View::Queue => ui.show(AppView::Queue),
         View::Settings | View::SettingsSession => ui.show(AppView::Settings),
         View::NowPlaying | View::NowPlayingEmpty | View::NowPlayingLast => ui.show_now_playing(),

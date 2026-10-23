@@ -13,8 +13,8 @@ use objc2::runtime::{AnyObject, NSObject, ProtocolObject};
 use objc2::{MainThreadOnly, Message, define_class, msg_send, sel};
 use objc2_app_kit::{
     NSAlert, NSAlertFirstButtonReturn, NSAnimatablePropertyContainer, NSApplication,
-    NSAttributedStringNSStringDrawing, NSColor, NSControl, NSEvent, NSFont, NSFontAttributeName,
-    NSForegroundColorAttributeName, NSImage, NSLineBreakMode, NSMenu, NSMenuItem, NSModalResponse,
+    NSAttributedStringNSStringDrawing, NSColor, NSEvent, NSFont, NSFontAttributeName,
+    NSForegroundColorAttributeName, NSImage, NSLineBreakMode, NSModalResponse,
     NSMutableParagraphStyle, NSParagraphStyleAttributeName, NSPasteboard, NSPasteboardTypeString,
     NSResponder, NSTextAlignment, NSTextField, NSTextFieldDelegate, NSTrackingAreaOptions, NSView,
     NSWindow, NSWindowStyleMask, NSWindowTitleVisibility, NSWorkspace,
@@ -45,8 +45,8 @@ use super::shelves::{FlippedView, Shelves, Surface};
 use super::table::{self, Kind, Table};
 use super::theme::{self, Icon, Weight};
 use super::widgets::{
-    self, EmptyState, FLEX_H, FLEX_W, Field, HoverButton, LABEL_ICON, NavItem, PIN_BOTTOM,
-    PIN_LEFT, PIN_RIGHT, PIN_TOP, rect,
+    self, EmptyState, FLEX_H, FLEX_W, Field, HoverButton, LABEL_ICON, NavItem, PAGE_HEAD_H,
+    PIN_BOTTOM, PIN_LEFT, PIN_RIGHT, PIN_TOP, rect,
 };
 use super::{Delegate, MainWindow};
 use crate::vm::{
@@ -345,7 +345,6 @@ pub struct Ui {
     home_state: EmptyState,
     library_page: Retained<NSView>,
     library_head: Retained<NSView>,
-    library_who: Retained<NSTextField>,
     pub library_bar: LibraryBar,
     library_grid: CoverGrid,
     /// What the Library's collections on screen are shown for, while they show.
@@ -558,19 +557,15 @@ impl Ui {
 
         // Queue page.
         let queue_page = widgets::view(mtm, rect(0.0, 0.0, mw, mh), FLEX_W | FLEX_H);
-        let head_y = field_y + Field::H / 2.0;
-        let heading_font = theme::font(20.0, Weight::SemiBold);
-        let count_font = theme::font(12.0, Weight::Regular);
-        let heading = widgets::placed_label(
+        let queue_head = widgets::view(
             mtm,
-            "Queue",
-            &heading_font,
-            &theme::ink(),
-            PAD,
-            head_y,
-            200.0,
-            PIN_TOP | PIN_LEFT,
+            rect(0.0, mh - TOP - PAGE_HEAD_H, mw, PAGE_HEAD_H),
+            FLEX_W | PIN_TOP,
         );
+        let head_y = PAGE_HEAD_H / 2.0;
+        let heading_font = widgets::page_title_font();
+        let count_font = theme::font(12.0, Weight::Regular);
+        let heading = widgets::page_title(mtm, "Queue", PAD);
         let queue_count = widgets::placed_label(
             mtm,
             "",
@@ -598,8 +593,9 @@ impl Ui {
             "Play or add a search result",
             Some("Go to search"),
         );
-        queue_page.addSubview(&heading);
-        queue_page.addSubview(&queue_count);
+        queue_head.addSubview(&heading);
+        queue_head.addSubview(&queue_count);
+        queue_page.addSubview(&queue_head);
         queue_page.addSubview(&queue.view);
         queue_page.addSubview(&queue_empty.view);
         main.addSubview(&queue_page);
@@ -626,45 +622,11 @@ impl Ui {
         let library_page = widgets::view(mtm, rect(0.0, 0.0, mw, mh), FLEX_W | FLEX_H);
         let library_head = widgets::view(
             mtm,
-            rect(0.0, mh - TOP - Field::H - 8.0, mw, Field::H + 8.0),
+            rect(0.0, mh - TOP - PAGE_HEAD_H, mw, PAGE_HEAD_H),
             FLEX_W | PIN_TOP,
         );
-        let hy = (Field::H + 8.0) / 2.0;
-        let library_title = widgets::placed_label(
-            mtm,
-            "Library",
-            &heading_font,
-            &theme::ink(),
-            PAD,
-            hy,
-            200.0,
-            PIN_TOP | PIN_LEFT,
-        );
-        let library_who = widgets::placed_label(
-            mtm,
-            "",
-            &count_font,
-            &theme::muted(),
-            mw - PAD - 90.0 - 12.0 - 260.0,
-            hy,
-            260.0,
-            PIN_TOP | PIN_RIGHT,
-        );
-        library_who.setAlignment(NSTextAlignment::Right);
-        let sign_out = HoverButton::secondary(mtm, rect(mw - PAD - 90.0, hy - 16.0, 90.0, 32.0));
-        let w = sign_out.set_label("Sign Out");
-        sign_out.setFrame(rect(mw - PAD - w, hy - 16.0, w, 32.0));
-        sign_out.setAutoresizingMask(PIN_TOP | PIN_RIGHT);
-        sign_out.set_action(target, sel!(signOutOfAccount:));
-        library_who.setFrame(rect(
-            mw - PAD - w - 12.0 - 260.0,
-            library_who.frame().origin.y,
-            260.0,
-            library_who.frame().size.height,
-        ));
+        let library_title = widgets::page_title(mtm, "Library", PAD);
         library_head.addSubview(&library_title);
-        library_head.addSubview(&library_who);
-        library_head.addSubview(&sign_out);
         let bar_y = library_head.frame().origin.y - LibraryBar::H;
         let library_bar = LibraryBar::new(mtm, rect(0.0, bar_y, mw, LibraryBar::H), target);
         // SAFETY: the field's delegate is weak. It is the app delegate, which `app::run` holds
@@ -790,7 +752,6 @@ impl Ui {
             home_state,
             library_page,
             library_head,
-            library_who,
             library_bar,
             library_grid,
             library_shown: RefCell::new(None),
@@ -1610,45 +1571,6 @@ impl Ui {
         }
     }
 
-    /// The Library's Sign Out button: asks directly with one account signed in, else lists them.
-    pub fn sign_out_menu(&self, sender: Option<&objc2::runtime::AnyObject>) {
-        let signed_in: Vec<Service> = Service::ALL
-            .into_iter()
-            .filter(|s| self.can_run(PaletteAction::SignOut(*s)))
-            .collect();
-        match (signed_in.as_slice(), sender) {
-            ([], _) => {}
-            ([only], _) => self.confirm_sign_out(only.provider()),
-            (_, Some(sender)) => {
-                let Some(button) = sender.downcast_ref::<NSControl>() else {
-                    return;
-                };
-                let menu = NSMenu::new(self.mtm);
-                for service in signed_in {
-                    // SAFETY: `signOut:` is implemented by the button's target, which
-                    // reads the service from the item's tag.
-                    let item = unsafe {
-                        NSMenuItem::initWithTitle_action_keyEquivalent(
-                            NSMenuItem::alloc(self.mtm),
-                            &NSString::from_str(PaletteAction::SignOut(service).label()),
-                            Some(sel!(signOut:)),
-                            &NSString::new(),
-                        )
-                    };
-                    if let Some(i) = Service::ALL.iter().position(|s| *s == service) {
-                        item.setTag(i as isize);
-                    }
-                    // SAFETY: as above; the target outlives the menu, which closes with this call.
-                    unsafe { item.setTarget(button.target().as_deref()) };
-                    menu.addItem(&item);
-                }
-                let at = NSPoint::new(0.0, button.bounds().size.height + 4.0);
-                menu.popUpMenuPositioningItem_atLocation_inView(None, at, Some(button));
-            }
-            _ => {}
-        }
-    }
-
     /// Asks before signing out; the provider's part of the Library goes with the account.
     pub fn confirm_sign_out(&self, provider: ProviderId) {
         let service = vm::provider_name(&provider.0).to_owned();
@@ -2171,14 +2093,7 @@ impl Ui {
         }
         if let Some((rows, current)) = p.queue {
             let n = rows.len();
-            widgets::set_text(
-                &self.queue_count,
-                &match n {
-                    0 => String::new(),
-                    1 => "1 track".to_owned(),
-                    n => format!("{n} tracks"),
-                },
-            );
+            widgets::set_text(&self.queue_count, &queue_count_text(n));
             self.queue.set_rows(rows, current);
             self.queue.view.setHidden(n == 0);
             self.queue_empty.view.setHidden(n != 0);
@@ -2400,13 +2315,7 @@ impl Ui {
                 user_code,
                 expires_at_unix,
             } => self.show_sign_in(provider, verification_url, user_code, *expires_at_unix),
-            LibraryView::SignedIn { name, page } => {
-                widgets::set_text(
-                    &self.library_who,
-                    &name
-                        .as_deref()
-                        .map_or_else(|| "Signed in".to_owned(), |n| format!("Signed in as {n}")),
-                );
+            LibraryView::SignedIn { page } => {
                 if *page == PageView::Ready && !grid.stocked && only.is_none() {
                     state.set(Icon::Library, "Your Library is empty", "", None);
                 } else if *page != PageView::Ready || !grid.stocked {
@@ -2423,6 +2332,7 @@ impl Ui {
         }
         if list {
             self.library_bar.set(&grid.chips, grid.sort);
+            self.layout_library();
         }
         // New collections for the same page, as a refresh brings, keep the place the user
         // scrolled to.
@@ -2536,6 +2446,8 @@ impl Ui {
                 None,
             );
         }
+        self.collection_table
+            .set_album(table::lists_album(c.collection.kind));
         self.place_collection_table(shelved && songs > 0, songs);
         self.collection_table.view.setHidden(!ready || songs == 0);
         self.collection_table
@@ -2669,6 +2581,17 @@ impl Ui {
         self.search_grid.view.setFrame(full);
     }
 
+    /// Fits the Library's toolbar, which takes a second row when it is narrow, and its grid
+    /// under the title.
+    fn layout_library(&self) {
+        let b = self.library_page.bounds();
+        let top = self.library_head.frame().origin.y;
+        let bottom = self.library_bar.fit(b.size.width, top);
+        self.library_grid
+            .view
+            .setFrame(rect(0.0, 0.0, b.size.width, (bottom - 4.0).max(0.0)));
+    }
+
     /// Fits the banner to its text and button at the current width: one line, or two when
     /// one is too narrow. Returns its height.
     fn layout_banner(&self) -> CGFloat {
@@ -2732,6 +2655,7 @@ impl Ui {
         if let Some(lead) = &*self.search_lead.borrow() {
             lead.layout();
         }
+        self.layout_library();
         self.library_grid.relayout();
         self.search_grid.relayout();
         self.settings.layout();
@@ -3045,6 +2969,15 @@ struct CollectionPatch {
     shelves: Vec<Shelf>,
 }
 
+/// The queue's count line: nothing while it is empty.
+fn queue_count_text(songs: usize) -> String {
+    match songs {
+        0 => String::new(),
+        1 => "1 song".to_owned(),
+        n => format!("{n} songs"),
+    }
+}
+
 /// The collections of `shelves`, a shelf each, leaving out the tracks and the shelves they
 /// leave empty.
 fn collection_shelves(shelves: &[Shelf]) -> Vec<Shelf> {
@@ -3261,6 +3194,13 @@ mod tests {
 
     use super::*;
     use crate::demo;
+
+    #[test]
+    fn the_queue_counts_its_songs_like_a_playlist() {
+        assert_eq!(queue_count_text(0), "");
+        assert_eq!(queue_count_text(1), "1 song");
+        assert_eq!(queue_count_text(17), "17 songs");
+    }
 
     #[test]
     fn back_from_now_playing_skips_a_collection_that_closed() {

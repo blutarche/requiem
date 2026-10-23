@@ -20,15 +20,14 @@ use super::shelves::FlippedView;
 use super::theme::{self, Icon, Weight};
 use super::ui;
 use super::widgets::{
-    self, FLEX_H, FLEX_W, Field, HoverButton, LABEL_ICON, Mask, PIN_LEFT, PIN_RIGHT, PIN_TOP, rect,
+    self, FLEX_H, FLEX_W, HoverButton, LABEL_ICON, Mask, PAGE_HEAD_H, PIN_LEFT, PIN_RIGHT, PIN_TOP,
+    rect,
 };
 use crate::vm::{self, AccountRow, AccountRowState, Service};
 
 const PAD: CGFloat = 24.0;
 /// The window has a transparent title bar over the content; the header starts below it.
 const TOP: CGFloat = 20.0;
-/// As tall as the Library's header, so the titles line up.
-const HEAD_H: CGFloat = Field::H + 8.0;
 /// An account row's line: badge, name, status and buttons.
 const ROW_H: CGFloat = 64.0;
 const BADGE: CGFloat = 20.0;
@@ -149,24 +148,15 @@ impl SettingsPage {
         let view = widgets::view(mtm, frame, FLEX_W | FLEX_H);
         let head = widgets::view(
             mtm,
-            rect(0.0, h - TOP - HEAD_H, w, HEAD_H),
+            rect(0.0, h - TOP - PAGE_HEAD_H, w, PAGE_HEAD_H),
             FLEX_W | PIN_TOP,
         );
-        let title = widgets::placed_label(
-            mtm,
-            "Settings",
-            &theme::font(20.0, Weight::SemiBold),
-            &theme::ink(),
-            PAD,
-            HEAD_H / 2.0,
-            200.0,
-            PIN_TOP | PIN_LEFT,
-        );
+        let title = widgets::page_title(mtm, "Settings", PAD);
         head.addSubview(&title);
         // Below the header, so it never reaches under the title bar: see Home's shelves.
         let scroll = NSScrollView::initWithFrame(
             NSScrollView::alloc(mtm),
-            rect(0.0, 0.0, w, h - TOP - HEAD_H - GAP),
+            rect(0.0, 0.0, w, h - TOP - PAGE_HEAD_H - GAP),
         );
         scroll.setAutoresizingMask(FLEX_W | FLEX_H);
         scroll.setHasVerticalScroller(true);

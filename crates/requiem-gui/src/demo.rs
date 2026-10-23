@@ -1126,8 +1126,8 @@ fn run_intent(vm: &mut Vm, daemon: &mut Daemon, intent: Intent) {
 /// opens YouTube Music's session form in Settings; `NowPlayingEmpty` stops playback;
 /// `NowPlayingLast` plays the queue's last track; `SearchAlbums`, `SearchSongs` and
 /// `SearchArtists` pick that chip of the results; `Artist` opens the top artist's page;
-/// `ArtistSpotify` opens the playing Spotify track's artist from Now Playing. Other views get
-/// the plain start.
+/// `ArtistSpotify` opens the playing Spotify track's artist from Now Playing; `Album` opens
+/// the first album the search finds. Other views get the plain start.
 pub fn start_in(view: View) -> (Vm, Daemon) {
     let t0 = Instant::now();
     let mut vm = Vm::new_at(t0);
@@ -1234,6 +1234,13 @@ pub fn start_in(view: View) -> (Vm, Daemon) {
         View::Artist => {
             let open = Intent::OpenCollection {
                 collection: search_artists().remove(0),
+                from: Place::Search,
+            };
+            run_intent(&mut vm, &mut daemon, open);
+        }
+        View::Album => {
+            let open = Intent::OpenCollection {
+                collection: search_results().albums.remove(0),
                 from: Place::Search,
             };
             run_intent(&mut vm, &mut daemon, open);

@@ -351,7 +351,6 @@ pub enum LibraryView {
         expires_at_unix: u64,
     },
     SignedIn {
-        name: Option<String>,
         page: PageView,
     },
 }
@@ -1108,16 +1107,7 @@ impl UiState {
             ) {
                 return LibraryView::SignedOut(offers);
             }
-            let names: Vec<&str> = self
-                .accounts
-                .iter()
-                .filter_map(|(_, s)| match s {
-                    AccountState::SignedIn { name } => name.as_deref(),
-                    _ => None,
-                })
-                .collect();
             return LibraryView::SignedIn {
-                name: (!names.is_empty()).then(|| names.join(", ")),
                 page: self.library.view(),
             };
         }
@@ -5267,7 +5257,9 @@ mod tests {
         vm.apply(signed_in());
         assert!(matches!(
             vm.ui().library_view(),
-            LibraryView::SignedIn { name: Some(n), page: PageView::Loading } if n == "Ada"
+            LibraryView::SignedIn {
+                page: PageView::Loading
+            }
         ));
     }
 
@@ -6419,7 +6411,7 @@ mod tests {
         assert_eq!(browses(&vm.take_commands()).len(), 1);
         assert!(matches!(
             vm.ui().library_view(),
-            LibraryView::SignedIn { name: Some(n), .. } if n == "Ada, Sam"
+            LibraryView::SignedIn { .. }
         ));
         // One signing out leaves the Library fetched for the rest.
         vm.apply(spotify_account(AccountState::SignedOut));

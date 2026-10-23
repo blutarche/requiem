@@ -303,6 +303,28 @@ pub fn placed_label(
     l
 }
 
+/// The header band of a top-level page, below the content's top inset. Library, Queue and
+/// Settings centre their titles in it, so the titles line up.
+pub const PAGE_HEAD_H: CGFloat = Field::H + 8.0;
+
+pub fn page_title_font() -> Retained<NSFont> {
+    theme::font(20.0, Weight::SemiBold)
+}
+
+/// A top-level page's title at `x`, centred in a header `PAGE_HEAD_H` tall.
+pub fn page_title(mtm: MainThreadMarker, text: &str, x: CGFloat) -> Retained<NSTextField> {
+    placed_label(
+        mtm,
+        text,
+        &page_title_font(),
+        &theme::ink(),
+        x,
+        PAGE_HEAD_H / 2.0,
+        200.0,
+        PIN_TOP | PIN_LEFT,
+    )
+}
+
 /// Height an `NSTextField` label needs for one line of `font`.
 pub fn line_height(font: &NSFont) -> CGFloat {
     (font.ascender() - font.descender() + font.leading()).ceil() + 2.0
@@ -1193,7 +1215,7 @@ pub struct Field {
 
 impl Field {
     pub const H: CGFloat = 36.0;
-    const RING: CGFloat = 2.0;
+    pub const RING: CGFloat = 2.0;
 
     /// `frame` is the box's frame in the superview.
     pub fn new(
