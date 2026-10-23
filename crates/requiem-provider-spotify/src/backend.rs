@@ -323,7 +323,7 @@ impl Librespot {
             .into_iter()
             .partition(|(id, _)| wants.albums.contains(id));
         Ok(Browsed {
-            about: Some(artist_about(id, &artist.name, &artist.portraits)),
+            about: Some(artist_about(id, &artist.name, &portraits(&artist))),
             shelves: artist_shelves(top?, albums, singles),
         })
     }
@@ -795,6 +795,22 @@ fn artist_page(id: SpotifyId) -> CollectionId {
 /// The artist a collection id opens, if it is an artist's.
 fn artist_of(id: &str) -> Option<SpotifyId> {
     SpotifyId::from_base62(id.strip_prefix(ARTIST_PREFIX)?).ok()
+}
+
+/// The artist's photos: the metadata leaves `portraits` empty for some artists, who have them
+/// in `portrait_group` or with their biography instead.
+fn portraits(artist: &Artist) -> Vec<Image> {
+    let bio = artist.biographies.first();
+    [
+        Some(artist.portraits.to_vec()),
+        Some(artist.portrait_group.to_vec()),
+        bio.map(|b| b.portraits.to_vec()),
+        bio.map(|b| b.portrait_group.iter().flat_map(|g| g.to_vec()).collect()),
+    ]
+    .into_iter()
+    .flatten()
+    .find(|images| !images.is_empty())
+    .unwrap_or_default()
 }
 
 /// Artist `id`'s page is about it: `name`, and the widest of its `portraits`. The metadata
