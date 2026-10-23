@@ -1501,6 +1501,7 @@ mod tests {
             },
             title: title.into(),
             artists: artists.iter().map(|a| (*a).into()).collect(),
+            artist_ids: Vec::new(),
             album: album.map(Into::into),
             duration: secs.map(Duration::from_secs),
             artwork_url: None,

@@ -610,6 +610,7 @@ pub fn results() -> Vec<Track> {
             },
             title: (*title).to_owned(),
             artists: artists.iter().map(|a| (*a).to_owned()).collect(),
+            artist_ids: Vec::new(),
             album: album.map(str::to_owned),
             duration: Some(Duration::from_secs(*secs)),
             artwork_url: artwork_url(i),

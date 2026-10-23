@@ -259,6 +259,7 @@ mod tests {
                         },
                         title: (*id).into(),
                         artists: vec![],
+                        artist_ids: Vec::new(),
                         album: None,
                         duration: None,
                         artwork_url: Some(format!("https://example.test/{id}.jpg")),

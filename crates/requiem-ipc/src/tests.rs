@@ -172,6 +172,7 @@ fn track(id: &str) -> Track {
         },
         title: id.into(),
         artists: vec![],
+        artist_ids: Vec::new(),
         album: None,
         duration: None,
         artwork_url: None,
@@ -405,6 +406,63 @@ fn artists_and_artist_pages_round_trip() {
         );
     }
     assert_eq!(frame::read::<_, ServerMsg>(&mut r).unwrap(), None);
+}
+
+#[test]
+fn a_tracks_artist_ids_round_trip_and_old_tracks_have_none() {
+    use requiem_core::{CollectionId, Page};
+    let mut t = track("t");
+    t.artists = vec!["A".into(), "B".into()];
+    t.artist_ids = vec![
+        Some(CollectionId {
+            provider: ProviderId("spotify".into()),
+            id: "spotify:artist:0FakeArtist10000000000".into(),
+        }),
+        None,
+    ];
+    let msgs = [
+        ServerMsg::Event(Event::NowPlaying {
+            track: t.clone(),
+            duration: None,
+        }),
+        ServerMsg::Event(Event::PageChanged {
+            page: Page::Home,
+            shelves: Vec::new(),
+        }),
+    ];
+    let mut buf = Vec::new();
+    for m in &msgs {
+        frame::write(&mut buf, m).unwrap();
+    }
+    let len = u32::from_be_bytes(buf[..4].try_into().unwrap()) as usize;
+    let wire: serde_json::Value = serde_json::from_slice(&buf[4..4 + len]).unwrap();
+    assert_eq!(
+        wire.pointer("/Event/NowPlaying/track/artist_ids"),
+        Some(&serde_json::json!([
+            {"provider": "spotify", "id": "spotify:artist:0FakeArtist10000000000"},
+            null,
+        ]))
+    );
+    let mut r = Cursor::new(buf);
+    for m in &msgs {
+        assert_eq!(
+            frame::read::<_, ServerMsg>(&mut r).unwrap().as_ref(),
+            Some(m)
+        );
+    }
+
+    // A track as a client or file from before artist ids sends it.
+    let old = serde_json::json!({
+        "id": {"provider": "fake", "id": "t"},
+        "title": "t",
+        "artists": ["A"],
+        "album": null,
+        "duration": null,
+        "artwork_url": null,
+    });
+    let old: Track = serde_json::from_value(old).unwrap();
+    assert_eq!(old.artists, ["A"]);
+    assert!(old.artist_ids.is_empty());
 }
 
 #[test]

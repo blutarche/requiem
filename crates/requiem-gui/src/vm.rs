@@ -3043,6 +3043,7 @@ mod tests {
             },
             title: format!("Title {id}"),
             artists: vec![format!("Artist {id}"), "Guest".into()],
+            artist_ids: Vec::new(),
             album: Some(format!("Album {id}")),
             duration: Some(Duration::from_secs(secs)),
             artwork_url: None,

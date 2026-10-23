@@ -25,6 +25,7 @@ fn track() -> Track {
         },
         title: "Song".into(),
         artists: vec!["Ann".into(), "Bo".into()],
+        artist_ids: Vec::new(),
         album: Some("Album".into()),
         duration: Some(Duration::from_secs(200)),
         artwork_url: Some("https://example.test/a.jpg".into()),

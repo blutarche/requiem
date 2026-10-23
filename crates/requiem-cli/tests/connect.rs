@@ -136,6 +136,7 @@ fn track(id: &str) -> Track {
         },
         title: format!("Title {id}"),
         artists: vec!["A".into()],
+        artist_ids: Vec::new(),
         album: None,
         duration: Some(Duration::from_secs(125)),
         artwork_url: None,

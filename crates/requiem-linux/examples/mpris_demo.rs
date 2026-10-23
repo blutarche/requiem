@@ -21,6 +21,7 @@ fn main() {
         },
         title: "Demo Song".into(),
         artists: vec!["Demo Artist".into()],
+        artist_ids: Vec::new(),
         album: Some("Demo Album".into()),
         duration: Some(Duration::from_secs(213)),
         artwork_url: Some("https://example.test/art.jpg".into()),

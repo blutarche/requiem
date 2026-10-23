@@ -19,9 +19,23 @@ pub struct Track {
     pub id: TrackId,
     pub title: String,
     pub artists: Vec<String>,
+    /// The `Artist` collection of each of `artists`, where the provider gave one. As long as
+    /// `artists`, except in a track kept by a version without them, where it is empty.
+    #[serde(default)]
+    pub artist_ids: Vec<Option<CollectionId>>,
     pub album: Option<String>,
     pub duration: Option<Duration>,
     pub artwork_url: Option<String>,
+}
+
+impl Track {
+    /// Each of `artists` that opens a page, with that page, in order.
+    pub fn artist_pages(&self) -> impl Iterator<Item = (&str, &CollectionId)> {
+        self.artists
+            .iter()
+            .zip(&self.artist_ids)
+            .filter_map(|(name, id)| Some((name.as_str(), id.as_ref()?)))
+    }
 }
 
 /// The id format is private to the provider that issued it.

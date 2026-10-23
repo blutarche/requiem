@@ -128,6 +128,7 @@ fn track() -> Track {
         },
         title: "Song".into(),
         artists: vec!["Ann".into()],
+        artist_ids: Vec::new(),
         album: None,
         duration: None,
         artwork_url: None,

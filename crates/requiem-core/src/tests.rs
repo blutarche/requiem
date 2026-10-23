@@ -53,6 +53,7 @@ fn track(id: &str) -> Track {
         },
         title: id.into(),
         artists: vec![],
+        artist_ids: Vec::new(),
         album: None,
         duration: None,
         artwork_url: None,
@@ -3516,4 +3517,20 @@ fn a_provider_that_failed_for_now_is_not_fetched_ahead_for_a_while() {
     // An open still fetches it.
     browse_event(&r, 3, collection_page("b"));
     assert_eq!(p.browse_calls()[3], collection_page("b"));
+}
+
+#[test]
+fn a_tracks_artist_pages_pair_names_with_the_ids_known() {
+    let page = |id: &str| CollectionId {
+        provider: ProviderId("fake".into()),
+        id: id.into(),
+    };
+    let mut t = track("t");
+    t.artists = vec!["A".into(), "B".into(), "C".into()];
+    t.artist_ids = vec![Some(page("a")), None, Some(page("c"))];
+    let pages: Vec<_> = t.artist_pages().collect();
+    assert_eq!(pages, [("A", &page("a")), ("C", &page("c"))]);
+    // A track kept without ids opens none.
+    t.artist_ids.clear();
+    assert_eq!(t.artist_pages().count(), 0);
 }
