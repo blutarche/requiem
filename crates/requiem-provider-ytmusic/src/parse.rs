@@ -127,6 +127,31 @@ struct BrowseEndpoint {
 #[serde(default, rename_all = "camelCase")]
 struct WatchEndpoint {
     video_id: Option<String>,
+    watch_endpoint_music_supported_configs: Option<WatchConfigs>,
+}
+
+impl WatchEndpoint {
+    /// Innertube's `MUSIC_VIDEO_TYPE_*` for what the video is.
+    fn music_video_type(&self) -> Option<&str> {
+        self.watch_endpoint_music_supported_configs
+            .as_ref()?
+            .watch_endpoint_music_config
+            .as_ref()?
+            .music_video_type
+            .as_deref()
+    }
+}
+
+#[derive(Deserialize, Default)]
+#[serde(default, rename_all = "camelCase")]
+struct WatchConfigs {
+    watch_endpoint_music_config: Option<WatchMusicConfig>,
+}
+
+#[derive(Deserialize, Default)]
+#[serde(default, rename_all = "camelCase")]
+struct WatchMusicConfig {
+    music_video_type: Option<String>,
 }
 
 #[derive(Deserialize, Default)]

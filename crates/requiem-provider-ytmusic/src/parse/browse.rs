@@ -9,8 +9,8 @@ use serde::Deserialize;
 use serde_json::Value;
 
 use super::{
-    ListItem, NavEndpoint, PROVIDER, Run, Runs, SEPARATOR, Thumbnail, collect_items, column_runs,
-    is_live, largest, largest_thumbnail, parse_duration, parse_err, parse_subtitle,
+    ListItem, NavEndpoint, PROVIDER, Run, Runs, SEPARATOR, Thumbnail, WatchEndpoint, collect_items,
+    column_runs, is_live, largest, largest_thumbnail, parse_duration, parse_err, parse_subtitle,
 };
 
 /// Prefix of collection ids that are Innertube browse ids.
@@ -146,6 +146,21 @@ fn list_item_track(item: &ListItem) -> Option<Track> {
     })
 }
 
+fn two_row_nav(item: &TwoRowItem) -> Option<&NavEndpoint> {
+    let first_run = item.title.as_ref().and_then(|t| t.runs.first());
+    item.navigation_endpoint
+        .as_ref()
+        .or_else(|| first_run?.navigation_endpoint.as_ref())
+}
+
+/// Home is for music: user uploads and podcast episodes are left off it.
+fn is_off_music(watch: Option<&WatchEndpoint>) -> bool {
+    matches!(
+        watch.and_then(WatchEndpoint::music_video_type),
+        Some("MUSIC_VIDEO_TYPE_UGC" | "MUSIC_VIDEO_TYPE_PODCAST_EPISODE")
+    )
+}
+
 /// A carousel card: a playlist, an album, or a song. Artists, live streams and other pages are
 /// skipped.
 fn two_row_item(item: &TwoRowItem) -> Option<Item> {
@@ -153,11 +168,7 @@ fn two_row_item(item: &TwoRowItem) -> Option<Item> {
         return None;
     }
     let title = joined(item.title.as_ref());
-    let first_run = item.title.as_ref().and_then(|t| t.runs.first());
-    let nav = item
-        .navigation_endpoint
-        .as_ref()
-        .or_else(|| first_run?.navigation_endpoint.as_ref())?;
+    let nav = two_row_nav(item)?;
     let artwork_url = largest(item.thumbnail_renderer.as_ref());
     let browse_id = nav
         .browse_endpoint
@@ -243,10 +254,22 @@ pub(crate) fn parse_home(body: &[u8]) -> Result<HomePage, ProviderError> {
                 .iter()
                 .filter_map(|entry| {
                     if let Some(v) = entry.get("musicTwoRowItemRenderer") {
-                        two_row_item(&TwoRowItem::deserialize(v).ok()?)
+                        let card = TwoRowItem::deserialize(v).ok()?;
+                        let watch = two_row_nav(&card).and_then(|n| n.watch_endpoint.as_ref());
+                        if is_off_music(watch) {
+                            return None;
+                        }
+                        two_row_item(&card)
                     } else {
                         let v = entry.get("musicResponsiveListItemRenderer")?;
-                        list_item_track(&ListItem::deserialize(v).ok()?).map(Item::Track)
+                        let row = ListItem::deserialize(v).ok()?;
+                        let watch = column_runs(&row, 0)
+                            .iter()
+                            .find_map(|r| r.navigation_endpoint.as_ref()?.watch_endpoint.as_ref());
+                        if is_off_music(watch) {
+                            return None;
+                        }
+                        list_item_track(&row).map(Item::Track)
                     }
                 })
                 .collect();
@@ -418,7 +441,7 @@ mod tests {
         );
 
         let lists = &shelves[1].items;
-        assert_eq!(lists.len(), 3);
+        assert_eq!(lists.len(), 4);
         let c = collection(&lists[0]);
         assert_eq!(c.id.id, "browse:VLPLW0lk8zFei2v91CDXtie506Q669dkKQQu");
         assert_eq!(c.kind, CollectionKind::Playlist);
@@ -438,6 +461,26 @@ mod tests {
             .as_str()
             .unwrap();
         assert_eq!(art, biggest);
+    }
+
+    #[test]
+    fn home_leaves_out_uploads_and_keeps_official_videos() {
+        let page = parse_home(HOME.as_bytes()).unwrap();
+        let ids: Vec<&str> = page
+            .shelves
+            .iter()
+            .flat_map(|s| &s.items)
+            .filter_map(|i| match i {
+                Item::Track(t) => Some(t.id.id.as_str()),
+                Item::Collection(_) => None,
+            })
+            .collect();
+        assert!(!ids.contains(&"ugcRow00001"));
+        assert!(!ids.contains(&"ugcCard0001"));
+        let video = track(&page.shelves[1].items[3]);
+        assert_eq!(video.id.id, "omvCard0001");
+        assert_eq!(video.title, "Live Session Clip");
+        assert_eq!(video.artists, ["Daft Punk"]);
     }
 
     #[test]
