@@ -517,6 +517,8 @@ fn parse_track(text: &str) -> Result<Track, String> {
         },
         title: str_at(&v, "title")?,
         artists,
+        // `--json` lines name no artist pages.
+        artist_ids: Vec::new(),
         album: opt_str("album"),
         duration: v
             .get("duration_ms")

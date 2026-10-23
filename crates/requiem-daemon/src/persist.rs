@@ -230,7 +230,7 @@ mod tests {
     use std::os::unix::fs::PermissionsExt;
     use std::sync::atomic::{AtomicU32, Ordering};
 
-    use requiem_core::{ProviderId, TrackId};
+    use requiem_core::{CollectionId, ProviderId, TrackId};
 
     use super::*;
 
@@ -268,6 +268,10 @@ mod tests {
             },
             title: id.into(),
             artists: vec!["artist".into()],
+            artist_ids: vec![Some(CollectionId {
+                provider: ProviderId("yt".into()),
+                id: "browse:UCartist".into(),
+            })],
             album: Some("album".into()),
             duration: Some(Duration::from_millis(201_500)),
             artwork_url: None,
@@ -310,6 +314,27 @@ mod tests {
         fs::write(dir.file(), json.to_string()).unwrap();
         let s = load(&dir.file()).unwrap();
         assert_eq!((s.resume, s.volume), (None, 100));
+    }
+
+    #[test]
+    fn a_queue_kept_before_artist_ids_loads_without_them() {
+        let dir = TempDir::new();
+        let json = serde_json::json!({
+            "version": 1, "volume": 40, "resume": 0, "queue": [{
+                "id": {"provider": "yt", "id": "a"},
+                "title": "a",
+                "artists": ["artist"],
+                "album": null,
+                "duration": {"secs": 201, "nanos": 0},
+                "artwork_url": null,
+            }],
+        });
+        fs::write(dir.file(), json.to_string()).unwrap();
+        let s = load(&dir.file()).unwrap();
+        assert_eq!(s.tracks.len(), 1);
+        assert_eq!(s.tracks[0].artists, ["artist"]);
+        assert!(s.tracks[0].artist_ids.is_empty());
+        assert_eq!(s.resume, Some(0));
     }
 
     #[test]

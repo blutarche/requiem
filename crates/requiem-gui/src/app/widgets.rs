@@ -13,19 +13,20 @@ use objc2::{AnyThread, DefinedClass, MainThreadOnly, Message, define_class, msg_
 use objc2_app_kit::{
     NSAccessibility, NSAccessibilityAnnouncementKey,
     NSAccessibilityAnnouncementRequestedNotification, NSAccessibilityButtonRole,
-    NSAccessibilityPostNotificationWithUserInfo, NSAccessibilityPriorityKey,
-    NSAccessibilityPriorityLevel, NSAccessibilitySliderRole, NSAnimatablePropertyContainer,
-    NSAnimationContext, NSApplication, NSAttributedStringNSStringDrawing,
-    NSAutoresizingMaskOptions, NSBezierPath, NSButton, NSCellImagePosition, NSColor, NSControl,
-    NSEvent, NSEventMask, NSEventTrackingRunLoopMode, NSEventType, NSFocusRingType, NSFont,
-    NSImage, NSImageScaling, NSImageView, NSLineBreakMode, NSResponder, NSTextAlignment,
-    NSTextField, NSTrackingArea, NSTrackingAreaOptions, NSView, NSWindow, NSWindowOcclusionState,
-    NSWorkspace,
+    NSAccessibilityLinkRole, NSAccessibilityPostNotificationWithUserInfo,
+    NSAccessibilityPriorityKey, NSAccessibilityPriorityLevel, NSAccessibilitySliderRole,
+    NSAnimatablePropertyContainer, NSAnimationContext, NSApplication,
+    NSAttributedStringNSStringDrawing, NSAutoresizingMaskOptions, NSBezierPath, NSButton,
+    NSCellImagePosition, NSColor, NSControl, NSCursor, NSEvent, NSEventMask,
+    NSEventTrackingRunLoopMode, NSEventType, NSFocusRingType, NSFont, NSImage, NSImageScaling,
+    NSImageView, NSLineBreakMode, NSResponder, NSTextAlignment, NSTextField, NSTrackingArea,
+    NSTrackingAreaOptions, NSUnderlineStyle, NSUnderlineStyleAttributeName, NSView, NSWindow,
+    NSWindowOcclusionState, NSWorkspace,
 };
 use objc2_core_foundation::CGFloat;
 use objc2_foundation::{
-    MainThreadMarker, NSAttributedString, NSDate, NSDictionary, NSNotification, NSNumber,
-    NSObjectProtocol, NSPoint, NSRect, NSSize, NSString, ns_string,
+    MainThreadMarker, NSAttributedString, NSDate, NSDictionary, NSMutableCopying, NSNotification,
+    NSNumber, NSObjectProtocol, NSPoint, NSRect, NSSize, NSString, ns_string,
 };
 use objc2_quartz_core::{
     CAMediaTiming, CAMediaTimingFunction, CATransaction, CATransition, kCATransitionFade,
@@ -804,6 +805,142 @@ fn padded(image: &NSImage, right: CGFloat) -> Retained<NSImage> {
     );
     out.setTemplate(image.isTemplate());
     out
+}
+
+pub struct LinkIvars {
+    /// The label whose text the link lies over.
+    label: Retained<NSTextField>,
+    press: fn(),
+    hovered: Cell<bool>,
+}
+
+define_class!(
+    /// A link over a label's text: the pointing hand, the text underlined while the pointer
+    /// is on it, and `press` on a click. An accessibility link of its own.
+    // SAFETY: NSView has no subclassing requirements; no Drop impl.
+    #[unsafe(super(NSView, NSResponder, objc2_foundation::NSObject))]
+    #[thread_kind = MainThreadOnly]
+    #[ivars = LinkIvars]
+    pub struct TextLink;
+
+    impl TextLink {
+        #[unsafe(method(mouseEntered:))]
+        fn mouse_entered(&self, _event: &NSEvent) {
+            self.set_hovered(true);
+        }
+
+        #[unsafe(method(mouseExited:))]
+        fn mouse_exited(&self, _event: &NSEvent) {
+            self.set_hovered(false);
+        }
+
+        /// Takes the press, so the click lands here on release rather than on a view below.
+        #[unsafe(method(mouseDown:))]
+        fn mouse_down(&self, _event: &NSEvent) {}
+
+        #[unsafe(method(mouseUp:))]
+        fn mouse_up(&self, event: &NSEvent) {
+            let at = self.convertPoint_fromView(event.locationInWindow(), None);
+            let b = self.bounds();
+            if at.x >= 0.0 && at.x < b.size.width && at.y >= 0.0 && at.y < b.size.height {
+                (self.ivars().press)();
+            }
+        }
+
+        #[unsafe(method(acceptsFirstMouse:))]
+        fn accepts_first_mouse(&self, _event: Option<&NSEvent>) -> bool {
+            true
+        }
+
+        #[unsafe(method(resetCursorRects))]
+        fn reset_cursor_rects(&self) {
+            self.addCursorRect_cursor(self.bounds(), &NSCursor::pointingHandCursor());
+        }
+
+        /// A hidden view gets no `mouseExited:`, so its text would stay underlined.
+        #[unsafe(method(viewDidHide))]
+        fn view_did_hide(&self) {
+            // SAFETY: forwards to the superclass implementation.
+            let _: () = unsafe { msg_send![super(self), viewDidHide] };
+            self.set_hovered(false);
+        }
+
+        #[unsafe(method(accessibilityPerformPress))]
+        fn accessibility_perform_press(&self) -> bool {
+            (self.ivars().press)();
+            true
+        }
+
+        /// A plain view reports itself disabled, which VoiceOver reads as dimmed.
+        #[unsafe(method(isAccessibilityEnabled))]
+        fn accessibility_enabled(&self) -> bool {
+            true
+        }
+    }
+);
+
+impl TextLink {
+    /// A link over `label`, which it is added after, so clicks find it first.
+    pub fn new(mtm: MainThreadMarker, label: &NSTextField, press: fn()) -> Retained<Self> {
+        let this = Self::alloc(mtm).set_ivars(LinkIvars {
+            label: label.retain(),
+            press,
+            hovered: Cell::new(false),
+        });
+        // SAFETY: `initWithFrame:` is NSView's designated initializer.
+        let this: Retained<Self> = unsafe { msg_send![super(this), initWithFrame: label.frame()] };
+        this.setAutoresizingMask(label.autoresizingMask() & !FLEX_W);
+        this.setAccessibilityElement(true);
+        // SAFETY: the role static is an immutable framework constant.
+        this.setAccessibilityRole(Some(unsafe { NSAccessibilityLinkRole }));
+        this.setHidden(true);
+        track_hover(&this, NSTrackingAreaOptions::empty());
+        this
+    }
+
+    /// Links `text`, the label's text at its resting `frame`, to artist `name`'s page; hidden
+    /// for `None`.
+    pub fn set(&self, name: Option<&str>, text: &str, frame: NSRect) {
+        let Some(name) = name else {
+            self.setHidden(true);
+            return;
+        };
+        let label = &self.ivars().label;
+        let ink = label.textColor().unwrap_or_else(theme::ink);
+        let w = label.font().map_or(frame.size.width, |f| {
+            // The text field's cell insets its text 2 pt a side.
+            (attributed(text, &f, &ink).size().width.ceil() + 4.0).min(frame.size.width)
+        });
+        self.setFrame(rect(frame.origin.x, frame.origin.y, w, frame.size.height));
+        self.setAccessibilityLabel(Some(&NSString::from_str(&format!("Go to {name}"))));
+        self.setHidden(false);
+        if self.ivars().hovered.get() {
+            underline(label, true);
+        }
+    }
+
+    fn set_hovered(&self, hovered: bool) {
+        if self.ivars().hovered.replace(hovered) != hovered {
+            underline(&self.ivars().label, hovered);
+        }
+    }
+}
+
+/// Underlines `label`'s text, or takes the underline off, keeping its other attributes.
+fn underline(label: &NSTextField, on: bool) {
+    let text = label.attributedStringValue().mutableCopy();
+    let all = objc2_foundation::NSRange::new(0, text.length());
+    // SAFETY: the key is an immutable framework constant, paired with the NSNumber of an
+    // `NSUnderlineStyle` it takes.
+    unsafe {
+        if on {
+            let single = NSNumber::new_isize(NSUnderlineStyle::Single.0);
+            text.addAttribute_value_range(NSUnderlineStyleAttributeName, &single, all);
+        } else {
+            text.removeAttribute_range(NSUnderlineStyleAttributeName, all);
+        }
+    }
+    label.setAttributedStringValue(&text);
 }
 
 pub struct NavIvars {

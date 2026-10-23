@@ -227,6 +227,7 @@ mod tests {
             id: id("ytmusic", n),
             title: format!("T{n}"),
             artists: vec!["Ann".into(), "Bo".into()],
+            artist_ids: Vec::new(),
             album: None,
             duration: Some(Duration::from_secs(90)),
             artwork_url: None,

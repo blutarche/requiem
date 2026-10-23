@@ -228,6 +228,7 @@ mod tests {
             },
             title: title.into(),
             artists: vec!["Ann".into(), "Bo".into()],
+            artist_ids: Vec::new(),
             album: Some("Album".into()),
             duration: Some(secs(200)),
             artwork_url: None,

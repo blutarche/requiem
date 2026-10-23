@@ -462,6 +462,7 @@ mod tests {
             },
             title: "a".into(),
             artists: Vec::new(),
+            artist_ids: Vec::new(),
             album: None,
             duration: None,
             artwork_url: None,
