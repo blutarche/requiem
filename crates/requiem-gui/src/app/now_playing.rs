@@ -171,10 +171,8 @@ impl NextRow {
         let w = 300.0 - x - 8.0;
         let title = widgets::label(mtm, "", &title_font, &theme::ink());
         title.setFrame(rect(x, y + sh, w, th));
-        title.setAutoresizingMask(FLEX_W);
         let artists = widgets::label(mtm, "", &sub_font, &theme::muted());
         artists.setFrame(rect(x, y, w, sh));
-        artists.setAutoresizingMask(FLEX_W);
         view.addSubview(&cover);
         view.addSubview(&title);
         view.addSubview(&artists);
@@ -183,6 +181,17 @@ impl NextRow {
             cover,
             title,
             artists,
+        }
+    }
+
+    /// Sizes the labels from the row's width: autoresizing would lose it once the row was
+    /// narrower than their margins.
+    fn place(&self, frame: NSRect) {
+        self.view.setFrame(frame);
+        for label in [&self.title, &self.artists] {
+            let f = label.frame();
+            let w = (frame.size.width - f.origin.x - 8.0).max(0.0);
+            label.setFrameSize(NSSize::new(w, f.size.height));
         }
     }
 
@@ -409,7 +418,7 @@ impl NowPlayingPage {
         }
         // Covers and titles line up with the details above them.
         for row in &self.rows[..shown] {
-            row.view.setFrame(rect(x - ROW_PAD, y, w + ROW_PAD, ROW_H));
+            row.place(rect(x - ROW_PAD, y, w + ROW_PAD, ROW_H));
             y += ROW_H;
         }
         // Its title lines up with the labels' text, inset 2 pt; its hover fill reaches past.
