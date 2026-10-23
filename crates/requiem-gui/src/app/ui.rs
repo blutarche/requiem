@@ -2485,13 +2485,15 @@ impl Ui {
     fn layout_search(&self) {
         let b = self.search_page.bounds();
         let field_y = b.size.height - TOP - Field::H;
-        let mut top = if self.search_status_shown.get() {
+        let status = self.search_status_shown.get();
+        let mut top = if status {
             field_y - 8.0 - STATUS_H
         } else {
             field_y - 16.0
         };
         if self.search_chips_shown.get() {
-            let bar_y = top + 8.0 - SEARCH_CHIPS_H;
+            // Under the status line when it shows, else as close to the field as its pad lets.
+            let bar_y = if status { top } else { top + 8.0 } - SEARCH_CHIPS_H;
             self.search_chips_bar
                 .setFrame(rect(0.0, bar_y, b.size.width, SEARCH_CHIPS_H));
             top = bar_y - 4.0;
