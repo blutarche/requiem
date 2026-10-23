@@ -32,7 +32,8 @@ pub(crate) struct MusicCall {
 type Hook = Box<dyn Fn() + Send + Sync>;
 
 /// Innertube's endpoints: replies are scripted per URL without its query and served in order,
-/// or per URL and `browseId` for browses made at once; an unscripted call is a network error.
+/// or per URL and `browseId` for browses made at once, or `params` for searches; an unscripted
+/// call is a network error.
 #[derive(Default)]
 pub(crate) struct FakeMusic {
     replies: Mutex<HashMap<String, VecDeque<(u16, String)>>>,
@@ -54,6 +55,11 @@ impl FakeMusic {
     /// Like `script`, for calls to `path` whose body asks for `browse_id` only.
     pub(crate) fn script_browse(&self, path: &str, browse_id: &str, status: u16, body: &str) {
         self.script(&format!("{path}#{browse_id}"), status, body);
+    }
+
+    /// Like `script`, for calls to `path` whose body asks for `params` only.
+    pub(crate) fn script_search(&self, path: &str, params: &str, status: u16, body: &str) {
+        self.script(&format!("{path}#{params}"), status, body);
     }
 
     /// Like `during`, for the next call to `path` that asks for `browse_id`.
@@ -78,7 +84,12 @@ impl FakeMusic {
         let path = call.url.split('?').next().unwrap_or_default().to_owned();
         let browse_id = serde_json::from_str::<serde_json::Value>(&call.body)
             .ok()
-            .and_then(|b| b["browseId"].as_str().map(str::to_owned));
+            .and_then(|b| {
+                b["browseId"]
+                    .as_str()
+                    .or_else(|| b["params"].as_str())
+                    .map(str::to_owned)
+            });
         self.calls.lock().unwrap().push(call);
         let hook = {
             let mut hooks = self.hooks.lock().unwrap();

@@ -231,10 +231,11 @@ impl Hub {
             return;
         }
         match ev {
-            Event::SearchResults { req, tracks } => {
+            Event::SearchResults { req, results } => {
                 if req != ui.latest_req {
                     return;
                 }
+                let tracks = results.tracks;
                 if tracks.is_empty() {
                     self.emit("no results", json!({ "type": "no_results" }));
                 }

@@ -11,8 +11,8 @@ use std::time::{Duration, Instant};
 use crossbeam_channel::{Receiver, unbounded};
 use requiem_core::testing::{FakeEngineHandle, FakeProvider, Step};
 use requiem_core::{
-    AccountState, Command, EngineEvent, EnqueueMode, Event, PlayState, ProviderId, Session,
-    SessionConfig, Track, TrackId,
+    AccountState, Command, EngineEvent, EnqueueMode, Event, PlayState, ProviderId, SearchResults,
+    Session, SessionConfig, Track, TrackId,
 };
 use requiem_ipc::{
     Client, ClientCounts, Incoming, Role, Server, ServerHooks, UpdateState, UpdateStatus,
@@ -152,7 +152,10 @@ fn daemon_flow() {
         take(&gui_rx, 1),
         [Event::SearchResults {
             req: 1,
-            tracks: found.clone(),
+            results: SearchResults {
+                tracks: found.clone(),
+                ..SearchResults::default()
+            },
         }]
     );
     gui.send(Command::Enqueue {

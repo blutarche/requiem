@@ -454,7 +454,10 @@ fn searches_answered_out_of_order() {
         ev,
         Event::SearchResults {
             req: 2,
-            tracks: tracks(&["f"])
+            results: SearchResults {
+                tracks: tracks(&["f"]),
+                ..SearchResults::default()
+            }
         }
     );
     gate.release();
@@ -463,7 +466,10 @@ fn searches_answered_out_of_order() {
         ev,
         Event::SearchResults {
             req: 1,
-            tracks: tracks(&["s"])
+            results: SearchResults {
+                tracks: tracks(&["s"]),
+                ..SearchResults::default()
+            }
         }
     );
 }
@@ -1550,8 +1556,8 @@ impl Provider for NoAccounts {
         ProviderId("plain".into())
     }
 
-    fn search(&self, _query: &str, _limit: usize) -> Result<Vec<Track>, ProviderError> {
-        Ok(Vec::new())
+    fn search(&self, _query: &str, _limit: usize) -> Result<SearchResults, ProviderError> {
+        Ok(SearchResults::default())
     }
 
     fn resolve(&self, _track: &TrackId) -> Result<AudioSource, ProviderError> {
@@ -1624,12 +1630,15 @@ fn search_takes_the_providers_in_turn_in_provider_order() {
         ev,
         Event::SearchResults {
             req: 1,
-            tracks: vec![
-                named_track("first", "a1"),
-                named_track("second", "b1"),
-                named_track("first", "a2"),
-                named_track("second", "b2")
-            ],
+            results: SearchResults {
+                tracks: vec![
+                    named_track("first", "a1"),
+                    named_track("second", "b1"),
+                    named_track("first", "a2"),
+                    named_track("second", "b2")
+                ],
+                ..SearchResults::default()
+            },
         }
     );
 }
@@ -1647,12 +1656,124 @@ fn search_follows_the_shorter_list_with_the_rest_of_the_longer() {
         search_event(&r),
         Event::SearchResults {
             req: 1,
-            tracks: vec![
-                named_track("first", "a1"),
-                named_track("second", "b1"),
-                named_track("first", "a2"),
-                named_track("first", "a3")
-            ],
+            results: SearchResults {
+                tracks: vec![
+                    named_track("first", "a1"),
+                    named_track("second", "b1"),
+                    named_track("first", "a2"),
+                    named_track("first", "a3")
+                ],
+                ..SearchResults::default()
+            },
+        }
+    );
+}
+
+fn named_collection(provider: &str, kind: CollectionKind, id: &str) -> Collection {
+    Collection {
+        id: CollectionId {
+            provider: ProviderId(provider.into()),
+            id: id.into(),
+        },
+        kind,
+        title: id.into(),
+        subtitle: None,
+        artwork_url: None,
+    }
+}
+
+fn named_albums(provider: &str, ids: &[&str]) -> Vec<Collection> {
+    ids.iter()
+        .map(|id| named_collection(provider, CollectionKind::Album, id))
+        .collect()
+}
+
+fn named_playlists(provider: &str, ids: &[&str]) -> Vec<Collection> {
+    ids.iter()
+        .map(|id| named_collection(provider, CollectionKind::Playlist, id))
+        .collect()
+}
+
+#[test]
+fn search_takes_each_kind_in_turn_with_its_own_kind() {
+    let (a, b) = pair();
+    a.script_search_results(
+        "q",
+        vec![Step::ok(SearchResults {
+            tracks: named_tracks("first", &["a1", "a2"]),
+            albums: named_albums("first", &["aA1", "aA2", "aA3"]),
+            playlists: named_playlists("first", &["aP1"]),
+        })],
+    );
+    b.script_search_results(
+        "q",
+        vec![Step::ok(SearchResults {
+            tracks: named_tracks("second", &["b1"]),
+            albums: named_albums("second", &["bA1"]),
+            playlists: named_playlists("second", &["bP1", "bP2"]),
+        })],
+    );
+    let r = rig_with(a, vec![b], config());
+    assert_eq!(
+        search_event(&r),
+        Event::SearchResults {
+            req: 1,
+            results: SearchResults {
+                tracks: vec![
+                    named_track("first", "a1"),
+                    named_track("second", "b1"),
+                    named_track("first", "a2"),
+                ],
+                albums: vec![
+                    named_collection("first", CollectionKind::Album, "aA1"),
+                    named_collection("second", CollectionKind::Album, "bA1"),
+                    named_collection("first", CollectionKind::Album, "aA2"),
+                    named_collection("first", CollectionKind::Album, "aA3"),
+                ],
+                playlists: vec![
+                    named_collection("first", CollectionKind::Playlist, "aP1"),
+                    named_collection("second", CollectionKind::Playlist, "bP1"),
+                    named_collection("second", CollectionKind::Playlist, "bP2"),
+                ],
+            },
+        }
+    );
+}
+
+#[test]
+fn search_keeps_the_tracks_of_a_provider_whose_playlists_failed() {
+    let (a, b) = pair();
+    // A provider folds a failed playlist search into no playlists.
+    a.script_search_results(
+        "q",
+        vec![Step::ok(SearchResults {
+            tracks: named_tracks("first", &["a1", "a2"]),
+            albums: named_albums("first", &["aA1"]),
+            playlists: Vec::new(),
+        })],
+    );
+    b.script_search_results(
+        "q",
+        vec![Step::ok(SearchResults {
+            tracks: named_tracks("second", &["b1"]),
+            albums: Vec::new(),
+            playlists: named_playlists("second", &["bP1"]),
+        })],
+    );
+    let r = rig_with(a, vec![b], config());
+    assert_eq!(
+        search_event(&r),
+        Event::SearchResults {
+            req: 1,
+            results: SearchResults {
+                tracks: vec![
+                    named_track("first", "a1"),
+                    named_track("second", "b1"),
+                    named_track("first", "a2"),
+                ],
+                albums: named_albums("first", &["aA1"]),
+                playlists: named_playlists("second", &["bP1"]),
+            },
         }
     );
 }
@@ -1669,12 +1790,15 @@ fn search_takes_the_others_in_turn_when_one_fails() {
         search_event(&r),
         Event::SearchResults {
             req: 1,
-            tracks: vec![
-                named_track("first", "a1"),
-                named_track("third", "c1"),
-                named_track("first", "a2"),
-                named_track("third", "c2")
-            ],
+            results: SearchResults {
+                tracks: vec![
+                    named_track("first", "a1"),
+                    named_track("third", "c1"),
+                    named_track("first", "a2"),
+                    named_track("third", "c2")
+                ],
+                ..SearchResults::default()
+            },
         }
     );
 }
@@ -1689,7 +1813,10 @@ fn search_survives_one_failing_provider() {
         search_event(&r),
         Event::SearchResults {
             req: 1,
-            tracks: vec![named_track("second", "b1")],
+            results: SearchResults {
+                tracks: vec![named_track("second", "b1")],
+                ..SearchResults::default()
+            },
         }
     );
 }
@@ -1707,7 +1834,10 @@ fn search_skips_a_provider_that_needs_sign_in() {
         search_event(&r),
         Event::SearchResults {
             req: 1,
-            tracks: vec![named_track("second", "b1")],
+            results: SearchResults {
+                tracks: vec![named_track("second", "b1")],
+                ..SearchResults::default()
+            },
         }
     );
 }

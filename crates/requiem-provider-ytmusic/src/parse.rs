@@ -4,7 +4,9 @@
 use std::collections::BTreeSet;
 use std::time::Duration;
 
-use requiem_core::{FormatHint, ProviderError, ProviderId, Track, TrackId};
+use requiem_core::{
+    Collection, CollectionId, CollectionKind, FormatHint, ProviderError, ProviderId, Track, TrackId,
+};
 use serde::Deserialize;
 use serde_json::Value;
 
@@ -56,6 +58,7 @@ pub(crate) fn logged_in(root: &Value) -> Option<bool> {
 #[serde(default, rename_all = "camelCase")]
 struct ListItem {
     playlist_item_data: Option<PlaylistItemData>,
+    navigation_endpoint: Option<NavEndpoint>,
     flex_columns: Vec<FlexColumn>,
     fixed_columns: Vec<FixedColumn>,
     thumbnail: Option<Thumbnail>,
@@ -362,7 +365,8 @@ fn largest(thumbnail: Option<&Thumbnail>) -> Option<String> {
         .and_then(|t| t.url.clone())
 }
 
-pub(crate) fn parse_search(body: &[u8], limit: usize) -> Result<Vec<Track>, ProviderError> {
+/// A search response's rows.
+fn search_items(body: &[u8]) -> Result<Vec<ListItem>, ProviderError> {
     let root: Value =
         serde_json::from_slice(body).map_err(|e| parse_err(format!("search json: {e}")))?;
     let Some(obj) = root.as_object() else {
@@ -374,6 +378,11 @@ pub(crate) fn parse_search(body: &[u8], limit: usize) -> Result<Vec<Track>, Prov
     }
     let mut items = Vec::new();
     collect_items(&root, &mut items);
+    Ok(items)
+}
+
+pub(crate) fn parse_search(body: &[u8], limit: usize) -> Result<Vec<Track>, ProviderError> {
+    let items = search_items(body)?;
     let tracks = items
         .iter()
         .filter_map(|item| {
@@ -403,6 +412,55 @@ pub(crate) fn parse_search(body: &[u8], limit: usize) -> Result<Vec<Track>, Prov
         .take(limit)
         .collect();
     Ok(tracks)
+}
+
+/// The rows of an albums or playlists search that open as a collection of `kind`: the row's
+/// browse id, its title, and its subtitle as shown ("Album • Artist • 2013", "YouTube Music •
+/// 35 songs").
+pub(crate) fn parse_search_collections(
+    body: &[u8],
+    kind: CollectionKind,
+    limit: usize,
+) -> Result<Vec<Collection>, ProviderError> {
+    let items = search_items(body)?;
+    let collections = items
+        .iter()
+        .filter_map(|item| {
+            let first_run = column_runs(item, 0).first();
+            let nav = item
+                .navigation_endpoint
+                .as_ref()
+                .or_else(|| first_run?.navigation_endpoint.as_ref())?;
+            let browse_id = nav
+                .browse_endpoint
+                .as_ref()?
+                .browse_id
+                .as_deref()
+                .filter(|id| id.starts_with("MPREb_") || id.starts_with("VL"))?;
+            if collection_kind(browse_id) != kind {
+                return None;
+            }
+            let text = |i| -> String {
+                column_runs(item, i)
+                    .iter()
+                    .filter_map(|r| r.text.as_deref())
+                    .collect()
+            };
+            let subtitle = text(1);
+            Some(Collection {
+                id: CollectionId {
+                    provider: ProviderId(PROVIDER.to_owned()),
+                    id: format!("{BROWSE_PREFIX}{browse_id}"),
+                },
+                kind,
+                title: text(0),
+                subtitle: Some(subtitle.trim().to_owned()).filter(|s| !s.is_empty()),
+                artwork_url: largest_thumbnail(item),
+            })
+        })
+        .take(limit)
+        .collect();
+    Ok(collections)
 }
 
 /// Byte length and the `*Renderer` key paths down to 10 object levels; never any text content.
@@ -580,6 +638,10 @@ mod tests {
     use super::*;
 
     const SEARCH: &str = include_str!("../tests/fixtures/search_songs.json");
+    // Live anonymous captures of "daft punk" with the Albums and Featured playlists filters,
+    // 2026-10-23: the first rows, trimmed of menus and tracking, visitorData scrubbed.
+    const SEARCH_ALBUMS: &str = include_str!("../tests/fixtures/search_albums.json");
+    const SEARCH_PLAYLISTS: &str = include_str!("../tests/fixtures/search_playlists.json");
     const OK: &str = include_str!("../tests/fixtures/player_ok.json");
     const LOGIN: &str = include_str!("../tests/fixtures/player_login_required.json");
     const ERROR: &str = include_str!("../tests/fixtures/player_error.json");
@@ -705,6 +767,95 @@ mod tests {
             );
         }
         assert_eq!(parse_search(br#"{"contents":{}}"#, 5).unwrap(), vec![]);
+    }
+
+    #[test]
+    fn album_search_fixture_fields() {
+        let albums =
+            parse_search_collections(SEARCH_ALBUMS.as_bytes(), CollectionKind::Album, 50).unwrap();
+        assert_eq!(albums.len(), 6);
+        let a = &albums[0];
+        assert_eq!(a.id.provider, ProviderId("ytmusic".into()));
+        assert_eq!(a.id.id, "browse:MPREb_K8qWMWVqXGi");
+        assert_eq!(a.kind, CollectionKind::Album);
+        assert_eq!(a.title, "Random Access Memories");
+        assert_eq!(
+            a.subtitle.as_deref(),
+            Some("Album \u{2022} Daft Punk \u{2022} 2013")
+        );
+        assert!(a.artwork_url.as_deref().unwrap().contains("w544-h544"));
+        let ep = &albums[4];
+        assert_eq!(ep.id.id, "browse:MPREb_D8fwgSA15pm");
+        assert_eq!(ep.title, "New Daft Punk");
+        assert_eq!(
+            ep.subtitle.as_deref(),
+            Some("EP \u{2022} Grimelda \u{2022} 2021")
+        );
+        assert!(albums.iter().all(|a| a.kind == CollectionKind::Album
+            && a.id.id.starts_with("browse:MPREb_")
+            && !a.title.is_empty()
+            && a.subtitle.is_some()
+            && a.artwork_url.is_some()));
+    }
+
+    #[test]
+    fn playlist_search_fixture_fields() {
+        let playlists =
+            parse_search_collections(SEARCH_PLAYLISTS.as_bytes(), CollectionKind::Playlist, 50)
+                .unwrap();
+        assert_eq!(playlists.len(), 6);
+        let p = &playlists[0];
+        assert_eq!(p.id.provider, ProviderId("ytmusic".into()));
+        assert_eq!(
+            p.id.id,
+            "browse:VLRDCLAK5uy_n20FRYQXNt1p1wS55Nj2r14IouO5weaYU"
+        );
+        assert_eq!(p.kind, CollectionKind::Playlist);
+        assert_eq!(p.title, "Presenting Daft Punk");
+        assert_eq!(
+            p.subtitle.as_deref(),
+            Some("YouTube Music \u{2022} 35 songs")
+        );
+        assert!(p.artwork_url.as_deref().unwrap().contains("w544-h544"));
+        assert!(playlists.iter().all(|p| p.kind == CollectionKind::Playlist
+            && p.id.id.starts_with("browse:VL")
+            && !p.title.is_empty()
+            && p.subtitle.is_some()
+            && p.artwork_url.is_some()));
+    }
+
+    #[test]
+    fn collection_search_keeps_only_its_kind_up_to_the_limit() {
+        let parse = |body: &str, kind| parse_search_collections(body.as_bytes(), kind, 50).unwrap();
+        assert!(parse(SEARCH_ALBUMS, CollectionKind::Playlist).is_empty());
+        assert!(parse(SEARCH_PLAYLISTS, CollectionKind::Album).is_empty());
+        assert!(parse(SEARCH, CollectionKind::Album).is_empty());
+        let two =
+            parse_search_collections(SEARCH_ALBUMS.as_bytes(), CollectionKind::Album, 2).unwrap();
+        assert_eq!(two.len(), 2);
+    }
+
+    #[test]
+    fn collection_search_skips_rows_that_open_no_collection() {
+        let body = r#"{"contents":{"a":[
+            {"musicResponsiveListItemRenderer":{"navigationEndpoint":{"browseEndpoint":
+                {"browseId":"UCartist"}}}},
+            {"musicResponsiveListItemRenderer":{"flexColumns":[]}},
+            {"musicResponsiveListItemRenderer":{"flexColumns":[
+              {"musicResponsiveListItemFlexColumnRenderer":{"text":{"runs":[{"text":"T",
+                "navigationEndpoint":{"browseEndpoint":{"browseId":"VLPLx"}}}]}}}]}}]}}"#;
+        let found =
+            parse_search_collections(body.as_bytes(), CollectionKind::Playlist, 10).unwrap();
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].id.id, "browse:VLPLx");
+        assert_eq!(found[0].title, "T");
+        assert_eq!(found[0].subtitle, None);
+        for body in ["not json", "[]", "{}"] {
+            assert!(matches!(
+                parse_search_collections(body.as_bytes(), CollectionKind::Album, 5),
+                Err(ProviderError::Parse(_))
+            ));
+        }
     }
 
     #[test]

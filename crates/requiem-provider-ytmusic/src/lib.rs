@@ -21,7 +21,8 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use requiem_core::{
-    AccountState, AudioSource, Page, Provider, ProviderError, ProviderId, Shelf, Track, TrackId,
+    AccountState, AudioSource, Page, Provider, ProviderError, ProviderId, SearchResults, Shelf,
+    TrackId,
 };
 
 use innertube::{ClientRefresher, InnertubeClient};
@@ -159,8 +160,8 @@ impl Provider for YtMusicProvider {
         ProviderId(PROVIDER.to_owned())
     }
 
-    fn search(&self, query: &str, limit: usize) -> Result<Vec<Track>, ProviderError> {
-        self.client.search(query, limit)
+    fn search(&self, query: &str, limit: usize) -> Result<SearchResults, ProviderError> {
+        self.client.search_all(query, limit)
     }
 
     fn resolve(&self, track: &TrackId) -> Result<AudioSource, ProviderError> {
@@ -263,15 +264,18 @@ fn browser_session(json: &str) -> Option<Result<String, ProviderError>> {
 mod tests {
     use std::fs;
 
-    use requiem_core::{CollectionId, ProviderId};
+    use requiem_core::{CollectionId, CollectionKind, ProviderId};
 
     use super::*;
+    use crate::clients::{ALBUMS_PARAMS, PLAYLISTS_PARAMS, SONGS_PARAMS};
     use crate::testing::{FakeMusic, TempDir};
 
     // Synthetic responses; every value in them is made up.
     const MENU: &str = include_str!("../tests/fixtures/account_menu.json");
     const HOME: &str = include_str!("../tests/fixtures/signed_in_home.json");
     const SEARCH: &str = include_str!("../tests/fixtures/search_songs.json");
+    const ALBUMS: &str = include_str!("../tests/fixtures/search_albums.json");
+    const PLAYLISTS: &str = include_str!("../tests/fixtures/search_playlists.json");
     const PLAYER: &str = include_str!("../tests/fixtures/player_ok.json");
     const PLAYLIST: &str = include_str!("../tests/fixtures/browse_playlist.json");
     const LIBRARY: &str = include_str!("../tests/fixtures/signed_in_library_playlists.json");
@@ -338,7 +342,8 @@ mod tests {
     fn the_session_never_reaches_search_or_playback() {
         let rig = Rig::new();
         let p = rig.signed_in();
-        rig.music.script(SEARCH_URL, 200, SEARCH);
+        rig.music
+            .script_search(SEARCH_URL, SONGS_PARAMS, 200, SEARCH);
         rig.music.script(PLAYER_URL, 200, PLAYER);
         rig.music.script(BROWSE_URL, 200, HOME);
         rig.music
@@ -347,7 +352,8 @@ mod tests {
         rig.music.script(BROWSE_URL, 200, PLAYLIST);
         rig.music.script(BROWSE_URL, 200, LIBRARY);
         rig.music.script(BROWSE_URL, 200, PLAYLIST);
-        let tracks = p.search("fake query", 5).unwrap();
+        // Albums and playlists go unanswered, which leaves them out.
+        let tracks = p.search("fake query", 5).unwrap().tracks;
         assert!(!tracks.is_empty());
         p.resolve(&tracks[0].id).unwrap();
         p.browse(&Page::Home).unwrap();
@@ -363,7 +369,10 @@ mod tests {
             .iter()
             .map(|c| c.url.split('?').next().unwrap())
             .collect();
-        assert_eq!(anonymous_urls, [SEARCH_URL, PLAYER_URL]);
+        assert_eq!(
+            anonymous_urls,
+            [SEARCH_URL, SEARCH_URL, SEARCH_URL, PLAYER_URL]
+        );
         for c in anonymous {
             for (k, v) in &c.headers {
                 assert!(
@@ -538,5 +547,76 @@ mod tests {
         );
         assert_eq!(p.account(), AccountState::SignedOut);
         assert!(!rig.session_file().exists());
+    }
+
+    fn search_params(rig: &Rig) -> Vec<String> {
+        let mut params: Vec<String> = rig
+            .music
+            .calls
+            .lock()
+            .unwrap()
+            .iter()
+            .filter_map(|c| {
+                let body: serde_json::Value = serde_json::from_str(&c.body).ok()?;
+                Some(body["params"].as_str()?.to_owned())
+            })
+            .collect();
+        params.sort();
+        params
+    }
+
+    #[test]
+    fn search_finds_albums_and_playlists_beside_the_songs() {
+        let rig = Rig::new();
+        rig.music
+            .script_search(SEARCH_URL, SONGS_PARAMS, 200, SEARCH);
+        rig.music
+            .script_search(SEARCH_URL, ALBUMS_PARAMS, 200, ALBUMS);
+        rig.music
+            .script_search(SEARCH_URL, PLAYLISTS_PARAMS, 200, PLAYLISTS);
+        let found = rig.provider().search("daft punk", 5).unwrap();
+        assert_eq!(found.tracks.len(), 5);
+        assert_eq!(found.albums.len(), 6);
+        assert!(found.albums.iter().all(|a| a.kind == CollectionKind::Album));
+        assert_eq!(found.albums[0].id.id, "browse:MPREb_K8qWMWVqXGi");
+        assert_eq!(found.playlists.len(), 6);
+        assert!(
+            found
+                .playlists
+                .iter()
+                .all(|p| p.kind == CollectionKind::Playlist)
+        );
+        let mut want = vec![SONGS_PARAMS, ALBUMS_PARAMS, PLAYLISTS_PARAMS];
+        want.sort_unstable();
+        assert_eq!(search_params(&rig), want);
+    }
+
+    #[test]
+    fn search_keeps_the_songs_and_albums_when_the_playlists_fail() {
+        let rig = Rig::new();
+        rig.music
+            .script_search(SEARCH_URL, SONGS_PARAMS, 200, SEARCH);
+        rig.music
+            .script_search(SEARCH_URL, ALBUMS_PARAMS, 200, ALBUMS);
+        rig.music
+            .script_search(SEARCH_URL, PLAYLISTS_PARAMS, 500, "{}");
+        let found = rig.provider().search("daft punk", 5).unwrap();
+        assert_eq!(found.tracks.len(), 5);
+        assert_eq!(found.albums.len(), 6);
+        assert!(found.playlists.is_empty());
+    }
+
+    #[test]
+    fn search_fails_when_the_songs_fail_whatever_else_is_found() {
+        let rig = Rig::new();
+        rig.music.script_search(SEARCH_URL, SONGS_PARAMS, 403, "{}");
+        rig.music
+            .script_search(SEARCH_URL, ALBUMS_PARAMS, 200, ALBUMS);
+        rig.music
+            .script_search(SEARCH_URL, PLAYLISTS_PARAMS, 200, PLAYLISTS);
+        assert!(matches!(
+            rig.provider().search("daft punk", 5),
+            Err(ProviderError::ClientBroken(_))
+        ));
     }
 }

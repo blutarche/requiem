@@ -1412,10 +1412,10 @@ impl Vm {
             .filter(|s| !s.importing)
             .and_then(|s| s.sent_from.take());
         match ev {
-            Event::SearchResults { req, tracks } => {
+            Event::SearchResults { req, results } => {
                 if self.pending_req == Some(req) {
                     self.pending_req = None;
-                    self.ui.results = tracks;
+                    self.ui.results = results.tracks;
                     self.ui.search = SearchStatus::Done;
                     self.dirty |= Dirty::RESULTS | Dirty::SEARCH_STATUS;
                 }
@@ -2667,7 +2667,7 @@ impl PaletteAction {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use requiem_core::{ProviderId, TrackId};
+    use requiem_core::{ProviderId, SearchResults, TrackId};
 
     fn track(id: &str, secs: u64) -> Track {
         Track {
@@ -2758,7 +2758,10 @@ mod tests {
         let req = search_req(&mut vm, "q");
         vm.apply(Event::SearchResults {
             req,
-            tracks: tracks(n),
+            results: SearchResults {
+                tracks: tracks(n),
+                ..SearchResults::default()
+            },
         });
         vm.take_dirty();
         vm
@@ -2827,7 +2830,10 @@ mod tests {
         vm.take_dirty();
         vm.apply(Event::SearchResults {
             req,
-            tracks: tracks(3),
+            results: SearchResults {
+                tracks: tracks(3),
+                ..SearchResults::default()
+            },
         });
         assert_eq!(vm.ui().results.len(), 3);
         assert_eq!(vm.ui().search, SearchStatus::Done);
@@ -2843,20 +2849,29 @@ mod tests {
         vm.take_dirty();
         vm.apply(Event::SearchResults {
             req: old,
-            tracks: tracks(5),
+            results: SearchResults {
+                tracks: tracks(5),
+                ..SearchResults::default()
+            },
         });
         assert!(vm.ui().results.is_empty());
         assert_eq!(vm.ui().search, SearchStatus::Pending);
         assert!(vm.take_dirty().is_empty());
         vm.apply(Event::SearchResults {
             req: new,
-            tracks: tracks(2),
+            results: SearchResults {
+                tracks: tracks(2),
+                ..SearchResults::default()
+            },
         });
         assert_eq!(vm.ui().results.len(), 2);
         // A late answer to the old req after the new one landed is ignored too.
         vm.apply(Event::SearchResults {
             req: old,
-            tracks: tracks(5),
+            results: SearchResults {
+                tracks: tracks(5),
+                ..SearchResults::default()
+            },
         });
         assert_eq!(vm.ui().results.len(), 2);
     }
@@ -3561,12 +3576,18 @@ mod tests {
         // An answer to the old req is ignored.
         vm.apply(Event::SearchResults {
             req,
-            tracks: tracks(1),
+            results: SearchResults {
+                tracks: tracks(1),
+                ..SearchResults::default()
+            },
         });
         assert!(vm.ui().results.is_empty());
         vm.apply(Event::SearchResults {
             req: req + 1,
-            tracks: tracks(2),
+            results: SearchResults {
+                tracks: tracks(2),
+                ..SearchResults::default()
+            },
         });
         assert_eq!(vm.ui().results.len(), 2);
     }
@@ -3659,7 +3680,10 @@ mod tests {
         let req = search_req(&mut vm, "zzz");
         vm.apply(Event::SearchResults {
             req,
-            tracks: Vec::new(),
+            results: SearchResults {
+                tracks: Vec::new(),
+                ..SearchResults::default()
+            },
         });
         assert_eq!(
             vm.ui().results_empty(),
@@ -6204,7 +6228,13 @@ mod tests {
 
     fn search_lands(vm: &mut Vm, tracks: Vec<Track>) {
         let req = search_req(vm, "q");
-        vm.apply(Event::SearchResults { req, tracks });
+        vm.apply(Event::SearchResults {
+            req,
+            results: SearchResults {
+                tracks,
+                ..SearchResults::default()
+            },
+        });
     }
 
     const ONLY_SPOTIFY: ServiceFilter = ServiceFilter::Only(Service::Spotify);

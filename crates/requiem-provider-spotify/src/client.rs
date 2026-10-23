@@ -11,7 +11,7 @@ use std::time::{Duration, Instant};
 
 use requiem_core::{
     AccountState, AudioSource, FormatHint, Page, PageSink, Provider, ProviderError, ProviderId,
-    Shelf, Track, TrackId,
+    SearchResults, Shelf, TrackId,
 };
 use serde::de::DeserializeOwned;
 
@@ -248,12 +248,16 @@ impl Provider for SpotifyProvider {
         ProviderId(PROVIDER_ID.into())
     }
 
-    fn search(&self, query: &str, limit: usize) -> Result<Vec<Track>, ProviderError> {
+    /// Tracks only: Spotify's search context lists no albums or playlists.
+    fn search(&self, query: &str, limit: usize) -> Result<SearchResults, ProviderError> {
         self.call::<Tracks>(&Request::Search {
             q: query.to_owned(),
             limit,
         })
-        .map(|t| t.tracks)
+        .map(|t| SearchResults {
+            tracks: t.tracks,
+            ..SearchResults::default()
+        })
     }
 
     fn resolve(&self, track: &TrackId) -> Result<AudioSource, ProviderError> {
