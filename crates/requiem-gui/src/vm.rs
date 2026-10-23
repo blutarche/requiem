@@ -223,6 +223,8 @@ pub enum Intent {
     SetFilter(ServiceFilter),
     /// Keeps one kind of collection on the Library page. Local to the window.
     SetLibraryChip(LibraryChip),
+    /// Shows one kind of search result, or all of them. Local to the window.
+    SetSearchChip(SearchChip),
     /// Keeps the Library's collections whose title or subtitle has this text. Local to the
     /// window.
     SetLibraryText(String),
@@ -369,6 +371,67 @@ impl LibraryChip {
             LibraryChip::Playlists => c.kind == CollectionKind::Playlist && !is_mix(c),
         }
     }
+}
+
+/// The kind of search result the Search page lists.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SearchChip {
+    #[default]
+    All,
+    Songs,
+    Albums,
+    Playlists,
+}
+
+impl SearchChip {
+    pub const CHOICES: [SearchChip; 4] = [
+        SearchChip::All,
+        SearchChip::Songs,
+        SearchChip::Albums,
+        SearchChip::Playlists,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            SearchChip::All => "All",
+            SearchChip::Songs => "Songs",
+            SearchChip::Albums => "Albums",
+            SearchChip::Playlists => "Playlists",
+        }
+    }
+}
+
+/// How many songs the All view lists beside the top result.
+pub const TOP_SONGS: usize = 4;
+
+/// What the Search page lists, below its chips.
+#[derive(Debug, Clone, PartialEq)]
+pub enum SearchBody {
+    /// Nothing to list; the empty state says why.
+    Empty(EmptyText),
+    /// The first song as the top result, the next few beside it, and a row each of the albums
+    /// and the playlists. A section with nothing in it is empty here and left out of the page.
+    All {
+        top: Option<Track>,
+        songs: Vec<Track>,
+        albums: Vec<Collection>,
+        playlists: Vec<Collection>,
+        /// Whether the songs span services, so their covers show a badge.
+        mixed: bool,
+    },
+    /// The song table, which lists `UiState::shown_results`.
+    Songs,
+    /// A grid of albums or of playlists. `mixed` says whether they span services, so their
+    /// cards show a badge.
+    Collections { items: Vec<Collection>, mixed: bool },
+}
+
+/// What the Search page shows: the chips, with whether each is the one in force, and the body.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SearchView {
+    /// Empty while there are no results to choose between.
+    pub chips: Vec<(SearchChip, bool)>,
+    pub body: SearchBody,
 }
 
 /// The order the Library lists its collections in.
@@ -620,6 +683,11 @@ pub struct UiState {
     pub query: String,
     pub search: SearchStatus,
     pub results: Vec<Track>,
+    /// The albums and playlists the last search found, whole; the filter keeps some.
+    pub albums: Vec<Collection>,
+    pub playlists: Vec<Collection>,
+    /// The kind of result the Search page lists. It outlasts queries, and ends with the app.
+    pub search_chip: SearchChip,
     pub queue: Vec<Track>,
     pub current: Option<usize>,
     pub now_playing: Option<Track>,
@@ -655,6 +723,9 @@ impl Default for UiState {
             query: String::new(),
             search: SearchStatus::Idle,
             results: Vec::new(),
+            albums: Vec::new(),
+            playlists: Vec::new(),
+            search_chip: SearchChip::All,
             queue: Vec::new(),
             current: None,
             now_playing: None,
@@ -831,6 +902,28 @@ impl UiState {
                 self.results
                     .iter()
                     .filter(|t| s.owns(&t.id.provider))
+                    .cloned()
+                    .collect(),
+            ),
+        }
+    }
+
+    /// The albums the filter keeps.
+    pub fn shown_albums(&self) -> Cow<'_, [Collection]> {
+        self.shown_collections(&self.albums)
+    }
+
+    /// The playlists the filter keeps.
+    pub fn shown_playlists(&self) -> Cow<'_, [Collection]> {
+        self.shown_collections(&self.playlists)
+    }
+
+    fn shown_collections<'a>(&self, all: &'a [Collection]) -> Cow<'a, [Collection]> {
+        match self.shown_service() {
+            None => Cow::Borrowed(all),
+            Some(s) => Cow::Owned(
+                all.iter()
+                    .filter(|c| s.owns(&c.id.provider))
                     .cloned()
                     .collect(),
             ),
@@ -1178,27 +1271,91 @@ impl UiState {
         (!self.queue.is_empty()).then(|| self.queue.len().to_string())
     }
 
-    /// The results area's empty state, when there are no results.
+    /// The results area's empty state, when there is nothing to list: no results of any kind,
+    /// or none of the chosen kind.
     pub fn results_empty(&self) -> Option<EmptyText> {
-        if !self.shown_results().is_empty() {
-            return None;
+        let (songs, albums, playlists) = (
+            self.shown_results().len(),
+            self.shown_albums().len(),
+            self.shown_playlists().len(),
+        );
+        if songs + albums + playlists == 0 {
+            return Some(if self.search == SearchStatus::Done {
+                EmptyText {
+                    heading: "No results".to_owned(),
+                    sub: match self.shown_service() {
+                        Some(s) => format!("Nothing from {} matched “{}”", s.name(), self.query),
+                        None => format!("Nothing matched “{}”", self.query),
+                    },
+                    action: Some("Edit search"),
+                }
+            } else {
+                EmptyText {
+                    heading: "Search".to_owned(),
+                    sub: "Type a song, artist or album, then press Return".to_owned(),
+                    action: None,
+                }
+            });
         }
-        Some(if self.search == SearchStatus::Done {
-            EmptyText {
-                heading: "No results".to_owned(),
-                sub: match self.shown_service() {
-                    Some(s) => format!("Nothing from {} matched “{}”", s.name(), self.query),
-                    None => format!("Nothing matched “{}”", self.query),
-                },
-                action: Some("Edit search"),
-            }
-        } else {
-            EmptyText {
-                heading: "Search".to_owned(),
-                sub: "Type a song, artist or album, then press Return".to_owned(),
-                action: None,
-            }
+        let (kind, n) = match self.search_chip {
+            SearchChip::All => return None,
+            SearchChip::Songs => ("songs", songs),
+            SearchChip::Albums => ("albums", albums),
+            SearchChip::Playlists => ("playlists", playlists),
+        };
+        (n == 0).then(|| EmptyText {
+            heading: format!("No {kind} for “{}”", self.query),
+            sub: match self.shown_service() {
+                Some(s) => format!(
+                    "Nothing from {} matched. Choose All to see every service.",
+                    s.name()
+                ),
+                None => "Try another search, or another kind of result.".to_owned(),
+            },
+            action: Some("Edit search"),
         })
+    }
+
+    /// What the Search page shows: the chips once there are results, and the chosen kind of
+    /// them. The service switch filters every kind. The top result is the first song the
+    /// filter keeps.
+    pub fn search_view(&self) -> SearchView {
+        let chosen = self.search_chip;
+        let songs = self.shown_results();
+        let albums = self.shown_albums();
+        let playlists = self.shown_playlists();
+        let listed = !(songs.is_empty() && albums.is_empty() && playlists.is_empty());
+        let chips = if listed {
+            SearchChip::CHOICES
+                .into_iter()
+                .map(|chip| (chip, chip == chosen))
+                .collect()
+        } else {
+            Vec::new()
+        };
+        let collections = |items: Cow<'_, [Collection]>| {
+            let mixed = mixed(items.iter().map(|c| &c.id.provider));
+            SearchBody::Collections {
+                items: items.into_owned(),
+                mixed,
+            }
+        };
+        let body = match self.results_empty() {
+            Some(empty) => SearchBody::Empty(empty),
+            None => match chosen {
+                SearchChip::All => SearchBody::All {
+                    mixed: mixed(songs.iter().map(|t| &t.id.provider)),
+                    top: songs.first().cloned(),
+                    songs: songs.iter().skip(1).take(TOP_SONGS).cloned().collect(),
+                    albums: albums.into_owned(),
+                    playlists: playlists.into_owned(),
+                },
+                SearchChip::Songs => SearchBody::Songs,
+                SearchChip::Albums => collections(albums),
+                SearchChip::Playlists => collections(playlists),
+            },
+        };
+        SearchView { chips, body }
     }
 
     pub fn search_status_text(&self) -> Option<(String, bool)> {
@@ -1416,6 +1573,8 @@ impl Vm {
                 if self.pending_req == Some(req) {
                     self.pending_req = None;
                     self.ui.results = results.tracks;
+                    self.ui.albums = results.albums;
+                    self.ui.playlists = results.playlists;
                     self.ui.search = SearchStatus::Done;
                     self.dirty |= Dirty::RESULTS | Dirty::SEARCH_STATUS;
                 }
@@ -1753,6 +1912,13 @@ impl Vm {
                 if self.ui.library_chip != chip {
                     self.ui.library_chip = chip;
                     self.dirty |= Dirty::LIBRARY_VIEW;
+                }
+                Vec::new()
+            }
+            Intent::SetSearchChip(chip) => {
+                if self.ui.search_chip != chip {
+                    self.ui.search_chip = chip;
+                    self.dirty |= Dirty::RESULTS;
                 }
                 Vec::new()
             }
@@ -6321,6 +6487,305 @@ mod tests {
         let empty = vm.ui().results_empty().unwrap();
         assert_eq!(empty.heading, "No results");
         assert_eq!(empty.sub, "Nothing from YouTube Music matched “q”");
+    }
+
+    fn found(
+        tracks: Vec<Track>,
+        albums: Vec<Collection>,
+        playlists: Vec<Collection>,
+    ) -> SearchResults {
+        SearchResults {
+            tracks,
+            albums,
+            playlists,
+        }
+    }
+
+    /// Lands the answer to a search for `query`.
+    fn search_finds(vm: &mut Vm, query: &str, results: SearchResults) {
+        let req = search_req(vm, query);
+        vm.apply(Event::SearchResults { req, results });
+    }
+
+    /// Collections that take the services in turn, Spotify first, titled by their ids.
+    fn collections_alternating(ids: &[&str]) -> Vec<Collection> {
+        ids.iter()
+            .enumerate()
+            .map(|(i, id)| collection_of(&[spotify(), provider()][i % 2], id))
+            .collect()
+    }
+
+    fn collection_ids(items: &[Collection]) -> Vec<&str> {
+        items.iter().map(|c| c.id.id.as_str()).collect()
+    }
+
+    /// A vm with both services signed in and a search landed: songs 0 to 5, albums a0 to a3
+    /// and playlists p0 to p2, each taking the services in turn from Spotify.
+    fn searched() -> Vm {
+        let mut vm = both_signed_in();
+        let results = found(
+            alternating(),
+            collections_alternating(&["a0", "a1", "a2", "a3"]),
+            collections_alternating(&["p0", "p1", "p2"]),
+        );
+        search_finds(&mut vm, "q", results);
+        vm.take_commands();
+        vm.take_dirty();
+        vm
+    }
+
+    #[test]
+    fn the_search_chips_pick_what_the_page_lists() {
+        let mut vm = searched();
+        let chips = |vm: &Vm| vm.ui().search_view().chips;
+        let selected = |on: SearchChip| SearchChip::CHOICES.map(|c| (c, c == on)).to_vec();
+        assert_eq!(
+            SearchChip::CHOICES.map(SearchChip::label),
+            ["All", "Songs", "Albums", "Playlists"]
+        );
+        assert_eq!(chips(&vm), selected(SearchChip::All));
+        let SearchBody::All {
+            top,
+            songs,
+            albums,
+            playlists,
+            ..
+        } = vm.ui().search_view().body
+        else {
+            panic!("All lists every kind");
+        };
+        assert_eq!(top.unwrap().id.id, "0");
+        assert_eq!(ids(&songs), ["1", "2", "3", "4"]);
+        assert_eq!(collection_ids(&albums), ["a0", "a1", "a2", "a3"]);
+        assert_eq!(collection_ids(&playlists), ["p0", "p1", "p2"]);
+
+        assert!(
+            vm.intent(Intent::SetSearchChip(SearchChip::Songs))
+                .is_empty()
+        );
+        assert!(vm.take_commands().is_empty());
+        assert!(vm.take_dirty().contains(Dirty::RESULTS));
+        assert_eq!(chips(&vm), selected(SearchChip::Songs));
+        assert_eq!(vm.ui().search_view().body, SearchBody::Songs);
+
+        vm.intent(Intent::SetSearchChip(SearchChip::Albums));
+        let SearchBody::Collections { items, mixed } = vm.ui().search_view().body else {
+            panic!("Albums lists a grid");
+        };
+        assert_eq!(collection_ids(&items), ["a0", "a1", "a2", "a3"]);
+        assert!(mixed);
+
+        vm.intent(Intent::SetSearchChip(SearchChip::Playlists));
+        let SearchBody::Collections { items, .. } = vm.ui().search_view().body else {
+            panic!("Playlists lists a grid");
+        };
+        assert_eq!(collection_ids(&items), ["p0", "p1", "p2"]);
+
+        // The same chip again changes nothing.
+        vm.take_dirty();
+        vm.intent(Intent::SetSearchChip(SearchChip::Playlists));
+        assert!(vm.take_dirty().is_empty());
+    }
+
+    #[test]
+    fn the_search_chip_survives_a_new_query_and_starts_at_all() {
+        assert_eq!(UiState::default().search_chip, SearchChip::All);
+        let mut vm = searched();
+        vm.intent(Intent::SetSearchChip(SearchChip::Albums));
+        let req = search_req(&mut vm, "refined");
+        // While the new search is out, the old results stay under the chip.
+        assert_eq!(vm.ui().search_chip, SearchChip::Albums);
+        assert!(matches!(
+            vm.ui().search_view().body,
+            SearchBody::Collections { .. }
+        ));
+        let results = found(
+            vec![from(&spotify(), "n0")],
+            collections_alternating(&["n-a0", "n-a1"]),
+            Vec::new(),
+        );
+        vm.apply(Event::SearchResults { req, results });
+        assert_eq!(vm.ui().search_chip, SearchChip::Albums);
+        let SearchBody::Collections { items, .. } = vm.ui().search_view().body else {
+            panic!("the chip kept its kind");
+        };
+        assert_eq!(collection_ids(&items), ["n-a0", "n-a1"]);
+        // A failed search leaves it alone too.
+        let req = search_req(&mut vm, "again");
+        vm.apply(Event::SearchFailed {
+            req,
+            error: "offline".into(),
+        });
+        assert_eq!(vm.ui().search_chip, SearchChip::Albums);
+    }
+
+    #[test]
+    fn the_all_view_leaves_out_sections_with_nothing_in_them() {
+        let all = |vm: &Vm| match vm.ui().search_view().body {
+            SearchBody::All {
+                top,
+                songs,
+                albums,
+                playlists,
+                ..
+            } => (
+                top.map(|t| t.id.id),
+                songs.len(),
+                albums.len(),
+                playlists.len(),
+            ),
+            other => panic!("expected the All view, got {other:?}"),
+        };
+        let mut vm = both_signed_in();
+        // Songs only: no albums or playlists.
+        search_lands(&mut vm, alternating());
+        assert_eq!(all(&vm), (Some("0".to_owned()), 4, 0, 0));
+        // A lone song is the top result with nothing beside it.
+        search_lands(&mut vm, vec![from(&spotify(), "solo")]);
+        assert_eq!(all(&vm), (Some("solo".to_owned()), 0, 0, 0));
+        // Albums only: no top result, no songs, no playlists.
+        search_finds(
+            &mut vm,
+            "q",
+            found(
+                Vec::new(),
+                collections_alternating(&["a0", "a1"]),
+                Vec::new(),
+            ),
+        );
+        assert_eq!(all(&vm), (None, 0, 2, 0));
+        // Playlists only.
+        search_finds(
+            &mut vm,
+            "q",
+            found(Vec::new(), Vec::new(), collections_alternating(&["p0"])),
+        );
+        assert_eq!(all(&vm), (None, 0, 0, 1));
+        // Nothing at all: the existing no-results state, and no chips.
+        search_finds(&mut vm, "zzz", SearchResults::default());
+        let view = vm.ui().search_view();
+        assert!(view.chips.is_empty());
+        let SearchBody::Empty(empty) = view.body else {
+            panic!("nothing found is the empty state");
+        };
+        assert_eq!(empty.heading, "No results");
+        assert_eq!(empty.sub, "Nothing matched “zzz”");
+    }
+
+    #[test]
+    fn a_chip_with_nothing_of_its_kind_says_so() {
+        let mut vm = both_signed_in();
+        search_lands(&mut vm, alternating());
+        let empty = |vm: &Vm| match vm.ui().search_view() {
+            SearchView {
+                chips,
+                body: SearchBody::Empty(e),
+            } => {
+                assert_eq!(chips.len(), 4, "the chips stay to choose another kind");
+                e
+            }
+            other => panic!("expected an empty state, got {other:?}"),
+        };
+        vm.intent(Intent::SetSearchChip(SearchChip::Albums));
+        let e = empty(&vm);
+        assert_eq!(e.heading, "No albums for “q”");
+        assert_eq!(e.action, Some("Edit search"));
+        vm.intent(Intent::SetSearchChip(SearchChip::Playlists));
+        assert_eq!(empty(&vm).heading, "No playlists for “q”");
+        // Songs, with only albums found.
+        search_finds(
+            &mut vm,
+            "q",
+            found(Vec::new(), collections_alternating(&["a0"]), Vec::new()),
+        );
+        vm.intent(Intent::SetSearchChip(SearchChip::Songs));
+        assert_eq!(empty(&vm).heading, "No songs for “q”");
+        // Named for the service the switch leaves.
+        search_lands(&mut vm, alternating());
+        vm.intent(Intent::SetFilter(ONLY_YT));
+        vm.intent(Intent::SetSearchChip(SearchChip::Playlists));
+        assert!(empty(&vm).sub.contains("YouTube Music"));
+    }
+
+    #[test]
+    fn the_service_switch_filters_albums_and_playlists_too() {
+        let mut vm = searched();
+        vm.intent(Intent::SetSearchChip(SearchChip::Albums));
+        let albums = |vm: &Vm| match vm.ui().search_view().body {
+            SearchBody::Collections { items, mixed } => (
+                items.iter().map(|c| c.id.id.clone()).collect::<Vec<_>>(),
+                mixed,
+            ),
+            other => panic!("expected a grid, got {other:?}"),
+        };
+        let owned = |ids: &[&str]| ids.iter().map(|id| (*id).to_owned()).collect::<Vec<_>>();
+        assert_eq!(albums(&vm), (owned(&["a0", "a1", "a2", "a3"]), true));
+
+        assert!(vm.intent(Intent::SetFilter(ONLY_SPOTIFY)).is_empty());
+        assert!(vm.take_commands().is_empty());
+        assert_eq!(albums(&vm), (owned(&["a0", "a2"]), false));
+        assert_eq!(collection_ids(&vm.ui().shown_playlists()), ["p0", "p2"]);
+        // The answer is kept whole, so another choice needs no search.
+        assert_eq!((vm.ui().albums.len(), vm.ui().playlists.len()), (4, 3));
+        vm.intent(Intent::SetFilter(ONLY_YT));
+        assert_eq!(albums(&vm), (owned(&["a1", "a3"]), false));
+        assert_eq!(collection_ids(&vm.ui().shown_playlists()), ["p1"]);
+
+        // The All view filters every section.
+        vm.intent(Intent::SetSearchChip(SearchChip::All));
+        let SearchBody::All {
+            top,
+            songs,
+            albums,
+            playlists,
+            ..
+        } = vm.ui().search_view().body
+        else {
+            panic!("All lists every kind");
+        };
+        assert_eq!(top.unwrap().id.id, "1");
+        assert_eq!(ids(&songs), ["3", "5"]);
+        assert_eq!(collection_ids(&albums), ["a1", "a3"]);
+        assert_eq!(collection_ids(&playlists), ["p1"]);
+    }
+
+    #[test]
+    fn the_top_result_is_the_first_song_the_filter_keeps_and_plays_like_a_table_row() {
+        let mut vm = searched();
+        // The first song overall is Spotify's, so YouTube Music's filter shows the top result
+        // is not simply the first of the answer.
+        vm.intent(Intent::SetFilter(ONLY_YT));
+        let SearchBody::All { top, songs, .. } = vm.ui().search_view().body else {
+            panic!("All lists every kind");
+        };
+        assert_eq!(
+            (top.unwrap().id.id.as_str(), ids(&songs)),
+            ("1", vec!["3", "5"])
+        );
+        vm.intent(Intent::SetFilter(ONLY_SPOTIFY));
+        let SearchBody::All { top, songs, .. } = vm.ui().search_view().body else {
+            panic!("All lists every kind");
+        };
+        let (top, songs) = (top.unwrap(), songs);
+        assert_eq!((top.id.id.as_str(), ids(&songs)), ("0", vec!["2", "4"]));
+        let queued = |from: usize| {
+            let mut vm = searched();
+            vm.intent(Intent::SetFilter(ONLY_SPOTIFY));
+            match &vm.intent(Intent::PlayFrom {
+                list: List::Results,
+                from,
+            })[..]
+            {
+                [Command::Enqueue { tracks, .. }, Command::PlayIndex(0)] => {
+                    tracks.iter().map(|t| t.id.id.clone()).collect::<Vec<_>>()
+                }
+                other => panic!("expected a replace and a play, got {other:?}"),
+            }
+        };
+        // The top result plays the whole list; a song beside it plays from its own place.
+        assert_eq!(queued(0), ["0", "2", "4"]);
+        assert_eq!(queued(1), ["2", "4"]);
+        assert_eq!(queued(2), ["4"]);
     }
 
     #[test]
