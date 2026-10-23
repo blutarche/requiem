@@ -83,6 +83,7 @@ fn live_cli_connect() {
     let daemon_exe = Path::new(env!("CARGO_BIN_EXE_requiem")).with_file_name("requiemd");
     let mut daemon = Command::new(daemon_exe)
         .env("REQUIEM_SOCKET_DIR", &socks)
+        .env("REQUIEM_ART_CACHE_DIR", dir.join("art"))
         .spawn()
         .unwrap();
 

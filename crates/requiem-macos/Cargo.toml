@@ -9,14 +9,27 @@ repository.workspace = true
 [dependencies]
 requiem-core.workspace = true
 crossbeam-channel.workspace = true
+ring.workspace = true
 
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2.workspace = true
 block2.workspace = true
 ureq.workspace = true
 dispatch2 = { version = "0.3.1", default-features = false, features = ["std", "objc2"] }
-objc2-core-foundation = { version = "0.3.2", default-features = false, features = ["std", "CFCGTypes"] }
-objc2-core-graphics = { version = "0.3.2", default-features = false, features = ["std", "CGColor"] }
+objc2-core-foundation = { version = "0.3.2", default-features = false, features = [
+    "std",
+    "CFCGTypes",
+    "CFData",
+    "CFDictionary",
+    "CFNumber",
+    "CFString",
+] }
+objc2-core-graphics = { version = "0.3.2", default-features = false, features = ["std", "CGColor", "CGImage"] }
+objc2-image-io = { version = "0.3.2", default-features = false, features = [
+    "std",
+    "CGImageSource",
+    "objc2-core-graphics",
+] }
 objc2-quartz-core = { version = "0.3.2", default-features = false, features = [
     "std",
     "objc2-core-foundation",
@@ -29,6 +42,7 @@ objc2-quartz-core = { version = "0.3.2", default-features = false, features = [
 objc2-foundation = { workspace = true, features = [
     "std",
     "NSArray",
+    "NSBundle",
     "NSData",
     "NSDate",
     "NSDictionary",

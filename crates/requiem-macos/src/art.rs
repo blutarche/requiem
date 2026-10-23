@@ -1,7 +1,15 @@
-//! Artwork bookkeeping without AppKit: URL sizing, the decoded-image cache and the request
-//! queue.
+//! Artwork bookkeeping without AppKit: URL sizing, the decoded-image cache, the request
+//! queue and the disk cache of downloaded images.
 
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::ffi::OsString;
+use std::fmt::Write as _;
+use std::fs::{self, File};
+use std::io::{self, Read, Write};
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Mutex, PoisonError};
+use std::time::{Duration, SystemTime};
 
 /// Image hosts whose URLs end in Google's `=w…-h…-…` options, which take a size.
 const SIZED_HOSTS: [&str; 2] = ["googleusercontent.com", "ggpht.com"];
@@ -134,14 +142,14 @@ impl<V: Clone> Lru<V> {
     }
 }
 
-/// Keys waiting for the fetcher, newest first, at most `limit`: rows scrolled into view are
-/// fetched before those scrolled past.
-pub(crate) struct Queue {
-    keys: VecDeque<String>,
+/// Requests waiting for the fetcher, newest first, at most `limit`: rows scrolled into view
+/// are fetched before those scrolled past.
+pub(crate) struct Queue<T> {
+    keys: VecDeque<T>,
     limit: usize,
 }
 
-impl Queue {
+impl<T> Queue<T> {
     pub(crate) fn new(limit: usize) -> Self {
         Self {
             keys: VecDeque::new(),
@@ -150,7 +158,7 @@ impl Queue {
     }
 
     /// Returns the oldest key when `key` pushes it out.
-    pub(crate) fn push(&mut self, key: String) -> Option<String> {
+    pub(crate) fn push(&mut self, key: T) -> Option<T> {
         self.keys.push_front(key);
         if self.keys.len() > self.limit {
             self.keys.pop_back()
@@ -160,7 +168,7 @@ impl Queue {
     }
 
     /// The newest key.
-    pub(crate) fn pop(&mut self) -> Option<String> {
+    pub(crate) fn pop(&mut self) -> Option<T> {
         self.keys.pop_front()
     }
 }
@@ -213,6 +221,167 @@ impl<W> Book<W> {
     /// `key` left the queue unfetched, so a later `want` fetches it.
     pub(crate) fn dropped(&mut self, key: &str) {
         self.waiting.remove(key);
+    }
+}
+
+/// Overrides where downloaded artwork is kept, so tests and private daemons leave the user's
+/// cache alone.
+pub(crate) const CACHE_DIR_ENV: &str = "REQUIEM_ART_CACHE_DIR";
+
+/// Where downloaded artwork is kept: `REQUIEM_ART_CACHE_DIR`, or
+/// `~/Library/Caches/<bundle id>/artwork`, `requiem` standing in for a missing bundle id.
+/// `None` turns the disk cache off, as does an override that is not absolute: falling back to
+/// the real cache would defeat it.
+pub(crate) fn cache_dir(
+    over: Option<OsString>,
+    home: Option<PathBuf>,
+    bundle_id: Option<&str>,
+) -> Option<PathBuf> {
+    if let Some(dir) = over.filter(|v| !v.is_empty()).map(PathBuf::from) {
+        if dir.is_absolute() {
+            return Some(dir);
+        }
+        eprintln!("requiem: not keeping artwork on disk: {CACHE_DIR_ENV} is not absolute");
+        return None;
+    }
+    let home = home.filter(|h| h.is_absolute())?;
+    let id = bundle_id
+        .filter(|id| !id.is_empty() && !id.contains('/') && !id.starts_with('.'))
+        .unwrap_or("requiem");
+    Some(home.join("Library/Caches").join(id).join("artwork"))
+}
+
+/// The file `url`'s bytes are kept in: the hex SHA-256 of the URL, which unlike `std`'s hasher
+/// stays the same across toolchains.
+pub(crate) fn file_name(url: &str) -> String {
+    let digest = ring::digest::digest(&ring::digest::SHA256, url.as_bytes());
+    let mut name = String::with_capacity(64);
+    for b in digest.as_ref() {
+        let _ = write!(name, "{b:02x}");
+    }
+    name
+}
+
+fn is_cache_file(name: &str) -> bool {
+    name.len() == 64 && name.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+}
+
+const TMP_SUFFIX: &str = ".tmp";
+/// A temporary file this old was left by a write that never finished.
+const STALE_TMP: Duration = Duration::from_secs(600);
+static TMP_SEQ: AtomicU64 = AtomicU64::new(0);
+
+/// Downloaded images by URL, the least recently used removed once their bytes pass `cap`.
+/// Threads and processes may share it: files are replaced whole, by rename.
+pub(crate) struct DiskCache {
+    dir: PathBuf,
+    cap: u64,
+    /// Bytes on disk as of the last prune plus those written since; `None` before the first
+    /// prune. Held through a prune, so only one runs at a time.
+    total: Mutex<Option<u64>>,
+}
+
+impl DiskCache {
+    pub(crate) fn new(dir: PathBuf, cap: u64) -> Self {
+        Self {
+            dir,
+            cap,
+            total: Mutex::new(None),
+        }
+    }
+
+    pub(crate) fn path(&self, url: &str) -> PathBuf {
+        self.dir.join(file_name(url))
+    }
+
+    /// `url`'s bytes, marking them used.
+    pub(crate) fn read(&self, url: &str) -> Option<Vec<u8>> {
+        let mut file = File::open(self.path(url)).ok()?;
+        let mut bytes = Vec::new();
+        file.read_to_end(&mut bytes).ok()?;
+        let _ = file.set_modified(SystemTime::now());
+        (!bytes.is_empty()).then_some(bytes)
+    }
+
+    /// Drops `url`'s bytes, as for a file that no longer decodes.
+    pub(crate) fn remove(&self, url: &str) {
+        let _ = fs::remove_file(self.path(url));
+    }
+
+    /// Keeps `bytes` as `url`'s, so a reader sees the old file or the new one, never part of
+    /// one. Prunes once past the cap.
+    pub(crate) fn write(&self, url: &str, bytes: &[u8]) -> io::Result<()> {
+        fs::create_dir_all(&self.dir)?;
+        let name = file_name(url);
+        let tmp = self.dir.join(format!(
+            "{name}.{}.{}{TMP_SUFFIX}",
+            std::process::id(),
+            TMP_SEQ.fetch_add(1, Ordering::Relaxed)
+        ));
+        let written = File::create(&tmp)
+            .and_then(|mut f| f.write_all(bytes))
+            .and_then(|()| fs::rename(&tmp, self.dir.join(&name)));
+        if written.is_err() {
+            let _ = fs::remove_file(&tmp);
+        }
+        written?;
+        let over = {
+            let mut total = self.total.lock().unwrap_or_else(PoisonError::into_inner);
+            match total.as_mut() {
+                Some(t) => {
+                    *t += bytes.len() as u64;
+                    *t > self.cap
+                }
+                None => true,
+            }
+        };
+        if over {
+            self.prune();
+        }
+        Ok(())
+    }
+
+    /// Once over the cap, removes the least recently used files until a quarter of it is free,
+    /// so a full cache is not scanned on every write. Also removes what writes that never
+    /// finished left; other files in the directory stay.
+    pub(crate) fn prune(&self) {
+        let mut total = self.total.lock().unwrap_or_else(PoisonError::into_inner);
+        let Ok(entries) = fs::read_dir(&self.dir) else {
+            *total = Some(0);
+            return;
+        };
+        let now = SystemTime::now();
+        let mut files = Vec::new();
+        for entry in entries.flatten() {
+            let Ok(meta) = entry.metadata() else { continue };
+            let name = entry.file_name();
+            let Some(name) = name.to_str().filter(|_| meta.is_file()) else {
+                continue;
+            };
+            let used = meta.modified().unwrap_or(SystemTime::UNIX_EPOCH);
+            if is_cache_file(name) {
+                files.push((used, meta.len(), entry.path()));
+            } else if name.ends_with(TMP_SUFFIX)
+                && name.get(..64).is_some_and(is_cache_file)
+                && now.duration_since(used).is_ok_and(|age| age > STALE_TMP)
+            {
+                let _ = fs::remove_file(entry.path());
+            }
+        }
+        let mut sum: u64 = files.iter().map(|(_, len, _)| len).sum();
+        if sum > self.cap {
+            files.sort_by_key(|(used, _, _)| *used);
+            let target = self.cap / 4 * 3;
+            for (_, len, path) in files {
+                if sum <= target {
+                    break;
+                }
+                if fs::remove_file(&path).is_ok() {
+                    sum -= len;
+                }
+            }
+        }
+        *total = Some(sum);
     }
 }
 
@@ -363,7 +532,7 @@ mod tests {
 
     #[test]
     fn the_queue_serves_the_newest_and_drops_the_oldest() {
-        let mut q = Queue::new(2);
+        let mut q = Queue::<String>::new(2);
         assert_eq!(q.push("a".into()), None);
         assert_eq!(q.push("b".into()), None);
         assert_eq!(q.push("c".into()), Some("a".into()));
@@ -372,5 +541,143 @@ mod tests {
         assert_eq!(q.pop().as_deref(), Some("d"));
         assert_eq!(q.pop().as_deref(), Some("b"));
         assert_eq!(q.pop(), None);
+    }
+
+    /// A fresh directory under the system's temporary one, never the real cache.
+    fn scratch(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("requiem-art-{name}-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        dir
+    }
+
+    fn last_used(cache: &DiskCache, url: &str, secs_ago: u64) {
+        let file = File::options().write(true).open(cache.path(url)).unwrap();
+        file.set_modified(SystemTime::now() - Duration::from_secs(secs_ago))
+            .unwrap();
+    }
+
+    fn total(cache: &DiskCache) -> Option<u64> {
+        *cache.total.lock().unwrap()
+    }
+
+    #[test]
+    fn a_url_is_kept_under_its_hash() {
+        let url = "https://i.scdn.co/image/ab67616d00001e02";
+        let name = file_name(url);
+        assert!(is_cache_file(&name), "{name}");
+        assert_eq!(name, file_name(url));
+        assert_ne!(name, file_name("https://i.scdn.co/image/ab67616d00001e03"));
+        // SHA-256 of the empty string: a name never changes with the toolchain.
+        assert_eq!(
+            file_name(""),
+            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        );
+        let cache = DiskCache::new(PathBuf::from("/cache"), 1);
+        assert_eq!(cache.path(url), PathBuf::from("/cache").join(name));
+        assert!(!is_cache_file(&file_name("").to_uppercase()));
+        assert!(!is_cache_file("notes.txt"));
+    }
+
+    #[test]
+    fn a_write_is_read_back_whole() {
+        let dir = scratch("write");
+        let cache = DiskCache::new(dir.clone(), 1 << 20);
+        assert_eq!(cache.read("https://a/1"), None);
+        cache.write("https://a/1", b"first").unwrap();
+        assert_eq!(cache.read("https://a/1").as_deref(), Some(&b"first"[..]));
+        cache.write("https://a/1", b"second").unwrap();
+        assert_eq!(cache.read("https://a/1").as_deref(), Some(&b"second"[..]));
+        let left: Vec<_> = fs::read_dir(&dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().into_string().unwrap())
+            .collect();
+        assert_eq!(
+            left,
+            vec![file_name("https://a/1")],
+            "no temporary file is left"
+        );
+        cache.remove("https://a/1");
+        assert_eq!(cache.read("https://a/1"), None);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn past_the_cap_the_least_recently_used_go() {
+        let dir = scratch("evict");
+        let cache = DiskCache::new(dir.clone(), 400);
+        for (i, url) in ["https://a/1", "https://a/2", "https://a/3"]
+            .iter()
+            .enumerate()
+        {
+            cache.write(url, &[0; 100]).unwrap();
+            last_used(&cache, url, 300 - 100 * i as u64);
+        }
+        // Reading 1 marks it used, so 2 is now the oldest.
+        assert!(cache.read("https://a/1").is_some());
+        cache.write("https://a/4", &[0; 100]).unwrap();
+        assert_eq!(total(&cache), Some(400), "at the cap, nothing goes");
+        cache.write("https://a/5", &[0; 100]).unwrap();
+        // 500 bytes is over 400, so files go until 300 are left: 2, then 3.
+        assert_eq!(cache.read("https://a/2"), None);
+        assert_eq!(cache.read("https://a/3"), None);
+        for url in ["https://a/1", "https://a/4", "https://a/5"] {
+            assert!(cache.read(url).is_some(), "{url}");
+        }
+        assert_eq!(total(&cache), Some(300));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_prune_leaves_other_files_and_unfinished_writes_alone() {
+        let dir = scratch("prune");
+        fs::create_dir_all(&dir).unwrap();
+        let other = dir.join("notes.txt");
+        fs::write(&other, [0; 500]).unwrap();
+        let name = file_name("https://a/1");
+        let stale = dir.join(format!("{name}.1.0{TMP_SUFFIX}"));
+        let writing = dir.join(format!("{name}.1.1{TMP_SUFFIX}"));
+        fs::write(&stale, b"x").unwrap();
+        fs::write(&writing, b"x").unwrap();
+        File::options()
+            .write(true)
+            .open(&stale)
+            .unwrap()
+            .set_modified(SystemTime::now() - STALE_TMP * 2)
+            .unwrap();
+        let cache = DiskCache::new(dir.clone(), 100);
+        cache.prune();
+        assert!(other.exists());
+        assert!(writing.exists(), "another writer may still be writing it");
+        assert!(!stale.exists());
+        assert_eq!(total(&cache), Some(0));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_override_keeps_tests_off_the_real_cache() {
+        let home = || Some(PathBuf::from("/Users/me"));
+        assert_eq!(
+            cache_dir(Some("/tmp/art".into()), home(), Some("dev.x")),
+            Some(PathBuf::from("/tmp/art"))
+        );
+        assert_eq!(
+            cache_dir(Some("relative/art".into()), home(), Some("dev.x")),
+            None,
+            "a bad override turns the cache off rather than use the real one"
+        );
+        assert_eq!(
+            cache_dir(Some("".into()), home(), Some("dev.x")),
+            Some(PathBuf::from("/Users/me/Library/Caches/dev.x/artwork"))
+        );
+        assert_eq!(
+            cache_dir(None, home(), None),
+            Some(PathBuf::from("/Users/me/Library/Caches/requiem/artwork"))
+        );
+        assert_eq!(
+            cache_dir(None, home(), Some("../x")),
+            Some(PathBuf::from("/Users/me/Library/Caches/requiem/artwork"))
+        );
+        assert_eq!(cache_dir(None, None, Some("dev.x")), None);
+        assert_eq!(cache_dir(None, Some("me".into()), Some("dev.x")), None);
     }
 }
