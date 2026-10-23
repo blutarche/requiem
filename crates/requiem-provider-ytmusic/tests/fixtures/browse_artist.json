@@ -620,7 +620,18 @@
               }
              }
             }
-           ]
+           ],
+           "bottomEndpoint": {
+            "browseEndpoint": {
+             "browseId": "VLOLAK5uy_lNVBcjNtiCwq-n95uoxJ-Gd4vsfMkyZNs",
+             "params": "ggMCCAI%3D",
+             "browseEndpointContextSupportedConfigs": {
+              "browseEndpointContextMusicConfig": {
+               "pageType": "MUSIC_PAGE_TYPE_PLAYLIST"
+              }
+             }
+            }
+           }
           }
          },
          {

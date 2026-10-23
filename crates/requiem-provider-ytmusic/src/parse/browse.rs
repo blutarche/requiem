@@ -1,6 +1,9 @@
 //! Innertube browse pages: the home feed, the Library's playlists, playlists (`VL…`), albums
 //! (`MPREb_…`) and artists (`UC…`). Only Home's continuations are followed.
 
+use std::collections::HashMap;
+use std::time::Duration;
+
 use requiem_core::{
     Collection, CollectionId, CollectionKind, Item, ProviderError, ProviderId, Shelf, Track,
     TrackId,
@@ -12,6 +15,7 @@ use super::{
     ListItem, NavEndpoint, PROVIDER, Run, Runs, SEPARATOR, Thumbnail, WatchEndpoint, collect_items,
     column_runs, is_live, largest, largest_thumbnail, parse_duration, parse_err, parse_subtitle,
 };
+use crate::log::debug;
 
 /// Prefix of collection ids that are Innertube browse ids.
 pub(crate) const BROWSE_PREFIX: &str = "browse:";
@@ -459,10 +463,79 @@ pub(crate) fn parse_artist_page(body: &[u8]) -> Result<Vec<Shelf>, ProviderError
         .collect())
 }
 
+/// The browse id of the playlist an artist's top songs link to ("Show all"): the page's first
+/// song list's `bottomEndpoint`, when it opens a playlist.
+fn top_songs_playlist(body: &[u8]) -> Option<String> {
+    let root: Value = serde_json::from_slice(body).ok()?;
+    let mut lists = Vec::new();
+    find_all(&root, &["musicShelfRenderer"], &mut lists);
+    let target = lists.first()?.pointer("/bottomEndpoint/browseEndpoint")?;
+    let page_type = target.pointer(
+        "/browseEndpointContextSupportedConfigs/browseEndpointContextMusicConfig/pageType",
+    );
+    if page_type.and_then(Value::as_str) != Some("MUSIC_PAGE_TYPE_PLAYLIST") {
+        return None;
+    }
+    let id = target.get("browseId")?.as_str()?;
+    (!id.is_empty()).then(|| id.to_owned())
+}
+
+/// The artist page's top songs rows leave out their durations, which the playlist they link to
+/// has. Fills each missing duration from the playlist row with the same track id; the rows, their
+/// order and their count stay the page's. A playlist that can't be had leaves them as they were.
+fn fill_top_song_durations(
+    body: &[u8],
+    shelves: &mut [Shelf],
+    fetch_playlist: impl FnOnce(&str) -> Result<Vec<u8>, ProviderError>,
+) {
+    let Some(top) = shelves.first_mut().filter(|s| s.title == ARTIST_TOP_SONGS) else {
+        return;
+    };
+    let missing = |item: &Item| matches!(item, Item::Track(t) if t.duration.is_none());
+    if !top.items.iter().any(missing) {
+        return;
+    }
+    let Some(playlist) = top_songs_playlist(body) else {
+        return;
+    };
+    let durations: HashMap<String, Duration> = match fetch_playlist(&playlist)
+        .and_then(|b| parse_collection(&b, CollectionKind::Playlist))
+    {
+        Ok(shelf) => shelf
+            .items
+            .into_iter()
+            .filter_map(|item| match item {
+                Item::Track(t) => Some((t.id.id, t.duration?)),
+                Item::Collection(_) => None,
+            })
+            .collect(),
+        Err(e) => {
+            debug!("artist's top songs without durations: {e}");
+            return;
+        }
+    };
+    for item in &mut top.items {
+        if let Item::Track(t) = item
+            && t.duration.is_none()
+        {
+            t.duration = durations.get(&t.id.id).copied();
+        }
+    }
+}
+
 /// The page `browse_id` opens: an artist's shelves, or a playlist or album as one shelf.
-pub(crate) fn parse_page(body: &[u8], browse_id: &str) -> Result<Vec<Shelf>, ProviderError> {
+/// `fetch_playlist` browses the playlist an artist's top songs link to, for their durations.
+pub(crate) fn parse_page(
+    body: &[u8],
+    browse_id: &str,
+    fetch_playlist: impl FnOnce(&str) -> Result<Vec<u8>, ProviderError>,
+) -> Result<Vec<Shelf>, ProviderError> {
     match collection_kind(browse_id) {
-        CollectionKind::Artist => parse_artist_page(body),
+        CollectionKind::Artist => {
+            let mut shelves = parse_artist_page(body)?;
+            fill_top_song_durations(body, &mut shelves, fetch_playlist);
+            Ok(shelves)
+        }
         kind => Ok(vec![parse_collection(body, kind)?]),
     }
 }
@@ -540,6 +613,8 @@ mod tests {
     // Singles & EPs, Videos, Featured on, Playlists by and Fans might also like shelves,
     // trimmed.
     const ARTIST: &str = include_str!("../../tests/fixtures/browse_artist.json");
+    // The playlist that artist's Top songs link to, 2026-10-23: the five songs the page lists.
+    const TOP_SONGS: &str = include_str!("../../tests/fixtures/browse_artist_top_songs.json");
 
     fn track(item: &Item) -> &Track {
         match item {
@@ -990,13 +1065,110 @@ mod tests {
 
     #[test]
     fn a_browse_id_picks_its_page_parser() {
-        let artist = parse_page(ARTIST.as_bytes(), "UCRr1xG_2WIDs18a6cIiCxeA").unwrap();
+        let artist = parse_page(ARTIST.as_bytes(), DAFT_PUNK, |_| {
+            Err(ProviderError::Parse("no playlist".into()))
+        })
+        .unwrap();
         assert_eq!(artist, parse_artist_page(ARTIST.as_bytes()).unwrap());
-        let album = parse_page(ALBUM.as_bytes(), "MPREb_x").unwrap();
+        let album = parse_page(ALBUM.as_bytes(), "MPREb_x", |_| unreachable!()).unwrap();
         assert_eq!(
             album,
             [parse_collection(ALBUM.as_bytes(), CollectionKind::Album).unwrap()]
         );
+    }
+
+    const DAFT_PUNK: &str = "UCRr1xG_2WIDs18a6cIiCxeA";
+    const TOP_SONGS_ID: &str = "VLOLAK5uy_lNVBcjNtiCwq-n95uoxJ-Gd4vsfMkyZNs";
+
+    fn top_songs(shelves: &[Shelf]) -> Vec<&Track> {
+        assert_eq!(shelves[0].title, "Top songs");
+        shelves[0].items.iter().map(track).collect()
+    }
+
+    #[test]
+    fn an_artists_top_songs_link_to_their_playlist() {
+        assert_eq!(
+            top_songs_playlist(ARTIST.as_bytes()).as_deref(),
+            Some(TOP_SONGS_ID)
+        );
+        let mut v: Value = serde_json::from_str(ARTIST).unwrap();
+        let path = "/contents/singleColumnBrowseResultsRenderer/tabs/0/tabRenderer/content/sectionListRenderer/contents/0/musicShelfRenderer/bottomEndpoint/browseEndpoint";
+        v.pointer_mut(path).unwrap()["browseEndpointContextSupportedConfigs"]["browseEndpointContextMusicConfig"]
+            ["pageType"] = Value::from("MUSIC_PAGE_TYPE_ALBUM");
+        assert_eq!(top_songs_playlist(v.to_string().as_bytes()), None);
+        v.pointer_mut(path).unwrap().take();
+        assert_eq!(top_songs_playlist(v.to_string().as_bytes()), None);
+        assert_eq!(top_songs_playlist(br#"{"contents":{}}"#), None);
+        assert_eq!(top_songs_playlist(b"nope"), None);
+    }
+
+    #[test]
+    fn top_songs_take_their_durations_from_the_playlist_by_track_id() {
+        let mut asked = Vec::new();
+        let shelves = parse_page(ARTIST.as_bytes(), DAFT_PUNK, |id| {
+            asked.push(id.to_owned());
+            Ok(TOP_SONGS.as_bytes().to_vec())
+        })
+        .unwrap();
+        assert_eq!(asked, [TOP_SONGS_ID]);
+        let bare = parse_artist_page(ARTIST.as_bytes()).unwrap();
+        assert!(top_songs(&bare).iter().all(|t| t.duration.is_none()));
+
+        let secs: Vec<Option<u64>> = top_songs(&shelves)
+            .iter()
+            .map(|t| t.duration.map(|d| d.as_secs()))
+            .collect();
+        assert_eq!(
+            secs,
+            [
+                Some(5 * 60 + 38),
+                Some(4 * 60 + 9),
+                Some(5 * 60 + 21),
+                Some(7 * 60 + 10),
+                Some(5 * 60 + 46)
+            ]
+        );
+        // The page's own rows, order and count stay.
+        let mut filled = shelves.clone();
+        for item in &mut filled[0].items {
+            if let Item::Track(t) = item {
+                t.duration = None;
+            }
+        }
+        assert_eq!(filled, bare);
+    }
+
+    #[test]
+    fn a_top_song_the_playlist_lacks_stays_without_a_duration() {
+        let mut v: Value = serde_json::from_str(TOP_SONGS).unwrap();
+        let path = "/contents/twoColumnBrowseResultsRenderer/secondaryContents/sectionListRenderer/contents/0/musicPlaylistShelfRenderer/contents";
+        v.pointer_mut(path)
+            .unwrap()
+            .as_array_mut()
+            .unwrap()
+            .remove(1);
+        let shelves = parse_page(ARTIST.as_bytes(), DAFT_PUNK, |_| {
+            Ok(v.to_string().into_bytes())
+        })
+        .unwrap();
+        let top = top_songs(&shelves);
+        assert_eq!(top.len(), 5);
+        assert_eq!(top[0].duration, Some(Duration::from_secs(5 * 60 + 38)));
+        assert_eq!(top[1].duration, None);
+        assert_eq!(top[2].duration, Some(Duration::from_secs(5 * 60 + 21)));
+    }
+
+    #[test]
+    fn a_playlist_that_fails_leaves_the_artist_page_as_it_was() {
+        let bare = parse_artist_page(ARTIST.as_bytes()).unwrap();
+        let failed = parse_page(ARTIST.as_bytes(), DAFT_PUNK, |_| {
+            Err(ProviderError::Network("offline".into()))
+        })
+        .unwrap();
+        assert_eq!(failed, bare);
+        let garbled = parse_page(ARTIST.as_bytes(), DAFT_PUNK, |_| Ok(b"nope".to_vec())).unwrap();
+        assert_eq!(garbled, bare);
+        assert_eq!(top_songs(&failed).len(), 5);
     }
 
     #[test]

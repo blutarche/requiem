@@ -581,7 +581,9 @@ impl BrowserSession {
     /// playlist or album as one shelf.
     pub(crate) fn page(&self, s: &Signed, browse_id: &str) -> Result<Vec<Shelf>, ProviderError> {
         let body = self.browse(s, "", &browse_body(browse_id))?;
-        parse_page(&body, browse_id)
+        parse_page(&body, browse_id, |playlist| {
+            self.browse(s, "", &browse_body(playlist))
+        })
     }
 }
 

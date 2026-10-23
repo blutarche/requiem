@@ -188,7 +188,9 @@ impl Provider for YtMusicProvider {
                     if let Some(s) = session {
                         return self.session.page(&s, id);
                     }
-                    parse::parse_page(&self.client.browse(id)?, id)
+                    parse::parse_page(&self.client.browse(id)?, id, |playlist| {
+                        self.client.browse(playlist)
+                    })
                 } else {
                     Err(ProviderError::Unplayable(format!(
                         "unknown collection {}",
@@ -277,6 +279,8 @@ mod tests {
     const ARTIST: &str = include_str!("../tests/fixtures/browse_artist.json");
     const PLAYER: &str = include_str!("../tests/fixtures/player_ok.json");
     const PLAYLIST: &str = include_str!("../tests/fixtures/browse_playlist.json");
+    const TOP_SONGS: &str = include_str!("../tests/fixtures/browse_artist_top_songs.json");
+    const TOP_SONGS_ID: &str = "VLOLAK5uy_lNVBcjNtiCwq-n95uoxJ-Gd4vsfMkyZNs";
     const LIBRARY: &str = include_str!("../tests/fixtures/signed_in_library_playlists.json");
 
     const SECRET: &str = "fakeSID-MARKER";
@@ -807,23 +811,55 @@ mod tests {
         ("Featured on", 4),
     ];
 
+    fn durations(shelves: &[Shelf]) -> Vec<Option<u64>> {
+        shelves[0]
+            .items
+            .iter()
+            .map(|item| match item {
+                requiem_core::Item::Track(t) => t.duration.map(|d| d.as_secs()),
+                requiem_core::Item::Collection(_) => panic!("top songs are tracks"),
+            })
+            .collect()
+    }
+
+    const TOP_SONGS_SECS: [Option<u64>; 5] =
+        [Some(338), Some(249), Some(321), Some(430), Some(346)];
+
     #[test]
     fn an_artist_opens_as_its_page_signed_in_or_not() {
         let rig = Rig::new();
         rig.music
             .script_browse(BROWSE_URL, "UCRr1xG_2WIDs18a6cIiCxeA", 200, ARTIST);
+        rig.music
+            .script_browse(BROWSE_URL, TOP_SONGS_ID, 200, TOP_SONGS);
         let shelves = rig.provider().browse(&daft_punk()).unwrap();
         assert_eq!(titles(&shelves), ARTIST_SHELVES);
+        assert_eq!(durations(&shelves), TOP_SONGS_SECS);
+        assert!(rig.music.calls.lock().unwrap().iter().all(|c| !c.signed));
 
         let rig = Rig::new();
         let p = rig.signed_in();
         rig.music
             .script_browse(BROWSE_URL, "UCRr1xG_2WIDs18a6cIiCxeA", 200, ARTIST);
+        rig.music
+            .script_browse(BROWSE_URL, TOP_SONGS_ID, 200, TOP_SONGS);
         let shelves = p.browse(&daft_punk()).unwrap();
         assert_eq!(titles(&shelves), ARTIST_SHELVES);
+        assert_eq!(durations(&shelves), TOP_SONGS_SECS);
         let calls = rig.music.calls.lock().unwrap();
-        let last = calls.last().unwrap();
-        assert!(last.signed && last.body.contains("UCRr1xG_2WIDs18a6cIiCxeA"));
+        let asked = |id: &str| calls.iter().find(|c| c.body.contains(id)).unwrap().signed;
+        assert!(asked("UCRr1xG_2WIDs18a6cIiCxeA") && asked(TOP_SONGS_ID));
+    }
+
+    #[test]
+    fn an_artist_page_opens_without_durations_when_its_playlist_fails() {
+        let rig = Rig::new();
+        rig.music
+            .script_browse(BROWSE_URL, "UCRr1xG_2WIDs18a6cIiCxeA", 200, ARTIST);
+        rig.music.script_browse(BROWSE_URL, TOP_SONGS_ID, 500, "{}");
+        let shelves = rig.provider().browse(&daft_punk()).unwrap();
+        assert_eq!(titles(&shelves), ARTIST_SHELVES);
+        assert_eq!(durations(&shelves), [None; 5]);
     }
 
     #[test]
