@@ -50,9 +50,9 @@ use super::widgets::{
 };
 use super::{Delegate, MainWindow};
 use crate::vm::{
-    self, AccountRow, AccountRowState, Banner, Controls, Dirty, HomeView, Intent, LibraryChip,
-    LibrarySort, LibraryView, List, PageView, PaletteAction, Place, QueueEdit, SearchBody,
-    SearchChip, SearchView, Selection, Service, ServiceFilter, Toast, UiState, Vm,
+    self, AccountRow, AccountRowState, Banner, CollectionPage, Controls, Dirty, HomeView, Intent,
+    LibraryChip, LibrarySort, LibraryView, List, PageView, PaletteAction, Place, QueueEdit,
+    SearchBody, SearchChip, SearchView, Selection, Service, ServiceFilter, Toast, UiState, Vm,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -121,11 +121,12 @@ pub(super) fn numbered(text: &str, font: &NSFont) -> Retained<NSAttributedString
     }
 }
 
-/// Where Back leaves Now Playing or Settings for: the view it was opened `from`, or Home for a
-/// collection that is no longer open.
-fn back_to(from: AppView, collection_open: bool) -> AppView {
+/// Where Back leaves Now Playing or Settings, `here`, for: the view it was opened `from`; Home
+/// instead of a collection that is no longer open, or whose Back, from the `origin` of its
+/// pages, would come back `here`.
+fn back_to(from: AppView, here: AppView, origin: Option<Place>) -> AppView {
     match from {
-        AppView::Collection if !collection_open => AppView::Home,
+        AppView::Collection if origin.is_none_or(|o| o == here.place()) => AppView::Home,
         view => view,
     }
 }
@@ -1458,6 +1459,35 @@ impl Ui {
         self.show(AppView::Collection);
     }
 
+    /// The track of a song table's row: of `list`, or of the queue for `None`.
+    pub fn track_at(&self, list: Option<List>, row: usize) -> Option<Track> {
+        self.vm.borrow().ui().track_at(list, row)
+    }
+
+    /// The playing track's first artist's page, from the view showing now: the link on the
+    /// artist's name in the player bar and on Now Playing.
+    pub fn go_to_playing_artist(&self) {
+        let Some(artist) = self.vm.borrow().ui().playing_artist() else {
+            return;
+        };
+        self.go_to_artist(artist, self.view.get().place());
+    }
+
+    /// Opens `artist`'s page from `from`, unless it is the page showing.
+    pub fn go_to_artist(&self, artist: Collection, from: Place) {
+        let showing = self.view.get() == AppView::Collection
+            && self
+                .vm
+                .borrow()
+                .ui()
+                .collection
+                .as_ref()
+                .is_some_and(|c| c.collection.id == artist.id);
+        if !showing {
+            self.open_collection(artist, from);
+        }
+    }
+
     /// Shows Now Playing, which Back leaves for the view showing now.
     pub fn show_now_playing(&self) {
         let from = self.view.get();
@@ -1483,19 +1513,33 @@ impl Ui {
                     self.run(Intent::CollectionBack);
                     self.show(AppView::Collection);
                 } else {
+                    // Settings, returned to, still leaves for where it was opened from.
+                    let settings_from = self.settings_from.get();
                     self.show(AppView::of(from));
+                    self.settings_from.set(settings_from);
                 }
             }
             AppView::NowPlaying => {
-                let open = self.vm.borrow().ui().collection.is_some();
-                self.show(back_to(self.now_playing_from.get(), open));
+                let origin = self.collection_origin();
+                let here = AppView::NowPlaying;
+                self.show(back_to(self.now_playing_from.get(), here, origin));
             }
             AppView::Settings => {
-                let open = self.vm.borrow().ui().collection.is_some();
-                self.show(back_to(self.settings_from.get(), open));
+                let origin = self.collection_origin();
+                self.show(back_to(self.settings_from.get(), AppView::Settings, origin));
             }
             _ => {}
         }
+    }
+
+    /// Where the open collection's pages were first opened from.
+    fn collection_origin(&self) -> Option<Place> {
+        self.vm
+            .borrow()
+            .ui()
+            .collection
+            .as_ref()
+            .map(CollectionPage::origin)
     }
 
     pub fn can_go_back(&self) -> bool {
@@ -2141,8 +2185,13 @@ impl Ui {
         }
         if let Some(now) = p.now_playing {
             let track = now.track.as_ref().map(|(t, a)| (t.as_str(), a.as_str()));
-            self.bar
-                .set_track(track, &now.total, now.artwork.as_deref(), now.badge);
+            self.bar.set_track(
+                track,
+                now.link.as_deref(),
+                &now.total,
+                now.artwork.as_deref(),
+                now.badge,
+            );
         }
         if let Some((track, next, badge)) = p.now_page {
             self.now_playing.set(track, &next, badge);
@@ -2467,16 +2516,11 @@ impl Ui {
         widgets::set_text(&h.sub, c.collection.subtitle.as_deref().unwrap_or(""));
         h.cover.set_url(c.collection.artwork_url.as_deref());
         widgets::round(&h.cover, if artist { COLLECTION_COVER / 2.0 } else { 8.0 });
-        let back = match (&c.back, c.from) {
-            (Some(title), _) => format!("\u{2039} {title}"),
-            (None, Place::Library) => "\u{2039} Library".to_owned(),
-            (None, Place::Search) => "\u{2039} Search".to_owned(),
-            (None, _) => "\u{2039} Home".to_owned(),
-        };
-        let w = h.back.set_label(&back);
+        let back = vm::back_label(c.back.as_deref(), c.from);
+        let w = h.back.set_label(&format!("\u{2039} {back}"));
         h.back
             .setFrame(rect(PAD, h.back.frame().origin.y, w, BACK_H));
-        widgets::accessibility_label(&h.back, &format!("Back to {}", &back[4..]));
+        widgets::accessibility_label(&h.back, &format!("Back to {back}"));
         let songs = c.rows.len();
         let loaded = c.view == PageView::Ready;
         // An artist's page shows with its shelves alone; another collection needs tracks.
@@ -3048,6 +3092,8 @@ pub(super) fn unix_now() -> u64 {
 
 struct NowPlaying {
     track: Option<(String, String)>,
+    /// The artist the artists' names link to.
+    link: Option<String>,
     total: String,
     artwork: Option<String>,
     badge: Option<Service>,
@@ -3181,6 +3227,7 @@ impl Patch {
                         .now_playing
                         .as_ref()
                         .map(|t| (t.title.clone(), vm::artists(t))),
+                    link: s.playing_artist().map(|a| a.title),
                     total: s.total_text(),
                     artwork: s.now_playing.as_ref().and_then(|t| t.artwork_url.clone()),
                     badge: s.now_playing_badge(),
@@ -3217,17 +3264,38 @@ mod tests {
 
     #[test]
     fn back_from_now_playing_skips_a_collection_that_closed() {
-        assert_eq!(back_to(AppView::Collection, true), AppView::Collection);
-        assert_eq!(back_to(AppView::Collection, false), AppView::Home);
+        let now = AppView::NowPlaying;
+        let open = Some(Place::Library);
+        assert_eq!(back_to(AppView::Collection, now, open), AppView::Collection);
+        assert_eq!(back_to(AppView::Collection, now, None), AppView::Home);
         for view in [
             AppView::Home,
             AppView::Search,
             AppView::Library,
             AppView::Queue,
         ] {
-            assert_eq!(back_to(view, false), view);
-            assert_eq!(back_to(view, true), view);
+            assert_eq!(back_to(view, now, None), view);
+            assert_eq!(back_to(view, now, open), view);
         }
+    }
+
+    #[test]
+    fn back_skips_an_artist_opened_from_the_page_it_leaves() {
+        // Now Playing over an album, then its artist from Now Playing, which replaced the
+        // album: Back from the artist shows Now Playing, whose Back must not show the artist.
+        let from_now = Some(Place::NowPlaying);
+        let (now, settings) = (AppView::NowPlaying, AppView::Settings);
+        assert_eq!(back_to(AppView::Collection, now, from_now), AppView::Home);
+        assert_eq!(
+            back_to(AppView::Collection, settings, Some(Place::Settings)),
+            AppView::Home
+        );
+        // Opened from elsewhere, the artist is where Back goes.
+        assert_eq!(
+            back_to(AppView::Collection, settings, from_now),
+            AppView::Collection
+        );
+        assert_eq!(back_to(AppView::Search, now, from_now), AppView::Search);
     }
 
     #[test]
@@ -3285,6 +3353,7 @@ mod tests {
             now.track,
             Some(("Night Drive Home".into(), "Hollow Coast".into()))
         );
+        assert_eq!(now.link.as_deref(), Some("Hollow Coast"));
         assert_eq!(now.total, "3:45");
         assert_eq!(now.artwork, demo::artwork_url(0));
         let (track, next, badge) = p.now_page.unwrap();

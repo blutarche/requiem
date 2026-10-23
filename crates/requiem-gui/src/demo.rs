@@ -295,6 +295,39 @@ fn taken_in_turn(i: usize, mixed: usize) -> ProviderId {
     }
 }
 
+/// The id of artist `name`'s page, whichever service it is on.
+fn artist_id(name: &str) -> String {
+    let slug: Vec<String> = name
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|w| !w.is_empty())
+        .map(str::to_lowercase)
+        .collect();
+    format!("{ARTIST_PREFIX}{}", slug.join("-"))
+}
+
+const ARTIST_PREFIX: &str = "demo-artist-";
+
+/// The artist whose page `id` is: one a search finds, or one of a result's.
+fn artist_named(id: &str) -> Option<&'static str> {
+    SEARCH_ARTISTS
+        .iter()
+        .map(|(name, _)| *name)
+        .chain(
+            RESULTS
+                .iter()
+                .flat_map(|(_, artists, _, _)| artists.iter().copied()),
+        )
+        .find(|name| artist_id(name) == id)
+}
+
+/// Moves `t` to `provider`, with its artists' pages.
+fn move_to(t: &mut Track, provider: &ProviderId) {
+    t.id.provider = provider.clone();
+    for id in t.artist_ids.iter_mut().flatten() {
+        id.provider = provider.clone();
+    }
+}
+
 /// Home's shelves alternate throughout, as both services have them.
 fn collection_id(kind: &str, i: usize) -> CollectionId {
     CollectionId {
@@ -308,7 +341,7 @@ fn home_tracks() -> Vec<Track> {
     tracks.drain(..12);
     tracks.truncate(12);
     for (k, t) in tracks.iter_mut().enumerate() {
-        t.id.provider = taken_in_turn(k, usize::MAX);
+        move_to(t, &taken_in_turn(k, usize::MAX));
         t.artwork_url = (k % 5 != 4).then(|| demo_url(HOME_TRACK_ART + k));
     }
     tracks
@@ -574,7 +607,7 @@ fn collection_tracks(provider: &ProviderId) -> Vec<Track> {
     let mut tracks = results();
     tracks.truncate(COLLECTION_LEN);
     for t in &mut tracks {
-        t.id.provider = provider.clone();
+        move_to(t, provider);
     }
     tracks
 }
@@ -603,17 +636,29 @@ pub fn results() -> Vec<Track> {
     RESULTS
         .iter()
         .enumerate()
-        .map(|(i, (title, artists, album, secs))| Track {
-            id: TrackId {
-                provider: taken_in_turn(i, MIXED_RESULTS),
-                id: format!("demo-{i:02}"),
-            },
-            title: (*title).to_owned(),
-            artists: artists.iter().map(|a| (*a).to_owned()).collect(),
-            artist_ids: Vec::new(),
-            album: album.map(str::to_owned),
-            duration: Some(Duration::from_secs(*secs)),
-            artwork_url: artwork_url(i),
+        .map(|(i, (title, artists, album, secs))| {
+            let provider = taken_in_turn(i, MIXED_RESULTS);
+            let artist_ids = artists
+                .iter()
+                .map(|a| {
+                    Some(CollectionId {
+                        provider: provider.clone(),
+                        id: artist_id(a),
+                    })
+                })
+                .collect();
+            Track {
+                id: TrackId {
+                    provider,
+                    id: format!("demo-{i:02}"),
+                },
+                title: (*title).to_owned(),
+                artists: artists.iter().map(|a| (*a).to_owned()).collect(),
+                artist_ids,
+                album: album.map(str::to_owned),
+                duration: Some(Duration::from_secs(*secs)),
+                artwork_url: artwork_url(i),
+            }
         })
         .collect()
 }
@@ -626,9 +671,20 @@ fn ytmusic_collection(
     subtitle: String,
     art: Option<usize>,
 ) -> Collection {
+    collection_of(&ytmusic(), kind, id, title, subtitle, art)
+}
+
+fn collection_of(
+    provider: &ProviderId,
+    kind: CollectionKind,
+    id: String,
+    title: &str,
+    subtitle: String,
+    art: Option<usize>,
+) -> Collection {
     Collection {
         id: CollectionId {
-            provider: ytmusic(),
+            provider: provider.clone(),
             id,
         },
         kind,
@@ -646,7 +702,7 @@ pub fn search_artists() -> Vec<Collection> {
         .map(|(i, (name, audience))| {
             ytmusic_collection(
                 CollectionKind::Artist,
-                format!("demo-artist-{i:02}"),
+                artist_id(name),
                 name,
                 format!("Artist \u{2022} {audience} monthly audience"),
                 (i != 2).then_some(SEARCH_ARTIST_ART + i),
@@ -655,18 +711,18 @@ pub fn search_artists() -> Vec<Collection> {
         .collect()
 }
 
-/// The page of `artist`: its top songs, its albums, its singles and EPs, and the playlists
-/// it is featured on, in YouTube Music's order.
-fn artist_page(artist: &Collection) -> Vec<Shelf> {
-    let name = artist.title.as_str();
+/// The page of artist `name` on `provider`: its top songs, its albums, its singles and EPs,
+/// and on YouTube Music the playlists it is featured on, in that service's order.
+fn artist_page(name: &str, provider: &ProviderId) -> Vec<Shelf> {
     let mut songs = results();
     songs.sort_by_key(|t| !t.artists.iter().any(|a| a == name));
     let top = songs.into_iter().take(5).map(|mut t| {
-        t.id.provider = ytmusic();
+        move_to(&mut t, provider);
         Item::Track(t)
     });
     let release = |i: usize, title: &str, subtitle: String| {
-        Item::Collection(ytmusic_collection(
+        Item::Collection(collection_of(
+            provider,
             CollectionKind::Album,
             format!("demo-release-{i:02}"),
             title,
@@ -688,21 +744,23 @@ fn artist_page(artist: &Collection) -> Vec<Shelf> {
                 format!("{kind} \u{2022} {year}"),
             )
         });
-    let featured = search_results()
-        .playlists
-        .into_iter()
-        .take(4)
-        .map(Item::Collection);
     let shelf = |title: &str, items: Vec<Item>| Shelf {
         title: title.to_owned(),
         items,
     };
-    vec![
+    let mut shelves = vec![
         shelf("Top songs", top.collect()),
         shelf("Albums", albums.collect()),
         shelf("Singles & EPs", singles.collect()),
-        shelf("Featured on", featured.collect()),
-    ]
+    ];
+    if *provider == ytmusic() {
+        let featured = search_results().playlists.into_iter().take(4);
+        shelves.push(shelf(
+            "Featured on",
+            featured.map(Item::Collection).collect(),
+        ));
+    }
+    shelves
 }
 
 /// What every demo search finds. Only YouTube Music finds artists, albums and playlists, as in
@@ -886,9 +944,9 @@ impl Daemon {
                 let shelves = match &page {
                     Page::Home => home(),
                     Page::Library => library(),
-                    Page::Collection(id) if id.id.starts_with("demo-artist-") => {
-                        match search_artists().iter().find(|a| a.id == *id) {
-                            Some(artist) => artist_page(artist),
+                    Page::Collection(id) if id.id.starts_with(ARTIST_PREFIX) => {
+                        match artist_named(&id.id) {
+                            Some(name) => artist_page(name, &id.provider),
                             None => Vec::new(),
                         }
                     }
@@ -1062,8 +1120,9 @@ fn run_intent(vm: &mut Vm, daemon: &mut Daemon, intent: Intent) {
 /// `HomeSignedOut` set the account; `HomeSpotify` filters Home to Spotify; `SettingsSession`
 /// opens YouTube Music's session form in Settings; `NowPlayingEmpty` stops playback;
 /// `NowPlayingLast` plays the queue's last track; `SearchAlbums`, `SearchSongs` and
-/// `SearchArtists` pick that chip of the results; `Artist` opens the top artist's page. Other
-/// views get the plain start.
+/// `SearchArtists` pick that chip of the results; `Artist` opens the top artist's page;
+/// `ArtistSpotify` opens the playing Spotify track's artist from Now Playing. Other views get
+/// the plain start.
 pub fn start_in(view: View) -> (Vm, Daemon) {
     let t0 = Instant::now();
     let mut vm = Vm::new_at(t0);
@@ -1173,6 +1232,15 @@ pub fn start_in(view: View) -> (Vm, Daemon) {
                 from: Place::Search,
             };
             run_intent(&mut vm, &mut daemon, open);
+        }
+        View::ArtistSpotify => {
+            if let Some(collection) = vm.ui().playing_artist() {
+                let open = Intent::OpenCollection {
+                    collection,
+                    from: Place::NowPlaying,
+                };
+                run_intent(&mut vm, &mut daemon, open);
+            }
         }
         View::Search
         | View::Queue
@@ -1297,6 +1365,81 @@ mod tests {
                 .iter()
                 .all(|t| t.id.provider == c.id.provider)
         );
+        // A track's artists' pages are on its own service.
+        let tracks = results().into_iter().chain(home_tracks());
+        for t in tracks.chain(collection_tracks(&spotify())) {
+            assert_eq!(t.artist_ids.len(), t.artists.len(), "{}", t.title);
+            assert!(
+                t.artist_ids
+                    .iter()
+                    .flatten()
+                    .all(|id| id.provider == t.id.provider),
+                "{}",
+                t.title
+            );
+        }
+    }
+
+    #[test]
+    fn every_demo_artist_has_a_page_on_each_service() {
+        let mut daemon = Daemon::default();
+        let mut browse = |id: CollectionId| {
+            let page = Page::Collection(id);
+            match &daemon.apply(Command::Browse { req: 1, page })[..] {
+                [Event::BrowseResults { shelves, .. }] => shelves.clone(),
+                other => panic!("expected a page, got {other:?}"),
+            }
+        };
+        for t in results() {
+            for (name, id) in t.artist_pages() {
+                let shelves = browse(id.clone());
+                let titles: Vec<&str> = shelves.iter().map(|s| s.title.as_str()).collect();
+                let mut want = vec!["Top songs", "Albums", "Singles & EPs"];
+                // Only YouTube Music's artist pages list the playlists an artist is on.
+                if id.provider == ytmusic() {
+                    want.push("Featured on");
+                }
+                assert_eq!(titles, want, "{name}");
+                assert!(
+                    shelves[..3]
+                        .iter()
+                        .flat_map(|s| &s.items)
+                        .all(|i| *vm::item_provider(i) == id.provider),
+                    "{name}"
+                );
+                let Item::Track(top) = &shelves[0].items[0] else {
+                    panic!("{name}'s page leads with a song");
+                };
+                assert!(top.artists.iter().any(|a| a == name), "{name}");
+                let linked = top.artist_ids.iter().flatten();
+                assert!(linked.clone().any(|a| a == id), "{name}");
+                assert!(linked.clone().all(|a| a.provider == id.provider), "{name}");
+            }
+        }
+        // A search's artists open the same pages.
+        for artist in search_artists() {
+            assert!(!browse(artist.id).is_empty(), "{}", artist.title);
+        }
+        assert!(
+            browse(CollectionId {
+                provider: spotify(),
+                id: "demo-artist-nobody".into(),
+            })
+            .is_empty()
+        );
+    }
+
+    #[test]
+    fn the_spotify_artist_view_opens_the_playing_artists_page_from_now_playing() {
+        let (vm, _) = start_in(View::ArtistSpotify);
+        let page = vm.ui().collection.as_ref().expect("an open page");
+        assert_eq!(page.collection.kind, CollectionKind::Artist);
+        assert_eq!(page.collection.title, "Hollow Coast");
+        assert_eq!(page.collection.id.provider, spotify());
+        assert_eq!(page.from, Place::NowPlaying);
+        assert_eq!(page.browse.load, vm::Load::Done);
+        assert_eq!(page.tracks.len(), 5);
+        assert!(page.tracks.iter().all(|t| t.id.provider == spotify()));
     }
 
     #[test]

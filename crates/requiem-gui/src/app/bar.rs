@@ -8,14 +8,15 @@ use objc2::runtime::AnyObject;
 use objc2::sel;
 use objc2_app_kit::{NSButton, NSTextAlignment, NSTextField, NSView};
 use objc2_core_foundation::CGFloat;
-use objc2_foundation::{MainThreadMarker, NSPoint};
+use objc2_foundation::{MainThreadMarker, NSPoint, NSRect};
 use requiem_macos::artwork::Cover;
 
 use super::badge::{self, Badge};
 use super::theme::{self, Icon, Weight};
+use super::ui;
 use super::widgets::{
     self, FLEX_W, FadeLabel, HoverButton, PIN_BOTTOM, PIN_LEFT, PIN_RIGHT, PIN_TOP, Slider,
-    SliderKind, rect,
+    SliderKind, TextLink, rect,
 };
 use crate::vm::{Controls, Service};
 
@@ -25,6 +26,8 @@ pub struct PlayerBar {
     badge: Retained<Badge>,
     title: FadeLabel,
     artists: FadeLabel,
+    /// Over the artists' names: the first linked artist's page.
+    artist_link: Retained<TextLink>,
     prev: Retained<HoverButton>,
     play: Retained<HoverButton>,
     next: Retained<HoverButton>,
@@ -134,6 +137,10 @@ impl PlayerBar {
         }
         widgets::accessibility_label(&open, "Show now playing");
         view.addSubview(&open);
+        let artist_link = TextLink::new(mtm, &artists, || {
+            ui::with(|ui| ui.go_to_playing_artist());
+        });
+        view.addSubview(&artist_link);
 
         let cw = Self::CENTER_W;
         let center = widgets::view(
@@ -257,6 +264,7 @@ impl PlayerBar {
             badge,
             title: FadeLabel::new(title),
             artists: FadeLabel::new(artists),
+            artist_link,
             prev,
             play,
             next,
@@ -269,11 +277,12 @@ impl PlayerBar {
         }
     }
 
-    /// `None` when nothing is loaded. `badge` is the track's service, while the queue mixes
-    /// services.
+    /// `None` when nothing is loaded. `link` names the artist the artists' names open. `badge`
+    /// is the track's service, while the queue mixes services.
     pub fn set_track(
         &self,
         track: Option<(&str, &str)>,
+        link: Option<&str>,
         total: &str,
         artwork: Option<&str>,
         badge: Option<Service>,
@@ -292,6 +301,8 @@ impl PlayerBar {
         self.title.set(title, &color, rest(&self.title.view, mid));
         let at = rest(&self.artists.view, Self::ARTISTS_Y);
         self.artists.set(artists, &theme::muted(), at);
+        let frame = NSRect::new(at, self.artists.view.frame().size);
+        self.artist_link.set(link, artists, frame);
         widgets::set_text(&self.total, total);
     }
 

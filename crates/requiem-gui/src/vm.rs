@@ -434,7 +434,7 @@ pub enum TopResult {
     /// The first artist found. `playable` once its top songs are known, which its Play plays.
     Artist { artist: Collection, playable: bool },
     /// The first song, when no artist was found.
-    Song(Track),
+    Song(Box<Track>),
 }
 
 /// What the Search page lists, below its chips.
@@ -1304,6 +1304,20 @@ impl UiState {
         }
     }
 
+    /// The track of row `row` of `list`'s song table, or of the queue's for `None`.
+    pub fn track_at(&self, list: Option<List>, row: usize) -> Option<Track> {
+        match list {
+            Some(list) => self.list_track(list, row),
+            None => self.queue.get(row).cloned(),
+        }
+    }
+
+    /// The page of the playing track's first artist that has one.
+    pub fn playing_artist(&self) -> Option<Collection> {
+        let (name, id) = self.now_playing.as_ref()?.artist_pages().next()?;
+        Some(artist_page(name, id))
+    }
+
     /// Whether "Quit and Stop Music" has a player to stop.
     pub fn can_stop_player(&self) -> bool {
         self.connection == Connection::Connected
@@ -1431,7 +1445,7 @@ impl UiState {
                             artist: artist.clone(),
                             playable: self.top_artist_playable(),
                         }),
-                        None => songs.first().cloned().map(TopResult::Song),
+                        None => songs.first().cloned().map(|t| TopResult::Song(Box::new(t))),
                     };
                     let after = usize::from(matches!(top, Some(TopResult::Song(_))));
                     SearchBody::All {
@@ -2762,6 +2776,53 @@ pub fn fmt_time(d: Duration) -> String {
 
 pub fn artists(track: &Track) -> String {
     track.artists.join(", ")
+}
+
+/// What a song's Go to Artist offers: nothing when none of its artists has a page, the page
+/// of the one that has, or a choice between those of all that have.
+#[derive(Debug, Clone, PartialEq)]
+pub enum GoToArtist {
+    None,
+    One(Collection),
+    Several(Vec<Collection>),
+}
+
+pub fn go_to_artist(track: &Track) -> GoToArtist {
+    let mut pages: Vec<Collection> = track
+        .artist_pages()
+        .map(|(name, id)| artist_page(name, id))
+        .collect();
+    match pages.len() {
+        0 => GoToArtist::None,
+        1 => GoToArtist::One(pages.remove(0)),
+        _ => GoToArtist::Several(pages),
+    }
+}
+
+/// Artist `name`'s page `id`, as a song links to it: its header names the artist alone, as
+/// the song gives no photo.
+pub fn artist_page(name: &str, id: &CollectionId) -> Collection {
+    Collection {
+        id: id.clone(),
+        kind: CollectionKind::Artist,
+        title: name.to_owned(),
+        subtitle: Some("Artist".into()),
+        artwork_url: None,
+    }
+}
+
+/// What a collection's Back returns to: the collection it was opened from, by its
+/// `previous` title, else the page it was opened `from`.
+pub fn back_label(previous: Option<&str>, from: Place) -> String {
+    let page = match from {
+        Place::Search => "Search",
+        Place::Library => "Library",
+        Place::Queue => "Queue",
+        Place::NowPlaying => "Now Playing",
+        Place::Settings => "Settings",
+        Place::Home | Place::Collection => "Home",
+    };
+    previous.unwrap_or(page).to_owned()
 }
 
 /// Whether the queue's row `row` has played: it comes before the current one.
@@ -7000,6 +7061,160 @@ mod tests {
         // Nothing to go back to now.
         assert!(vm.intent(Intent::CollectionBack).is_empty());
         assert_eq!(vm.ui().collection.as_ref().unwrap().collection.id.id, "ar0");
+    }
+
+    fn page_id(id: &str) -> CollectionId {
+        CollectionId {
+            provider: provider(),
+            id: id.into(),
+        }
+    }
+
+    /// Track `id`, whose first artist, "Artist `id`", has page `ar-<id>`, and whose guest has
+    /// none.
+    fn linked(id: &str) -> Track {
+        Track {
+            artist_ids: vec![Some(page_id(&format!("ar-{id}"))), None],
+            ..track(id, 200)
+        }
+    }
+
+    #[test]
+    fn go_to_artist_offers_the_artists_that_have_pages() {
+        // Kept before artist ids, or with none known.
+        assert_eq!(go_to_artist(&track("old", 200)), GoToArtist::None);
+        let unlinked = Track {
+            artist_ids: vec![None, None],
+            ..track("t", 200)
+        };
+        assert_eq!(go_to_artist(&unlinked), GoToArtist::None);
+
+        let one = linked("t");
+        let page = super::artist_page("Artist t", &page_id("ar-t"));
+        assert_eq!(go_to_artist(&one), GoToArtist::One(page.clone()));
+        assert_eq!(
+            (page.kind, page.title.as_str(), page.artwork_url),
+            (CollectionKind::Artist, "Artist t", None)
+        );
+
+        let both = Track {
+            artist_ids: vec![Some(page_id("ar-t")), Some(page_id("ar-guest"))],
+            ..track("t", 200)
+        };
+        let GoToArtist::Several(pages) = go_to_artist(&both) else {
+            panic!("expected a choice of artists");
+        };
+        let named: Vec<(&str, &str)> = pages
+            .iter()
+            .map(|p| (p.title.as_str(), p.id.id.as_str()))
+            .collect();
+        assert_eq!(named, [("Artist t", "ar-t"), ("Guest", "ar-guest")]);
+    }
+
+    #[test]
+    fn go_to_artist_opens_the_artists_page_and_back_returns_where_it_came_from() {
+        let mut vm = connected();
+        vm.apply(signed_in());
+        assert_eq!(vm.ui().playing_artist(), None);
+        // Both of its artists have pages; the first is the link.
+        vm.apply(Event::NowPlaying {
+            track: Track {
+                artist_ids: vec![Some(page_id("ar-np")), Some(page_id("ar-guest"))],
+                ..track("np", 200)
+            },
+            duration: None,
+        });
+        vm.apply(Event::QueueChanged {
+            tracks: vec![track("q0", 200), linked("q1")],
+            current: Some(1),
+        });
+        vm.take_commands();
+
+        // The playing track's artist, from Now Playing: the page is fetched, and Back, with
+        // no collection before it, leaves for Now Playing.
+        let artist = vm
+            .ui()
+            .playing_artist()
+            .expect("the playing artist has a page");
+        assert_eq!(artist.id, page_id("ar-np"));
+        let cmds = browses(&vm.intent(Intent::OpenCollection {
+            collection: artist,
+            from: Place::NowPlaying,
+        }));
+        assert_eq!(cmds, [(cmds[0].0, Page::Collection(page_id("ar-np")))]);
+        let page = vm.ui().collection.as_ref().unwrap();
+        assert_eq!(
+            (page.from, page.previous.is_none()),
+            (Place::NowPlaying, true)
+        );
+        assert_eq!(back_label(None, page.from), "Now Playing");
+        assert_eq!(vm.ui().place, Place::Collection);
+        assert!(vm.intent(Intent::CollectionBack).is_empty());
+
+        // A queue row's artist.
+        let row = vm.ui().track_at(None, 1).unwrap();
+        assert_eq!(row.id.id, "q1");
+        assert_eq!(
+            go_to_artist(&vm.ui().track_at(None, 0).unwrap()),
+            GoToArtist::None
+        );
+        let GoToArtist::One(artist) = go_to_artist(&row) else {
+            panic!("expected q1's artist");
+        };
+        vm.intent(Intent::OpenCollection {
+            collection: artist,
+            from: Place::Queue,
+        });
+        assert_eq!(vm.ui().collection.as_ref().unwrap().from, Place::Queue);
+
+        // An album's track's artist: Back returns to the album, as it was.
+        let album = collection("al0");
+        let cmds = browses(&vm.intent(Intent::OpenCollection {
+            collection: album.clone(),
+            from: Place::Search,
+        }));
+        let album_tracks = vec![Item::Track(track("a0", 200)), Item::Track(linked("a1"))];
+        vm.apply(results(
+            cmds[0].0,
+            cmds[0].1.clone(),
+            vec![shelf("", album_tracks)],
+        ));
+        let row = vm.ui().track_at(Some(List::Collection), 1).unwrap();
+        let GoToArtist::One(artist) = go_to_artist(&row) else {
+            panic!("expected a1's artist");
+        };
+        let cmds = browses(&vm.intent(Intent::OpenCollection {
+            collection: artist,
+            from: Place::Collection,
+        }));
+        assert_eq!(cmds, [(cmds[0].0, Page::Collection(page_id("ar-a1")))]);
+        let page = vm.ui().collection.as_ref().unwrap();
+        let back = page.previous.as_ref().map(|p| p.collection.title.as_str());
+        assert_eq!(back_label(back, page.from), album.title);
+        assert!(
+            vm.intent(Intent::CollectionBack).is_empty(),
+            "the album is kept"
+        );
+        let page = vm.ui().collection.as_ref().unwrap();
+        assert_eq!(
+            (&page.collection, page.from, page.tracks.len()),
+            (&album, Place::Search, 2)
+        );
+    }
+
+    #[test]
+    fn back_names_the_page_a_collection_was_opened_from() {
+        let label = |from| back_label(None, from);
+        assert_eq!(label(Place::Home), "Home");
+        assert_eq!(label(Place::Search), "Search");
+        assert_eq!(label(Place::Library), "Library");
+        assert_eq!(label(Place::Queue), "Queue");
+        assert_eq!(label(Place::NowPlaying), "Now Playing");
+        assert_eq!(label(Place::Settings), "Settings");
+        assert_eq!(
+            back_label(Some("Discovery"), Place::Collection),
+            "Discovery"
+        );
     }
 
     /// Lands the answer to a search for `query`.

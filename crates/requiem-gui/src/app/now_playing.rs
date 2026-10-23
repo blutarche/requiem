@@ -16,7 +16,7 @@ use super::badge::{self, Badge};
 use super::shelves::FlippedView;
 use super::theme::{self, Icon, Weight};
 use super::ui;
-use super::widgets::{self, EmptyState, FLEX_H, FLEX_W, HoverButton, rect};
+use super::widgets::{self, EmptyState, FLEX_H, FLEX_W, HoverButton, TextLink, rect};
 use crate::vm::{self, Service};
 
 /// The cover's distance from the page's top and left edges.
@@ -203,6 +203,8 @@ pub struct NowPlayingPage {
     badge: Retained<Badge>,
     title: Retained<NSTextField>,
     artists: Retained<NSTextField>,
+    /// Over the artists' names: the first linked artist's page.
+    artist_link: Retained<TextLink>,
     album: Retained<NSTextField>,
     up_next: Retained<NSTextField>,
     rows: Vec<NextRow>,
@@ -282,6 +284,10 @@ impl NowPlayingPage {
             content.addSubview(&row.view);
         }
         content.addSubview(&button);
+        let artist_link = TextLink::new(mtm, &artists, || {
+            ui::with(|ui| ui.go_to_playing_artist());
+        });
+        content.addSubview(&artist_link);
         let empty = EmptyState::new(mtm, bounds, Icon::Music, target, sel!(showHome:));
         empty.set(
             Icon::Music,
@@ -300,6 +306,7 @@ impl NowPlayingPage {
             badge,
             title,
             artists,
+            artist_link,
             album,
             up_next,
             rows,
@@ -374,6 +381,13 @@ impl NowPlayingPage {
         };
         place(&self.title, 0.0);
         place(&self.artists, 4.0);
+        let link = self.track.borrow().as_ref().and_then(|t| {
+            let (name, _) = t.artist_pages().next()?;
+            Some(name.to_owned())
+        });
+        let text = self.artists.stringValue().to_string();
+        self.artist_link
+            .set(link.as_deref(), &text, self.artists.frame());
         if !self.album.isHidden() {
             place(&self.album, 2.0);
         }

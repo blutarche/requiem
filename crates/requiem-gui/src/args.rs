@@ -76,10 +76,12 @@ pub enum View {
     SearchArtists,
     /// Demo only: the top artist's page, opened from the search results.
     Artist,
+    /// Demo only: the playing Spotify track's artist's page, opened from Now Playing.
+    ArtistSpotify,
 }
 
 impl View {
-    const NAMES: [(&str, View); 30] = [
+    const NAMES: [(&str, View); 31] = [
         ("home", View::Home),
         ("search", View::Search),
         ("library", View::Library),
@@ -110,6 +112,7 @@ impl View {
         ("search-songs", View::SearchSongs),
         ("search-artists", View::SearchArtists),
         ("artist", View::Artist),
+        ("artist-spotify", View::ArtistSpotify),
     ];
 
     /// Whether the view is a staged demo state rather than a place in the app.
@@ -294,6 +297,7 @@ mod tests {
             ("search-songs", View::SearchSongs),
             ("search-artists", View::SearchArtists),
             ("artist", View::Artist),
+            ("artist-spotify", View::ArtistSpotify),
         ] {
             assert_eq!(p(&["--demo", "--view", name]).unwrap().view, view);
             assert_eq!(p(&["--smoke", "--view", name]).unwrap().view, view);

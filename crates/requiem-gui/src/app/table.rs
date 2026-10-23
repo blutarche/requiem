@@ -22,14 +22,14 @@ use objc2_foundation::{
     MainThreadMarker, NSAttributedString, NSEdgeInsets, NSIndexSet, NSInteger, NSNotification,
     NSNotificationCenter, NSObjectProtocol, NSPoint, NSRect, NSSize, NSString,
 };
-use requiem_core::Track;
+use requiem_core::{Collection, Track};
 use requiem_macos::artwork::Cover;
 
 use super::badge::{self, Badge};
 use super::theme::{self, Icon, Weight};
 use super::ui;
 use super::widgets::{self, FLEX_H, FLEX_W, HoverButton, PIN_BOTTOM, PIN_LEFT, PIN_TOP, rect};
-use crate::vm::{self, Intent, List, QueueEdit, Service};
+use crate::vm::{self, GoToArtist, Intent, List, Place, QueueEdit, Service};
 
 pub const ROW_H: CGFloat = 36.0;
 /// The title's artwork, before the title.
@@ -138,6 +138,8 @@ pub struct ControllerIvars {
     table: OnceCell<Weak<NSTableView>>,
     /// The row outlined while its context menu is open.
     menu_row: Cell<Option<NSInteger>>,
+    /// The pages of the artists of the context menu's row: Go to Artist's, by tag.
+    artists: RefCell<Vec<Collection>>,
 }
 
 define_class!(
@@ -175,6 +177,11 @@ define_class!(
         #[unsafe(method(menuDidClose:))]
         fn menu_did_close(&self, _menu: &NSMenu) {
             self.outline(None);
+        }
+
+        #[unsafe(method(menuNeedsUpdate:))]
+        fn menu_needs_update(&self, menu: &NSMenu) {
+            self.offer_artists(menu);
         }
     }
 
@@ -269,6 +276,23 @@ define_class!(
             ui::with(|ui| ui.edit_queue(QueueEdit::Clear));
         }
 
+        /// Opens the artist of the item's tag, from the page the table is on.
+        #[unsafe(method(contextGoToArtist:))]
+        fn context_go_to_artist(&self, sender: Option<&NSMenuItem>) {
+            let i = sender.map_or(0, NSMenuItem::tag);
+            let artist = usize::try_from(i)
+                .ok()
+                .and_then(|i| self.ivars().artists.borrow().get(i).cloned());
+            let from = match self.ivars().kind {
+                Kind::Results => Place::Search,
+                Kind::Collection => Place::Collection,
+                Kind::Queue => Place::Queue,
+            };
+            if let Some(artist) = artist {
+                ui::with(|ui| ui.go_to_artist(artist, from));
+            }
+        }
+
         #[unsafe(method(validateMenuItem:))]
         fn validate_menu_item(&self, item: &NSMenuItem) -> bool {
             self.validate(item)
@@ -347,6 +371,31 @@ impl Controller {
         };
     }
 
+    /// Sets Go to Artist for the clicked row: the one artist with a page, a submenu of those
+    /// with one, or, with none, nothing to open, which `validate` disables.
+    fn offer_artists(&self, menu: &NSMenu) {
+        let items = menu.itemArray();
+        let Some(item) = items
+            .iter()
+            .find(|i| i.action() == Some(sel!(contextGoToArtist:)))
+        else {
+            return;
+        };
+        let track = self
+            .clicked_row()
+            .and_then(|row| ui::with(|ui| ui.track_at(self.list(), row)).flatten());
+        let pages = match track.map_or(GoToArtist::None, |t| vm::go_to_artist(&t)) {
+            GoToArtist::None => Vec::new(),
+            GoToArtist::One(page) => vec![page],
+            GoToArtist::Several(pages) => pages,
+        };
+        let (_, names) = artist_item(&pages);
+        let submenu = names.map(|names| artists_menu(self.mtm(), &names, self));
+        item.setTag(0);
+        item.setSubmenu(submenu.as_deref());
+        *self.ivars().artists.borrow_mut() = pages;
+    }
+
     fn edit_clicked(&self, edit: fn(usize) -> QueueEdit) {
         if let Some(row) = self.clicked_row() {
             ui::with(|ui| ui.edit_queue(edit(row)));
@@ -368,6 +417,9 @@ impl Controller {
                 edit(QueueEdit::MoveDown)
             } else if action == Some(sel!(contextClear:)) {
                 ui.can_edit(QueueEdit::Clear)
+            } else if action == Some(sel!(contextGoToArtist:)) {
+                // Go to Artist, or an artist in its submenu: `offer_artists` kept the pages.
+                artist_item(&self.ivars().artists.borrow()).0
             } else {
                 row.is_some_and(|r| r < rows) && ui.playback().1.player
             }
@@ -1235,6 +1287,7 @@ impl Table {
             enabled: Cell::new(true),
             table: OnceCell::new(),
             menu_row: Cell::new(None),
+            artists: RefCell::new(Vec::new()),
         });
         // SAFETY: NSObject's `init`.
         let controller: Retained<Controller> = unsafe { msg_send![super(controller), init] };
@@ -1454,12 +1507,16 @@ fn context_menu(mtm: MainThreadMarker, kind: Kind, target: &Controller) -> Retai
         Kind::Results | Kind::Collection => &[
             Some(("Play", sel!(contextPlay:))),
             Some(("Add to Queue", sel!(contextAdd:))),
+            None,
+            Some((GO_TO_ARTIST, sel!(contextGoToArtist:))),
         ],
         Kind::Queue => &[
             Some(("Play", sel!(contextPlay:))),
             Some(("Remove from Queue", sel!(contextRemove:))),
             Some(("Move Up", sel!(contextMoveUp:))),
             Some(("Move Down", sel!(contextMoveDown:))),
+            None,
+            Some((GO_TO_ARTIST, sel!(contextGoToArtist:))),
             None,
             Some(("Clear Queue", sel!(contextClear:))),
         ],
@@ -1480,6 +1537,36 @@ fn context_menu(mtm: MainThreadMarker, kind: Kind, target: &Controller) -> Retai
             i.setTarget(Some(target));
             i
         };
+        menu.addItem(&item);
+    }
+    menu
+}
+
+const GO_TO_ARTIST: &str = "Go to Artist";
+
+/// Go to Artist for a row whose artists have `pages`: whether it is enabled, and the names of
+/// its submenu's artists, when there is a choice. The submenu's items are enabled alike.
+fn artist_item(pages: &[Collection]) -> (bool, Option<Vec<&str>>) {
+    let names = (pages.len() > 1).then(|| pages.iter().map(|p| p.title.as_str()).collect());
+    (!pages.is_empty(), names)
+}
+
+/// Go to Artist's submenu: an item per artist, tagged with its place in `names`.
+fn artists_menu(mtm: MainThreadMarker, names: &[&str], target: &Controller) -> Retained<NSMenu> {
+    let menu = NSMenu::initWithTitle(NSMenu::alloc(mtm), &NSString::from_str(GO_TO_ARTIST));
+    for (i, name) in names.iter().enumerate() {
+        // SAFETY: `Controller` implements the action; `Table::new` covers the target.
+        let item = unsafe {
+            let item = NSMenuItem::initWithTitle_action_keyEquivalent(
+                NSMenuItem::alloc(mtm),
+                &NSString::from_str(name),
+                Some(sel!(contextGoToArtist:)),
+                &NSString::new(),
+            );
+            item.setTarget(Some(target));
+            item
+        };
+        item.setTag(NSInteger::try_from(i).unwrap_or(NSInteger::MAX));
         menu.addItem(&item);
     }
     menu
@@ -1677,5 +1764,45 @@ mod tests {
             Some("https://lh3.googleusercontent.com/x=w120-h120")
         );
         assert_eq!(rows[1].artwork, None);
+    }
+
+    #[test]
+    fn go_to_artist_is_disabled_without_an_artist_page_and_a_choice_with_several() {
+        let linked = |artists: &[(&str, Option<&str>)]| Track {
+            artist_ids: artists
+                .iter()
+                .map(|(_, id)| {
+                    id.map(|id| requiem_core::CollectionId {
+                        provider: ProviderId("test".into()),
+                        id: id.into(),
+                    })
+                })
+                .collect(),
+            ..track(
+                "Song",
+                &artists.iter().map(|(a, _)| *a).collect::<Vec<_>>(),
+                None,
+                None,
+            )
+        };
+        let item = |t: &Track| {
+            let pages: Vec<Collection> = match vm::go_to_artist(t) {
+                GoToArtist::None => Vec::new(),
+                GoToArtist::One(page) => vec![page],
+                GoToArtist::Several(pages) => pages,
+            };
+            let (enabled, names) = artist_item(&pages);
+            (enabled, names.map(|n| n.join(", ")))
+        };
+        assert_eq!(item(&track("Old", &["A"], None, None)), (false, None));
+        assert_eq!(item(&linked(&[("A", None), ("B", None)])), (false, None));
+        assert_eq!(
+            item(&linked(&[("A", None), ("B", Some("b"))])),
+            (true, None)
+        );
+        assert_eq!(
+            item(&linked(&[("A", Some("a")), ("B", None), ("C", Some("c"))])),
+            (true, Some("A, C".to_owned()))
+        );
     }
 }
