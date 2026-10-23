@@ -59,6 +59,17 @@ pub struct Shelf {
     pub items: Vec<Item>,
 }
 
+/// The most albums, and the most playlists, a provider gives for one search.
+pub const SEARCH_COLLECTIONS: usize = 12;
+
+/// What a search found: songs, and albums and playlists that browse to theirs.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct SearchResults {
+    pub tracks: Vec<Track>,
+    pub albums: Vec<Collection>,
+    pub playlists: Vec<Collection>,
+}
+
 /// Home shelves every provider names alike, so the merge makes one of each.
 pub const HOME_LIKED: &str = "Liked songs";
 pub const HOME_MIXES: &str = "Mixes";
@@ -147,7 +158,10 @@ impl std::error::Error for ProviderError {}
 
 pub trait Provider: Send + Sync {
     fn id(&self) -> ProviderId;
-    fn search(&self, query: &str, limit: usize) -> Result<Vec<Track>, ProviderError>;
+    /// At most `limit` tracks and [`SEARCH_COLLECTIONS`] each of albums and playlists. Only a
+    /// failed track search is an `Err`; albums or playlists that could not be had are left
+    /// empty.
+    fn search(&self, query: &str, limit: usize) -> Result<SearchResults, ProviderError>;
     fn resolve(&self, track: &TrackId) -> Result<AudioSource, ProviderError>;
 
     /// Blocking; called on a worker thread.
@@ -296,6 +310,8 @@ impl From<&str> for Redacted {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum Command {
+    /// Answered with `SearchResults` or `SearchFailed` under the same `req`. Each kind of
+    /// every provider's results is taken in turn, in provider order.
     Search {
         req: u64,
         query: String,
@@ -352,7 +368,7 @@ pub enum Command {
 pub enum Event {
     SearchResults {
         req: u64,
-        tracks: Vec<Track>,
+        results: SearchResults,
     },
     SearchFailed {
         req: u64,

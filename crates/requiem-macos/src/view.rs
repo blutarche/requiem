@@ -208,7 +208,7 @@ fn truncate(text: &str, max: usize) -> String {
 
 #[cfg(test)]
 mod tests {
-    use requiem_core::{ProviderId, TrackId};
+    use requiem_core::{ProviderId, SearchResults, TrackId};
 
     use super::*;
 
@@ -288,7 +288,10 @@ mod tests {
         let events = [
             Event::SearchResults {
                 req: 1,
-                tracks: vec![track("B")],
+                results: SearchResults {
+                    tracks: vec![track("B")],
+                    ..SearchResults::default()
+                },
             },
             Event::SearchFailed {
                 req: 2,

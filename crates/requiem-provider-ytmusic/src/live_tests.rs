@@ -23,7 +23,7 @@ fn provider(prefer_aac: bool, ip_family: IpFamily) -> YtMusicProvider {
 #[ignore]
 fn live_search() {
     for family in FAMILIES {
-        let tracks = provider(false, family).search(QUERY, 20).unwrap();
+        let tracks = provider(false, family).search(QUERY, 20).unwrap().tracks;
         println!("{family:?}: {} tracks", tracks.len());
         assert!(tracks.len() >= 5);
         for t in &tracks {
@@ -38,7 +38,7 @@ fn live_search() {
 fn stream(prefer_aac: bool, hint: FormatHint) {
     for family in FAMILIES {
         let p = provider(prefer_aac, family);
-        let track = p.search(QUERY, 5).unwrap().remove(0);
+        let track = p.search(QUERY, 5).unwrap().tracks.remove(0);
         let (format, mut src) = p.open(&track.id.id).unwrap();
         assert_eq!(format.hint, hint, "{family:?}");
 
@@ -93,7 +93,7 @@ fn live_stream_aac() {
 #[ignore]
 fn live_any_family_falls_back() {
     let p = provider(false, IpFamily::Any);
-    let track = p.search(QUERY, 5).unwrap().remove(0);
+    let track = p.search(QUERY, 5).unwrap().tracks.remove(0);
     let (format, mut src) = p.open(&track.id.id).unwrap();
     let mut got = 0usize;
     let mut buf = vec![0u8; 64 * 1024];

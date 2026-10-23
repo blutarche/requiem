@@ -5,8 +5,8 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use requiem_core::{
     AccountState, Collection, CollectionId, CollectionKind, Command, EnqueueMode, Event,
-    HOME_LIKED, HOME_MIXES, HOME_PLAYLISTS, Item, Page, PlayState, ProviderId, SeekTarget, Shelf,
-    Track, TrackId,
+    HOME_LIKED, HOME_MIXES, HOME_PLAYLISTS, Item, Page, PlayState, ProviderId, SearchResults,
+    SeekTarget, Shelf, Track, TrackId,
 };
 use requiem_ipc::{UpdateState, UpdateStatus};
 
@@ -504,7 +504,10 @@ impl Daemon {
             // Every query matches everything.
             Command::Search { req, .. } => vec![Event::SearchResults {
                 req,
-                tracks: self.results.clone(),
+                results: SearchResults {
+                    tracks: self.results.clone(),
+                    ..SearchResults::default()
+                },
             }],
             Command::Enqueue { tracks, mode } => {
                 match mode {

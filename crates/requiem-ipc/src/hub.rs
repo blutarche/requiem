@@ -259,8 +259,8 @@ impl Hub {
 
     fn on_event(&mut self, ev: Event) {
         match ev {
-            Event::SearchResults { req, tracks } => {
-                self.route(req, |req| Event::SearchResults { req, tracks });
+            Event::SearchResults { req, results } => {
+                self.route(req, |req| Event::SearchResults { req, results });
             }
             Event::SearchFailed { req, error } => {
                 self.route(req, |req| Event::SearchFailed { req, error });

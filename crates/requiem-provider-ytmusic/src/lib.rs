@@ -21,7 +21,8 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use requiem_core::{
-    AccountState, AudioSource, Page, Provider, ProviderError, ProviderId, Shelf, Track, TrackId,
+    AccountState, AudioSource, Page, Provider, ProviderError, ProviderId, SearchResults, Shelf,
+    TrackId,
 };
 
 use innertube::{ClientRefresher, InnertubeClient};
@@ -159,8 +160,11 @@ impl Provider for YtMusicProvider {
         ProviderId(PROVIDER.to_owned())
     }
 
-    fn search(&self, query: &str, limit: usize) -> Result<Vec<Track>, ProviderError> {
-        self.client.search(query, limit)
+    fn search(&self, query: &str, limit: usize) -> Result<SearchResults, ProviderError> {
+        Ok(SearchResults {
+            tracks: self.client.search(query, limit)?,
+            ..SearchResults::default()
+        })
     }
 
     fn resolve(&self, track: &TrackId) -> Result<AudioSource, ProviderError> {
@@ -347,7 +351,7 @@ mod tests {
         rig.music.script(BROWSE_URL, 200, PLAYLIST);
         rig.music.script(BROWSE_URL, 200, LIBRARY);
         rig.music.script(BROWSE_URL, 200, PLAYLIST);
-        let tracks = p.search("fake query", 5).unwrap();
+        let tracks = p.search("fake query", 5).unwrap().tracks;
         assert!(!tracks.is_empty());
         p.resolve(&tracks[0].id).unwrap();
         p.browse(&Page::Home).unwrap();

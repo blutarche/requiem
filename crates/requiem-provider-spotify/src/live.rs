@@ -162,7 +162,7 @@ fn live() {
     assert_eq!(p.account(), AccountState::SignedIn { name: None });
 
     println!("1. search \"daft punk\"");
-    let found = p.search("daft punk", 10).unwrap();
+    let found = p.search("daft punk", 10).unwrap().tracks;
     assert!(!found.is_empty() && found.len() <= 10);
     for t in &found {
         println!("  {} - {}", t.title, t.artists.join(", "));

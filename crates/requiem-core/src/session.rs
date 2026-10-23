@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 use crate::{
     AccountState, AudioSource, CollectionId, Command, Engine, EngineEvent, EngineEventSink,
     EnqueueMode, Event, FailureKind, HOME_MIXES, HOME_PLAYLISTS, Item, Page, PlayState, Provider,
-    ProviderError, ProviderId, SeekTarget, Shelf, Track, TrackId,
+    ProviderError, ProviderId, SearchResults, SeekTarget, Shelf, Track, TrackId,
 };
 
 /// What a restart restores. `resume` is the queue index Play would start.
@@ -156,7 +156,7 @@ enum Msg {
     Engine(EngineEvent),
     Searched {
         req: u64,
-        result: Result<Vec<Track>, ProviderError>,
+        result: Result<SearchResults, ProviderError>,
     },
     /// `accounts` are the queried providers' states after the browse, which may have signed it out.
     Browsed {
@@ -411,8 +411,8 @@ fn sign_in_error(e: &ProviderError) -> String {
 fn fan_out<T: Send + 'static>(
     what: &'static str,
     providers: Vec<Arc<dyn Provider>>,
-    call: impl Fn(&dyn Provider) -> Result<Vec<T>, ProviderError> + Send + Sync + 'static,
-) -> Result<Vec<Vec<T>>, ProviderError> {
+    call: impl Fn(&dyn Provider) -> Result<T, ProviderError> + Send + Sync + 'static,
+) -> Result<Vec<T>, ProviderError> {
     let call = Arc::new(call);
     let workers: Vec<_> = providers
         .into_iter()
@@ -430,7 +430,7 @@ fn fan_out<T: Send + 'static>(
             continue;
         };
         match result {
-            Ok(items) => answers.push(items),
+            Ok(answer) => answers.push(answer),
             Err(e @ ProviderError::SignInRequired(_)) => {
                 sign_in.get_or_insert(e);
             }
@@ -461,6 +461,25 @@ fn interleave<T>(lists: Vec<Vec<T>>) -> Vec<T> {
         if items.len() == before {
             return items;
         }
+    }
+}
+
+/// Each kind of the providers' results taken in turn, in provider order: tracks with tracks,
+/// albums with albums, playlists with playlists. `answers` are each provider's, in provider
+/// order.
+fn merge_search(answers: Vec<SearchResults>) -> SearchResults {
+    let mut tracks = Vec::new();
+    let mut albums = Vec::new();
+    let mut playlists = Vec::new();
+    for a in answers {
+        tracks.push(a.tracks);
+        albums.push(a.albums);
+        playlists.push(a.playlists);
+    }
+    SearchResults {
+        tracks: interleave(tracks),
+        albums: interleave(albums),
+        playlists: interleave(playlists),
     }
 }
 
@@ -652,7 +671,7 @@ impl Actor {
                 }
                 Msg::Engine(ev) => self.on_engine(ev),
                 Msg::Searched { req, result } => match result {
-                    Ok(tracks) => self.emit(Event::SearchResults { req, tracks }),
+                    Ok(results) => self.emit(Event::SearchResults { req, results }),
                     Err(e) => self.emit(Event::SearchFailed {
                         req,
                         error: e.to_string(),
@@ -965,7 +984,7 @@ impl Actor {
         let limit = self.config.search_limit;
         thread::spawn(move || {
             let result =
-                fan_out("search", providers, move |p| p.search(&query, limit)).map(interleave);
+                fan_out("search", providers, move |p| p.search(&query, limit)).map(merge_search);
             let _ = tx.send(Msg::Searched { req, result });
         });
     }

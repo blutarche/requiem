@@ -131,7 +131,7 @@ fn main() -> ExitCode {
 }
 
 fn helper_pid(p: &SpotifyProvider) -> i32 {
-    p.search("who", 1).unwrap()[0].title.parse().unwrap()
+    p.search("who", 1).unwrap().tracks[0].title.parse().unwrap()
 }
 
 fn resolve(p: &SpotifyProvider, id: &str) -> AudioSource {

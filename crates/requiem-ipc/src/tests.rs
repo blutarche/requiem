@@ -16,7 +16,7 @@ use crossbeam_channel::{Receiver, RecvTimeoutError, unbounded};
 use requiem_core::testing::{EngineCall, FakeEngineHandle, FakeProvider, Gate, Step};
 use requiem_core::{
     AccountState, Command, EngineEvent, EnqueueMode, Event, PlayState, ProviderError, ProviderId,
-    Session, SessionConfig, Track, TrackId,
+    SearchResults, Session, SessionConfig, Track, TrackId,
 };
 
 use crate::frame::{self, Deadline, MAX_FRAME};
@@ -674,7 +674,10 @@ fn search_results_go_only_to_the_requester_under_its_own_id() {
         next_event(&brx),
         Event::SearchResults {
             req: 1,
-            tracks: tracks(&["b1", "b2"]),
+            results: SearchResults {
+                tracks: tracks(&["b1", "b2"]),
+                ..SearchResults::default()
+            },
         }
     );
     gate_a.release();
@@ -682,7 +685,10 @@ fn search_results_go_only_to_the_requester_under_its_own_id() {
         next_event(&arx),
         Event::SearchResults {
             req: 1,
-            tracks: tracks(&["a1"]),
+            results: SearchResults {
+                tracks: tracks(&["a1"]),
+                ..SearchResults::default()
+            },
         }
     );
 
@@ -699,7 +705,10 @@ fn search_results_go_only_to_the_requester_under_its_own_id() {
     wait_sub(&sub, |e| {
         *e == Event::SearchResults {
             req: 9,
-            tracks: tracks(&["s1"]),
+            results: SearchResults {
+                tracks: tracks(&["s1"]),
+                ..SearchResults::default()
+            },
         }
     });
 

@@ -8,7 +8,7 @@ use std::time::Duration;
 
 use crate::{
     AccountState, AudioSource, ByteSource, Engine, EngineEvent, EngineEventSink, FormatHint, Page,
-    PageSink, Provider, ProviderError, ProviderId, Shelf, Track, TrackId,
+    PageSink, Provider, ProviderError, ProviderId, SearchResults, Shelf, Track, TrackId,
 };
 
 const WAIT: Duration = Duration::from_secs(5);
@@ -95,6 +95,14 @@ impl<T> Step<T> {
         self
     }
 
+    fn map<U>(self, f: impl FnOnce(T) -> U) -> Step<U> {
+        Step {
+            result: self.result.map(f),
+            delay: self.delay,
+            gate: self.gate,
+        }
+    }
+
     fn run(self) -> Result<T, ProviderError> {
         if let Some(g) = &self.gate {
             g.wait();
@@ -116,7 +124,7 @@ pub struct SignInScript {
 
 struct ProviderState {
     resolve_scripts: HashMap<String, VecDeque<Step<()>>>,
-    search_scripts: HashMap<String, VecDeque<Step<Vec<Track>>>>,
+    search_scripts: HashMap<String, VecDeque<Step<SearchResults>>>,
     browse_scripts: HashMap<Page, VecDeque<Step<Vec<Shelf>>>>,
     sign_in_scripts: VecDeque<SignInScript>,
     sign_out_gate: Option<Gate>,
@@ -186,7 +194,21 @@ impl FakeProvider {
             .insert(track_id.into(), steps.into());
     }
 
+    /// Searches that find only tracks.
     pub fn script_search(&self, query: &str, steps: Vec<Step<Vec<Track>>>) {
+        let steps = steps
+            .into_iter()
+            .map(|s| {
+                s.map(|tracks| SearchResults {
+                    tracks,
+                    ..SearchResults::default()
+                })
+            })
+            .collect();
+        self.script_search_results(query, steps);
+    }
+
+    pub fn script_search_results(&self, query: &str, steps: Vec<Step<SearchResults>>) {
         self.state
             .lock()
             .unwrap()
@@ -337,7 +359,7 @@ impl Provider for FakeProvider {
         self.id.clone()
     }
 
-    fn search(&self, query: &str, _limit: usize) -> Result<Vec<Track>, ProviderError> {
+    fn search(&self, query: &str, _limit: usize) -> Result<SearchResults, ProviderError> {
         let step = {
             let mut st = self.state.lock().unwrap();
             st.search_calls += 1;
@@ -348,7 +370,7 @@ impl Provider for FakeProvider {
         };
         match step {
             Some(s) => s.run(),
-            None => Ok(Vec::new()),
+            None => Ok(SearchResults::default()),
         }
     }
 
