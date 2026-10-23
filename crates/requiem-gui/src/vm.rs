@@ -466,6 +466,9 @@ pub struct LibraryGrid<'a> {
     pub collections: Vec<&'a Collection>,
     /// Whether the Library has any collection at all, before the chip and the filter text.
     pub stocked: bool,
+    /// Whether the Library mixes services, so its cards show their service's badge. The chip
+    /// and the filter text do not change it.
+    pub mixed: bool,
 }
 
 /// What the Home page shows.
@@ -1187,6 +1190,7 @@ impl UiState {
     pub fn library_grid(&self, collate: impl Fn(&str, &str) -> Ordering) -> LibraryGrid<'_> {
         let base = self.library_collections();
         let stocked = !base.is_empty();
+        let mixed = mixed(base.iter().map(|c| &c.id.provider));
         let mut chips: Vec<(LibraryChip, bool)> = LibraryChip::CHOICES
             .into_iter()
             .filter(|chip| base.iter().any(|c| chip.keeps(c)))
@@ -1220,6 +1224,7 @@ impl UiState {
             chips,
             collections,
             stocked,
+            mixed,
         }
     }
 
@@ -7264,7 +7269,7 @@ mod tests {
         assert!(titles(&vm).is_empty());
         // The chips and the page's being stocked do not depend on the text.
         let grid = vm.ui().library_grid(lowercase);
-        assert!(grid.stocked);
+        assert!(grid.stocked && grid.mixed);
         assert_eq!(grid.chips.len(), 4);
         vm.intent(Intent::SetLibraryText(String::new()));
         assert_eq!(titles(&vm).len(), 9);
@@ -7296,6 +7301,7 @@ mod tests {
     fn the_service_switch_narrows_the_chips_and_the_grid() {
         let mut vm = mixed_library();
         vm.intent(Intent::SetFilter(ONLY_SPOTIFY));
+        assert!(!vm.ui().library_grid(lowercase).mixed);
         assert_eq!(
             titles(&vm),
             [

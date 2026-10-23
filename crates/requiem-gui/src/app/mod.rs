@@ -4,6 +4,7 @@
 mod backend;
 mod badge;
 mod bar;
+mod cover_grid;
 mod now_playing;
 mod palette;
 mod prefs;
@@ -700,6 +701,7 @@ const KEY_ENTER: u16 = 76;
 const KEY_FORWARD_DELETE: u16 = 117;
 const KEY_LEFT: u16 = 123;
 const KEY_RIGHT: u16 = 124;
+const KEY_DOWN: u16 = 125;
 const KEY_UP: u16 = 126;
 
 /// Window-wide keys outside text fields. True when handled.
@@ -730,9 +732,15 @@ fn key_down(ui: &Ui, event: &NSEvent) -> bool {
             | NSEventModifierFlags::Control
             | NSEventModifierFlags::Option,
     );
+    let grid = ui.library_grid_focused();
     match code {
         KEY_ESCAPE if plain && ui.current_view() == AppView::NowPlaying => ui.go_back(),
         KEY_SPACE if plain && !on_button => ui.intent(Intent::Toggle),
+        // The Library's grid takes the arrows the seek would.
+        KEY_LEFT if plain && grid => ui.move_library_selection(-1, 0),
+        KEY_RIGHT if plain && grid => ui.move_library_selection(1, 0),
+        KEY_UP if plain && grid => ui.move_library_selection(0, -1),
+        KEY_DOWN if plain && grid => ui.move_library_selection(0, 1),
         KEY_LEFT if plain => ui.intent(Intent::SeekBy(-SEEK_STEP_SECS)),
         KEY_RIGHT if plain => ui.intent(Intent::SeekBy(SEEK_STEP_SECS)),
         KEY_UP if plain && ui.results_at_top() => ui.focus_search(),
