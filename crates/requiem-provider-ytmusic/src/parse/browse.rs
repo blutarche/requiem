@@ -391,6 +391,13 @@ pub(crate) fn parse_artist_releases(
         for mut c in cards {
             if kind == CollectionKind::Album {
                 c.subtitle = Some(release_subtitle(c.subtitle.as_deref(), artist));
+            } else if let Some(rest) = c
+                .subtitle
+                .as_deref()
+                .and_then(|s| s.strip_prefix("Playlist \u{2022} "))
+            {
+                // Search's playlist hits leave out the kind; drop it so both read alike.
+                c.subtitle = Some(rest.to_owned());
             }
             into.push(c);
         }
@@ -839,7 +846,7 @@ mod tests {
         );
         assert_eq!(
             found.playlists[0].subtitle.as_deref(),
-            Some("Playlist \u{2022} YouTube Music")
+            Some("YouTube Music")
         );
         assert!(
             found
