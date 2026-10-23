@@ -1688,6 +1688,12 @@ fn named_albums(provider: &str, ids: &[&str]) -> Vec<Collection> {
         .collect()
 }
 
+fn named_artists(provider: &str, ids: &[&str]) -> Vec<Collection> {
+    ids.iter()
+        .map(|id| named_collection(provider, CollectionKind::Artist, id))
+        .collect()
+}
+
 fn named_playlists(provider: &str, ids: &[&str]) -> Vec<Collection> {
     ids.iter()
         .map(|id| named_collection(provider, CollectionKind::Playlist, id))
@@ -1701,6 +1707,7 @@ fn search_takes_each_kind_in_turn_with_its_own_kind() {
         "q",
         vec![Step::ok(SearchResults {
             tracks: named_tracks("first", &["a1", "a2"]),
+            artists: named_artists("first", &["aR1", "aR2"]),
             albums: named_albums("first", &["aA1", "aA2", "aA3"]),
             playlists: named_playlists("first", &["aP1"]),
         })],
@@ -1709,6 +1716,7 @@ fn search_takes_each_kind_in_turn_with_its_own_kind() {
         "q",
         vec![Step::ok(SearchResults {
             tracks: named_tracks("second", &["b1"]),
+            artists: named_artists("second", &["bR1"]),
             albums: named_albums("second", &["bA1"]),
             playlists: named_playlists("second", &["bP1", "bP2"]),
         })],
@@ -1723,6 +1731,11 @@ fn search_takes_each_kind_in_turn_with_its_own_kind() {
                     named_track("first", "a1"),
                     named_track("second", "b1"),
                     named_track("first", "a2"),
+                ],
+                artists: vec![
+                    named_collection("first", CollectionKind::Artist, "aR1"),
+                    named_collection("second", CollectionKind::Artist, "bR1"),
+                    named_collection("first", CollectionKind::Artist, "aR2"),
                 ],
                 albums: vec![
                     named_collection("first", CollectionKind::Album, "aA1"),
@@ -1748,6 +1761,7 @@ fn search_keeps_the_tracks_of_a_provider_whose_playlists_failed() {
         "q",
         vec![Step::ok(SearchResults {
             tracks: named_tracks("first", &["a1", "a2"]),
+            artists: Vec::new(),
             albums: named_albums("first", &["aA1"]),
             playlists: Vec::new(),
         })],
@@ -1756,6 +1770,7 @@ fn search_keeps_the_tracks_of_a_provider_whose_playlists_failed() {
         "q",
         vec![Step::ok(SearchResults {
             tracks: named_tracks("second", &["b1"]),
+            artists: Vec::new(),
             albums: Vec::new(),
             playlists: named_playlists("second", &["bP1"]),
         })],
@@ -1771,6 +1786,7 @@ fn search_keeps_the_tracks_of_a_provider_whose_playlists_failed() {
                     named_track("second", "b1"),
                     named_track("first", "a2"),
                 ],
+                artists: Vec::new(),
                 albums: named_albums("first", &["aA1"]),
                 playlists: named_playlists("second", &["bP1"]),
             },

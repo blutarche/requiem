@@ -635,6 +635,7 @@ pub fn search_results() -> SearchResults {
         .collect();
     SearchResults {
         tracks: results(),
+        artists: Vec::new(),
         albums,
         playlists,
     }

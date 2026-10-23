@@ -196,6 +196,7 @@ impl InnertubeClient {
         let (what, params) = match kind {
             CollectionKind::Album => ("album search", ALBUMS_PARAMS),
             CollectionKind::Playlist => ("playlist search", PLAYLISTS_PARAMS),
+            CollectionKind::Artist => ("artists search", ARTISTS_PARAMS),
         };
         let body = json!({
             "context": Self::music_context(),
@@ -259,6 +260,7 @@ impl InnertubeClient {
         };
         Ok(SearchResults {
             tracks: tracks?,
+            artists: Vec::new(),
             albums: merge_collections(
                 artist.albums,
                 left_out(albums, "albums"),

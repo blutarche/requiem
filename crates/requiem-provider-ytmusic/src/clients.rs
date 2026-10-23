@@ -13,6 +13,9 @@ pub(crate) const SONGS_PARAMS: &str = "EgWKAQIIAWoQEAMQBBAJEAoQBRAREBAQFQ==";
 /// (2026-10-23), URL-decoded.
 pub(crate) const ALBUMS_PARAMS: &str = "EgWKAQIYAWoMEA4QChADEAQQCRAF";
 pub(crate) const PLAYLISTS_PARAMS: &str = "EgeKAQQoADgBagwQDhAKEAMQBBAJEAU=";
+/// The web client's Artists chip, from an unfiltered search for "daft punk"
+/// (`chipCloudRenderer` chip "Artists", 2026-10-23), URL-decoded.
+pub(crate) const ARTISTS_PARAMS: &str = "EgWKAQIgAWoSEAUQCRAKEAMQBBAQEA4QFRAR";
 
 /// VISIONOS: the only stream client that ships. Its URLs serve ranged GETs to EOF.
 pub(crate) const STREAM_ORIGIN: &str = "https://www.youtube.com";

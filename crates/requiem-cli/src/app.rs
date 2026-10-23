@@ -530,6 +530,7 @@ fn kind_name(k: CollectionKind) -> &'static str {
     match k {
         CollectionKind::Playlist => "playlist",
         CollectionKind::Album => "album",
+        CollectionKind::Artist => "artist",
     }
 }
 

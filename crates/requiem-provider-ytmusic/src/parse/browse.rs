@@ -457,6 +457,7 @@ pub(crate) fn parse_collection(body: &[u8], kind: CollectionKind) -> Result<Shel
         match kind {
             CollectionKind::Album => "Album".to_owned(),
             CollectionKind::Playlist => "Playlist".to_owned(),
+            CollectionKind::Artist => "Artist".to_owned(),
         }
     } else {
         name

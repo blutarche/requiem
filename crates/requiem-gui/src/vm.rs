@@ -6496,6 +6496,7 @@ mod tests {
     ) -> SearchResults {
         SearchResults {
             tracks,
+            artists: Vec::new(),
             albums,
             playlists,
         }

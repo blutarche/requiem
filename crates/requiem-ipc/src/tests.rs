@@ -346,6 +346,63 @@ fn frame_round_trip() {
 }
 
 #[test]
+fn artists_and_artist_pages_round_trip() {
+    use requiem_core::{Collection, CollectionId, CollectionKind, Item, Page, Shelf};
+    let artist = Collection {
+        id: CollectionId {
+            provider: ProviderId("ytmusic".into()),
+            id: "browse:UCartist".into(),
+        },
+        kind: CollectionKind::Artist,
+        title: "Daft Punk".into(),
+        subtitle: Some("Artist \u{2022} 68.7M monthly audience".into()),
+        artwork_url: Some("https://example.com/photo.jpg".into()),
+    };
+    let msgs = [
+        ServerMsg::Event(Event::SearchResults {
+            req: 4,
+            results: SearchResults {
+                tracks: tracks(&["a"]),
+                artists: vec![artist.clone()],
+                ..SearchResults::default()
+            },
+        }),
+        ServerMsg::Event(Event::BrowseResults {
+            req: 5,
+            page: Page::Collection(artist.id.clone()),
+            shelves: vec![
+                Shelf {
+                    title: "Top songs".into(),
+                    items: vec![Item::Track(track("t1"))],
+                },
+                Shelf {
+                    title: "Featured on".into(),
+                    items: vec![Item::Collection(artist.clone())],
+                },
+            ],
+        }),
+    ];
+    let mut buf = Vec::new();
+    for m in &msgs {
+        frame::write(&mut buf, m).unwrap();
+    }
+    let len = u32::from_be_bytes(buf[..4].try_into().unwrap()) as usize;
+    let wire: serde_json::Value = serde_json::from_slice(&buf[4..4 + len]).unwrap();
+    assert_eq!(
+        wire.pointer("/Event/SearchResults/results/artists/0/kind"),
+        Some(&serde_json::json!("Artist"))
+    );
+    let mut r = Cursor::new(buf);
+    for m in &msgs {
+        assert_eq!(
+            frame::read::<_, ServerMsg>(&mut r).unwrap().as_ref(),
+            Some(m)
+        );
+    }
+    assert_eq!(frame::read::<_, ServerMsg>(&mut r).unwrap(), None);
+}
+
+#[test]
 fn oversize_frames_are_rejected() {
     // Refused from the header alone, before the body is read.
     let header = ((MAX_FRAME + 1) as u32).to_be_bytes();
