@@ -13,7 +13,8 @@ use serde_json::Value;
 mod browse;
 
 pub(crate) use browse::{
-    BROWSE_PREFIX, collection_kind, parse_collection, parse_home, parse_library_playlists,
+    ArtistReleases, BROWSE_PREFIX, collection_kind, parse_artist_releases, parse_collection,
+    parse_home, parse_library_playlists,
 };
 
 pub(crate) const PROVIDER: &str = "ytmusic";
@@ -463,6 +464,56 @@ pub(crate) fn parse_search_collections(
     Ok(collections)
 }
 
+/// The artist a search's top card is about.
+#[derive(Debug, PartialEq)]
+pub(crate) struct TopArtist {
+    pub browse_id: String,
+    pub name: String,
+}
+
+/// The artist the first section of an unfiltered search is a card for, if it is one: the card
+/// for a song, album or playlist leaves this `None`.
+pub(crate) fn parse_top_artist(body: &[u8]) -> Result<Option<TopArtist>, ProviderError> {
+    let root: Value =
+        serde_json::from_slice(body).map_err(|e| parse_err(format!("search json: {e}")))?;
+    if root.get("contents").is_none() {
+        return Err(parse_err("search response has no contents"));
+    }
+    let card = root
+        .pointer("/contents/tabbedSearchResultsRenderer/tabs/0/tabRenderer/content/sectionListRenderer/contents/0/musicCardShelfRenderer");
+    let run = card
+        .and_then(|c| Runs::deserialize(c.get("title")?).ok())
+        .and_then(|t| t.runs.into_iter().next());
+    let artist = run.and_then(|r| {
+        let browse = r.navigation_endpoint?.browse_endpoint?;
+        let page_type = browse
+            .browse_endpoint_context_supported_configs?
+            .browse_endpoint_context_music_config?
+            .page_type?;
+        let browse_id = browse.browse_id.filter(|id| !id.is_empty())?;
+        (page_type == "MUSIC_PAGE_TYPE_ARTIST").then(|| TopArtist {
+            browse_id,
+            name: r.text.unwrap_or_default(),
+        })
+    });
+    Ok(artist)
+}
+
+/// `first` then `then`, a collection once however often it appears, at most `limit`.
+pub(crate) fn merge_collections(
+    first: Vec<Collection>,
+    then: Vec<Collection>,
+    limit: usize,
+) -> Vec<Collection> {
+    let mut seen = BTreeSet::new();
+    first
+        .into_iter()
+        .chain(then)
+        .filter(|c| seen.insert(c.id.id.clone()))
+        .take(limit)
+        .collect()
+}
+
 /// Byte length and the `*Renderer` key paths down to 10 object levels; never any text content.
 pub(crate) fn structure_summary(body: &[u8]) -> String {
     fn walk(v: &Value, path: &str, depth: usize, out: &mut BTreeSet<String>) {
@@ -642,6 +693,8 @@ mod tests {
     // 2026-10-23: the first rows, trimmed of menus and tracking, visitorData scrubbed.
     const SEARCH_ALBUMS: &str = include_str!("../tests/fixtures/search_albums.json");
     const SEARCH_PLAYLISTS: &str = include_str!("../tests/fixtures/search_playlists.json");
+    // The same query unfiltered: the artist card first, then the first rows of two sections.
+    const SEARCH_TOP_ARTIST: &str = include_str!("../tests/fixtures/search_top_artist.json");
     const OK: &str = include_str!("../tests/fixtures/player_ok.json");
     const LOGIN: &str = include_str!("../tests/fixtures/player_login_required.json");
     const ERROR: &str = include_str!("../tests/fixtures/player_error.json");
@@ -856,6 +909,62 @@ mod tests {
                 Err(ProviderError::Parse(_))
             ));
         }
+    }
+
+    #[test]
+    fn top_artist_is_read_from_the_leading_card() {
+        let artist = parse_top_artist(SEARCH_TOP_ARTIST.as_bytes()).unwrap();
+        assert_eq!(
+            artist,
+            Some(TopArtist {
+                browse_id: "UCRr1xG_2WIDs18a6cIiCxeA".into(),
+                name: "Daft Punk".into(),
+            })
+        );
+    }
+
+    #[test]
+    fn a_search_without_an_artist_card_has_no_top_artist() {
+        assert_eq!(parse_top_artist(SEARCH.as_bytes()).unwrap(), None);
+        assert_eq!(parse_top_artist(SEARCH_ALBUMS.as_bytes()).unwrap(), None);
+        let album_card =
+            SEARCH_TOP_ARTIST.replace("MUSIC_PAGE_TYPE_ARTIST", "MUSIC_PAGE_TYPE_ALBUM");
+        assert_eq!(parse_top_artist(album_card.as_bytes()).unwrap(), None);
+        for body in ["not json", "[]", "{}"] {
+            assert!(matches!(
+                parse_top_artist(body.as_bytes()),
+                Err(ProviderError::Parse(_))
+            ));
+        }
+    }
+
+    fn collection(id: &str) -> Collection {
+        Collection {
+            id: CollectionId {
+                provider: ProviderId(PROVIDER.into()),
+                id: id.into(),
+            },
+            kind: CollectionKind::Album,
+            title: id.into(),
+            subtitle: None,
+            artwork_url: None,
+        }
+    }
+
+    #[test]
+    fn merged_collections_lead_with_the_first_list_once_each_up_to_the_limit() {
+        let list = |ids: &[&str]| ids.iter().map(|id| collection(id)).collect::<Vec<_>>();
+        let ids = |cs: Vec<Collection>| cs.into_iter().map(|c| c.id.id).collect::<Vec<_>>();
+        let merged = merge_collections(list(&["a", "b"]), list(&["c", "a", "d", "b", "e"]), 4);
+        assert_eq!(ids(merged), ["a", "b", "c", "d"]);
+        assert_eq!(
+            ids(merge_collections(list(&[]), list(&["x", "y"]), 5)),
+            ["x", "y"]
+        );
+        assert_eq!(
+            ids(merge_collections(list(&["p", "q"]), list(&["x"]), 1)),
+            ["p"]
+        );
     }
 
     #[test]
