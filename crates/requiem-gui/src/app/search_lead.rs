@@ -1,5 +1,5 @@
-//! The head of the All view of search results: the top result as a card with a Play button,
-//! and the songs after it in a short list.
+//! The head of the All view of search results: the top result, an artist or a song, as a card
+//! with a Play button, and the first songs in a short list.
 
 use std::cell::Cell;
 use std::rc::Rc;
@@ -20,7 +20,7 @@ use super::shelves::{FlippedView, spoken};
 use super::theme::{self, Icon, Weight};
 use super::ui;
 use super::widgets::{self, FLEX_W, rect};
-use crate::vm::{self, Intent, List, Service, TOP_SONGS};
+use crate::vm::{self, Intent, List, Place, Service, TOP_SONGS, TopResult};
 
 const PAD: CGFloat = 24.0;
 /// A section title's height, and the space under it: those of a shelf's.
@@ -40,6 +40,8 @@ const CARD_COVER: CGFloat = 104.0;
 const CARD_RADIUS: CGFloat = 12.0;
 const PLAY: CGFloat = 44.0;
 const PLAY_ICON: CGFloat = 20.0;
+/// A button's opacity while it has nothing to do.
+const DISABLED_ALPHA: CGFloat = 0.4;
 
 pub struct PressIvars {
     press: Rc<dyn Fn()>,
@@ -47,6 +49,7 @@ pub struct PressIvars {
     hover: Retained<NSColor>,
     hovered: Cell<bool>,
     pressed: Cell<bool>,
+    enabled: Cell<bool>,
 }
 
 define_class!(
@@ -125,7 +128,7 @@ define_class!(
         /// A plain view reports itself disabled, which VoiceOver reads as dimmed.
         #[unsafe(method(isAccessibilityEnabled))]
         fn accessibility_enabled(&self) -> bool {
-            true
+            self.ivars().enabled.get()
         }
     }
 );
@@ -146,6 +149,7 @@ impl PressView {
             hover,
             hovered: Cell::new(false),
             pressed: Cell::new(false),
+            enabled: Cell::new(true),
         });
         // SAFETY: `initWithFrame:` is NSView's designated initializer.
         let this: Retained<Self> = unsafe { msg_send![super(this), initWithFrame: frame] };
@@ -160,6 +164,13 @@ impl PressView {
         widgets::as_button(self, label);
     }
 
+    /// Dims the button, which then does nothing, or brings it back.
+    fn set_enabled(&self, enabled: bool) {
+        self.ivars().enabled.set(enabled);
+        self.setAlphaValue(if enabled { 1.0 } else { DISABLED_ALPHA });
+        self.paint();
+    }
+
     fn set_hovered(&self, hovered: bool) {
         if self.ivars().hovered.replace(hovered) != hovered {
             self.paint();
@@ -168,7 +179,7 @@ impl PressView {
 
     fn paint(&self) {
         let iv = self.ivars();
-        let color = if iv.hovered.get() {
+        let color = if iv.hovered.get() && iv.enabled.get() {
             Some(&iv.hover)
         } else {
             iv.rest.as_ref()
@@ -177,6 +188,9 @@ impl PressView {
     }
 
     fn activate(&self) {
+        if !self.ivars().enabled.get() {
+            return;
+        }
         // The press can bring the page down with this view, and the closure with it.
         let press = self.ivars().press.clone();
         let _alive = self.retain();
@@ -184,19 +198,24 @@ impl PressView {
     }
 }
 
-/// Plays the shown results from item `from`, as a row of the song table does.
-fn play(from: usize) -> Rc<dyn Fn()> {
+/// Plays `list` from item `from`, as a row of the song table does.
+fn play(list: List, from: usize) -> Rc<dyn Fn()> {
     Rc::new(move || {
-        ui::with(|ui| {
-            ui.intent(Intent::PlayFrom {
-                list: List::Results,
-                from,
-            })
-        });
+        ui::with(|ui| ui.intent(Intent::PlayFrom { list, from }));
     })
 }
 
-struct TopResult {
+/// What the top result's card shows.
+struct TopFace<'a> {
+    title: &'a str,
+    sub: &'a str,
+    art: Option<&'a str>,
+    service: Option<Service>,
+    /// The cover's corner radius: half its side for an artist's round photo.
+    radius: CGFloat,
+}
+
+struct TopCard {
     title_label: Retained<NSTextField>,
     card: Retained<PressView>,
     play: Retained<PressView>,
@@ -215,7 +234,7 @@ struct SongRow {
 
 pub struct SearchLead {
     pub view: Retained<FlippedView>,
-    top: TopResult,
+    top: TopCard,
     songs_title: Option<Retained<NSTextField>>,
     songs: Vec<SongRow>,
 }
@@ -224,12 +243,13 @@ impl SearchLead {
     /// The lead's height: a title over the card, or over the songs when there are four.
     pub const H: CGFloat = HEAD_H + BODY_H;
 
-    /// `top` as a card with a Play button, and `songs` after it, in a view `width` wide.
-    /// `songs` are the tracks after the top one in the shown results, so a row presses to play
-    /// from its own place in them; `mixed` says whether the results span services.
+    /// `top` as a card with a Play button, and `songs` beside it, in a view `width` wide.
+    /// `songs` are the first of the shown results, after the top one when it is a song, so a
+    /// row presses to play from its own place in them; `mixed` says whether the results span
+    /// services.
     pub fn new(
         mtm: MainThreadMarker,
-        top: &Track,
+        top: &TopResult,
         songs: &[Track],
         mixed: bool,
         width: CGFloat,
@@ -249,12 +269,20 @@ impl SearchLead {
             view.addSubview(&l);
             l
         };
-        let top = Self::top_result(mtm, &view, heading("Top result"), top, mixed);
+        let title = heading("Top result");
+        let (top, first) = match top {
+            TopResult::Song(track) => (Self::top_song(mtm, &view, title, track, mixed), 1),
+            TopResult::Artist { artist, playable } => {
+                let top = Self::top_artist(mtm, &view, title, artist, mixed);
+                top.play.set_enabled(*playable);
+                (top, 0)
+            }
+        };
         let songs_title = (!songs.is_empty()).then(|| heading("Songs"));
         let songs = songs
             .iter()
             .enumerate()
-            .map(|(i, t)| Self::song_row(mtm, &view, t, mixed, 1 + i))
+            .map(|(i, t)| Self::song_row(mtm, &view, t, mixed, first + i))
             .collect();
         let lead = SearchLead {
             view,
@@ -266,53 +294,102 @@ impl SearchLead {
         lead
     }
 
-    fn top_result(
+    /// The top song: a press on the card or its Play plays the results from it.
+    fn top_song(
         mtm: MainThreadMarker,
         view: &NSView,
         title_label: Retained<NSTextField>,
         track: &Track,
         mixed: bool,
-    ) -> TopResult {
-        let artists = vm::artists(track);
-        let service = vm::badge(&track.id.provider, mixed);
+    ) -> TopCard {
+        let card = TopFace {
+            title: &track.title,
+            sub: &vm::artists(track),
+            art: track.artwork_url.as_deref(),
+            service: vm::badge(&track.id.provider, mixed),
+            radius: 8.0,
+        };
+        let play = play(List::Results, 0);
+        Self::top_card(mtm, view, title_label, card, play.clone(), play)
+    }
+
+    /// The top artist, with a round photo: a press on the card opens its page, and its Play
+    /// plays its top songs.
+    fn top_artist(
+        mtm: MainThreadMarker,
+        view: &NSView,
+        title_label: Retained<NSTextField>,
+        artist: &requiem_core::Collection,
+        mixed: bool,
+    ) -> TopCard {
+        let card = TopFace {
+            title: &artist.title,
+            sub: "Artist",
+            art: artist.artwork_url.as_deref(),
+            service: vm::badge(&artist.id.provider, mixed),
+            radius: CARD_COVER / 2.0,
+        };
+        let shown = artist.clone();
+        let open: Rc<dyn Fn()> = Rc::new(move || {
+            let artist = shown.clone();
+            ui::with(|ui| ui.open_collection(artist, Place::Search));
+        });
+        Self::top_card(mtm, view, title_label, card, open, play(List::TopArtist, 0))
+    }
+
+    fn top_card(
+        mtm: MainThreadMarker,
+        view: &NSView,
+        title_label: Retained<NSTextField>,
+        face: TopFace<'_>,
+        press: Rc<dyn Fn()>,
+        play: Rc<dyn Fn()>,
+    ) -> TopCard {
+        let TopFace {
+            title: name,
+            sub: subtitle,
+            art,
+            service,
+            radius,
+        } = face;
         let card = PressView::new(
             mtm,
             NSRect::ZERO,
             CARD_RADIUS,
             (Some(theme::bg_2()), theme::row_hover()),
-            play(0),
+            press,
         );
         let cover = widgets::cover(
             mtm,
             rect(CARD_PAD, CARD_PAD, CARD_COVER, CARD_COVER),
-            8.0,
+            radius,
             36.0,
         );
-        cover.set_url(track.artwork_url.as_deref());
+        cover.set_url(art);
         card.addSubview(&cover);
         let title = widgets::label(
             mtm,
-            &track.title,
+            name,
             &theme::font(20.0, Weight::SemiBold),
             &theme::ink(),
         );
         let sub = widgets::label(
             mtm,
-            &artists,
+            subtitle,
             &theme::font(13.0, Weight::Regular),
             &theme::muted(),
         );
         card.addSubview(&title);
         card.addSubview(&sub);
         let mark = service.map(|s| Self::badge(mtm, &card, s, rect(0.0, 0.0, 0.0, 0.0)));
-        card.finish(&spoken(&track.title, &artists, service));
+        card.finish(&spoken(name, subtitle, service));
 
         let disc = PressView::new(
             mtm,
             rect(0.0, 0.0, PLAY, PLAY),
             PLAY / 2.0,
             (Some(theme::accent()), theme::accent_hi()),
-            play(0),
+            play,
         );
         let glyph = widgets::icon_view(
             mtm,
@@ -327,10 +404,10 @@ impl SearchLead {
             ),
         );
         disc.addSubview(&glyph);
-        disc.finish(&format!("Play {}", track.title));
+        disc.finish(&format!("Play {name}"));
         view.addSubview(&card);
         view.addSubview(&disc);
-        TopResult {
+        TopCard {
             title_label,
             card,
             play: disc,
@@ -355,7 +432,7 @@ impl SearchLead {
             NSRect::ZERO,
             8.0,
             (None, theme::row_hover()),
-            play(from),
+            play(List::Results, from),
         );
         let pad = (ROW_H - THUMB) / 2.0;
         let cover = widgets::cover(mtm, rect(pad, pad, THUMB, THUMB), 4.0, 16.0);
@@ -479,6 +556,11 @@ impl SearchLead {
                 sub_h,
             ));
         }
+    }
+
+    /// Turns the top result's Play on once there is something for it to play.
+    pub fn set_play_enabled(&self, enabled: bool) {
+        self.top.play.set_enabled(enabled);
     }
 
     /// A cover has not arrived.

@@ -25,7 +25,7 @@ use objc2_foundation::{
     NSSize, NSString, NSURL,
 };
 use requiem_core::ProviderId;
-use requiem_core::{Collection, Item, Shelf, Track};
+use requiem_core::{Collection, CollectionId, CollectionKind, Item, Shelf, Track};
 use requiem_ipc::UpdateRequest;
 use requiem_macos::artwork::Cover;
 
@@ -41,7 +41,7 @@ use super::prefs;
 use super::search_lead::SearchLead;
 use super::service_switch::ServiceSwitch;
 use super::settings::SettingsPage;
-use super::shelves::{Shelves, Surface};
+use super::shelves::{FlippedView, Shelves, Surface};
 use super::table::{self, Kind, Table};
 use super::theme::{self, Icon, Weight};
 use super::widgets::{
@@ -175,6 +175,8 @@ const STATUS_H: CGFloat = 26.0;
 /// The chips of the search results, and the space around them.
 const SEARCH_CHIPS_H: CGFloat = CHIP_H + 8.0;
 const COLLECTION_COVER: CGFloat = 120.0;
+/// The top songs' title on an artist's page, and the space under it: a shelf title's.
+const ARTIST_HEAD_H: CGFloat = 34.0;
 const BACK_H: CGFloat = 28.0;
 const BUTTON_H: CGFloat = 36.0;
 const SIGN_IN_W: CGFloat = 560.0;
@@ -354,6 +356,12 @@ pub struct Ui {
     collection_head: CollectionHead,
     collection_table: Table,
     collection_state: EmptyState,
+    /// An artist's page below its head: the top songs, in `artist_lead`, then its shelves.
+    artist_shelves: Shelves,
+    /// The top songs' title, and the collection table while an artist's page shows.
+    artist_lead: Retained<FlippedView>,
+    /// The artist whose shelves are on screen, so a newer page of it keeps their scroll.
+    artist_shown: RefCell<Option<CollectionId>>,
     search_page: Retained<NSView>,
     pub search: Field,
     status: Retained<NSTextField>,
@@ -696,9 +704,17 @@ impl Ui {
             target,
             sel!(refresh:),
         );
+        let artist_shelves = Shelves::on(
+            mtm,
+            Surface::Artist,
+            rect(0.0, 0.0, mw, collection_list.size.height),
+        );
+        artist_shelves.view.setHidden(true);
+        let artist_lead = Self::artist_lead(mtm, mw);
         collection_page.addSubview(&collection_head.view);
         collection_page.addSubview(&collection_table.view);
         collection_page.addSubview(&collection_state.view);
+        collection_page.addSubview(&artist_shelves.view);
         main.addSubview(&collection_page);
 
         let now_playing =
@@ -784,6 +800,9 @@ impl Ui {
             collection_head,
             collection_table,
             collection_state,
+            artist_shelves,
+            artist_lead,
+            artist_shown: RefCell::new(None),
             search_page,
             search,
             status,
@@ -974,6 +993,26 @@ impl Ui {
         }
     }
 
+    /// The lead of an artist's shelves: a "Top songs" title, over the collection table once
+    /// `show_collection` moves it in.
+    fn artist_lead(mtm: MainThreadMarker, width: CGFloat) -> Retained<FlippedView> {
+        // SAFETY: `initWithFrame:` is NSView's designated initializer.
+        let lead: Retained<FlippedView> = unsafe {
+            msg_send![FlippedView::alloc(mtm), initWithFrame: rect(0.0, 0.0, width, ARTIST_HEAD_H)]
+        };
+        let font = theme::font(17.0, Weight::SemiBold);
+        let title = widgets::label(mtm, "Top songs", &font, &theme::ink());
+        title.setFrame(rect(
+            PAD,
+            0.0,
+            width - 2.0 * PAD,
+            widgets::line_height(&font),
+        ));
+        title.setAutoresizingMask(FLEX_W);
+        lead.addSubview(&title);
+        lead
+    }
+
     fn toast_view(mtm: MainThreadMarker, target: &AnyObject) -> ToastView {
         let w = 320.0;
         let frame = rect(
@@ -1119,7 +1158,7 @@ impl Ui {
                 .ui()
                 .collection
                 .as_ref()
-                .map_or(AppView::Home, |c| AppView::of(c.from)),
+                .map_or(AppView::Home, |c| AppView::of(c.origin())),
             v => v,
         };
         self.nav_home.set_active(lit == AppView::Home);
@@ -1376,7 +1415,7 @@ impl Ui {
             match list {
                 List::Results => self.results.confirm_add(i),
                 List::Collection => self.collection_table.confirm_add(i),
-                List::Shelf(_) => {}
+                List::TopArtist | List::Shelf(_) => {}
             }
             widgets::announce(self.mtm, "Added to queue");
         }
@@ -1387,6 +1426,7 @@ impl Ui {
         match surface {
             Surface::Home => &self.shelves,
             Surface::Search => &self.search_shelves,
+            Surface::Artist => &self.artist_shelves,
         }
     }
 
@@ -1400,7 +1440,10 @@ impl Ui {
             }),
             (Surface::Home, Some(Item::Collection(c))) => self.open_collection(c, Place::Home),
             (Surface::Search, Some(Item::Collection(c))) => self.open_collection(c, Place::Search),
-            (Surface::Search, Some(Item::Track(_))) | (_, None) => {}
+            (Surface::Artist, Some(Item::Collection(c))) => {
+                self.open_collection(c, Place::Collection);
+            }
+            (Surface::Search | Surface::Artist, Some(Item::Track(_))) | (_, None) => {}
         }
     }
 
@@ -1429,14 +1472,19 @@ impl Ui {
     pub fn go_back(&self) {
         match self.view.get() {
             AppView::Collection => {
-                let from = self
+                let (from, previous) = self
                     .vm
                     .borrow()
                     .ui()
                     .collection
                     .as_ref()
-                    .map_or(Place::Home, |c| c.from);
-                self.show(AppView::of(from));
+                    .map_or((Place::Home, false), |c| (c.from, c.previous.is_some()));
+                if previous {
+                    self.run(Intent::CollectionBack);
+                    self.show(AppView::Collection);
+                } else {
+                    self.show(AppView::of(from));
+                }
             }
             AppView::NowPlaying => {
                 let open = self.vm.borrow().ui().collection.is_some();
@@ -2051,6 +2099,11 @@ impl Ui {
         if let Some(r) = p.results {
             self.show_results(r);
         }
+        if let Some(on) = p.top_play
+            && let Some(lead) = &*self.search_lead.borrow()
+        {
+            lead.set_play_enabled(on);
+        }
         if let Some((shown, filter)) = p.filter {
             self.service_switch.set(shown, filter);
         }
@@ -2161,6 +2214,7 @@ impl Ui {
             SearchBody::All {
                 top,
                 songs: next,
+                artists,
                 albums,
                 playlists,
                 mixed,
@@ -2177,7 +2231,11 @@ impl Ui {
                     items: items.into_iter().map(Item::Collection).collect(),
                 };
                 self.search_shelves.set_shelves(
-                    &[shelf("Albums", albums), shelf("Playlists", playlists)],
+                    &[
+                        shelf("Artists", artists),
+                        shelf("Albums", albums),
+                        shelf("Playlists", playlists),
+                    ],
                     false,
                 );
                 all = true;
@@ -2403,39 +2461,98 @@ impl Ui {
             self.collection_table.set_rows(Vec::new(), None);
             return;
         };
+        let artist = c.collection.kind == CollectionKind::Artist;
         let h = &self.collection_head;
         widgets::set_text(&h.title, &c.collection.title);
         widgets::set_text(&h.sub, c.collection.subtitle.as_deref().unwrap_or(""));
         h.cover.set_url(c.collection.artwork_url.as_deref());
-        let back = match c.from {
-            Place::Library => "\u{2039} Library",
-            Place::Search => "\u{2039} Search",
-            _ => "\u{2039} Home",
+        widgets::round(&h.cover, if artist { COLLECTION_COVER / 2.0 } else { 8.0 });
+        let back = match (&c.back, c.from) {
+            (Some(title), _) => format!("\u{2039} {title}"),
+            (None, Place::Library) => "\u{2039} Library".to_owned(),
+            (None, Place::Search) => "\u{2039} Search".to_owned(),
+            (None, _) => "\u{2039} Home".to_owned(),
         };
-        let w = h.back.set_label(back);
+        let w = h.back.set_label(&back);
         h.back
             .setFrame(rect(PAD, h.back.frame().origin.y, w, BACK_H));
         widgets::accessibility_label(&h.back, &format!("Back to {}", &back[4..]));
-        let ready = c.view == PageView::Ready && !c.rows.is_empty();
-        self.collection_table.view.setHidden(!ready);
+        let songs = c.rows.len();
+        let loaded = c.view == PageView::Ready;
+        // An artist's page shows with its shelves alone; another collection needs tracks.
+        let shelved = artist && loaded && (songs > 0 || !c.shelves.is_empty());
+        let ready = shelved || (loaded && songs > 0);
         self.collection_state.view.setHidden(ready);
         if !ready {
             Self::page_state(
                 &self.collection_state,
                 Icon::ListMusic,
                 &c.view,
-                "playlist",
+                if artist { "artist" } else { "playlist" },
                 None,
             );
         }
+        self.place_collection_table(shelved && songs > 0, songs);
+        self.collection_table.view.setHidden(!ready || songs == 0);
         self.collection_table
             .set_rows(if ready { c.rows } else { Vec::new() }, None);
+        if shelved {
+            let id = Some(c.collection.id.clone());
+            let same = *self.artist_shown.borrow() == id;
+            *self.artist_shown.borrow_mut() = id;
+            let lead = (songs > 0).then(|| {
+                let height = ARTIST_HEAD_H + Table::height_for(songs);
+                (Retained::into_super(self.artist_lead.clone()), height)
+            });
+            self.artist_shelves.set_lead(lead);
+            self.artist_shelves.set_shelves(&c.shelves, same);
+        } else if self.artist_shown.take().is_some() {
+            self.artist_shelves.set_lead(None);
+            self.artist_shelves.set_shelves(&[], false);
+        }
+        self.artist_shelves.view.setHidden(!shelved);
         h.play.set_shown(true);
         h.add.set_shown(true);
-        h.play
-            .set_enabled(ready && self.vm.borrow().ui().controls().player);
-        h.add
-            .set_enabled(ready && self.vm.borrow().ui().controls().player);
+        let can = songs > 0 && ready && self.vm.borrow().ui().controls().player;
+        h.play.set_enabled(can);
+        h.add.set_enabled(can);
+    }
+
+    /// Puts the collection table in the artist page's lead, fitted to its `songs` rows and
+    /// leaving the wheel to the page, or back on the collection page under the head.
+    fn place_collection_table(&self, in_lead: bool, songs: usize) {
+        let t = &self.collection_table;
+        let lead: &NSView = &self.artist_lead;
+        let page: &NSView = &self.collection_page;
+        // SAFETY: a superview holds its subviews, so it is alive while the table is in it.
+        let parent = unsafe { t.view.superview() };
+        if in_lead {
+            let width = self.artist_shelves.view.contentSize().width;
+            let height = ARTIST_HEAD_H + Table::height_for(songs);
+            lead.setFrameSize(NSSize::new(width, height));
+            if parent.as_deref() != Some(lead) {
+                lead.addSubview(&t.view);
+                t.view.setAutoresizingMask(FLEX_W);
+                t.set_passes_scroll(true);
+            }
+            t.view.setFrame(rect(
+                PAD,
+                ARTIST_HEAD_H,
+                width - 2.0 * PAD,
+                Table::height_for(songs),
+            ));
+        } else if parent.as_deref() != Some(page) {
+            page.addSubview(&t.view);
+            t.view.setAutoresizingMask(FLEX_W | FLEX_H);
+            t.set_passes_scroll(false);
+            let b = page.bounds();
+            t.view.setFrame(rect(
+                PAD,
+                0.0,
+                b.size.width - 2.0 * PAD,
+                self.collection_head.view.frame().origin.y - 16.0,
+            ));
+        }
     }
 
     /// What a snapshot of the connected window waits for.
@@ -2465,6 +2582,8 @@ impl Ui {
                 covers: self.shelves.covers_loading()
                     || (self.view.get() == AppView::Search && self.search_covers_loading())
                     || (self.view.get() == AppView::Library && self.library_grid.covers_loading())
+                    || (self.view.get() == AppView::Collection
+                        && self.artist_shelves.covers_loading())
                     || self.collection_head.cover.is_loading(),
             },
         }
@@ -2565,6 +2684,7 @@ impl Ui {
         }
         self.shelves.update_paging();
         self.search_shelves.update_paging();
+        self.artist_shelves.update_paging();
         if let Some(lead) = &*self.search_lead.borrow() {
             lead.layout();
         }
@@ -2798,6 +2918,7 @@ impl Ui {
         self.library_grid.set_bottom_inset(inset);
         self.collection_table.set_bottom_inset(inset);
         self.shelves.set_bottom_inset(inset);
+        self.artist_shelves.set_bottom_inset(inset);
     }
 
     /// Fades the toast in as it rises into the frame it was given.
@@ -2872,8 +2993,32 @@ fn spoken(toast: &Toast) -> String {
 struct CollectionPatch {
     collection: Collection,
     from: Place,
+    /// The title of the collection Back returns to, when it was opened from one.
+    back: Option<String>,
     view: PageView,
     rows: Vec<table::RowText>,
+    /// The shelves of collections on the page, which an artist's lists after its top songs.
+    shelves: Vec<Shelf>,
+}
+
+/// The collections of `shelves`, a shelf each, leaving out the tracks and the shelves they
+/// leave empty.
+fn collection_shelves(shelves: &[Shelf]) -> Vec<Shelf> {
+    shelves
+        .iter()
+        .filter_map(|s| {
+            let items: Vec<Item> = s
+                .items
+                .iter()
+                .filter(|i| matches!(i, Item::Collection(_)))
+                .cloned()
+                .collect();
+            (!items.is_empty()).then(|| Shelf {
+                title: s.title.clone(),
+                items,
+            })
+        })
+        .collect()
 }
 
 /// The sign-in panels' buttons, one per provider: a title and the provider's badge.
@@ -2950,6 +3095,8 @@ struct ResultsPatch {
 /// runs.
 struct Patch {
     results: Option<ResultsPatch>,
+    /// Whether the top artist's Play has songs to play.
+    top_play: Option<bool>,
     search_status: Option<Option<(String, bool)>>,
     queue: Option<(Vec<table::RowText>, Option<usize>)>,
     queue_badge: Option<Option<String>>,
@@ -2989,6 +3136,7 @@ impl Patch {
                     view,
                 }
             }),
+            top_play: any(Dirty::TOP_ARTIST).then(|| s.top_artist_playable()),
             search_status: any(Dirty::SEARCH_STATUS).then(|| s.search_status_text()),
             queue: any(Dirty::QUEUE).then(|| (table::rows(&s.queue), s.current)),
             queue_badge: any(Dirty::QUEUE).then(|| s.queue_badge()),
@@ -3019,8 +3167,10 @@ impl Patch {
                 s.collection.as_ref().map(|c| CollectionPatch {
                     collection: c.collection.clone(),
                     from: c.from,
+                    back: c.previous.as_ref().map(|p| p.collection.title.clone()),
                     view: c.browse.view(),
                     rows: table::rows(&c.tracks),
+                    shelves: collection_shelves(&c.browse.shelves),
                 })
             }),
             // The queue says whether the badge shows.
@@ -3086,6 +3236,7 @@ mod tests {
         let p = Patch::new(Dirty::VOLUME, vm.ui());
         assert_eq!(p.volume, Some(70));
         assert!(p.results.is_none() && p.search_status.is_none() && p.queue.is_none());
+        assert!(p.top_play.is_none());
         assert!(p.queue_badge.is_none());
         assert!(p.home.is_none() && p.library.is_none() && p.collection.is_none());
         assert!(p.now_playing.is_none() && p.elapsed.is_none() && p.progress.is_none());
@@ -3099,15 +3250,30 @@ mod tests {
         let (vm, _) = demo::start();
         let p = Patch::new(Dirty::ALL, vm.ui());
         let results = p.results.unwrap();
-        // The All view lists the top result and the four songs after it, and the table
-        // waits for the Songs chip.
+        // The All view lists the top artist, playable once its page landed, and the first
+        // four songs, and the table waits for the Songs chip.
         assert!(results.rows.is_empty());
-        let SearchBody::All { top, songs, .. } = results.view.body else {
+        let SearchBody::All {
+            top,
+            songs,
+            artists,
+            ..
+        } = results.view.body
+        else {
             panic!("the demo's search lists everything");
         };
-        assert_eq!(top.map(|t| t.title).as_deref(), Some("Night Drive Home"));
+        let Some(vm::TopResult::Artist { artist, playable }) = top else {
+            panic!("the demo finds artists, so one is the top result");
+        };
+        assert_eq!((artist.title.as_str(), playable), ("Northbound Echo", true));
+        assert_eq!(p.top_play, Some(true));
+        assert_eq!(
+            songs.first().map(|t| t.title.as_str()),
+            Some("Night Drive Home")
+        );
         assert_eq!(songs.len(), 4);
-        assert_eq!(results.view.chips.len(), 4);
+        assert_eq!(artists.len(), 5);
+        assert_eq!(results.view.chips.len(), 5);
         assert_eq!(p.search_status, Some(None));
         // The demo has both services signed in.
         assert_eq!(p.filter, Some((true, ServiceFilter::All)));

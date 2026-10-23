@@ -457,6 +457,45 @@ pub struct KeyTableIvars {
     ring: OnceCell<Retained<FocusRing>>,
 }
 
+pub struct PassScrollIvars {
+    pass: Cell<bool>,
+}
+
+define_class!(
+    /// The rows' scroll view. Set to pass, it leaves the wheel to the page it sits in, as a
+    /// table that shows every row does inside a page that scrolls.
+    // SAFETY: NSScrollView has no subclassing requirements for `scrollWheel:`; no Drop impl.
+    #[unsafe(super(NSScrollView, NSView, NSResponder, NSObject))]
+    #[thread_kind = MainThreadOnly]
+    #[ivars = PassScrollIvars]
+    pub struct PassScroll;
+
+    impl PassScroll {
+        #[unsafe(method(scrollWheel:))]
+        fn scroll_wheel(&self, event: &NSEvent) {
+            if self.ivars().pass.get() {
+                // SAFETY: the next responder is a live responder or nil.
+                if let Some(next) = unsafe { self.nextResponder() } {
+                    next.scrollWheel(event);
+                }
+            } else {
+                // SAFETY: `scrollWheel:` is NSScrollView's, called on its superclass.
+                let _: () = unsafe { msg_send![super(self), scrollWheel: event] };
+            }
+        }
+    }
+);
+
+impl PassScroll {
+    fn new(mtm: MainThreadMarker, frame: NSRect) -> Retained<Self> {
+        let this = Self::alloc(mtm).set_ivars(PassScrollIvars {
+            pass: Cell::new(false),
+        });
+        // SAFETY: `initWithFrame:` is NSView's designated initializer.
+        unsafe { msg_send![super(this), initWithFrame: frame] }
+    }
+}
+
 define_class!(
     /// An outline over the rows that lets clicks through to them.
     // SAFETY: NSView has no subclassing requirements; no ivars; no Drop impl.
@@ -1182,8 +1221,7 @@ impl Table {
         let _ = header.ivars().table.set(Weak::from_retained(&table));
         view.addSubview(&header);
 
-        let scroll =
-            NSScrollView::initWithFrame(NSScrollView::alloc(mtm), rect(0.0, 0.0, w, h - HEADER_H));
+        let scroll = PassScroll::new(mtm, rect(0.0, 0.0, w, h - HEADER_H));
         scroll.setAutoresizingMask(FLEX_W | FLEX_H);
         scroll.setDocumentView(Some(&table));
         scroll.setHasVerticalScroller(true);
@@ -1279,6 +1317,20 @@ impl Table {
 
     pub fn selected_row(&self) -> Option<usize> {
         usize::try_from(self.table.selectedRow()).ok()
+    }
+
+    /// The height that shows `rows` rows under the header, with nothing to scroll.
+    pub fn height_for(rows: usize) -> CGFloat {
+        HEADER_H + rows as CGFloat * ROW_H
+    }
+
+    /// Leaves the wheel to the page the table sits in, or takes it back.
+    pub fn set_passes_scroll(&self, pass: bool) {
+        if let Some(scroll) = self.table.enclosingScrollView()
+            && let Some(s) = scroll.downcast_ref::<PassScroll>()
+        {
+            s.ivars().pass.set(pass);
+        }
     }
 
     /// Leaves `inset` below the last row, so it can scroll clear of an overlay.
