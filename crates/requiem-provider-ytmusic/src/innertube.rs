@@ -1,15 +1,19 @@
 //! Innertube client: search and browse (WEB_REMIX) and stream resolution (VISIONOS).
 
 use std::sync::{Arc, Mutex};
+use std::thread;
 
-use requiem_core::{ProviderError, Track};
+use requiem_core::{
+    Collection, CollectionKind, ProviderError, SEARCH_COLLECTIONS, SearchResults, Track,
+};
 use serde_json::{Value, json};
 
 use crate::IpFamily;
 use crate::clients::*;
 use crate::log::debug;
 use crate::parse::{
-    PlayerOutcome, StreamFormat, classify_player, parse_search, structure_summary, visitor_data,
+    PlayerOutcome, StreamFormat, classify_player, parse_search, parse_search_collections,
+    structure_summary, visitor_data,
 };
 use crate::range::{FetchError, RangeFetcher, RangeResponse, Refresher};
 use crate::transport::{HttpResponse, Transport};
@@ -179,6 +183,59 @@ impl InnertubeClient {
             return self.search_once(query, limit);
         }
         Ok(tracks)
+    }
+
+    /// At most `limit` of the albums or playlists a search for `query` finds.
+    fn search_collections(
+        &self,
+        query: &str,
+        kind: CollectionKind,
+        limit: usize,
+    ) -> Result<Vec<Collection>, ProviderError> {
+        let (what, params) = match kind {
+            CollectionKind::Album => ("album search", ALBUMS_PARAMS),
+            CollectionKind::Playlist => ("playlist search", PLAYLISTS_PARAMS),
+        };
+        let body = json!({
+            "context": Self::music_context(),
+            "query": query,
+            "params": params,
+        });
+        let resp = self.post_music(self.family(), what, SEARCH_URL, &body)?;
+        parse_search_collections(&resp.body, kind, limit)
+    }
+
+    /// Songs, albums and playlists, searched at once. Albums or playlists that could not be
+    /// had are left out; only a failed song search fails.
+    pub(crate) fn search_all(
+        &self,
+        query: &str,
+        limit: usize,
+    ) -> Result<SearchResults, ProviderError> {
+        let found = |kind| self.search_collections(query, kind, SEARCH_COLLECTIONS);
+        let (tracks, albums, playlists) = thread::scope(|scope| {
+            let albums = scope.spawn(|| found(CollectionKind::Album));
+            let playlists = scope.spawn(|| found(CollectionKind::Playlist));
+            let tracks = self.search(query, limit);
+            (tracks, albums.join(), playlists.join())
+        });
+        let left_out =
+            |joined: thread::Result<Result<Vec<Collection>, ProviderError>>, what| match joined {
+                Ok(Ok(found)) => found,
+                Ok(Err(e)) => {
+                    debug!("search without {what}: {e}");
+                    Vec::new()
+                }
+                Err(_) => {
+                    debug!("search without {what}: the search panicked");
+                    Vec::new()
+                }
+            };
+        Ok(SearchResults {
+            tracks: tracks?,
+            albums: left_out(albums, "albums"),
+            playlists: left_out(playlists, "playlists"),
+        })
     }
 
     /// The first page of an anonymous browse of `browse_id`.

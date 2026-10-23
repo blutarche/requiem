@@ -9,6 +9,10 @@ pub(crate) const MUSIC_CLIENT_VERSION: &str = "1.20260707.12.00";
 pub(crate) const MUSIC_UA: &str = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36";
 /// Songs-only filter for `search`.
 pub(crate) const SONGS_PARAMS: &str = "EgWKAQIIAWoQEAMQBBAJEAoQBRAREBAQFQ==";
+/// The web client's Albums and Featured playlists chips, as a search response lists them
+/// (2026-10-23), URL-decoded.
+pub(crate) const ALBUMS_PARAMS: &str = "EgWKAQIYAWoMEA4QChADEAQQCRAF";
+pub(crate) const PLAYLISTS_PARAMS: &str = "EgeKAQQoADgBagwQDhAKEAMQBBAJEAU=";
 
 /// VISIONOS: the only stream client that ships. Its URLs serve ranged GETs to EOF.
 pub(crate) const STREAM_ORIGIN: &str = "https://www.youtube.com";
