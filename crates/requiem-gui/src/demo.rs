@@ -11,7 +11,9 @@ use requiem_core::{
 use requiem_ipc::{UpdateState, UpdateStatus};
 
 use crate::args::View;
-use crate::vm::{BANNER_GRACE, Intent, Link, LinkError, Place, Service, ServiceFilter, Vm};
+use crate::vm::{
+    BANNER_GRACE, Intent, Link, LinkError, Place, SearchChip, Service, ServiceFilter, Vm,
+};
 
 pub const QUERY: &str = "night drive";
 /// The demo player's version, and the one its update offers.
@@ -949,7 +951,8 @@ fn run_intent(vm: &mut Vm, daemon: &mut Daemon, intent: Intent) {
 /// `OutOfDate`, `Toast` and the update views add their banner or toast; the Library views and
 /// `HomeSignedOut` set the account; `HomeSpotify` filters Home to Spotify; `SettingsSession`
 /// opens YouTube Music's session form in Settings; `NowPlayingEmpty` stops playback;
-/// `NowPlayingLast` plays the queue's last track. Other views get the plain start.
+/// `NowPlayingLast` plays the queue's last track; `SearchAlbums` and `SearchSongs` pick that
+/// chip of the results. Other views get the plain start.
 pub fn start_in(view: View) -> (Vm, Daemon) {
     let t0 = Instant::now();
     let mut vm = Vm::new_at(t0);
@@ -1043,6 +1046,12 @@ pub fn start_in(view: View) -> (Vm, Daemon) {
         View::NowPlayingLast => {
             let last = daemon.queue.len() - 1;
             run_intent(&mut vm, &mut daemon, Intent::PlayQueue(last));
+        }
+        View::SearchAlbums => {
+            vm.intent(Intent::SetSearchChip(SearchChip::Albums));
+        }
+        View::SearchSongs => {
+            vm.intent(Intent::SetSearchChip(SearchChip::Songs));
         }
         View::Search
         | View::Queue

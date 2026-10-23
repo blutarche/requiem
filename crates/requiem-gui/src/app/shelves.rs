@@ -65,6 +65,14 @@ const FLING_STOP: CGFloat = 10.0;
 const FLING_WINDOW: f64 = 0.1;
 const FLING_TICK: Duration = Duration::from_millis(16);
 
+/// The page whose shelves a `Shelves` holds, which cards and scrolling find it by.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Surface {
+    Home,
+    /// The All view of search results.
+    Search,
+}
+
 define_class!(
     /// A view with its origin at the top left, so rows and cards lay out downwards.
     // SAFETY: NSView has no subclassing requirements; no ivars; no Drop impl.
@@ -80,31 +88,39 @@ define_class!(
     }
 );
 
+pub struct WatcherIvars {
+    surface: Surface,
+}
+
 define_class!(
     /// Hears the scroll views scroll, so cards come and go with the visible area, and the
     /// paging buttons, whose tag is their row's place in `Shelves::rows`.
-    // SAFETY: NSObject has no subclassing requirements; no ivars; no Drop impl.
+    // SAFETY: NSObject has no subclassing requirements; no Drop impl.
     #[unsafe(super(NSObject))]
     #[thread_kind = MainThreadOnly]
+    #[ivars = WatcherIvars]
     pub struct ScrollWatcher;
 
     impl ScrollWatcher {
         #[unsafe(method(scrolled:))]
         fn scrolled(&self, _notification: &NSNotification) {
-            ui::with(|ui| ui.shelves.sync());
+            let surface = self.ivars().surface;
+            ui::with(|ui| ui.shelves_of(surface).sync());
         }
 
         #[unsafe(method(pageBack:))]
         fn page_back(&self, sender: Option<&NSControl>) {
+            let surface = self.ivars().surface;
             if let Some(b) = sender {
-                ui::with(|ui| ui.shelves.page(b.tag() as usize, false));
+                ui::with(|ui| ui.shelves_of(surface).page(b.tag() as usize, false));
             }
         }
 
         #[unsafe(method(pageForward:))]
         fn page_forward(&self, sender: Option<&NSControl>) {
+            let surface = self.ivars().surface;
             if let Some(b) = sender {
-                ui::with(|ui| ui.shelves.page(b.tag() as usize, true));
+                ui::with(|ui| ui.shelves_of(surface).page(b.tag() as usize, true));
             }
         }
     }
@@ -362,6 +378,7 @@ impl RowScroll {
 }
 
 pub struct CardIvars {
+    surface: Surface,
     /// The shelf's index in the page's list, which moves when a refresh adds or drops a
     /// shelf before it.
     shelf: Cell<usize>,
@@ -470,7 +487,7 @@ define_class!(
         #[unsafe(method(cardAdd:))]
         fn card_add(&self, _sender: Option<&AnyObject>) {
             let iv = self.ivars();
-            ui::with(|ui| ui.card_add(iv.shelf.get(), iv.index));
+            ui::with(|ui| ui.card_add(iv.surface, iv.shelf.get(), iv.index));
         }
 
         #[unsafe(method(validateMenuItem:))]
@@ -503,8 +520,10 @@ impl ShelfCard {
     }
 
     /// `badge` is the item's service, on a page that mixes services.
+    #[allow(clippy::too_many_arguments)]
     fn new(
         mtm: MainThreadMarker,
+        surface: Surface,
         frame: NSRect,
         shelf: usize,
         index: usize,
@@ -513,6 +532,7 @@ impl ShelfCard {
         badge: Option<Service>,
     ) -> Retained<Self> {
         let this = Self::alloc(mtm).set_ivars(CardIvars {
+            surface,
             shelf: Cell::new(shelf),
             index,
             track: matches!(item, Item::Track(_)),
@@ -627,7 +647,7 @@ impl ShelfCard {
 
     fn activate(&self) {
         let iv = self.ivars();
-        ui::with(|ui| ui.card_clicked(iv.shelf.get(), iv.index));
+        ui::with(|ui| ui.card_clicked(iv.surface, iv.shelf.get(), iv.index));
     }
 }
 
@@ -774,6 +794,7 @@ fn row_size(items: usize, grid: bool) -> (CGFloat, CGFloat) {
 }
 
 struct ShelfRow {
+    surface: Surface,
     /// The shelf's index in the page's list, which `Intent`s name.
     shelf: usize,
     /// The shelf's title, which a refreshed page finds it again by.
@@ -921,7 +942,16 @@ impl ShelfRow {
             };
             let item = &self.items[i];
             let badge = vm::badge(vm::item_provider(item), self.mixed);
-            let card = ShelfCard::new(mtm, frame, self.shelf, i, item, self.grid, badge);
+            let card = ShelfCard::new(
+                mtm,
+                self.surface,
+                frame,
+                self.shelf,
+                i,
+                item,
+                self.grid,
+                badge,
+            );
             self.doc.addSubview(&card);
             cards.insert(i, card);
         }
@@ -942,16 +972,30 @@ fn card_h() -> CGFloat {
 #[doc(hidden)]
 pub type RowViews = (Retained<NSScrollView>, Vec<(usize, Retained<NSView>)>);
 
+/// What sits above a page's first shelf: a view across the page's width, and its height.
+struct Lead {
+    view: Retained<NSView>,
+    height: CGFloat,
+}
+
 pub struct Shelves {
     mtm: MainThreadMarker,
+    surface: Surface,
     pub view: Retained<NSScrollView>,
     doc: Retained<FlippedView>,
     rows: RefCell<Vec<ShelfRow>>,
+    lead: RefCell<Option<Lead>>,
     watcher: Retained<ScrollWatcher>,
 }
 
 impl Shelves {
+    /// Home's shelves in `frame`.
     pub fn new(mtm: MainThreadMarker, frame: NSRect) -> Shelves {
+        Self::on(mtm, Surface::Home, frame)
+    }
+
+    /// The shelves of `surface`'s page in `frame`.
+    pub fn on(mtm: MainThreadMarker, surface: Surface, frame: NSRect) -> Shelves {
         let view = NSScrollView::initWithFrame(NSScrollView::alloc(mtm), frame);
         view.setAutoresizingMask(widgets::FLEX_W | widgets::FLEX_H);
         view.setHasVerticalScroller(true);
@@ -968,16 +1012,34 @@ impl Shelves {
             v
         };
         view.setDocumentView(Some(&doc));
+        let watcher = ScrollWatcher::alloc(mtm).set_ivars(WatcherIvars { surface });
         // SAFETY: NSObject's `init`.
-        let watcher: Retained<ScrollWatcher> =
-            unsafe { msg_send![ScrollWatcher::alloc(mtm), init] };
+        let watcher: Retained<ScrollWatcher> = unsafe { msg_send![super(watcher), init] };
         Shelves {
             mtm,
+            surface,
             view,
             doc,
             rows: RefCell::new(Vec::new()),
+            lead: RefCell::new(None),
             watcher,
         }
+    }
+
+    /// Puts `view`, `height` high and as wide as the page, above the first shelf, in place of
+    /// the one before; `None` takes it away. It lays out at the next `set_shelves`.
+    pub fn set_lead(&self, view: Option<(Retained<NSView>, CGFloat)>) {
+        let old = self
+            .lead
+            .replace(view.map(|(view, height)| Lead { view, height }));
+        if let Some(old) = old {
+            old.view.removeFromSuperview();
+        }
+    }
+
+    /// The lead's view, if there is one.
+    pub fn lead(&self) -> Option<Retained<NSView>> {
+        self.lead.borrow().as_ref().map(|l| l.view.clone())
     }
 
     /// Replaces the page's shelves; shelves with nothing in them are left out. With
@@ -1027,6 +1089,12 @@ impl Shelves {
         }
         let width = self.view.contentSize().width;
         let mut y = TOP_PAD;
+        if let Some(lead) = &*self.lead.borrow() {
+            lead.view.setFrame(rect(0.0, y, width, lead.height));
+            lead.view.setAutoresizingMask(FLEX_W);
+            self.doc.addSubview(&lead.view);
+            y += lead.height + SHELF_GAP;
+        }
         let mut rows = Vec::with_capacity(shown.len());
         for (&(si, shelf), fate) in shown.iter().zip(fates) {
             let row = match fate {
@@ -1129,6 +1197,7 @@ impl Shelves {
         scroll.setDocumentView(Some(&doc));
         self.doc.addSubview(&scroll);
         ShelfRow {
+            surface: self.surface,
             shelf: si,
             name: shelf.title.clone(),
             title,

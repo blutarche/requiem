@@ -1,0 +1,493 @@
+//! The head of the All view of search results: the top result as a card with a Play button,
+//! and the songs after it in a short list.
+
+use std::cell::Cell;
+use std::rc::Rc;
+
+use objc2::rc::Retained;
+use objc2::runtime::NSObject;
+use objc2::{DefinedClass, MainThreadOnly, Message, define_class, msg_send};
+use objc2_app_kit::{
+    NSColor, NSEvent, NSResponder, NSTextAlignment, NSTextField, NSTrackingAreaOptions, NSView,
+};
+use objc2_core_foundation::CGFloat;
+use objc2_foundation::{MainThreadMarker, NSPoint, NSRect};
+use requiem_core::Track;
+use requiem_macos::artwork::Cover;
+
+use super::badge::{self, Badge};
+use super::shelves::{FlippedView, spoken};
+use super::theme::{self, Icon, Weight};
+use super::ui;
+use super::widgets::{self, FLEX_W, rect};
+use crate::vm::{self, Intent, List, Service, TOP_SONGS};
+
+const PAD: CGFloat = 24.0;
+/// A section title's height, and the space under it: those of a shelf's.
+const TITLE_H: CGFloat = 24.0;
+const TITLE_GAP: CGFloat = 10.0;
+const HEAD_H: CGFloat = TITLE_H + TITLE_GAP;
+/// A song's row, with the cover of Home's compact cards.
+const ROW_H: CGFloat = 56.0;
+const THUMB: CGFloat = 44.0;
+const THUMB_GAP: CGFloat = 12.0;
+const DURATION_W: CGFloat = 44.0;
+const BODY_H: CGFloat = TOP_SONGS as CGFloat * ROW_H;
+/// The space between the top result's card and the songs.
+const GAP: CGFloat = 24.0;
+const CARD_PAD: CGFloat = 16.0;
+const CARD_COVER: CGFloat = 104.0;
+const CARD_RADIUS: CGFloat = 12.0;
+const PLAY: CGFloat = 44.0;
+const PLAY_ICON: CGFloat = 20.0;
+
+pub struct PressIvars {
+    press: Rc<dyn Fn()>,
+    rest: Option<Retained<NSColor>>,
+    hover: Retained<NSColor>,
+    hovered: Cell<bool>,
+    pressed: Cell<bool>,
+}
+
+define_class!(
+    /// A button made of a view: it presses on a click that is let go inside it, and fills on
+    /// hover.
+    // SAFETY: NSView has no subclassing requirements; no Drop impl.
+    #[unsafe(super(NSView, NSResponder, NSObject))]
+    #[thread_kind = MainThreadOnly]
+    #[ivars = PressIvars]
+    pub struct PressView;
+
+    impl PressView {
+        #[unsafe(method(isFlipped))]
+        fn is_flipped(&self) -> bool {
+            true
+        }
+
+        #[unsafe(method(mouseEntered:))]
+        fn mouse_entered(&self, _event: &NSEvent) {
+            self.set_hovered(true);
+        }
+
+        #[unsafe(method(mouseExited:))]
+        fn mouse_exited(&self, _event: &NSEvent) {
+            self.ivars().pressed.set(false);
+            self.set_hovered(false);
+        }
+
+        #[unsafe(method(mouseDown:))]
+        fn mouse_down(&self, _event: &NSEvent) {
+            self.ivars().pressed.set(true);
+        }
+
+        #[unsafe(method(mouseUp:))]
+        fn mouse_up(&self, event: &NSEvent) {
+            let was = self.ivars().pressed.replace(false);
+            let at = self.convertPoint_fromView(event.locationInWindow(), None);
+            let b = self.bounds();
+            let inside = at.x >= 0.0 && at.x < b.size.width && at.y >= 0.0 && at.y < b.size.height;
+            if was && inside {
+                self.activate();
+            }
+        }
+
+        #[unsafe(method(acceptsFirstMouse:))]
+        fn accepts_first_mouse(&self, _event: Option<&NSEvent>) -> bool {
+            true
+        }
+
+        /// Clicks on the cover or a label land on the view itself.
+        #[unsafe(method_id(hitTest:))]
+        fn hit_test(&self, point: NSPoint) -> Option<Retained<NSView>> {
+            let f = self.frame();
+            let inside = point.x >= f.origin.x
+                && point.x < f.origin.x + f.size.width
+                && point.y >= f.origin.y
+                && point.y < f.origin.y + f.size.height;
+            inside.then(|| Retained::into_super(self.retain()))
+        }
+
+        /// Also called when an ancestor is hidden or the view leaves the page; a hidden view
+        /// gets no `mouseExited:`.
+        #[unsafe(method(viewDidHide))]
+        fn view_did_hide(&self) {
+            // SAFETY: forwards to the superclass implementation.
+            let _: () = unsafe { msg_send![super(self), viewDidHide] };
+            self.set_hovered(false);
+        }
+
+        #[unsafe(method(accessibilityPerformPress))]
+        fn accessibility_perform_press(&self) -> bool {
+            self.activate();
+            true
+        }
+
+        /// A plain view reports itself disabled, which VoiceOver reads as dimmed.
+        #[unsafe(method(isAccessibilityEnabled))]
+        fn accessibility_enabled(&self) -> bool {
+            true
+        }
+    }
+);
+
+impl PressView {
+    /// A button in `frame` that calls `press`, named `label` to VoiceOver. It is filled with
+    /// `rest` and with `hover` under the pointer. Add its parts before `finish`.
+    fn new(
+        mtm: MainThreadMarker,
+        frame: NSRect,
+        radius: CGFloat,
+        (rest, hover): (Option<Retained<NSColor>>, Retained<NSColor>),
+        press: Rc<dyn Fn()>,
+    ) -> Retained<Self> {
+        let this = Self::alloc(mtm).set_ivars(PressIvars {
+            press,
+            rest,
+            hover,
+            hovered: Cell::new(false),
+            pressed: Cell::new(false),
+        });
+        // SAFETY: `initWithFrame:` is NSView's designated initializer.
+        let this: Retained<Self> = unsafe { msg_send![super(this), initWithFrame: frame] };
+        widgets::round(&this, radius);
+        widgets::track_hover(&this, NSTrackingAreaOptions::empty());
+        this.paint();
+        this
+    }
+
+    /// Makes the view one accessibility button, once its parts are in.
+    fn finish(&self, label: &str) {
+        widgets::as_button(self, label);
+    }
+
+    fn set_hovered(&self, hovered: bool) {
+        if self.ivars().hovered.replace(hovered) != hovered {
+            self.paint();
+        }
+    }
+
+    fn paint(&self) {
+        let iv = self.ivars();
+        let color = if iv.hovered.get() {
+            Some(&iv.hover)
+        } else {
+            iv.rest.as_ref()
+        };
+        widgets::fill(self, color.map(|c| &**c));
+    }
+
+    fn activate(&self) {
+        // The press can bring the page down with this view, and the closure with it.
+        let press = self.ivars().press.clone();
+        let _alive = self.retain();
+        press();
+    }
+}
+
+/// Plays the shown results from item `from`, as a row of the song table does.
+fn play(from: usize) -> Rc<dyn Fn()> {
+    Rc::new(move || {
+        ui::with(|ui| {
+            ui.intent(Intent::PlayFrom {
+                list: List::Results,
+                from,
+            })
+        });
+    })
+}
+
+struct TopResult {
+    title_label: Retained<NSTextField>,
+    card: Retained<PressView>,
+    play: Retained<PressView>,
+    cover: Retained<Cover>,
+    badge: Option<Retained<Badge>>,
+    title: Retained<NSTextField>,
+    artists: Retained<NSTextField>,
+}
+
+struct SongRow {
+    row: Retained<PressView>,
+    title: Retained<NSTextField>,
+    artists: Retained<NSTextField>,
+    duration: Retained<NSTextField>,
+}
+
+pub struct SearchLead {
+    pub view: Retained<FlippedView>,
+    top: TopResult,
+    songs_title: Option<Retained<NSTextField>>,
+    songs: Vec<SongRow>,
+}
+
+impl SearchLead {
+    /// The lead's height: a title over the card, or over the songs when there are four.
+    pub const H: CGFloat = HEAD_H + BODY_H;
+
+    /// `top` as a card with a Play button, and `songs` after it, in a view `width` wide.
+    /// `songs` are the tracks after the top one in the shown results, so a row presses to play
+    /// from its own place in them; `mixed` says whether the results span services.
+    pub fn new(
+        mtm: MainThreadMarker,
+        top: &Track,
+        songs: &[Track],
+        mixed: bool,
+        width: CGFloat,
+    ) -> SearchLead {
+        // SAFETY: `initWithFrame:` is NSView's designated initializer.
+        let view: Retained<FlippedView> = unsafe {
+            msg_send![FlippedView::alloc(mtm), initWithFrame: rect(0.0, 0.0, width, Self::H)]
+        };
+        view.setAutoresizingMask(FLEX_W);
+        let heading = |text: &str| {
+            let l = widgets::label(
+                mtm,
+                text,
+                &theme::font(17.0, Weight::SemiBold),
+                &theme::ink(),
+            );
+            view.addSubview(&l);
+            l
+        };
+        let top = Self::top_result(mtm, &view, heading("Top result"), top, mixed);
+        let songs_title = (!songs.is_empty()).then(|| heading("Songs"));
+        let songs = songs
+            .iter()
+            .enumerate()
+            .map(|(i, t)| Self::song_row(mtm, &view, t, mixed, 1 + i))
+            .collect();
+        let lead = SearchLead {
+            view,
+            top,
+            songs_title,
+            songs,
+        };
+        lead.layout();
+        lead
+    }
+
+    fn top_result(
+        mtm: MainThreadMarker,
+        view: &NSView,
+        title_label: Retained<NSTextField>,
+        track: &Track,
+        mixed: bool,
+    ) -> TopResult {
+        let artists = vm::artists(track);
+        let service = vm::badge(&track.id.provider, mixed);
+        let card = PressView::new(
+            mtm,
+            NSRect::ZERO,
+            CARD_RADIUS,
+            (Some(theme::bg_2()), theme::row_hover()),
+            play(0),
+        );
+        let cover = widgets::cover(
+            mtm,
+            rect(CARD_PAD, CARD_PAD, CARD_COVER, CARD_COVER),
+            8.0,
+            36.0,
+        );
+        cover.set_url(track.artwork_url.as_deref());
+        card.addSubview(&cover);
+        let title = widgets::label(
+            mtm,
+            &track.title,
+            &theme::font(20.0, Weight::SemiBold),
+            &theme::ink(),
+        );
+        let sub = widgets::label(
+            mtm,
+            &artists,
+            &theme::font(13.0, Weight::Regular),
+            &theme::muted(),
+        );
+        card.addSubview(&title);
+        card.addSubview(&sub);
+        let mark = service.map(|s| Self::badge(mtm, &card, s, rect(0.0, 0.0, 0.0, 0.0)));
+        card.finish(&spoken(&track.title, &artists, service));
+
+        let disc = PressView::new(
+            mtm,
+            rect(0.0, 0.0, PLAY, PLAY),
+            PLAY / 2.0,
+            (Some(theme::accent()), theme::accent_hi()),
+            play(0),
+        );
+        let glyph = widgets::icon_view(
+            mtm,
+            Icon::Play,
+            PLAY_ICON,
+            &theme::on_accent(),
+            rect(
+                (PLAY - PLAY_ICON) / 2.0,
+                (PLAY - PLAY_ICON) / 2.0,
+                PLAY_ICON,
+                PLAY_ICON,
+            ),
+        );
+        disc.addSubview(&glyph);
+        disc.finish(&format!("Play {}", track.title));
+        view.addSubview(&card);
+        view.addSubview(&disc);
+        TopResult {
+            title_label,
+            card,
+            play: disc,
+            cover,
+            badge: mark,
+            title,
+            artists: sub,
+        }
+    }
+
+    fn song_row(
+        mtm: MainThreadMarker,
+        view: &NSView,
+        track: &Track,
+        mixed: bool,
+        from: usize,
+    ) -> SongRow {
+        let artists = vm::artists(track);
+        let service = vm::badge(&track.id.provider, mixed);
+        let row = PressView::new(
+            mtm,
+            NSRect::ZERO,
+            8.0,
+            (None, theme::row_hover()),
+            play(from),
+        );
+        let pad = (ROW_H - THUMB) / 2.0;
+        let cover = widgets::cover(mtm, rect(pad, pad, THUMB, THUMB), 4.0, 16.0);
+        cover.set_url(track.artwork_url.as_deref());
+        row.addSubview(&cover);
+        let title = widgets::label(
+            mtm,
+            &track.title,
+            &theme::font(14.0, Weight::Medium),
+            &theme::ink(),
+        );
+        let sub = widgets::label(
+            mtm,
+            &artists,
+            &theme::font(12.0, Weight::Regular),
+            &theme::muted(),
+        );
+        let duration = widgets::label(
+            mtm,
+            &track.duration.map(vm::fmt_time).unwrap_or_default(),
+            &theme::tabular(12.0, Weight::Regular),
+            &theme::muted(),
+        );
+        duration.setAlignment(NSTextAlignment::Right);
+        row.addSubview(&title);
+        row.addSubview(&sub);
+        row.addSubview(&duration);
+        if let Some(s) = service {
+            Self::badge(mtm, &row, s, rect(pad, pad, THUMB, THUMB));
+        }
+        row.finish(&spoken(&track.title, &artists, service));
+        view.addSubview(&row);
+        SongRow {
+            row,
+            title,
+            artists: sub,
+            duration,
+        }
+    }
+
+    /// `service`'s badge on a cover at `cover`, added to `parent`.
+    fn badge(
+        mtm: MainThreadMarker,
+        parent: &NSView,
+        service: Service,
+        cover: NSRect,
+    ) -> Retained<Badge> {
+        let b = Badge::new(mtm, badge::frame(cover, 6.0, true));
+        b.set(Some(service));
+        parent.addSubview(&b);
+        b
+    }
+
+    /// The top result card's width at a lead `width` wide: a share of it, within bounds.
+    fn card_w(width: CGFloat) -> CGFloat {
+        ((width - 2.0 * PAD - GAP) * 0.4).clamp(240.0, 380.0)
+    }
+
+    /// Fits the parts to the lead's width, after the window resized.
+    pub fn layout(&self) {
+        let width = self.view.frame().size.width;
+        let cw = Self::card_w(width);
+        let t = &self.top;
+        t.title_label.setFrame(rect(
+            PAD,
+            0.0,
+            cw,
+            widgets::line_height(&theme::font(17.0, Weight::SemiBold)),
+        ));
+        t.card.setFrame(rect(PAD, HEAD_H, cw, BODY_H));
+        let inner = cw - 2.0 * CARD_PAD;
+        let title_y = CARD_PAD + CARD_COVER + 12.0;
+        let title_h = widgets::line_height(&theme::font(20.0, Weight::SemiBold));
+        t.title.setFrame(rect(CARD_PAD, title_y, inner, title_h));
+        // The artists stop short of the Play button.
+        t.artists.setFrame(rect(
+            CARD_PAD,
+            title_y + title_h + 2.0,
+            inner - PLAY - 8.0,
+            widgets::line_height(&theme::font(13.0, Weight::Regular)),
+        ));
+        let cover = rect(CARD_PAD, CARD_PAD, CARD_COVER, CARD_COVER);
+        t.cover.setFrame(cover);
+        if let Some(b) = &t.badge {
+            b.setFrame(badge::frame(cover, 6.0, true));
+        }
+        t.play.setFrame(rect(
+            PAD + cw - CARD_PAD - PLAY,
+            HEAD_H + BODY_H - CARD_PAD - PLAY,
+            PLAY,
+            PLAY,
+        ));
+
+        let x = PAD + cw + GAP;
+        let w = (width - x - PAD).max(0.0);
+        if let Some(l) = &self.songs_title {
+            l.setFrame(rect(
+                x,
+                0.0,
+                w,
+                widgets::line_height(&theme::font(17.0, Weight::SemiBold)),
+            ));
+        }
+        let pad = (ROW_H - THUMB) / 2.0;
+        let text_x = pad + THUMB + THUMB_GAP;
+        let text_w = (w - text_x - DURATION_W - 2.0 * pad).max(0.0);
+        let (title_h, sub_h) = (
+            widgets::line_height(&theme::font(14.0, Weight::Medium)),
+            widgets::line_height(&theme::font(12.0, Weight::Regular)),
+        );
+        let y = ((ROW_H - title_h - sub_h) / 2.0).round();
+        for (i, s) in self.songs.iter().enumerate() {
+            s.row
+                .setFrame(rect(x, HEAD_H + i as CGFloat * ROW_H, w, ROW_H));
+            s.title.setFrame(rect(text_x, y, text_w, title_h));
+            s.artists.setFrame(rect(text_x, y + title_h, text_w, sub_h));
+            s.duration.setFrame(rect(
+                w - pad - DURATION_W,
+                ((ROW_H - sub_h) / 2.0).round(),
+                DURATION_W,
+                sub_h,
+            ));
+        }
+    }
+
+    /// A cover has not arrived.
+    pub fn covers_loading(&self) -> bool {
+        let loading = |v: &NSView| {
+            v.subviews()
+                .iter()
+                .any(|s| s.downcast_ref::<Cover>().is_some_and(Cover::is_loading))
+        };
+        self.top.cover.is_loading() || self.songs.iter().any(|s| loading(&s.row))
+    }
+}

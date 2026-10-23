@@ -32,14 +32,16 @@ use requiem_macos::artwork::Cover;
 use super::backend::{Backend, Msg};
 use super::badge;
 use super::bar::PlayerBar;
+use super::chips::{CHIP_H, ChipRow};
 use super::cover_grid::CoverGrid;
 use super::library_bar::LibraryBar;
 use super::now_playing::NowPlayingPage;
 use super::palette::Palette;
 use super::prefs;
+use super::search_lead::SearchLead;
 use super::service_switch::ServiceSwitch;
 use super::settings::SettingsPage;
-use super::shelves::Shelves;
+use super::shelves::{Shelves, Surface};
 use super::table::{self, Kind, Table};
 use super::theme::{self, Icon, Weight};
 use super::widgets::{
@@ -48,9 +50,9 @@ use super::widgets::{
 };
 use super::{Delegate, MainWindow};
 use crate::vm::{
-    self, AccountRow, AccountRowState, Banner, Controls, Dirty, EmptyText, HomeView, Intent,
-    LibraryChip, LibrarySort, LibraryView, List, PageView, PaletteAction, Place, QueueEdit,
-    Selection, Service, ServiceFilter, Toast, UiState, Vm,
+    self, AccountRow, AccountRowState, Banner, Controls, Dirty, HomeView, Intent, LibraryChip,
+    LibrarySort, LibraryView, List, PageView, PaletteAction, Place, QueueEdit, SearchBody,
+    SearchChip, SearchView, Selection, Service, ServiceFilter, Toast, UiState, Vm,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -170,6 +172,8 @@ const PAD: CGFloat = 24.0;
 /// it.
 const TOP: CGFloat = 20.0;
 const STATUS_H: CGFloat = 26.0;
+/// The chips of the search results, and the space around them.
+const SEARCH_CHIPS_H: CGFloat = CHIP_H + 8.0;
 const COLLECTION_COVER: CGFloat = 120.0;
 const BACK_H: CGFloat = 28.0;
 const BUTTON_H: CGFloat = 36.0;
@@ -298,6 +302,17 @@ struct CollectionHead {
     add: Retained<HoverButton>,
 }
 
+/// What the results area lists that the keyboard can act on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SearchList {
+    /// An empty state, or the All view, whose cards the keyboard does not reach.
+    Nothing,
+    /// The song table.
+    Table,
+    /// The grid of albums or of playlists.
+    Grid,
+}
+
 pub struct Ui {
     mtm: MainThreadMarker,
     pub window: Retained<NSWindow>,
@@ -344,6 +359,17 @@ pub struct Ui {
     status: Retained<NSTextField>,
     pub results: Table,
     results_empty: EmptyState,
+    search_chips_bar: Retained<NSView>,
+    search_chips: ChipRow<SearchChip>,
+    /// The All view's albums and playlists, under its lead.
+    pub search_shelves: Shelves,
+    search_lead: RefCell<Option<SearchLead>>,
+    search_grid: CoverGrid,
+    /// What the results area lists, which the keyboard acts on.
+    search_list: Cell<SearchList>,
+    /// Whether the status line and the chips take room under the field.
+    search_status_shown: Cell<bool>,
+    search_chips_shown: Cell<bool>,
     queue_page: Retained<NSView>,
     queue_count: Retained<NSTextField>,
     pub queue: Table,
@@ -491,9 +517,33 @@ impl Ui {
         let list = rect(PAD, 0.0, mw - 2.0 * PAD, field_y - 16.0);
         let results = Table::new(mtm, list, Kind::Results);
         let results_empty = EmptyState::new(mtm, list, Icon::Search, target, sel!(emptyAction:));
+        let search_chips_bar = widgets::view(
+            mtm,
+            rect(0.0, field_y - 8.0 - SEARCH_CHIPS_H, mw, SEARCH_CHIPS_H),
+            FLEX_W | PIN_TOP,
+        );
+        search_chips_bar.setHidden(true);
+        let search_chips = ChipRow::new(
+            mtm,
+            &search_chips_bar,
+            SearchChip::CHOICES.map(|chip| (chip, chip.label())),
+            |chip| {
+                with(|ui| ui.choose_search_chip(chip));
+            },
+        );
+        let below_field = rect(0.0, 0.0, mw, field_y - 16.0);
+        let search_shelves = Shelves::on(mtm, Surface::Search, below_field);
+        search_shelves.view.setHidden(true);
+        let search_grid = CoverGrid::new(mtm, below_field, |c| {
+            with(|ui| ui.open_collection(c, Place::Search));
+        });
+        search_grid.view.setHidden(true);
         search_page.addSubview(&search.ring);
         search_page.addSubview(&status);
+        search_page.addSubview(&search_chips_bar);
         search_page.addSubview(&results.view);
+        search_page.addSubview(&search_shelves.view);
+        search_page.addSubview(&search_grid.view);
         search_page.addSubview(&results_empty.view);
         main.addSubview(&search_page);
 
@@ -739,6 +789,14 @@ impl Ui {
             status,
             results,
             results_empty,
+            search_chips_bar,
+            search_chips,
+            search_shelves,
+            search_lead: RefCell::new(None),
+            search_grid,
+            search_list: Cell::new(SearchList::Nothing),
+            search_status_shown: Cell::new(false),
+            search_chips_shown: Cell::new(false),
             queue_page,
             queue_count,
             queue,
@@ -1001,8 +1059,13 @@ impl Ui {
     pub fn show(&self, view: AppView) {
         self.switch_to(view);
         self.visit(view.place());
-        if view == AppView::Search && self.vm.borrow().ui().shown_results().is_empty() {
+        if view == AppView::Search && self.search_list.get() == SearchList::Nothing {
             self.window.makeFirstResponder(Some(&self.search.text));
+            return;
+        }
+        if view == AppView::Search && self.search_list.get() == SearchList::Grid {
+            self.window
+                .makeFirstResponder(Some(self.search_grid.responder()));
             return;
         }
         let table = match view {
@@ -1066,17 +1129,36 @@ impl Ui {
         self.nav_settings.set_active(lit == AppView::Settings);
     }
 
-    /// The Library's grid has the keyboard.
-    pub fn library_grid_focused(&self) -> bool {
-        self.view.get() == AppView::Library
-            && self.window.firstResponder().is_some_and(|r| {
-                std::ptr::eq::<AnyObject>(r.as_ref(), self.library_grid.responder().as_ref())
-            })
+    /// The grid of the Library or of the search results, whichever shows, has the keyboard.
+    pub fn grid_focused(&self) -> bool {
+        let grid = match self.view.get() {
+            AppView::Library => &self.library_grid,
+            AppView::Search => &self.search_grid,
+            _ => return false,
+        };
+        self.window
+            .firstResponder()
+            .is_some_and(|r| std::ptr::eq::<AnyObject>(r.as_ref(), grid.responder().as_ref()))
     }
 
-    /// Moves the Library's selected card by `cols` columns and `rows` rows.
-    pub fn move_library_selection(&self, cols: isize, rows: isize) {
-        self.library_grid.move_selection(cols, rows);
+    /// Moves the selected card of the grid that shows by `cols` columns and `rows` rows.
+    pub fn move_grid_selection(&self, cols: isize, rows: isize) {
+        match self.view.get() {
+            AppView::Library => self.library_grid.move_selection(cols, rows),
+            AppView::Search => self.search_grid.move_selection(cols, rows),
+            _ => {}
+        }
+    }
+
+    /// Down from the search field: into the song table or the grid, whichever lists the
+    /// results.
+    pub fn results_move_down(&self) {
+        self.show(AppView::Search);
+        match self.search_list.get() {
+            SearchList::Table => self.results.select_first(),
+            SearchList::Grid => self.search_grid.move_selection(0, 0),
+            SearchList::Nothing => {}
+        }
     }
 
     /// The results table has focus with its first row selected.
@@ -1091,10 +1173,17 @@ impl Ui {
     /// Whether the visible table has a row that Return (or with `append`, Cmd+Return) acts on.
     pub fn selection(&self) -> Selection {
         match self.view.get() {
-            AppView::Search => {
-                let row = self.results.selected_row().is_some();
-                Selection { row, result: row }
-            }
+            AppView::Search => match self.search_list.get() {
+                SearchList::Table => {
+                    let row = self.results.selected_row().is_some();
+                    Selection { row, result: row }
+                }
+                SearchList::Grid => Selection {
+                    row: self.search_grid.selected().is_some(),
+                    result: false,
+                },
+                SearchList::Nothing => Selection::default(),
+            },
             AppView::Collection => {
                 let row = self.collection_table.selected_row().is_some();
                 Selection { row, result: row }
@@ -1250,6 +1339,14 @@ impl Ui {
         self.run(Intent::SetLibraryChip(chip));
     }
 
+    /// A click on a search chip: lists that kind of result, and gives it the keyboard.
+    pub fn choose_search_chip(&self, chip: SearchChip) {
+        self.run(Intent::SetSearchChip(chip));
+        if self.view.get() == AppView::Search {
+            self.show(AppView::Search);
+        }
+    }
+
     /// The user's choice of Library order: shown at once, and kept for the next launch. Demo
     /// runs leave the saved choice alone.
     pub fn choose_library_sort(&self, sort: LibrarySort) {
@@ -1285,20 +1382,32 @@ impl Ui {
         }
     }
 
-    /// A click on a Home card: a track plays its shelf from there; a playlist or album opens.
-    pub fn card_clicked(&self, shelf: usize, index: usize) {
-        match self.shelves.item(shelf, index) {
-            Some(Item::Track(_)) => self.intent(Intent::PlayFrom {
-                list: List::Shelf(shelf),
-                from: index,
-            }),
-            Some(Item::Collection(c)) => self.open_collection(c, Place::Home),
-            None => {}
+    /// The shelves of `surface`'s page.
+    pub fn shelves_of(&self, surface: Surface) -> &Shelves {
+        match surface {
+            Surface::Home => &self.shelves,
+            Surface::Search => &self.search_shelves,
         }
     }
 
-    pub fn card_add(&self, shelf: usize, index: usize) {
-        self.append_row(List::Shelf(shelf), index);
+    /// A click on a card: on Home, a track plays its shelf from there; a playlist or album
+    /// opens, from the page the card is on.
+    pub fn card_clicked(&self, surface: Surface, shelf: usize, index: usize) {
+        match (surface, self.shelves_of(surface).item(shelf, index)) {
+            (Surface::Home, Some(Item::Track(_))) => self.intent(Intent::PlayFrom {
+                list: List::Shelf(shelf),
+                from: index,
+            }),
+            (Surface::Home, Some(Item::Collection(c))) => self.open_collection(c, Place::Home),
+            (Surface::Search, Some(Item::Collection(c))) => self.open_collection(c, Place::Search),
+            (Surface::Search, Some(Item::Track(_))) | (_, None) => {}
+        }
+    }
+
+    pub fn card_add(&self, surface: Surface, shelf: usize, index: usize) {
+        if surface == Surface::Home {
+            self.append_row(List::Shelf(shelf), index);
+        }
     }
 
     pub fn open_collection(&self, collection: Collection, from: Place) {
@@ -1648,13 +1757,21 @@ impl Ui {
     /// Settings, presses the session form's Paste from Clipboard.
     pub fn activate_selection(&self, append: bool) {
         match self.view.get() {
-            AppView::Search => match self.results.selected_row() {
-                Some(i) if append => self.append_row(List::Results, i),
-                Some(i) => self.intent(Intent::PlayFrom {
-                    list: List::Results,
-                    from: i,
-                }),
-                None => {}
+            AppView::Search => match self.search_list.get() {
+                SearchList::Table => match self.results.selected_row() {
+                    Some(i) if append => self.append_row(List::Results, i),
+                    Some(i) => self.intent(Intent::PlayFrom {
+                        list: List::Results,
+                        from: i,
+                    }),
+                    None => {}
+                },
+                SearchList::Grid => {
+                    if !append {
+                        self.search_grid.open_selected();
+                    }
+                }
+                SearchList::Nothing => {}
             },
             AppView::Collection => match self.collection_table.selected_row() {
                 Some(i) if append => self.append_row(List::Collection, i),
@@ -1928,18 +2045,11 @@ impl Ui {
                 None => widgets::set_text(&self.status, ""),
             }
             self.status.setHidden(status.is_none());
-            self.layout_search(status.is_some());
+            self.search_status_shown.set(status.is_some());
+            self.layout_search();
         }
-        if let Some((rows, empty)) = p.results {
-            let has_rows = !rows.is_empty();
-            self.results.set_rows(rows, None);
-            self.results.deselect();
-            self.results.view.setHidden(!has_rows);
-            self.results_empty.view.setHidden(has_rows);
-            if let Some(e) = empty {
-                self.results_empty
-                    .set(Icon::Search, &e.heading, &e.sub, e.action);
-            }
+        if let Some(r) = p.results {
+            self.show_results(r);
         }
         if let Some((shown, filter)) = p.filter {
             self.service_switch.set(shown, filter);
@@ -2025,6 +2135,71 @@ impl Ui {
             &self.now_playing.view,
             &self.settings.view,
         ]
+    }
+
+    /// Lists the search results: under the chips once there are some, as the chip in force
+    /// lists them.
+    fn show_results(&self, r: ResultsPatch) {
+        let ResultsPatch { rows, view } = r;
+        let SearchView { chips, body } = view;
+        let chips_shown = !chips.is_empty();
+        self.search_chips_bar.setHidden(!chips_shown);
+        if chips_shown {
+            self.search_chips.set(&chips, SEARCH_CHIPS_H);
+        }
+        self.search_chips_shown.set(chips_shown);
+        self.layout_search();
+
+        let (mut songs, mut all, mut grid, mut empty) = (false, false, false, None);
+        match body {
+            SearchBody::Empty(e) => empty = Some(e),
+            SearchBody::Songs => {
+                self.results.set_rows(rows, None);
+                self.results.deselect();
+                songs = true;
+            }
+            SearchBody::All {
+                top,
+                songs: next,
+                albums,
+                playlists,
+                mixed,
+            } => {
+                let width = self.search_shelves.view.contentSize().width;
+                let lead = top.map(|t| SearchLead::new(self.mtm, &t, &next, mixed, width));
+                self.search_shelves.set_lead(
+                    lead.as_ref()
+                        .map(|l| (Retained::into_super(l.view.clone()), SearchLead::H)),
+                );
+                *self.search_lead.borrow_mut() = lead;
+                let shelf = |title: &str, items: Vec<Collection>| Shelf {
+                    title: title.to_owned(),
+                    items: items.into_iter().map(Item::Collection).collect(),
+                };
+                self.search_shelves.set_shelves(
+                    &[shelf("Albums", albums), shelf("Playlists", playlists)],
+                    false,
+                );
+                all = true;
+            }
+            SearchBody::Collections { items, mixed } => {
+                self.search_grid.set(&items, mixed, false);
+                grid = true;
+            }
+        }
+        self.search_list.set(match (songs, grid) {
+            (true, _) => SearchList::Table,
+            (_, true) => SearchList::Grid,
+            _ => SearchList::Nothing,
+        });
+        self.results.view.setHidden(!songs);
+        self.search_shelves.view.setHidden(!all);
+        self.search_grid.view.setHidden(!grid);
+        self.results_empty.view.setHidden(empty.is_none());
+        if let Some(e) = empty {
+            self.results_empty
+                .set(Icon::Search, &e.heading, &e.sub, e.action);
+        }
     }
 
     fn show_home(&self, view: &HomeView, shelves: &[Shelf], only: Option<Service>) {
@@ -2234,6 +2409,7 @@ impl Ui {
         h.cover.set_url(c.collection.artwork_url.as_deref());
         let back = match c.from {
             Place::Library => "\u{2039} Library",
+            Place::Search => "\u{2039} Search",
             _ => "\u{2039} Home",
         };
         let w = h.back.set_label(back);
@@ -2287,23 +2463,47 @@ impl Ui {
             PageView::Failed(e) => SnapshotState::Failed(e),
             PageView::Ready => SnapshotState::Loaded {
                 covers: self.shelves.covers_loading()
+                    || (self.view.get() == AppView::Search && self.search_covers_loading())
                     || (self.view.get() == AppView::Library && self.library_grid.covers_loading())
                     || self.collection_head.cover.is_loading(),
             },
         }
     }
 
-    fn layout_search(&self, status: bool) {
+    /// The search results' covers have not all arrived.
+    fn search_covers_loading(&self) -> bool {
+        self.search_shelves.covers_loading()
+            || self.search_grid.covers_loading()
+            || self
+                .search_lead
+                .borrow()
+                .as_ref()
+                .is_some_and(SearchLead::covers_loading)
+    }
+
+    /// Fits the results under the field, the status line and the chips, whichever show.
+    fn layout_search(&self) {
         let b = self.search_page.bounds();
         let field_y = b.size.height - TOP - Field::H;
-        let top = if status {
+        let status = self.search_status_shown.get();
+        let mut top = if status {
             field_y - 8.0 - STATUS_H
         } else {
             field_y - 16.0
         };
+        if self.search_chips_shown.get() {
+            // Under the status line when it shows, else as close to the field as its pad lets.
+            let bar_y = if status { top } else { top + 8.0 } - SEARCH_CHIPS_H;
+            self.search_chips_bar
+                .setFrame(rect(0.0, bar_y, b.size.width, SEARCH_CHIPS_H));
+            top = bar_y - 4.0;
+        }
         let list = rect(PAD, 0.0, b.size.width - 2.0 * PAD, top);
         self.results.view.setFrame(list);
         self.results_empty.view.setFrame(list);
+        let full = rect(0.0, 0.0, b.size.width, top.max(0.0));
+        self.search_shelves.view.setFrame(full);
+        self.search_grid.view.setFrame(full);
     }
 
     /// Fits the banner to its text and button at the current width: one line, or two when
@@ -2364,7 +2564,12 @@ impl Ui {
             self.palette.layout();
         }
         self.shelves.update_paging();
+        self.search_shelves.update_paging();
+        if let Some(lead) = &*self.search_lead.borrow() {
+            lead.layout();
+        }
         self.library_grid.relayout();
+        self.search_grid.relayout();
         self.settings.layout();
         if !self.banner_shown.get() {
             return;
@@ -2734,11 +2939,17 @@ fn localized_cmp(a: &str, b: &str) -> Ordering {
     }
 }
 
+/// The search results as the page lists them.
+struct ResultsPatch {
+    /// The table's rows, while the Songs chip lists them.
+    rows: Vec<table::RowText>,
+    view: SearchView,
+}
+
 /// Owned copies of the dirty regions, taken so the view-model borrow ends before AppKit
 /// runs.
 struct Patch {
-    /// Rows, and the empty state when there are none.
-    results: Option<(Vec<table::RowText>, Option<EmptyText>)>,
+    results: Option<ResultsPatch>,
     search_status: Option<Option<(String, bool)>>,
     queue: Option<(Vec<table::RowText>, Option<usize>)>,
     queue_badge: Option<Option<String>>,
@@ -2766,8 +2977,18 @@ impl Patch {
     fn new(d: Dirty, s: &UiState) -> Patch {
         let any = |r: Dirty| d.contains(r);
         Patch {
-            results: any(Dirty::RESULTS)
-                .then(|| (table::rows(&s.shown_results()), s.results_empty())),
+            results: any(Dirty::RESULTS).then(|| {
+                let view = s.search_view();
+                let songs = view.body == SearchBody::Songs;
+                ResultsPatch {
+                    rows: if songs {
+                        table::rows(&s.shown_results())
+                    } else {
+                        Vec::new()
+                    },
+                    view,
+                }
+            }),
             search_status: any(Dirty::SEARCH_STATUS).then(|| s.search_status_text()),
             queue: any(Dirty::QUEUE).then(|| (table::rows(&s.queue), s.current)),
             queue_badge: any(Dirty::QUEUE).then(|| s.queue_badge()),
@@ -2877,9 +3098,16 @@ mod tests {
     fn patch_of_everything_matches_the_state() {
         let (vm, _) = demo::start();
         let p = Patch::new(Dirty::ALL, vm.ui());
-        let (rows, empty) = p.results.unwrap();
-        assert_eq!(rows.len(), 30);
-        assert_eq!(empty, None);
+        let results = p.results.unwrap();
+        // The All view lists the top result and the four songs after it, and the table
+        // waits for the Songs chip.
+        assert!(results.rows.is_empty());
+        let SearchBody::All { top, songs, .. } = results.view.body else {
+            panic!("the demo's search lists everything");
+        };
+        assert_eq!(top.map(|t| t.title).as_deref(), Some("Night Drive Home"));
+        assert_eq!(songs.len(), 4);
+        assert_eq!(results.view.chips.len(), 4);
         assert_eq!(p.search_status, Some(None));
         // The demo has both services signed in.
         assert_eq!(p.filter, Some((true, ServiceFilter::All)));
@@ -2965,8 +3193,11 @@ mod tests {
     #[test]
     fn empty_results_carry_their_empty_state() {
         let (vm, _) = demo::start_in(crate::args::View::Empty);
-        let (rows, empty) = Patch::new(Dirty::RESULTS, vm.ui()).results.unwrap();
-        assert!(rows.is_empty());
-        assert_eq!(empty.unwrap().heading, "Search");
+        let results = Patch::new(Dirty::RESULTS, vm.ui()).results.unwrap();
+        assert!(results.rows.is_empty() && results.view.chips.is_empty());
+        let SearchBody::Empty(empty) = results.view.body else {
+            panic!("no search yet is the empty state");
+        };
+        assert_eq!(empty.heading, "Search");
     }
 }

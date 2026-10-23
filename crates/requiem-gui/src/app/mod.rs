@@ -4,11 +4,13 @@
 mod backend;
 mod badge;
 mod bar;
+mod chips;
 mod cover_grid;
 mod library_bar;
 mod now_playing;
 mod palette;
 mod prefs;
+mod search_lead;
 mod service_switch;
 mod settings;
 #[doc(hidden)]
@@ -626,8 +628,7 @@ fn field_command(ui: &Ui, control: &NSControl, text: &NSTextView, command: Sel) 
         if command == sel!(insertNewline:) {
             ui.search_submitted();
         } else if command == sel!(moveDown:) {
-            ui.show(AppView::Search);
-            ui.results.select_first();
+            ui.results_move_down();
         } else if command == sel!(cancelOperation:) {
             if text.string().length() > 0 {
                 text.setString(&NSString::new());
@@ -714,15 +715,15 @@ fn key_down(ui: &Ui, event: &NSEvent) -> bool {
             | NSEventModifierFlags::Control
             | NSEventModifierFlags::Option,
     );
-    let grid = ui.library_grid_focused();
+    let grid = ui.grid_focused();
     match code {
         KEY_ESCAPE if plain && ui.current_view() == AppView::NowPlaying => ui.go_back(),
         KEY_SPACE if plain && !on_button => ui.intent(Intent::Toggle),
-        // The Library's grid takes the arrows the seek would.
-        KEY_LEFT if plain && grid => ui.move_library_selection(-1, 0),
-        KEY_RIGHT if plain && grid => ui.move_library_selection(1, 0),
-        KEY_UP if plain && grid => ui.move_library_selection(0, -1),
-        KEY_DOWN if plain && grid => ui.move_library_selection(0, 1),
+        // A grid of covers takes the arrows the seek would.
+        KEY_LEFT if plain && grid => ui.move_grid_selection(-1, 0),
+        KEY_RIGHT if plain && grid => ui.move_grid_selection(1, 0),
+        KEY_UP if plain && grid => ui.move_grid_selection(0, -1),
+        KEY_DOWN if plain && grid => ui.move_grid_selection(0, 1),
         KEY_LEFT if plain => ui.intent(Intent::SeekBy(-SEEK_STEP_SECS)),
         KEY_RIGHT if plain => ui.intent(Intent::SeekBy(SEEK_STEP_SECS)),
         KEY_UP if plain && ui.results_at_top() => ui.focus_search(),
@@ -1062,7 +1063,9 @@ pub fn run(args: Args) {
         | View::UpdateReady
         | View::UpdateFailed
         | View::NotUpdatable
-        | View::UpToDate => ui.show(AppView::Search),
+        | View::UpToDate
+        | View::SearchAlbums
+        | View::SearchSongs => ui.show(AppView::Search),
     }
 
     app.setDelegate(Some(ProtocolObject::from_ref(&*delegate)));
