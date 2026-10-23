@@ -255,6 +255,8 @@ struct Group {
 
 struct Subtitle {
     artists: Vec<String>,
+    /// The artist page of each of `artists`, as linked runs give it.
+    artist_ids: Vec<Option<CollectionId>>,
     album: Option<String>,
     duration: Option<Duration>,
 }
@@ -265,6 +267,7 @@ struct Subtitle {
 /// neither a count, a type label nor the album, split at unlinked " & " and ", " runs.
 fn parse_subtitle<'a>(runs: impl IntoIterator<Item = &'a Run>) -> Subtitle {
     let mut artists = Vec::new();
+    let mut artist_ids = Vec::new();
     let mut album = None;
     let mut duration = None;
     let mut groups = vec![Group {
@@ -286,10 +289,11 @@ fn parse_subtitle<'a>(runs: impl IntoIterator<Item = &'a Run>) -> Subtitle {
             duration = Some(d);
             continue;
         }
-        let page_type = run
+        let browse = run
             .navigation_endpoint
             .as_ref()
-            .and_then(|n| n.browse_endpoint.as_ref())
+            .and_then(|n| n.browse_endpoint.as_ref());
+        let page_type = browse
             .and_then(|b| b.browse_endpoint_context_supported_configs.as_ref())
             .and_then(|c| c.browse_endpoint_context_music_config.as_ref())
             .and_then(|m| m.page_type.as_deref());
@@ -301,7 +305,10 @@ fn parse_subtitle<'a>(runs: impl IntoIterator<Item = &'a Run>) -> Subtitle {
             group.parts.last_mut().expect("non-empty").push_str(text);
         }
         match page_type {
-            Some("MUSIC_PAGE_TYPE_ARTIST") => artists.push(text.to_owned()),
+            Some("MUSIC_PAGE_TYPE_ARTIST") => {
+                artists.push(text.to_owned());
+                artist_ids.push(browse.and_then(|b| artist_id(b.browse_id.as_deref()?)));
+            }
             Some("MUSIC_PAGE_TYPE_ALBUM") => album = Some(text.to_owned()),
             _ => {}
         }
@@ -334,11 +341,22 @@ fn parse_subtitle<'a>(runs: impl IntoIterator<Item = &'a Run>) -> Subtitle {
                 .collect();
         }
     }
+    // Untyped runs link nowhere.
+    artist_ids.resize(artists.len(), None);
     Subtitle {
         artists,
+        artist_ids,
         album,
         duration,
     }
+}
+
+/// The artist page browse id `browse_id` opens, if it is one.
+fn artist_id(browse_id: &str) -> Option<CollectionId> {
+    (collection_kind(browse_id) == CollectionKind::Artist).then(|| CollectionId {
+        provider: ProviderId(PROVIDER.to_owned()),
+        id: format!("{BROWSE_PREFIX}{browse_id}"),
+    })
 }
 
 fn column_runs(item: &ListItem, i: usize) -> &[Run] {
@@ -405,6 +423,7 @@ pub(crate) fn parse_search(body: &[u8], limit: usize) -> Result<Vec<Track>, Prov
                 },
                 title,
                 artists: sub.artists,
+                artist_ids: sub.artist_ids,
                 album: sub.album,
                 duration: sub.duration,
                 artwork_url: largest_thumbnail(item),
@@ -725,6 +744,7 @@ mod tests {
         assert_eq!(t.id.provider, ProviderId("ytmusic".into()));
         assert_eq!(t.title, "Around the World");
         assert_eq!(t.artists, vec!["Daft Punk"]);
+        assert_eq!(t.artist_ids, [Some(artist("UCRr1xG_2WIDs18a6cIiCxeA"))]);
         assert_eq!(t.album.as_deref(), Some("Homework"));
         assert_eq!(t.duration, Some(Duration::from_secs(7 * 60 + 10)));
         assert!(t.artwork_url.as_deref().unwrap().contains("w120-h120"));
@@ -733,6 +753,17 @@ mod tests {
                 .iter()
                 .all(|t| !t.title.is_empty() && t.duration.is_some())
         );
+        assert_eq!(
+            tracks[1].artist_ids,
+            [Some(artist("UCfARTWWQuS2V8Dsc-7mQ2Ug"))]
+        );
+    }
+
+    fn artist(browse_id: &str) -> CollectionId {
+        CollectionId {
+            provider: ProviderId("ytmusic".into()),
+            id: format!("browse:{browse_id}"),
+        }
     }
 
     #[test]
@@ -762,6 +793,8 @@ mod tests {
                 {"text":"Alb"},{"text":" \u2022 "},{"text":"1:02:03"}]}}}]}}}}"#;
         let t = &parse_search(body.as_bytes(), 1).unwrap()[0];
         assert_eq!(t.artists, vec!["A & B"]);
+        // Runs that link nowhere open no artist page.
+        assert_eq!(t.artist_ids, [None]);
         assert_eq!(t.album.as_deref(), Some("Alb"));
         assert_eq!(t.duration, Some(Duration::from_secs(3723)));
     }

@@ -146,6 +146,7 @@ fn list_item_track(item: &ListItem) -> Option<Track> {
         },
         title,
         artists: sub.artists,
+        artist_ids: sub.artist_ids,
         album: sub.album,
         duration: sub.duration.or_else(fixed),
         artwork_url: largest_thumbnail(item),
@@ -228,6 +229,7 @@ fn two_row_item(item: &TwoRowItem) -> Option<Item> {
         },
         title,
         artists: sub.artists,
+        artist_ids: sub.artist_ids,
         album: sub.album,
         duration: sub.duration,
         artwork_url,
@@ -551,11 +553,10 @@ pub(crate) fn parse_collection(body: &[u8], kind: CollectionKind) -> Result<Shel
         .and_then(|h| Header::deserialize(*h).ok())
         .unwrap_or_default();
     let name = joined(header.title.as_ref());
-    let header_artists: Vec<String> = header
+    let header_artists = header
         .strapline_text_one
         .as_ref()
-        .map(|s| parse_subtitle(&s.runs).artists)
-        .unwrap_or_default();
+        .map(|s| parse_subtitle(&s.runs));
     let header_art = largest(header.thumbnail.as_ref());
 
     let mut shelves = Vec::new();
@@ -575,8 +576,11 @@ pub(crate) fn parse_collection(body: &[u8], kind: CollectionKind) -> Result<Shel
         .filter_map(list_item_track)
         .map(|mut t| {
             if kind == CollectionKind::Album {
-                if t.artists.is_empty() {
-                    t.artists.clone_from(&header_artists);
+                if t.artists.is_empty()
+                    && let Some(sub) = &header_artists
+                {
+                    t.artists.clone_from(&sub.artists);
+                    t.artist_ids.clone_from(&sub.artist_ids);
                 }
                 if t.album.is_none() && !name.is_empty() {
                     t.album = Some(name.clone());
@@ -630,6 +634,13 @@ mod tests {
         }
     }
 
+    fn artist(browse_id: &str) -> CollectionId {
+        CollectionId {
+            provider: ProviderId("ytmusic".into()),
+            id: format!("browse:{browse_id}"),
+        }
+    }
+
     #[test]
     fn home_fixture_shelves() {
         let page = parse_home(HOME.as_bytes()).unwrap();
@@ -650,6 +661,13 @@ mod tests {
         assert_eq!(t.id.provider, ProviderId("ytmusic".into()));
         assert_eq!(t.title, "Amor Factura");
         assert_eq!(t.artists, ["Ricardo Arjona", "Grupo Firme"]);
+        assert_eq!(
+            t.artist_ids,
+            [
+                Some(artist("UCGqiM9WAE7sXx2mhoJ_GzOQ")),
+                Some(artist("UCJKREB2c3dO8dgdo8FtdO_A"))
+            ]
+        );
         assert_eq!(t.album.as_deref(), Some("Amor Factura"));
         assert_eq!(t.duration, None);
         assert!(
@@ -858,7 +876,11 @@ mod tests {
             ids(&page.shelves[2]),
             ["fakeVid0003", "browse:MPREb_fakeAlbum01"]
         );
-        assert_eq!(track(&page.shelves[2].items[0]).artists, ["Fake Artist"]);
+        let card = track(&page.shelves[2].items[0]);
+        assert_eq!(card.artists, ["Fake Artist"]);
+        assert_eq!(card.artist_ids, [Some(artist("UCfakeArtist0001"))]);
+        // Its artist is named but not linked.
+        assert_eq!(two.artist_ids, [None]);
     }
 
     #[test]
@@ -907,6 +929,7 @@ mod tests {
         assert_eq!(t.id.id, "kkppQnFl2-8");
         assert_eq!(t.title, "ฤดูฝน");
         assert_eq!(t.artists, ["Paradox"]);
+        assert_eq!(t.artist_ids, [Some(artist("UCHiQKgD-JprgAKU75eukOQg"))]);
         assert_eq!(t.album.as_deref(), Some("BEFORE SUNRISE AFTER SUNSET"));
         assert_eq!(t.duration, Some(Duration::from_secs(4 * 60 + 48)));
         assert!(t.artwork_url.is_some());
@@ -932,6 +955,8 @@ mod tests {
         let t = track(&shelf.items[0]);
         assert_eq!(t.title, "Daftendirekt");
         assert_eq!(t.artists, ["Daft Punk"]);
+        // The rows link no artist; the header's link is the album's artist.
+        assert_eq!(t.artist_ids, [Some(artist(DAFT_PUNK))]);
         assert_eq!(t.album.as_deref(), Some("Homework"));
         assert_eq!(t.duration, Some(Duration::from_secs(2 * 60 + 45)));
         assert!(
@@ -1015,6 +1040,13 @@ mod tests {
         assert_eq!(top[0].id.id, "khnokW3Mw24");
         assert_eq!(top[0].title, "Instant Crush (feat. Julian Casablancas)");
         assert_eq!(top[0].artists, ["Daft Punk", "Julian Casablancas"]);
+        assert_eq!(
+            top[0].artist_ids,
+            [
+                Some(artist(DAFT_PUNK)),
+                Some(artist("UCWhpbdGLnR8XtXLr0yl2nYA"))
+            ]
+        );
         assert_eq!(top[0].album.as_deref(), Some("Random Access Memories"));
         assert_eq!(top[4].title, "Veridis Quo");
         let collections = |i: usize| -> Vec<&Collection> {
