@@ -5,6 +5,7 @@ mod backend;
 mod badge;
 mod bar;
 mod cover_grid;
+mod library_bar;
 mod now_playing;
 mod palette;
 mod prefs;
@@ -30,8 +31,8 @@ use objc2_app_kit::{
     NSAppearance, NSAppearanceNameDarkAqua, NSApplication, NSApplicationActivationPolicy,
     NSApplicationDelegate, NSBackingStoreType, NSButton, NSControl, NSControlStateValueOff,
     NSControlStateValueOn, NSControlTextEditingDelegate, NSEvent, NSEventMask,
-    NSEventModifierFlags, NSMenu, NSMenuItem, NSResponder, NSText, NSTextFieldDelegate, NSTextView,
-    NSWindow, NSWindowDelegate, NSWindowStyleMask,
+    NSEventModifierFlags, NSMenu, NSMenuItem, NSPopUpButton, NSResponder, NSText,
+    NSTextFieldDelegate, NSTextView, NSWindow, NSWindowDelegate, NSWindowStyleMask,
 };
 use objc2_foundation::{MainThreadMarker, NSNotification, NSRect, NSString};
 
@@ -39,7 +40,9 @@ use requiem_macos::artwork;
 
 use crate::args::{Args, View};
 use crate::demo;
-use crate::vm::{Intent, PaletteAction, QueueEdit, SEEK_STEP_SECS, Service, VOLUME_STEP, Vm};
+use crate::vm::{
+    Intent, LibrarySort, PaletteAction, QueueEdit, SEEK_STEP_SECS, Service, VOLUME_STEP, Vm,
+};
 use backend::{Backend, Live};
 use ui::{AppView, Ui};
 
@@ -97,6 +100,8 @@ define_class!(
                 };
                 if ui.palette.field.is(&control) {
                     ui.palette.filter();
+                } else if ui.library_bar.filter.is(&control) {
+                    ui.library_filter_changed();
                 } else if let Some(row) = ui.settings.form_row(&control) {
                     ui.settings.fields_changed(row);
                 }
@@ -187,6 +192,17 @@ define_class!(
         fn library_action(&self, sender: Option<&AnyObject>) {
             let index = sender_tag(sender).and_then(|t| usize::try_from(t).ok());
             ui::with(|ui| ui.library_action(index.unwrap_or(0)));
+        }
+
+        #[unsafe(method(librarySort:))]
+        fn library_sort(&self, sender: Option<&AnyObject>) {
+            let sort = sender
+                .and_then(|s| s.downcast_ref::<NSPopUpButton>())
+                .and_then(|p| usize::try_from(p.indexOfSelectedItem()).ok())
+                .and_then(|i| LibrarySort::CHOICES.get(i).copied());
+            if let Some(sort) = sort {
+                ui::with(|ui| ui.choose_library_sort(sort));
+            }
         }
 
         #[unsafe(method(homeAction:))]
@@ -646,7 +662,8 @@ fn row_edit(action: Sel) -> Option<fn(usize) -> QueueEdit> {
     }
 }
 
-/// Keys the search, palette and client fields handle themselves; true when handled.
+/// Keys the search, palette, Library filter and client fields handle themselves; true when
+/// handled.
 fn field_command(ui: &Ui, control: &NSControl, text: &NSTextView, command: Sel) -> bool {
     if ui.search.is(control) {
         if command == sel!(insertNewline:) {
@@ -678,6 +695,21 @@ fn field_command(ui: &Ui, control: &NSControl, text: &NSTextView, command: Sel) 
             ui.close_palette();
         } else if command == sel!(insertTab:) || command == sel!(insertBacktab:) {
             // The palette has nothing else to focus.
+        } else {
+            return false;
+        }
+        return true;
+    }
+    if ui.library_bar.filter.is(control) {
+        if command == sel!(cancelOperation:) {
+            if text.string().length() > 0 {
+                text.setString(&NSString::new());
+                ui.library_filter_changed();
+            } else {
+                ui.focus_library_grid();
+            }
+        } else if command == sel!(insertNewline:) || command == sel!(moveDown:) {
+            ui.focus_library_grid();
         } else {
             return false;
         }
@@ -1042,6 +1074,7 @@ pub fn run(args: Args) {
     } else {
         let mut vm = Vm::new();
         vm.intent(Intent::SetFilter(prefs::service_filter()));
+        vm.intent(Intent::SetLibrarySort(prefs::library_sort()));
         (vm, Backend::Live(Live::start()))
     };
     let ui = Ui::new(mtm, vm, backend, &delegate);

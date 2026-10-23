@@ -35,6 +35,7 @@ use super::backend::{Backend, Msg};
 use super::badge;
 use super::bar::PlayerBar;
 use super::cover_grid::CoverGrid;
+use super::library_bar::LibraryBar;
 use super::now_playing::NowPlayingPage;
 use super::palette::Palette;
 use super::prefs;
@@ -50,8 +51,8 @@ use super::widgets::{
 use super::{Delegate, MainWindow};
 use crate::vm::{
     self, AccountRow, AccountRowState, Banner, Controls, Dirty, EmptyText, HomeView, Intent,
-    LibraryView, List, PageView, PaletteAction, Place, QueueEdit, Selection, Service,
-    ServiceFilter, Toast, UiState, Vm,
+    LibraryChip, LibrarySort, LibraryView, List, PageView, PaletteAction, Place, QueueEdit,
+    Selection, Service, ServiceFilter, Toast, UiState, Vm,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -348,9 +349,10 @@ pub struct Ui {
     library_page: Retained<NSView>,
     library_head: Retained<NSView>,
     library_who: Retained<NSTextField>,
+    pub library_bar: LibraryBar,
     library_grid: CoverGrid,
-    /// The service the Library's collections on screen are shown for, while they show.
-    library_shown: Cell<Option<Option<Service>>>,
+    /// What the Library's collections on screen are shown for, while they show.
+    library_shown: RefCell<Option<LibraryShown>>,
     library_state: EmptyState,
     sign_in: SignInPanel,
     setup: SetupPanel,
@@ -626,13 +628,14 @@ impl Ui {
         library_head.addSubview(&library_title);
         library_head.addSubview(&library_who);
         library_head.addSubview(&sign_out);
-        let library_grid = CoverGrid::new(
-            mtm,
-            rect(0.0, 0.0, mw, library_head.frame().origin.y),
-            |c| {
-                with(|ui| ui.open_collection(c, Place::Library));
-            },
-        );
+        let bar_y = library_head.frame().origin.y - LibraryBar::H;
+        let library_bar = LibraryBar::new(mtm, rect(0.0, bar_y, mw, LibraryBar::H), target);
+        // SAFETY: the field's delegate is weak. It is the app delegate, which `app::run` holds
+        // in a local until `app.run()`, which never returns.
+        unsafe { library_bar.filter.text.setDelegate(Some(delegate)) };
+        let library_grid = CoverGrid::new(mtm, rect(0.0, 0.0, mw, bar_y - 4.0), |c| {
+            with(|ui| ui.open_collection(c, Place::Library));
+        });
         let library_state = EmptyState::new(
             mtm,
             rect(0.0, 0.0, mw, mh),
@@ -645,6 +648,7 @@ impl Ui {
         library_page.addSubview(&library_head);
         library_page.addSubview(&library_grid.view);
         library_page.addSubview(&library_state.view);
+        library_page.addSubview(&library_bar.view);
         library_page.addSubview(&sign_in.view);
         library_page.addSubview(&setup.view);
         main.addSubview(&library_page);
@@ -744,8 +748,9 @@ impl Ui {
             library_page,
             library_head,
             library_who,
+            library_bar,
             library_grid,
-            library_shown: Cell::new(None),
+            library_shown: RefCell::new(None),
             library_state,
             sign_in,
             setup,
@@ -1393,6 +1398,33 @@ impl Ui {
         if !matches!(self.backend, Backend::Demo(_)) {
             prefs::save_service_filter(filter);
         }
+    }
+
+    /// A click on a Library chip: shows that kind of collection.
+    pub fn choose_library_chip(&self, chip: LibraryChip) {
+        self.run(Intent::SetLibraryChip(chip));
+    }
+
+    /// The user's choice of Library order: shown at once, and kept for the next launch. Demo
+    /// runs leave the saved choice alone.
+    pub fn choose_library_sort(&self, sort: LibrarySort) {
+        self.run(Intent::SetLibrarySort(sort));
+        if !matches!(self.backend, Backend::Demo(_)) {
+            prefs::save_library_sort(sort);
+        }
+    }
+
+    /// The Library filter's text changed: lists what matches, live.
+    pub fn library_filter_changed(&self) {
+        self.run(Intent::SetLibraryText(self.library_bar.filter.value()));
+    }
+
+    /// Moves the keyboard from the Library filter to the grid, on its first card unless a
+    /// card is selected.
+    pub fn focus_library_grid(&self) {
+        self.window
+            .makeFirstResponder(Some(self.library_grid.responder()));
+        self.library_grid.move_selection(0, 0);
     }
 
     /// Appends item `i` of `list`, and confirms it on the row's "+" and to VoiceOver when it
@@ -2320,12 +2352,15 @@ impl Ui {
                 ..
             }
         ) && grid.stocked;
+        // The filter text can leave nothing to list; the toolbar stays to clear it.
+        let cards = list && !grid.collections.is_empty();
         let head = matches!(view, LibraryView::SignedIn { .. });
         self.sign_in.view.setHidden(!panel);
         self.setup.view.setHidden(!setup);
         self.library_head.setHidden(!head);
-        self.library_grid.view.setHidden(!list);
-        self.library_state.view.setHidden(panel || setup || list);
+        self.library_bar.view.setHidden(!list);
+        self.library_grid.view.setHidden(!cards);
+        self.library_state.view.setHidden(panel || setup || cards);
         let state = &self.library_state;
         match view {
             LibraryView::Loading => state.set(Icon::Library, "Loading Library", "", None),
@@ -2361,14 +2396,30 @@ impl Ui {
                     state.set(Icon::Library, "Your Library is empty", "", None);
                 } else if *page != PageView::Ready || !grid.stocked {
                     Self::page_state(state, Icon::Library, page, "Library", only);
+                } else if !cards {
+                    state.set(
+                        Icon::Library,
+                        "Nothing matches",
+                        "Clear the filter to see everything.",
+                        None,
+                    );
                 }
             }
         }
+        if list {
+            self.library_bar.set(&grid.chips, grid.sort);
+        }
         // New collections for the same page, as a refresh brings, keep the place the user
         // scrolled to.
-        let same = list && self.library_shown.get() == Some(only);
-        self.library_shown.set(list.then_some(only));
-        if list {
+        let shown = LibraryShown {
+            only,
+            chip: grid.chips.iter().find(|c| c.1).map(|c| c.0),
+            text: grid.text,
+            sort: grid.sort,
+        };
+        let same = cards && self.library_shown.borrow().as_ref() == Some(&shown);
+        *self.library_shown.borrow_mut() = cards.then_some(shown);
+        if cards {
             self.library_grid.set(&grid.collections, grid.mixed, same);
         } else {
             self.library_grid.set(&[], false, false);
@@ -2943,6 +2994,19 @@ struct LibraryPatch {
     /// Whether the Library has any collection, before the chip and the filter text.
     stocked: bool,
     mixed: bool,
+    chips: Vec<(LibraryChip, bool)>,
+    text: String,
+    sort: LibrarySort,
+}
+
+/// What a list of the Library's collections is of: a new list for the same, as a refresh
+/// brings, keeps the scroll.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct LibraryShown {
+    only: Option<Service>,
+    chip: Option<LibraryChip>,
+    text: String,
+    sort: LibrarySort,
 }
 
 /// Orders titles as Finder does: whatever their case, with numbers and accents in the user's
@@ -3007,6 +3071,9 @@ impl Patch {
                         collections: grid.collections.into_iter().cloned().collect(),
                         stocked: grid.stocked,
                         mixed: grid.mixed,
+                        chips: grid.chips,
+                        text: s.library_text.clone(),
+                        sort: s.library_sort,
                     };
                     (s.library_view(), patch, s.shown_service())
                 }),
