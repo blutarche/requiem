@@ -104,6 +104,13 @@ pub fn chrome_muted() -> Retained<NSColor> {
 pub fn accent() -> Retained<NSColor> {
     rgb(ACCENT)
 }
+/// The volume bar's colour at `t` along its track, 0 to 1: accent, then pink, then orange.
+pub fn heat(t: CGFloat) -> Retained<NSColor> {
+    const STOPS: [u32; 3] = [ACCENT, 0xE86FD8, 0xFF8A5B];
+    let t = t.clamp(0.0, 1.0) * 2.0;
+    let i = (t as usize).min(1);
+    mix(STOPS[i], STOPS[i + 1], t - i as CGFloat)
+}
 pub fn accent_hi() -> Retained<NSColor> {
     rgb(0x9088F8)
 }

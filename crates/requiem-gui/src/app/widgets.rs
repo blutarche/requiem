@@ -1236,8 +1236,26 @@ define_class!(
             theme::line_2().setFill();
             NSBezierPath::bezierPathWithRoundedRect_xRadius_yRadius(rect(x0, mid - 2.0, w, 4.0), 2.0, 2.0)
                 .fill();
-            let fill = theme::accent();
-            if v > 0.0 {
+            let heat = self.ivars().kind == SliderKind::Volume;
+            let fill = if heat { theme::heat(v) } else { theme::accent() };
+            if heat && v > 0.0 {
+                // The gradient is pinned to the track, so turning up reveals the warmer end.
+                // Rounded end caps, 1 pt strips between them.
+                let fw = (w * v).max(4.0);
+                let cap = |x: CGFloat, t: CGFloat| {
+                    theme::heat(t).setFill();
+                    NSBezierPath::bezierPathWithRoundedRect_xRadius_yRadius(rect(x, mid - 2.0, 4.0, 4.0), 2.0, 2.0)
+                        .fill();
+                };
+                cap(x0, 0.0);
+                cap(x0 + fw - 4.0, v);
+                let mut x = 2.0;
+                while x < fw - 2.0 {
+                    theme::heat(x / w).setFill();
+                    NSBezierPath::fillRect(rect(x0 + x, mid - 2.0, (fw - 2.0 - x).min(1.5), 4.0));
+                    x += 1.0;
+                }
+            } else if v > 0.0 {
                 fill.setFill();
                 NSBezierPath::bezierPathWithRoundedRect_xRadius_yRadius(
                     rect(x0, mid - 2.0, (w * v).max(4.0), 4.0),
