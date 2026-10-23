@@ -465,21 +465,30 @@ fn interleave<T>(lists: Vec<Vec<T>>) -> Vec<T> {
 }
 
 /// Each kind of the providers' results taken in turn, in provider order: tracks with tracks,
-/// albums with albums, playlists with playlists. `answers` are each provider's, in provider
-/// order.
+/// artists with artists, albums with albums, playlists with playlists. `answers` are each
+/// provider's, in provider order. The search is about the first artist only if the provider
+/// that artist came from said so of it.
 fn merge_search(answers: Vec<SearchResults>) -> SearchResults {
+    let top_artist = answers
+        .iter()
+        .find(|a| !a.artists.is_empty())
+        .is_some_and(|a| a.top_artist);
     let mut tracks = Vec::new();
+    let mut artists = Vec::new();
     let mut albums = Vec::new();
     let mut playlists = Vec::new();
     for a in answers {
         tracks.push(a.tracks);
+        artists.push(a.artists);
         albums.push(a.albums);
         playlists.push(a.playlists);
     }
     SearchResults {
         tracks: interleave(tracks),
+        artists: interleave(artists),
         albums: interleave(albums),
         playlists: interleave(playlists),
+        top_artist,
     }
 }
 

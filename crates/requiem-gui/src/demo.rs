@@ -222,6 +222,28 @@ const SEARCH_PLAYLISTS: [(&str, usize); 6] = [
     ("Slow Roads", 27),
 ];
 
+/// The artists a search finds: name and monthly audience.
+const SEARCH_ARTISTS: [(&str, &str); 5] = [
+    ("Northbound Echo", "2.4M"),
+    ("Hollow Coast", "1.1M"),
+    ("The Night Drivers", "640K"),
+    ("Velvet Static", "380K"),
+    ("Mira Vance", "95K"),
+];
+
+/// The releases on an artist's page: albums, then singles and EPs, with their years.
+const ARTIST_ALBUMS: [(&str, u16); 4] = [
+    ("Route Nine", 2023),
+    ("Northern Lights Radio", 2021),
+    ("Long Way Home", 2019),
+    ("First Light", 2016),
+];
+const ARTIST_SINGLES: [(&str, &str, u16); 3] = [
+    ("Night Drive", "Single", 2024),
+    ("Mile Markers", "EP", 2022),
+    ("Static Bloom", "Single", 2020),
+];
+
 const LIBRARY_ADJECTIVES: [&str; 5] = ["Golden", "Quiet", "Midnight", "Early", "Slow"];
 const LIBRARY_NOUNS: [&str; 4] = ["Mornings", "Roads", "Rooms", "Waves"];
 
@@ -233,6 +255,9 @@ const LIBRARY_ART: usize = 60;
 const LIBRARY_LEN: usize = 20;
 const SEARCH_ALBUM_ART: usize = LIBRARY_ART + LIBRARY_LEN;
 const SEARCH_PLAYLIST_ART: usize = SEARCH_ALBUM_ART + SEARCH_ALBUMS.len();
+const SEARCH_ARTIST_ART: usize = SEARCH_PLAYLIST_ART + SEARCH_PLAYLISTS.len();
+const ARTIST_RELEASE_ART: usize = SEARCH_ARTIST_ART + SEARCH_ARTISTS.len();
+const ART_END: usize = ARTIST_RELEASE_ART + ARTIST_ALBUMS.len() + ARTIST_SINGLES.len();
 const COLLECTION_LEN: usize = 15;
 
 fn demo_url(i: usize) -> String {
@@ -244,8 +269,7 @@ pub fn covers() -> Vec<(String, usize)> {
     let mut out: Vec<(String, usize)> = (0..RESULTS.len())
         .filter_map(|i| artwork_url(i).map(|u| (u, i)))
         .collect();
-    let end = SEARCH_PLAYLIST_ART + SEARCH_PLAYLISTS.len();
-    out.extend((HOME_TRACK_ART..end).map(|i| (demo_url(i), i)));
+    out.extend((HOME_TRACK_ART..ART_END).map(|i| (demo_url(i), i)));
     out
 }
 
@@ -593,20 +617,97 @@ pub fn results() -> Vec<Track> {
         .collect()
 }
 
-/// What every demo search finds. Only YouTube Music finds albums and playlists, as in the
-/// player; one of each has no cover, to show the placeholder.
+/// A YouTube Music collection, as the demo's search and artist pages list them.
+fn ytmusic_collection(
+    kind: CollectionKind,
+    id: String,
+    title: &str,
+    subtitle: String,
+    art: Option<usize>,
+) -> Collection {
+    Collection {
+        id: CollectionId {
+            provider: ytmusic(),
+            id,
+        },
+        kind,
+        title: title.to_owned(),
+        subtitle: Some(subtitle),
+        artwork_url: art.map(demo_url),
+    }
+}
+
+/// The artists every demo search finds, all YouTube Music's; the third has no photo.
+pub fn search_artists() -> Vec<Collection> {
+    SEARCH_ARTISTS
+        .iter()
+        .enumerate()
+        .map(|(i, (name, audience))| {
+            ytmusic_collection(
+                CollectionKind::Artist,
+                format!("demo-artist-{i:02}"),
+                name,
+                format!("Artist \u{2022} {audience} monthly audience"),
+                (i != 2).then_some(SEARCH_ARTIST_ART + i),
+            )
+        })
+        .collect()
+}
+
+/// The page of `artist`: its top songs, its albums, its singles and EPs, and the playlists
+/// it is featured on, in YouTube Music's order.
+fn artist_page(artist: &Collection) -> Vec<Shelf> {
+    let name = artist.title.as_str();
+    let mut songs = results();
+    songs.sort_by_key(|t| !t.artists.iter().any(|a| a == name));
+    let top = songs.into_iter().take(5).map(|mut t| {
+        t.id.provider = ytmusic();
+        Item::Track(t)
+    });
+    let release = |i: usize, title: &str, subtitle: String| {
+        Item::Collection(ytmusic_collection(
+            CollectionKind::Album,
+            format!("demo-release-{i:02}"),
+            title,
+            subtitle,
+            Some(ARTIST_RELEASE_ART + i),
+        ))
+    };
+    let albums = ARTIST_ALBUMS
+        .iter()
+        .enumerate()
+        .map(|(i, (title, year))| release(i, title, format!("Album \u{2022} {year}")));
+    let singles = ARTIST_SINGLES
+        .iter()
+        .enumerate()
+        .map(|(i, (title, kind, year))| {
+            release(
+                ARTIST_ALBUMS.len() + i,
+                title,
+                format!("{kind} \u{2022} {year}"),
+            )
+        });
+    let featured = search_results()
+        .playlists
+        .into_iter()
+        .take(4)
+        .map(Item::Collection);
+    let shelf = |title: &str, items: Vec<Item>| Shelf {
+        title: title.to_owned(),
+        items,
+    };
+    vec![
+        shelf("Top songs", top.collect()),
+        shelf("Albums", albums.collect()),
+        shelf("Singles & EPs", singles.collect()),
+        shelf("Featured on", featured.collect()),
+    ]
+}
+
+/// What every demo search finds. Only YouTube Music finds artists, albums and playlists, as in
+/// the player; one of each has no cover, to show the placeholder.
 pub fn search_results() -> SearchResults {
-    let collection =
-        |kind, id: String, title: &str, subtitle: String, art: Option<usize>| Collection {
-            id: CollectionId {
-                provider: ytmusic(),
-                id,
-            },
-            kind,
-            title: title.to_owned(),
-            subtitle: Some(subtitle),
-            artwork_url: art.map(demo_url),
-        };
+    let collection = ytmusic_collection;
     let albums = SEARCH_ALBUMS
         .iter()
         .enumerate()
@@ -635,8 +736,10 @@ pub fn search_results() -> SearchResults {
         .collect();
     SearchResults {
         tracks: results(),
+        artists: search_artists(),
         albums,
         playlists,
+        top_artist: true,
     }
 }
 
@@ -782,6 +885,12 @@ impl Daemon {
                 let shelves = match &page {
                     Page::Home => home(),
                     Page::Library => library(),
+                    Page::Collection(id) if id.id.starts_with("demo-artist-") => {
+                        match search_artists().iter().find(|a| a.id == *id) {
+                            Some(artist) => artist_page(artist),
+                            None => Vec::new(),
+                        }
+                    }
                     Page::Collection(id) => vec![Shelf {
                         title: String::new(),
                         items: collection_tracks(&id.provider)
@@ -951,8 +1060,9 @@ fn run_intent(vm: &mut Vm, daemon: &mut Daemon, intent: Intent) {
 /// `OutOfDate`, `Toast` and the update views add their banner or toast; the Library views and
 /// `HomeSignedOut` set the account; `HomeSpotify` filters Home to Spotify; `SettingsSession`
 /// opens YouTube Music's session form in Settings; `NowPlayingEmpty` stops playback;
-/// `NowPlayingLast` plays the queue's last track; `SearchAlbums` and `SearchSongs` pick that
-/// chip of the results. Other views get the plain start.
+/// `NowPlayingLast` plays the queue's last track; `SearchAlbums`, `SearchSongs` and
+/// `SearchArtists` pick that chip of the results; `Artist` opens the top artist's page. Other
+/// views get the plain start.
 pub fn start_in(view: View) -> (Vm, Daemon) {
     let t0 = Instant::now();
     let mut vm = Vm::new_at(t0);
@@ -1052,6 +1162,16 @@ pub fn start_in(view: View) -> (Vm, Daemon) {
         }
         View::SearchSongs => {
             vm.intent(Intent::SetSearchChip(SearchChip::Songs));
+        }
+        View::SearchArtists => {
+            vm.intent(Intent::SetSearchChip(SearchChip::Artists));
+        }
+        View::Artist => {
+            let open = Intent::OpenCollection {
+                collection: search_artists().remove(0),
+                from: Place::Search,
+            };
+            run_intent(&mut vm, &mut daemon, open);
         }
         View::Search
         | View::Queue

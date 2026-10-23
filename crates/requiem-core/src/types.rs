@@ -35,9 +35,12 @@ pub struct CollectionId {
 pub enum CollectionKind {
     Playlist,
     Album,
+    /// An artist's page: its top songs, then shelves of its releases and the playlists it is
+    /// featured on.
+    Artist,
 }
 
-/// A playlist or album that browses to its tracks.
+/// A playlist, album or artist that browses to its tracks.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Collection {
     pub id: CollectionId,
@@ -59,15 +62,19 @@ pub struct Shelf {
     pub items: Vec<Item>,
 }
 
-/// The most albums, and the most playlists, a provider gives for one search.
+/// The most artists, the most albums and the most playlists a provider gives for one search.
 pub const SEARCH_COLLECTIONS: usize = 12;
 
-/// What a search found: songs, and albums and playlists that browse to theirs.
+/// What a search found: songs, and artists, albums and playlists that browse to theirs.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct SearchResults {
     pub tracks: Vec<Track>,
+    pub artists: Vec<Collection>,
     pub albums: Vec<Collection>,
     pub playlists: Vec<Collection>,
+    /// The search is about `artists[0]`: the provider matched the query to that artist, as
+    /// opposed to listing artists whose names merely resemble it.
+    pub top_artist: bool,
 }
 
 /// Home shelves every provider names alike, so the merge makes one of each.
@@ -158,9 +165,9 @@ impl std::error::Error for ProviderError {}
 
 pub trait Provider: Send + Sync {
     fn id(&self) -> ProviderId;
-    /// At most `limit` tracks and [`SEARCH_COLLECTIONS`] each of albums and playlists. Only a
-    /// failed track search is an `Err`; albums or playlists that could not be had are left
-    /// empty.
+    /// At most `limit` tracks and [`SEARCH_COLLECTIONS`] each of artists, albums and
+    /// playlists. Only a failed track search is an `Err`; artists, albums or playlists that
+    /// could not be had are left empty.
     fn search(&self, query: &str, limit: usize) -> Result<SearchResults, ProviderError>;
     fn resolve(&self, track: &TrackId) -> Result<AudioSource, ProviderError>;
 

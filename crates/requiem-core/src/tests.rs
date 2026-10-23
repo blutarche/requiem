@@ -1688,6 +1688,12 @@ fn named_albums(provider: &str, ids: &[&str]) -> Vec<Collection> {
         .collect()
 }
 
+fn named_artists(provider: &str, ids: &[&str]) -> Vec<Collection> {
+    ids.iter()
+        .map(|id| named_collection(provider, CollectionKind::Artist, id))
+        .collect()
+}
+
 fn named_playlists(provider: &str, ids: &[&str]) -> Vec<Collection> {
     ids.iter()
         .map(|id| named_collection(provider, CollectionKind::Playlist, id))
@@ -1701,16 +1707,20 @@ fn search_takes_each_kind_in_turn_with_its_own_kind() {
         "q",
         vec![Step::ok(SearchResults {
             tracks: named_tracks("first", &["a1", "a2"]),
+            artists: named_artists("first", &["aR1", "aR2"]),
             albums: named_albums("first", &["aA1", "aA2", "aA3"]),
             playlists: named_playlists("first", &["aP1"]),
+            top_artist: false,
         })],
     );
     b.script_search_results(
         "q",
         vec![Step::ok(SearchResults {
             tracks: named_tracks("second", &["b1"]),
+            artists: named_artists("second", &["bR1"]),
             albums: named_albums("second", &["bA1"]),
             playlists: named_playlists("second", &["bP1", "bP2"]),
+            top_artist: false,
         })],
     );
     let r = rig_with(a, vec![b], config());
@@ -1723,6 +1733,11 @@ fn search_takes_each_kind_in_turn_with_its_own_kind() {
                     named_track("first", "a1"),
                     named_track("second", "b1"),
                     named_track("first", "a2"),
+                ],
+                artists: vec![
+                    named_collection("first", CollectionKind::Artist, "aR1"),
+                    named_collection("second", CollectionKind::Artist, "bR1"),
+                    named_collection("first", CollectionKind::Artist, "aR2"),
                 ],
                 albums: vec![
                     named_collection("first", CollectionKind::Album, "aA1"),
@@ -1735,9 +1750,43 @@ fn search_takes_each_kind_in_turn_with_its_own_kind() {
                     named_collection("second", CollectionKind::Playlist, "bP1"),
                     named_collection("second", CollectionKind::Playlist, "bP2"),
                 ],
+                top_artist: false,
             },
         }
     );
+}
+
+#[test]
+fn a_search_is_about_its_first_artist_only_if_that_artists_provider_says_so() {
+    let merged = |first: (&[&str], bool), second: (&[&str], bool)| {
+        let (a, b) = pair();
+        for (fake, name, (artists, top)) in [(&a, "first", first), (&b, "second", second)] {
+            fake.script_search_results(
+                "q",
+                vec![Step::ok(SearchResults {
+                    artists: named_artists(name, artists),
+                    top_artist: top,
+                    ..SearchResults::default()
+                })],
+            );
+        }
+        let r = rig_with(a, vec![b], config());
+        match search_event(&r) {
+            Event::SearchResults { results, .. } => (
+                results.artists.first().map(|c| c.id.id.clone()),
+                results.top_artist,
+            ),
+            other => panic!("expected results, got {other:?}"),
+        }
+    };
+    let some = |id: &str| Some(id.to_owned());
+    assert_eq!(merged((&["a"], true), (&["b"], false)), (some("a"), true));
+    // The first artist is the first provider's, which matched none.
+    assert_eq!(merged((&["a"], false), (&["b"], true)), (some("a"), false));
+    // With no artists from the first, the second's leads, and its word holds.
+    assert_eq!(merged((&[], false), (&["b"], true)), (some("b"), true));
+    assert_eq!(merged((&[], true), (&["b"], false)), (some("b"), false));
+    assert_eq!(merged((&[], true), (&[], true)), (None, false));
 }
 
 #[test]
@@ -1748,16 +1797,20 @@ fn search_keeps_the_tracks_of_a_provider_whose_playlists_failed() {
         "q",
         vec![Step::ok(SearchResults {
             tracks: named_tracks("first", &["a1", "a2"]),
+            artists: Vec::new(),
             albums: named_albums("first", &["aA1"]),
             playlists: Vec::new(),
+            top_artist: false,
         })],
     );
     b.script_search_results(
         "q",
         vec![Step::ok(SearchResults {
             tracks: named_tracks("second", &["b1"]),
+            artists: Vec::new(),
             albums: Vec::new(),
             playlists: named_playlists("second", &["bP1"]),
+            top_artist: false,
         })],
     );
     let r = rig_with(a, vec![b], config());
@@ -1771,8 +1824,10 @@ fn search_keeps_the_tracks_of_a_provider_whose_playlists_failed() {
                     named_track("second", "b1"),
                     named_track("first", "a2"),
                 ],
+                artists: Vec::new(),
                 albums: named_albums("first", &["aA1"]),
                 playlists: named_playlists("second", &["bP1"]),
+                top_artist: false,
             },
         }
     );

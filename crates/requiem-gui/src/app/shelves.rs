@@ -21,7 +21,7 @@ use objc2_foundation::{
     MainThreadMarker, NSEdgeInsets, NSNotification, NSNotificationCenter, NSPoint, NSRect, NSSize,
     NSString,
 };
-use requiem_core::{Item, Shelf};
+use requiem_core::{CollectionKind, Item, Shelf};
 use requiem_macos::artwork::Cover;
 
 use super::badge::{self, Badge};
@@ -71,6 +71,8 @@ pub enum Surface {
     Home,
     /// The All view of search results.
     Search,
+    /// An artist's page, below its top songs.
+    Artist,
 }
 
 define_class!(
@@ -546,7 +548,12 @@ impl ShelfCard {
         if compact {
             this.fill_compact(mtm, frame.size.width, title, &subtitle, art);
         } else {
-            this.fill_card(mtm, title, &subtitle, art);
+            let radius = if is_artist(item) {
+                CARD_W / 2.0
+            } else {
+                COVER_RADIUS
+            };
+            this.fill_card(mtm, title, &subtitle, art, radius);
         }
         if badge.is_some() {
             let (cover, room) = if compact {
@@ -564,9 +571,17 @@ impl ShelfCard {
         this
     }
 
-    /// A 128 pt cover, a title of up to two lines, and a muted subtitle.
-    fn fill_card(&self, mtm: MainThreadMarker, title: &str, subtitle: &str, art: Option<&str>) {
-        let cover = widgets::cover(mtm, rect(INSET, INSET, CARD_W, CARD_W), COVER_RADIUS, 32.0);
+    /// A 128 pt cover with corners of `radius`, a title of up to two lines, and a muted
+    /// subtitle.
+    fn fill_card(
+        &self,
+        mtm: MainThreadMarker,
+        title: &str,
+        subtitle: &str,
+        art: Option<&str>,
+        radius: CGFloat,
+    ) {
+        let cover = widgets::cover(mtm, rect(INSET, INSET, CARD_W, CARD_W), radius, 32.0);
         cover.set_url(art);
         self.addSubview(&cover);
         let title_font = theme::font(13.0, Weight::Medium);
@@ -661,6 +676,11 @@ fn parts(item: &Item) -> (&str, String, Option<&str>) {
             c.artwork_url.as_deref(),
         ),
     }
+}
+
+/// Whether `item` is an artist, whose photo is round.
+pub(super) fn is_artist(item: &Item) -> bool {
+    matches!(item, Item::Collection(c) if c.kind == CollectionKind::Artist)
 }
 
 /// What VoiceOver reads for a card: "title, subtitle", then the service its badge shows.
@@ -1027,12 +1047,16 @@ impl Shelves {
     }
 
     /// Puts `view`, `height` high and as wide as the page, above the first shelf, in place of
-    /// the one before; `None` takes it away. It lays out at the next `set_shelves`.
+    /// the one before; `None` takes it away. It lays out at the next `set_shelves`. The same
+    /// view again stays in the window, so a part of it that has the keyboard keeps it.
     pub fn set_lead(&self, view: Option<(Retained<NSView>, CGFloat)>) {
+        let kept = view.as_ref().map(|(v, _)| Retained::as_ptr(v));
         let old = self
             .lead
             .replace(view.map(|(view, height)| Lead { view, height }));
-        if let Some(old) = old {
+        if let Some(old) = old
+            && Some(Retained::as_ptr(&old.view)) != kept
+        {
             old.view.removeFromSuperview();
         }
     }
@@ -1092,7 +1116,11 @@ impl Shelves {
         if let Some(lead) = &*self.lead.borrow() {
             lead.view.setFrame(rect(0.0, y, width, lead.height));
             lead.view.setAutoresizingMask(FLEX_W);
-            self.doc.addSubview(&lead.view);
+            let doc: &NSView = &self.doc;
+            // SAFETY: a superview holds its subviews, so it is alive while the lead is in it.
+            if unsafe { lead.view.superview() }.as_deref() != Some(doc) {
+                self.doc.addSubview(&lead.view);
+            }
             y += lead.height + SHELF_GAP;
         }
         let mut rows = Vec::with_capacity(shown.len());

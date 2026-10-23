@@ -1050,7 +1050,7 @@ pub fn run(args: Args) {
         View::Library | View::LibrarySignedOut | View::LibraryUnavailable | View::SignIn => {
             ui.show(AppView::Library)
         }
-        View::Collection => ui.show(AppView::Collection),
+        View::Collection | View::Artist => ui.show(AppView::Collection),
         View::Queue => ui.show(AppView::Queue),
         View::Settings | View::SettingsSession => ui.show(AppView::Settings),
         View::NowPlaying | View::NowPlayingEmpty | View::NowPlayingLast => ui.show_now_playing(),
@@ -1065,7 +1065,8 @@ pub fn run(args: Args) {
         | View::NotUpdatable
         | View::UpToDate
         | View::SearchAlbums
-        | View::SearchSongs => ui.show(AppView::Search),
+        | View::SearchSongs
+        | View::SearchArtists => ui.show(AppView::Search),
     }
 
     app.setDelegate(Some(ProtocolObject::from_ref(&*delegate)));

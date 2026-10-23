@@ -12,7 +12,7 @@ use crate::IpFamily;
 use crate::clients::*;
 use crate::log::debug;
 use crate::parse::{
-    ArtistReleases, PlayerOutcome, StreamFormat, classify_player, merge_collections,
+    ArtistReleases, BROWSE_PREFIX, PlayerOutcome, StreamFormat, classify_player, merge_collections,
     parse_artist_releases, parse_search, parse_search_collections, parse_top_artist,
     structure_summary, visitor_data,
 };
@@ -196,6 +196,7 @@ impl InnertubeClient {
         let (what, params) = match kind {
             CollectionKind::Album => ("album search", ALBUMS_PARAMS),
             CollectionKind::Playlist => ("playlist search", PLAYLISTS_PARAMS),
+            CollectionKind::Artist => ("artists search", ARTISTS_PARAMS),
         };
         let body = json!({
             "context": Self::music_context(),
@@ -206,33 +207,56 @@ impl InnertubeClient {
         parse_search_collections(&resp.body, kind, limit)
     }
 
-    /// The releases of the artist an unfiltered search for `query` leads with, if it does: the
-    /// filtered searches match titles, so an artist's own albums can sit far down them.
-    fn artist_releases(&self, query: &str) -> Result<Option<ArtistReleases>, ProviderError> {
+    /// The artist an unfiltered search for `query` leads with, if it does, and its releases:
+    /// the filtered searches match titles, so an artist's own albums can sit far down them,
+    /// and the artist below others. Releases that could not be had are left out.
+    fn top_artist(
+        &self,
+        query: &str,
+    ) -> Result<Option<(Collection, ArtistReleases)>, ProviderError> {
         let body = json!({"context": Self::music_context(), "query": query});
         let resp = self.post_music(self.family(), "artist search", SEARCH_URL, &body)?;
         let Some(artist) = parse_top_artist(&resp.body)? else {
             return Ok(None);
         };
-        let page = self.browse(&artist.browse_id)?;
-        parse_artist_releases(&page, &artist.name).map(Some)
+        let browse_id = artist
+            .id
+            .id
+            .strip_prefix(BROWSE_PREFIX)
+            .unwrap_or(&artist.id.id);
+        let releases = self
+            .browse(browse_id)
+            .and_then(|page| parse_artist_releases(&page, &artist.title))
+            .unwrap_or_else(|e| {
+                debug!("search without the artist's releases: {e}");
+                ArtistReleases::default()
+            });
+        Ok(Some((artist, releases)))
     }
 
-    /// Songs, albums and playlists, searched at once. Albums or playlists that could not be
-    /// had are left out; only a failed song search fails. An artist the query leads to puts its
-    /// own albums and playlists ahead of the title matches.
+    /// Songs, artists, albums and playlists, searched at once. Artists, albums or playlists
+    /// that could not be had are left out; only a failed song search fails. An artist the
+    /// query leads to comes first among the artists, and puts its own albums, singles and
+    /// playlists ahead of the title matches.
     pub(crate) fn search_all(
         &self,
         query: &str,
         limit: usize,
     ) -> Result<SearchResults, ProviderError> {
         let found = |kind| self.search_collections(query, kind, SEARCH_COLLECTIONS);
-        let (tracks, albums, playlists, artist) = thread::scope(|scope| {
+        let (tracks, artists, albums, playlists, top) = thread::scope(|scope| {
+            let artists = scope.spawn(|| found(CollectionKind::Artist));
             let albums = scope.spawn(|| found(CollectionKind::Album));
             let playlists = scope.spawn(|| found(CollectionKind::Playlist));
-            let artist = scope.spawn(|| self.artist_releases(query));
+            let top = scope.spawn(|| self.top_artist(query));
             let tracks = self.search(query, limit);
-            (tracks, albums.join(), playlists.join(), artist.join())
+            (
+                tracks,
+                artists.join(),
+                albums.join(),
+                playlists.join(),
+                top.join(),
+            )
         });
         let left_out =
             |joined: thread::Result<Result<Vec<Collection>, ProviderError>>, what| match joined {
@@ -246,26 +270,32 @@ impl InnertubeClient {
                     Vec::new()
                 }
             };
-        let artist = match artist {
-            Ok(Ok(releases)) => releases.unwrap_or_default(),
+        let (top, releases) = match top {
+            Ok(Ok(Some((artist, releases)))) => (vec![artist], releases),
+            Ok(Ok(None)) => Default::default(),
             Ok(Err(e)) => {
-                debug!("search without the artist's releases: {e}");
-                ArtistReleases::default()
+                debug!("search without the top artist: {e}");
+                Default::default()
             }
             Err(_) => {
-                debug!("search without the artist's releases: the search panicked");
-                ArtistReleases::default()
+                debug!("search without the top artist: the search panicked");
+                Default::default()
             }
         };
+        let own_albums = releases
+            .albums
+            .into_iter()
+            .chain(releases.singles)
+            .collect();
+        // The card's artist leads the merged artists.
+        let top_artist = !top.is_empty();
         Ok(SearchResults {
+            top_artist,
             tracks: tracks?,
-            albums: merge_collections(
-                artist.albums,
-                left_out(albums, "albums"),
-                SEARCH_COLLECTIONS,
-            ),
+            artists: merge_collections(top, left_out(artists, "artists"), SEARCH_COLLECTIONS),
+            albums: merge_collections(own_albums, left_out(albums, "albums"), SEARCH_COLLECTIONS),
             playlists: merge_collections(
-                artist.playlists,
+                releases.playlists,
                 left_out(playlists, "playlists"),
                 SEARCH_COLLECTIONS,
             ),

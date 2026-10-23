@@ -15,8 +15,8 @@ usage: requiem-gui [--demo] [--smoke] [--snapshot <png>] [--view <view>]
                      home-spotify, home-signed-out, collection, now-playing, now-playing-empty,
                      now-playing-last, library-signed-out, library-unavailable, signin,
                      settings-session, empty, disconnected, toast, out-of-date,
-                     update-ready, update-failed, not-updatable, up-to-date, search-albums or
-                     search-songs";
+                     update-ready, update-failed, not-updatable, up-to-date, search-albums,
+                     search-songs, search-artists or artist";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum View {
@@ -72,10 +72,14 @@ pub enum View {
     SearchAlbums,
     /// Demo only: the search view listing songs only.
     SearchSongs,
+    /// Demo only: the search view listing artists only.
+    SearchArtists,
+    /// Demo only: the top artist's page, opened from the search results.
+    Artist,
 }
 
 impl View {
-    const NAMES: [(&str, View); 28] = [
+    const NAMES: [(&str, View); 30] = [
         ("home", View::Home),
         ("search", View::Search),
         ("library", View::Library),
@@ -104,6 +108,8 @@ impl View {
         ("up-to-date", View::UpToDate),
         ("search-albums", View::SearchAlbums),
         ("search-songs", View::SearchSongs),
+        ("search-artists", View::SearchArtists),
+        ("artist", View::Artist),
     ];
 
     /// Whether the view is a staged demo state rather than a place in the app.
@@ -286,6 +292,8 @@ mod tests {
             ("up-to-date", View::UpToDate),
             ("search-albums", View::SearchAlbums),
             ("search-songs", View::SearchSongs),
+            ("search-artists", View::SearchArtists),
+            ("artist", View::Artist),
         ] {
             assert_eq!(p(&["--demo", "--view", name]).unwrap().view, view);
             assert_eq!(p(&["--smoke", "--view", name]).unwrap().view, view);

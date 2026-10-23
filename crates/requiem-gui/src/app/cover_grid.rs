@@ -19,7 +19,7 @@ use objc2_core_foundation::CGFloat;
 use objc2_foundation::{
     MainThreadMarker, NSEdgeInsets, NSNotification, NSNotificationCenter, NSPoint, NSRect, NSSize,
 };
-use requiem_core::Collection;
+use requiem_core::{Collection, CollectionKind};
 use requiem_macos::artwork::Cover;
 
 use super::badge::{self, Badge};
@@ -37,6 +37,15 @@ const ROW_GAP: CGFloat = 20.0;
 /// A card's hover fill reaches this far past its content, on every side.
 const INSET: CGFloat = 6.0;
 const COVER_RADIUS: CGFloat = 8.0;
+
+/// The corner radius of `collection`'s cover `side` square: an artist's photo is round.
+fn cover_radius(collection: &Collection, side: CGFloat) -> CGFloat {
+    if collection.kind == CollectionKind::Artist {
+        side / 2.0
+    } else {
+        COVER_RADIUS
+    }
+}
 /// How far past the visible area cards are kept.
 const VIEW_MARGIN: CGFloat = 160.0;
 const SELECTED_W: CGFloat = 2.0;
@@ -269,7 +278,12 @@ impl GridCard {
             unsafe { msg_send![super(this), initWithFrame: layout.frame(index)] };
         widgets::round(&this, COVER_RADIUS);
         let side = layout.side;
-        let cover = widgets::cover(mtm, rect(INSET, INSET, side, side), COVER_RADIUS, 32.0);
+        let cover = widgets::cover(
+            mtm,
+            rect(INSET, INSET, side, side),
+            cover_radius(collection, side),
+            32.0,
+        );
         cover.set_url(collection.artwork_url.as_deref());
         let title = widgets::label(
             mtm,
@@ -315,6 +329,10 @@ impl GridCard {
         };
         let cover = rect(INSET, INSET, layout.side, layout.side);
         p.cover.setFrame(cover);
+        widgets::round(
+            &p.cover,
+            cover_radius(&self.ivars().collection, layout.side),
+        );
         let y = INSET + layout.side + 8.0;
         p.title
             .setFrame(rect(INSET, y, layout.side, Layout::title_h()));

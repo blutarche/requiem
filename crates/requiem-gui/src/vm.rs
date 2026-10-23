@@ -8,8 +8,8 @@ use std::ops::{BitOr, BitOrAssign};
 use std::time::{Duration, Instant};
 
 use requiem_core::{
-    AccountState, Collection, CollectionKind, Command, EnqueueMode, Event, Item, Page, PlayState,
-    ProviderId, Redacted, SeekTarget, Shelf, Track, TrackId,
+    AccountState, Collection, CollectionId, CollectionKind, Command, EnqueueMode, Event, Item,
+    Page, PlayState, ProviderId, Redacted, SeekTarget, Shelf, Track, TrackId,
 };
 use requiem_ipc::{UpdateState, UpdateStatus};
 
@@ -70,7 +70,9 @@ impl Dirty {
     pub const ACCOUNT: Dirty = Dirty(1 << 13);
     /// The Library's chip, filter text or sort, which only its own page shows.
     pub const LIBRARY_VIEW: Dirty = Dirty(1 << 14);
-    pub const ALL: Dirty = Dirty((1 << 15) - 1);
+    /// Whether the top artist's songs are known, which its Play button waits on.
+    pub const TOP_ARTIST: Dirty = Dirty(1 << 15);
+    pub const ALL: Dirty = Dirty(u16::MAX);
 
     pub fn contains(self, other: Dirty) -> bool {
         self.0 & other.0 == other.0
@@ -202,10 +204,14 @@ pub enum Intent {
     },
     /// Shows `Place`, fetching its page if it has not loaded.
     Visit(Place),
+    /// Opens `collection`'s page. Opened `from` another collection's page, as an album from
+    /// an artist's, that page is kept for `CollectionBack`.
     OpenCollection {
         collection: Collection,
         from: Place,
     },
+    /// Back from a collection opened off another collection's page: that page again, as it was.
+    CollectionBack,
     /// Fetches the current page again, if it is a browse page.
     Refresh,
     /// Starts a sign-in; for a provider that signs in with a browser session, opens its form.
@@ -250,6 +256,8 @@ pub enum Place {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum List {
     Results,
+    /// The top songs of the search's top artist, once its page has landed.
+    TopArtist,
     /// The tracks of the open collection.
     Collection,
     /// A Home shelf, by index. Its items may include collections, which the tracks skip.
@@ -303,8 +311,21 @@ pub struct CollectionPage {
     /// The page it was opened from, which Back returns to.
     pub from: Place,
     pub browse: Browse,
-    /// Every track of the shelves, which the page lists.
+    /// The tracks of the shelves, which the page lists: an artist's top songs.
     pub tracks: Vec<Track>,
+    /// The collection's page it was opened from, when `from` is `Place::Collection`.
+    pub previous: Option<Box<CollectionPage>>,
+}
+
+impl CollectionPage {
+    /// Where the first of the collections Back runs through was opened from.
+    pub fn origin(&self) -> Place {
+        let mut page = self;
+        while let Some(previous) = &page.previous {
+            page = previous;
+        }
+        page.from
+    }
 }
 
 /// What a browse page shows.
@@ -379,14 +400,16 @@ pub enum SearchChip {
     #[default]
     All,
     Songs,
+    Artists,
     Albums,
     Playlists,
 }
 
 impl SearchChip {
-    pub const CHOICES: [SearchChip; 4] = [
+    pub const CHOICES: [SearchChip; 5] = [
         SearchChip::All,
         SearchChip::Songs,
+        SearchChip::Artists,
         SearchChip::Albums,
         SearchChip::Playlists,
     ];
@@ -395,6 +418,7 @@ impl SearchChip {
         match self {
             SearchChip::All => "All",
             SearchChip::Songs => "Songs",
+            SearchChip::Artists => "Artists",
             SearchChip::Albums => "Albums",
             SearchChip::Playlists => "Playlists",
         }
@@ -404,16 +428,28 @@ impl SearchChip {
 /// How many songs the All view lists beside the top result.
 pub const TOP_SONGS: usize = 4;
 
+/// The All view's top result.
+#[derive(Debug, Clone, PartialEq)]
+pub enum TopResult {
+    /// The first artist found. `playable` once its top songs are known, which its Play plays.
+    Artist { artist: Collection, playable: bool },
+    /// The first song, when no artist was found.
+    Song(Track),
+}
+
 /// What the Search page lists, below its chips.
 #[derive(Debug, Clone, PartialEq)]
 pub enum SearchBody {
     /// Nothing to list; the empty state says why.
     Empty(EmptyText),
-    /// The first song as the top result, the next few beside it, and a row each of the albums
-    /// and the playlists. A section with nothing in it is empty here and left out of the page.
+    /// The top result, the first few songs beside it, and a row each of the artists, the
+    /// albums and the playlists. A section with nothing in it is empty here and left out of
+    /// the page.
     All {
-        top: Option<Track>,
+        top: Option<TopResult>,
+        /// The first songs, or the songs after the top result when it is a song.
         songs: Vec<Track>,
+        artists: Vec<Collection>,
         albums: Vec<Collection>,
         playlists: Vec<Collection>,
         /// Whether the songs span services, so their covers show a badge.
@@ -421,7 +457,7 @@ pub enum SearchBody {
     },
     /// The song table, which lists `UiState::shown_results`.
     Songs,
-    /// A grid of albums or of playlists. `mixed` says whether they span services, so their
+    /// A grid of artists, albums or playlists. `mixed` says whether they span services, so their
     /// cards show a badge.
     Collections { items: Vec<Collection>, mixed: bool },
 }
@@ -683,11 +719,18 @@ pub struct UiState {
     pub query: String,
     pub search: SearchStatus,
     pub results: Vec<Track>,
-    /// The albums and playlists the last search found, whole; the filter keeps some.
+    /// The artists, albums and playlists the last search found, whole; the filter keeps some.
+    pub artists: Vec<Collection>,
     pub albums: Vec<Collection>,
     pub playlists: Vec<Collection>,
+    /// Whether the last search is about its first artist, rather than finding artists whose
+    /// names resemble it.
+    pub about_artist: bool,
     /// The kind of result the Search page lists. It outlasts queries, and ends with the app.
     pub search_chip: SearchChip,
+    /// The page of an artist the search found, fetched for its top songs: its id, and the
+    /// songs once they land.
+    pub top_artist: Option<(CollectionId, Option<Vec<Track>>)>,
     pub queue: Vec<Track>,
     pub current: Option<usize>,
     pub now_playing: Option<Track>,
@@ -723,9 +766,12 @@ impl Default for UiState {
             query: String::new(),
             search: SearchStatus::Idle,
             results: Vec::new(),
+            artists: Vec::new(),
             albums: Vec::new(),
             playlists: Vec::new(),
+            about_artist: false,
             search_chip: SearchChip::All,
+            top_artist: None,
             queue: Vec::new(),
             current: None,
             now_playing: None,
@@ -906,6 +952,33 @@ impl UiState {
                     .collect(),
             ),
         }
+    }
+
+    /// The artists the filter keeps.
+    pub fn shown_artists(&self) -> Cow<'_, [Collection]> {
+        self.shown_collections(&self.artists)
+    }
+
+    /// The artist the last search is about, if the filter keeps it: the top result.
+    fn lead_artist(&self) -> Option<&Collection> {
+        let first = self.artists.first().filter(|_| self.about_artist)?;
+        self.shown_service()
+            .is_none_or(|s| s.owns(&first.id.provider))
+            .then_some(first)
+    }
+
+    /// The top songs of the lead artist, once its page has landed.
+    fn top_artist_songs(&self) -> Option<&[Track]> {
+        let lead = &self.lead_artist()?.id;
+        match &self.top_artist {
+            Some((id, Some(songs))) if id == lead => Some(songs),
+            _ => None,
+        }
+    }
+
+    /// Whether the top artist's Play has songs to play.
+    pub fn top_artist_playable(&self) -> bool {
+        self.top_artist_songs().is_some_and(|s| !s.is_empty())
     }
 
     /// The albums the filter keeps.
@@ -1195,6 +1268,11 @@ impl UiState {
                 .get(from..)
                 .unwrap_or_default()
                 .to_vec(),
+            List::TopArtist => self
+                .top_artist_songs()
+                .and_then(|s| s.get(from..))
+                .unwrap_or_default()
+                .to_vec(),
             List::Collection => self
                 .collection
                 .as_ref()
@@ -1274,12 +1352,13 @@ impl UiState {
     /// The results area's empty state, when there is nothing to list: no results of any kind,
     /// or none of the chosen kind.
     pub fn results_empty(&self) -> Option<EmptyText> {
-        let (songs, albums, playlists) = (
+        let (songs, artists, albums, playlists) = (
             self.shown_results().len(),
+            self.shown_artists().len(),
             self.shown_albums().len(),
             self.shown_playlists().len(),
         );
-        if songs + albums + playlists == 0 {
+        if songs + artists + albums + playlists == 0 {
             return Some(if self.search == SearchStatus::Done {
                 EmptyText {
                     heading: "No results".to_owned(),
@@ -1300,6 +1379,7 @@ impl UiState {
         let (kind, n) = match self.search_chip {
             SearchChip::All => return None,
             SearchChip::Songs => ("songs", songs),
+            SearchChip::Artists => ("artists", artists),
             SearchChip::Albums => ("albums", albums),
             SearchChip::Playlists => ("playlists", playlists),
         };
@@ -1317,14 +1397,16 @@ impl UiState {
     }
 
     /// What the Search page shows: the chips once there are results, and the chosen kind of
-    /// them. The service switch filters every kind. The top result is the first song the
-    /// filter keeps.
+    /// them. The service switch filters every kind. The top result is the artist the search
+    /// is about, if the filter keeps it, else the first song.
     pub fn search_view(&self) -> SearchView {
         let chosen = self.search_chip;
         let songs = self.shown_results();
+        let artists = self.shown_artists();
         let albums = self.shown_albums();
         let playlists = self.shown_playlists();
-        let listed = !(songs.is_empty() && albums.is_empty() && playlists.is_empty());
+        let listed =
+            !(songs.is_empty() && artists.is_empty() && albums.is_empty() && playlists.is_empty());
         let chips = if listed {
             SearchChip::CHOICES
                 .into_iter()
@@ -1343,14 +1425,26 @@ impl UiState {
         let body = match self.results_empty() {
             Some(empty) => SearchBody::Empty(empty),
             None => match chosen {
-                SearchChip::All => SearchBody::All {
-                    mixed: mixed(songs.iter().map(|t| &t.id.provider)),
-                    top: songs.first().cloned(),
-                    songs: songs.iter().skip(1).take(TOP_SONGS).cloned().collect(),
-                    albums: albums.into_owned(),
-                    playlists: playlists.into_owned(),
-                },
+                SearchChip::All => {
+                    let top = match self.lead_artist() {
+                        Some(artist) => Some(TopResult::Artist {
+                            artist: artist.clone(),
+                            playable: self.top_artist_playable(),
+                        }),
+                        None => songs.first().cloned().map(TopResult::Song),
+                    };
+                    let after = usize::from(matches!(top, Some(TopResult::Song(_))));
+                    SearchBody::All {
+                        mixed: mixed(songs.iter().map(|t| &t.id.provider)),
+                        top,
+                        songs: songs.iter().skip(after).take(TOP_SONGS).cloned().collect(),
+                        artists: artists.into_owned(),
+                        albums: albums.into_owned(),
+                        playlists: playlists.into_owned(),
+                    }
+                }
                 SearchChip::Songs => SearchBody::Songs,
+                SearchChip::Artists => collections(artists),
                 SearchChip::Albums => collections(albums),
                 SearchChip::Playlists => collections(playlists),
             },
@@ -1398,6 +1492,8 @@ pub struct Vm {
     /// other req, but only its own newer fetch supersedes it: a slow Home answer is not lost to
     /// a Library load.
     pending_browse: [Option<(u64, bool)>; 3],
+    /// The req that fetches the top artist's page, for its top songs.
+    pending_top: Option<u64>,
     last_toast: u64,
     dirty: Dirty,
     seek_hold: Option<Hold<Duration>>,
@@ -1573,10 +1669,16 @@ impl Vm {
                 if self.pending_req == Some(req) {
                     self.pending_req = None;
                     self.ui.results = results.tracks;
+                    self.ui.artists = results.artists;
                     self.ui.albums = results.albums;
                     self.ui.playlists = results.playlists;
+                    self.ui.about_artist = results.top_artist;
                     self.ui.search = SearchStatus::Done;
                     self.dirty |= Dirty::RESULTS | Dirty::SEARCH_STATUS;
+                    self.ui.top_artist = None;
+                    self.pending_top = None;
+                    let fetch = self.fetch_top_artist();
+                    self.outbox.extend(fetch);
                 }
             }
             Event::SearchFailed { req, error } => {
@@ -1638,6 +1740,14 @@ impl Vm {
             Event::TrackFailed { track, error } => {
                 self.toast(format!("Couldn’t play “{}”: {error}", track.title), true);
                 self.failed_toast = Some(self.last_toast);
+            }
+            Event::BrowseResults { req, shelves, .. } if self.pending_top == Some(req) => {
+                self.pending_top = None;
+                self.set_top_artist(&shelves);
+            }
+            // Its songs stay unknown, and Play off, until a reconnect asks again.
+            Event::BrowseFailed { req, .. } if self.pending_top == Some(req) => {
+                self.pending_top = None;
             }
             Event::BrowseResults { req, shelves, .. } => {
                 if let Some((slot, _)) = self.take_browse(req) {
@@ -1703,6 +1813,15 @@ impl Vm {
             // Taken as they come, never fetched again: a fetch would start the player fetching
             // anew, and a page that differs on every fetch would never settle.
             Event::PageChanged { page, shelves } => {
+                if let Page::Collection(id) = &page
+                    && self
+                        .ui
+                        .top_artist
+                        .as_ref()
+                        .is_some_and(|(top, songs)| top == id && songs.is_some())
+                {
+                    self.set_top_artist(&shelves);
+                }
                 let slot = match page {
                     Page::Home => Some(Slot::Home),
                     Page::Library => Some(Slot::Library),
@@ -1818,6 +1937,11 @@ impl Vm {
             self.reset_browse();
             let fetch = self.fetch_place();
             self.outbox.extend(fetch);
+            // A search still out asks for its own top artist when it lands.
+            if self.pending_req.is_none() {
+                let fetch = self.fetch_top_artist();
+                self.outbox.extend(fetch);
+            }
         }
         self.refresh_banner(now);
     }
@@ -1906,7 +2030,8 @@ impl Vm {
                     self.ui.filter = filter;
                     self.dirty |= Dirty::RESULTS | Dirty::HOME | Dirty::LIBRARY | Dirty::ACCOUNT;
                 }
-                Vec::new()
+                // Another artist may lead the results the filter keeps.
+                self.fetch_top_artist().into_iter().collect()
             }
             Intent::SetLibraryChip(chip) => {
                 if self.ui.library_chip != chip {
@@ -1941,12 +2066,36 @@ impl Vm {
                 self.fetch_place()
             }
             Intent::OpenCollection { collection, from } => {
+                let previous = match self.ui.collection.take() {
+                    Some(mut page) if from == Place::Collection => {
+                        // Its answer is dropped with the slot's, so it is asked again on return.
+                        match page.browse.load {
+                            Load::Loading => page.browse = Browse::default(),
+                            Load::Refreshing => page.browse.load = Load::Done,
+                            _ => {}
+                        }
+                        Some(Box::new(page))
+                    }
+                    _ => None,
+                };
                 self.ui.collection = Some(CollectionPage {
                     collection,
                     from,
                     browse: Browse::default(),
                     tracks: Vec::new(),
+                    previous,
                 });
+                self.pending_browse[Slot::Collection as usize] = None;
+                self.dirty |= Dirty::COLLECTION;
+                self.ui.place = Place::Collection;
+                self.fetch_place()
+            }
+            Intent::CollectionBack => {
+                let Some(previous) = self.ui.collection.as_mut().and_then(|c| c.previous.take())
+                else {
+                    return Vec::new();
+                };
+                self.ui.collection = Some(*previous);
                 self.pending_browse[Slot::Collection as usize] = None;
                 self.dirty |= Dirty::COLLECTION;
                 self.ui.place = Place::Collection;
@@ -2120,15 +2269,7 @@ impl Vm {
             }
             Slot::Collection => {
                 if let Some(page) = &mut self.ui.collection {
-                    page.tracks = browse
-                        .shelves
-                        .iter()
-                        .flat_map(|s| &s.items)
-                        .filter_map(|i| match i {
-                            Item::Track(t) => Some(t.clone()),
-                            Item::Collection(_) => None,
-                        })
-                        .collect();
+                    page.tracks = shelf_tracks(&browse.shelves);
                     page.browse = browse;
                     self.dirty |= Dirty::COLLECTION;
                 }
@@ -2183,6 +2324,42 @@ impl Vm {
         })
     }
 
+    /// Asks for the page of the lead artist, for its top songs, unless it has been asked for
+    /// since the search landed. Its failure goes unsaid.
+    fn fetch_top_artist(&mut self) -> Option<Command> {
+        if !self.ui.controls().player {
+            return None;
+        }
+        let id = self.ui.lead_artist()?.id.clone();
+        if self
+            .ui
+            .top_artist
+            .as_ref()
+            .is_some_and(|(top, _)| *top == id)
+        {
+            return None;
+        }
+        self.last_req += 1;
+        self.pending_top = Some(self.last_req);
+        self.ui.top_artist = Some((id.clone(), None));
+        Some(Command::Browse {
+            req: self.last_req,
+            page: Page::Collection(id),
+        })
+    }
+
+    /// Takes the top artist's songs from its page's `shelves`: every track on it.
+    fn set_top_artist(&mut self, shelves: &[Shelf]) {
+        let Some((_, songs)) = &mut self.ui.top_artist else {
+            return;
+        };
+        let tracks = shelf_tracks(shelves);
+        if songs.as_ref() != Some(&tracks) {
+            *songs = Some(tracks);
+            self.dirty |= Dirty::TOP_ARTIST;
+        }
+    }
+
     /// Fetches the page of the current place unless it has been requested already.
     fn fetch_place(&mut self) -> Vec<Command> {
         let (slot, load) = match self.ui.place {
@@ -2206,13 +2383,24 @@ impl Vm {
     /// follows tells the accounts again.
     fn reset_browse(&mut self) {
         self.pending_browse = [None; 3];
+        self.pending_top = None;
+        if self
+            .ui
+            .top_artist
+            .as_ref()
+            .is_some_and(|(_, s)| s.is_none())
+        {
+            self.ui.top_artist = None;
+        }
         self.ui.home = Browse::default();
         self.ui.library = Browse::default();
         self.ui.accounts.clear();
         self.ui.setup = None;
-        if let Some(page) = &mut self.ui.collection {
-            page.browse = Browse::default();
-            page.tracks.clear();
+        let mut page = self.ui.collection.as_mut();
+        while let Some(p) = page {
+            p.browse = Browse::default();
+            p.tracks.clear();
+            page = p.previous.as_deref_mut();
         }
         self.dirty |=
             Dirty::HOME | Dirty::LIBRARY | Dirty::COLLECTION | Dirty::ACCOUNT | Dirty::RESULTS;
@@ -2619,6 +2807,18 @@ pub fn item_provider(item: &Item) -> &ProviderId {
         Item::Track(t) => &t.id.provider,
         Item::Collection(c) => &c.id.provider,
     }
+}
+
+/// Every track of `shelves`, in order.
+fn shelf_tracks(shelves: &[Shelf]) -> Vec<Track> {
+    shelves
+        .iter()
+        .flat_map(|s| &s.items)
+        .filter_map(|i| match i {
+            Item::Track(t) => Some(t.clone()),
+            Item::Collection(_) => None,
+        })
+        .collect()
 }
 
 /// A provider the menus and palette have sign-in items for.
@@ -6496,9 +6696,309 @@ mod tests {
     ) -> SearchResults {
         SearchResults {
             tracks,
+            artists: Vec::new(),
             albums,
             playlists,
+            top_artist: false,
         }
+    }
+
+    /// The id of the top result, which must be a song.
+    fn top_song(top: Option<TopResult>) -> Option<String> {
+        match top {
+            Some(TopResult::Song(t)) => Some(t.id.id),
+            None => None,
+            other => panic!("expected a song on top, got {other:?}"),
+        }
+    }
+
+    fn artist(id: &str) -> Collection {
+        Collection {
+            kind: CollectionKind::Artist,
+            title: format!("Artist {id}"),
+            subtitle: Some("Artist".into()),
+            ..collection(id)
+        }
+    }
+
+    /// An artist's page: its top songs `top0`.., then a shelf of its albums.
+    fn artist_page(songs: usize) -> Vec<Shelf> {
+        vec![
+            shelf(
+                "Top songs",
+                (0..songs)
+                    .map(|i| Item::Track(track(&format!("top{i}"), 200)))
+                    .collect(),
+            ),
+            shelf(
+                "Albums",
+                vec![Item::Collection(collection_of(&provider(), "al0"))],
+            ),
+        ]
+    }
+
+    /// A connected vm with a search landed that found songs 0 to 5 and artists `artists`, all
+    /// of YouTube Music, and is about the first artist if `about`; returns the req of the top
+    /// artist's fetch.
+    fn found_artists(artists: &[&str], about: bool) -> (Vm, Option<u64>) {
+        let mut vm = connected();
+        vm.apply(signed_in());
+        vm.take_commands();
+        let results = SearchResults {
+            tracks: (0..6).map(|i| from(&provider(), &i.to_string())).collect(),
+            artists: artists.iter().map(|id| artist(id)).collect(),
+            top_artist: about,
+            ..SearchResults::default()
+        };
+        search_finds(&mut vm, "q", results);
+        let fetches = browses(&vm.take_commands());
+        let req = match fetches.as_slice() {
+            [] => None,
+            [(req, Page::Collection(id))] => {
+                assert_eq!(id.id, artists[0], "the first artist is fetched");
+                Some(*req)
+            }
+            other => panic!("expected the top artist's fetch, got {other:?}"),
+        };
+        vm.take_dirty();
+        (vm, req)
+    }
+
+    #[test]
+    fn the_top_result_is_the_first_artist_and_plays_its_top_songs_once_they_land() {
+        let (mut vm, req) = found_artists(&["ar0", "ar1"], true);
+        let req = req.expect("a fetch of the top artist's page");
+        let all = |vm: &Vm| match vm.ui().search_view().body {
+            SearchBody::All {
+                top: Some(TopResult::Artist { artist, playable }),
+                songs,
+                artists,
+                ..
+            } => (artist.id.id, playable, songs, artists),
+            other => panic!("expected an artist on top, got {other:?}"),
+        };
+        let (top, playable, songs, artists) = all(&vm);
+        assert_eq!((top.as_str(), playable), ("ar0", false));
+        // The songs beside it are the first ones, the first included.
+        assert_eq!(ids(&songs), ["0", "1", "2", "3"]);
+        assert_eq!(collection_ids(&artists), ["ar0", "ar1"]);
+        // Until its songs are known, Play does nothing.
+        let play = Intent::PlayFrom {
+            list: List::TopArtist,
+            from: 0,
+        };
+        assert!(vm.intent(play.clone()).is_empty());
+
+        vm.apply(results(
+            req,
+            Page::Collection(artist("ar0").id),
+            artist_page(3),
+        ));
+        let d = vm.take_dirty();
+        assert!(d.contains(Dirty::TOP_ARTIST), "{d:?}");
+        // Only the button changes, so the page is not rebuilt under the pointer.
+        assert!(!d.contains(Dirty::RESULTS), "{d:?}");
+        assert!(vm.ui().top_artist_playable());
+        assert!(all(&vm).1);
+        match &vm.intent(play)[..] {
+            [Command::Enqueue { tracks, mode }, Command::PlayIndex(0)] => {
+                assert_eq!(*mode, EnqueueMode::Replace);
+                assert_eq!(ids(tracks), ["top0", "top1", "top2"]);
+            }
+            other => panic!("expected a replace and a play, got {other:?}"),
+        }
+        // A newer page of the artist, as the player tells it, is taken too.
+        vm.apply(Event::PageChanged {
+            page: Page::Collection(artist("ar0").id),
+            shelves: artist_page(1),
+        });
+        assert_eq!(vm.ui().list_tracks(List::TopArtist, 0).len(), 1);
+    }
+
+    #[test]
+    fn artists_a_search_is_not_about_are_listed_with_the_first_song_on_top() {
+        let (mut vm, req) = found_artists(&["ar0", "ar1"], false);
+        assert_eq!(req, None, "no artist's page is fetched");
+        let SearchBody::All {
+            top,
+            songs,
+            artists,
+            ..
+        } = vm.ui().search_view().body
+        else {
+            panic!("All lists every kind");
+        };
+        assert_eq!(top_song(top).as_deref(), Some("0"));
+        assert_eq!(ids(&songs), ["1", "2", "3", "4"]);
+        assert_eq!(collection_ids(&artists), ["ar0", "ar1"]);
+        vm.intent(Intent::SetSearchChip(SearchChip::Artists));
+        let SearchBody::Collections { items, .. } = vm.ui().search_view().body else {
+            panic!("Artists lists a grid");
+        };
+        assert_eq!(collection_ids(&items), ["ar0", "ar1"]);
+    }
+
+    #[test]
+    fn a_filter_that_hides_the_artist_a_search_is_about_puts_a_song_on_top() {
+        let mut vm = both_signed_in();
+        search_finds(
+            &mut vm,
+            "q",
+            SearchResults {
+                tracks: alternating(),
+                artists: vec![
+                    collection_of(&provider(), "yt0"),
+                    collection_of(&spotify(), "sp0"),
+                ],
+                top_artist: true,
+                ..SearchResults::default()
+            },
+        );
+        vm.take_commands();
+        vm.intent(Intent::SetFilter(ONLY_SPOTIFY));
+        assert!(
+            browses(&vm.take_commands()).is_empty(),
+            "nothing is fetched"
+        );
+        let SearchBody::All { top, artists, .. } = vm.ui().search_view().body else {
+            panic!("All lists every kind");
+        };
+        assert_eq!(top_song(top).as_deref(), Some("0"));
+        assert_eq!(collection_ids(&artists), ["sp0"]);
+    }
+
+    #[test]
+    fn without_artists_the_top_result_is_the_first_song_and_nothing_is_fetched() {
+        let (vm, req) = found_artists(&[], true);
+        assert_eq!(req, None);
+        let SearchBody::All { top, songs, .. } = vm.ui().search_view().body else {
+            panic!("All lists every kind");
+        };
+        assert_eq!(top_song(top).as_deref(), Some("0"));
+        assert_eq!(ids(&songs), ["1", "2", "3", "4"]);
+    }
+
+    #[test]
+    fn a_failed_top_artist_fetch_leaves_play_off_quietly_and_a_reconnect_asks_again() {
+        let (mut vm, req) = found_artists(&["ar0"], true);
+        vm.apply(Event::BrowseFailed {
+            req: req.unwrap(),
+            error: "timeout".into(),
+            sign_in_required: false,
+        });
+        assert!(vm.ui().toast.is_none());
+        assert!(!vm.ui().top_artist_playable());
+        vm.link(Link::Lost(LinkError::NotRunning));
+        vm.link(Link::Connected);
+        let fetches = browses(&vm.take_commands());
+        assert!(
+            fetches
+                .iter()
+                .any(|(_, p)| *p == Page::Collection(artist("ar0").id)),
+            "{fetches:?}"
+        );
+    }
+
+    #[test]
+    fn the_artists_chip_lists_the_artists_as_a_grid() {
+        let (mut vm, _) = found_artists(&["ar0", "ar1"], true);
+        vm.intent(Intent::SetSearchChip(SearchChip::Artists));
+        let SearchBody::Collections { items, mixed } = vm.ui().search_view().body else {
+            panic!("Artists lists a grid");
+        };
+        assert_eq!(collection_ids(&items), ["ar0", "ar1"]);
+        assert!(!mixed);
+        // Artists alone are results: the chips show, and All has the artist on top.
+        let mut vm = both_signed_in();
+        search_finds(
+            &mut vm,
+            "q",
+            SearchResults {
+                artists: vec![artist("ar0")],
+                top_artist: true,
+                ..SearchResults::default()
+            },
+        );
+        let view = vm.ui().search_view();
+        assert_eq!(view.chips.len(), 5);
+        assert!(matches!(
+            view.body,
+            SearchBody::All {
+                top: Some(TopResult::Artist { .. }),
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn an_artist_page_plays_and_queues_its_top_songs_and_backs_out_of_its_albums() {
+        let (mut vm, _) = found_artists(&["ar0"], true);
+        let cmds = browses(&vm.intent(Intent::OpenCollection {
+            collection: artist("ar0"),
+            from: Place::Search,
+        }));
+        let [(req, page)] = cmds.as_slice() else {
+            panic!("expected the artist's fetch, got {cmds:?}");
+        };
+        vm.apply(results(*req, page.clone(), artist_page(2)));
+        let play = |vm: &mut Vm| match &vm.intent(Intent::PlayFrom {
+            list: List::Collection,
+            from: 0,
+        })[..]
+        {
+            [Command::Enqueue { tracks, .. }, Command::PlayIndex(0)] => ids(tracks)
+                .into_iter()
+                .map(str::to_owned)
+                .collect::<Vec<_>>(),
+            other => panic!("expected a replace and a play, got {other:?}"),
+        };
+        assert_eq!(play(&mut vm), ["top0", "top1"]);
+        let Command::Enqueue { tracks, mode } = &vm.intent(Intent::AppendAll(List::Collection))[0]
+        else {
+            panic!("expected an enqueue");
+        };
+        assert_eq!(
+            (ids(tracks), *mode),
+            (vec!["top0", "top1"], EnqueueMode::Append)
+        );
+
+        // An album opened off it, and Back: the artist's page as it was, with no fetch.
+        let cmds = browses(&vm.intent(Intent::OpenCollection {
+            collection: collection_of(&provider(), "al0"),
+            from: Place::Collection,
+        }));
+        assert_eq!(cmds.len(), 1, "{cmds:?}");
+        assert_eq!(
+            vm.ui()
+                .collection
+                .as_ref()
+                .map(|c| c.collection.id.id.as_str()),
+            Some("al0")
+        );
+        vm.take_dirty();
+        assert!(vm.intent(Intent::CollectionBack).is_empty());
+        assert!(vm.take_dirty().contains(Dirty::COLLECTION));
+        let page = vm.ui().collection.as_ref().unwrap();
+        assert_eq!(
+            (
+                page.collection.id.id.as_str(),
+                page.from,
+                page.browse.load.clone()
+            ),
+            ("ar0", Place::Search, Load::Done)
+        );
+        assert!(page.previous.is_none());
+        assert_eq!(play(&mut vm), ["top0", "top1"]);
+        // The album's late answer is not the artist's.
+        vm.apply(results(
+            cmds[0].0,
+            cmds[0].1.clone(),
+            vec![shelf("Tracks", track_items(5))],
+        ));
+        assert_eq!(vm.ui().collection.as_ref().unwrap().tracks.len(), 2);
+        // Nothing to go back to now.
+        assert!(vm.intent(Intent::CollectionBack).is_empty());
+        assert_eq!(vm.ui().collection.as_ref().unwrap().collection.id.id, "ar0");
     }
 
     /// Lands the answer to a search for `query`.
@@ -6541,7 +7041,7 @@ mod tests {
         let selected = |on: SearchChip| SearchChip::CHOICES.map(|c| (c, c == on)).to_vec();
         assert_eq!(
             SearchChip::CHOICES.map(SearchChip::label),
-            ["All", "Songs", "Albums", "Playlists"]
+            ["All", "Songs", "Artists", "Albums", "Playlists"]
         );
         assert_eq!(chips(&vm), selected(SearchChip::All));
         let SearchBody::All {
@@ -6554,7 +7054,7 @@ mod tests {
         else {
             panic!("All lists every kind");
         };
-        assert_eq!(top.unwrap().id.id, "0");
+        assert_eq!(top_song(top).as_deref(), Some("0"));
         assert_eq!(ids(&songs), ["1", "2", "3", "4"]);
         assert_eq!(collection_ids(&albums), ["a0", "a1", "a2", "a3"]);
         assert_eq!(collection_ids(&playlists), ["p0", "p1", "p2"]);
@@ -6628,12 +7128,7 @@ mod tests {
                 albums,
                 playlists,
                 ..
-            } => (
-                top.map(|t| t.id.id),
-                songs.len(),
-                albums.len(),
-                playlists.len(),
-            ),
+            } => (top_song(top), songs.len(), albums.len(), playlists.len()),
             other => panic!("expected the All view, got {other:?}"),
         };
         let mut vm = both_signed_in();
@@ -6681,7 +7176,7 @@ mod tests {
                 chips,
                 body: SearchBody::Empty(e),
             } => {
-                assert_eq!(chips.len(), 4, "the chips stay to choose another kind");
+                assert_eq!(chips.len(), 5, "the chips stay to choose another kind");
                 e
             }
             other => panic!("expected an empty state, got {other:?}"),
@@ -6692,6 +7187,8 @@ mod tests {
         assert_eq!(e.action, Some("Edit search"));
         vm.intent(Intent::SetSearchChip(SearchChip::Playlists));
         assert_eq!(empty(&vm).heading, "No playlists for “q”");
+        vm.intent(Intent::SetSearchChip(SearchChip::Artists));
+        assert_eq!(empty(&vm).heading, "No artists for “q”");
         // Songs, with only albums found.
         search_finds(
             &mut vm,
@@ -6743,7 +7240,7 @@ mod tests {
         else {
             panic!("All lists every kind");
         };
-        assert_eq!(top.unwrap().id.id, "1");
+        assert_eq!(top_song(top).as_deref(), Some("1"));
         assert_eq!(ids(&songs), ["3", "5"]);
         assert_eq!(collection_ids(&albums), ["a1", "a3"]);
         assert_eq!(collection_ids(&playlists), ["p1"]);
@@ -6759,15 +7256,17 @@ mod tests {
             panic!("All lists every kind");
         };
         assert_eq!(
-            (top.unwrap().id.id.as_str(), ids(&songs)),
-            ("1", vec!["3", "5"])
+            (top_song(top).as_deref(), ids(&songs)),
+            (Some("1"), vec!["3", "5"])
         );
         vm.intent(Intent::SetFilter(ONLY_SPOTIFY));
         let SearchBody::All { top, songs, .. } = vm.ui().search_view().body else {
             panic!("All lists every kind");
         };
-        let (top, songs) = (top.unwrap(), songs);
-        assert_eq!((top.id.id.as_str(), ids(&songs)), ("0", vec!["2", "4"]));
+        assert_eq!(
+            (top_song(top).as_deref(), ids(&songs)),
+            (Some("0"), vec!["2", "4"])
+        );
         let queued = |from: usize| {
             let mut vm = searched();
             vm.intent(Intent::SetFilter(ONLY_SPOTIFY));
