@@ -14,7 +14,7 @@ mod browse;
 
 pub(crate) use browse::{
     ArtistReleases, BROWSE_PREFIX, collection_kind, parse_artist_releases, parse_collection,
-    parse_home, parse_library_playlists,
+    parse_home, parse_library_playlists, parse_page,
 };
 
 pub(crate) const PROVIDER: &str = "ytmusic";
@@ -415,9 +415,9 @@ pub(crate) fn parse_search(body: &[u8], limit: usize) -> Result<Vec<Track>, Prov
     Ok(tracks)
 }
 
-/// The rows of an albums or playlists search that open as a collection of `kind`: the row's
-/// browse id, its title, and its subtitle as shown ("Album • Artist • 2013", "YouTube Music •
-/// 35 songs").
+/// The rows of an artists, albums or playlists search that open as a collection of `kind`: the
+/// row's browse id, its title, and its subtitle as shown ("Artist • 68.7M monthly audience",
+/// "Album • Artist • 2013", "YouTube Music • 35 songs").
 pub(crate) fn parse_search_collections(
     body: &[u8],
     kind: CollectionKind,
@@ -437,7 +437,7 @@ pub(crate) fn parse_search_collections(
                 .as_ref()?
                 .browse_id
                 .as_deref()
-                .filter(|id| id.starts_with("MPREb_") || id.starts_with("VL"))?;
+                .filter(|id| ["MPREb_", "VL", "UC"].iter().any(|p| id.starts_with(p)))?;
             if collection_kind(browse_id) != kind {
                 return None;
             }
@@ -464,26 +464,21 @@ pub(crate) fn parse_search_collections(
     Ok(collections)
 }
 
-/// The artist a search's top card is about.
-#[derive(Debug, PartialEq)]
-pub(crate) struct TopArtist {
-    pub browse_id: String,
-    pub name: String,
-}
-
-/// The artist the first section of an unfiltered search is a card for, if it is one: the card
-/// for a song, album or playlist leaves this `None`.
-pub(crate) fn parse_top_artist(body: &[u8]) -> Result<Option<TopArtist>, ProviderError> {
+/// The artist the first section of an unfiltered search is a card for, if it is one, as the
+/// artists search lists it: the card for a song, album or playlist leaves this `None`.
+pub(crate) fn parse_top_artist(body: &[u8]) -> Result<Option<Collection>, ProviderError> {
     let root: Value =
         serde_json::from_slice(body).map_err(|e| parse_err(format!("search json: {e}")))?;
     if root.get("contents").is_none() {
         return Err(parse_err("search response has no contents"));
     }
-    let card = root
-        .pointer("/contents/tabbedSearchResultsRenderer/tabs/0/tabRenderer/content/sectionListRenderer/contents/0/musicCardShelfRenderer");
-    let run = card
-        .and_then(|c| Runs::deserialize(c.get("title")?).ok())
-        .and_then(|t| t.runs.into_iter().next());
+    let Some(card) = root
+        .pointer("/contents/tabbedSearchResultsRenderer/tabs/0/tabRenderer/content/sectionListRenderer/contents/0/musicCardShelfRenderer")
+    else {
+        return Ok(None);
+    };
+    let runs = |key| card.get(key).and_then(|v| Runs::deserialize(v).ok());
+    let run = runs("title").and_then(|t| t.runs.into_iter().next());
     let artist = run.and_then(|r| {
         let browse = r.navigation_endpoint?.browse_endpoint?;
         let page_type = browse
@@ -491,9 +486,21 @@ pub(crate) fn parse_top_artist(body: &[u8]) -> Result<Option<TopArtist>, Provide
             .browse_endpoint_context_music_config?
             .page_type?;
         let browse_id = browse.browse_id.filter(|id| !id.is_empty())?;
-        (page_type == "MUSIC_PAGE_TYPE_ARTIST").then(|| TopArtist {
-            browse_id,
-            name: r.text.unwrap_or_default(),
+        let subtitle: String = runs("subtitle")
+            .map(|s| s.runs.into_iter().filter_map(|r| r.text).collect())
+            .unwrap_or_default();
+        let thumbnail = card
+            .get("thumbnail")
+            .and_then(|t| Thumbnail::deserialize(t).ok());
+        (page_type == "MUSIC_PAGE_TYPE_ARTIST").then(|| Collection {
+            id: CollectionId {
+                provider: ProviderId(PROVIDER.to_owned()),
+                id: format!("{BROWSE_PREFIX}{browse_id}"),
+            },
+            kind: CollectionKind::Artist,
+            title: r.text.unwrap_or_default(),
+            subtitle: Some(subtitle.trim().to_owned()).filter(|s| !s.is_empty()),
+            artwork_url: largest(thumbnail.as_ref()),
         })
     });
     Ok(artist)
@@ -695,6 +702,8 @@ mod tests {
     const SEARCH_PLAYLISTS: &str = include_str!("../tests/fixtures/search_playlists.json");
     // The same query unfiltered: the artist card first, then the first rows of two sections.
     const SEARCH_TOP_ARTIST: &str = include_str!("../tests/fixtures/search_top_artist.json");
+    // The same query with the Artists filter, 2026-10-23: the first six rows, trimmed alike.
+    const SEARCH_ARTISTS: &str = include_str!("../tests/fixtures/search_artists.json");
     const OK: &str = include_str!("../tests/fixtures/player_ok.json");
     const LOGIN: &str = include_str!("../tests/fixtures/player_login_required.json");
     const ERROR: &str = include_str!("../tests/fixtures/player_error.json");
@@ -912,13 +921,68 @@ mod tests {
     }
 
     #[test]
+    fn artists_search_lists_artists_in_order() {
+        let found = parse_search_collections(SEARCH_ARTISTS.as_bytes(), CollectionKind::Artist, 12)
+            .unwrap();
+        let names: Vec<&str> = found.iter().map(|c| c.title.as_str()).collect();
+        assert_eq!(
+            names,
+            [
+                "Daft Punk",
+                "The Weeknd",
+                "Pharrell",
+                "The Strokes",
+                "Pentatonix",
+                "LCD Soundsystem"
+            ]
+        );
+        assert_eq!(found[0].id.id, "browse:UCRr1xG_2WIDs18a6cIiCxeA");
+        assert_eq!(
+            found[0].subtitle.as_deref(),
+            Some("Artist \u{2022} 68.7M monthly audience")
+        );
+        assert!(
+            found[0]
+                .artwork_url
+                .as_deref()
+                .unwrap()
+                .contains("w120-h120")
+        );
+        assert!(found.iter().all(|c| c.kind == CollectionKind::Artist
+            && c.id.id.starts_with("browse:UC")
+            && c.artwork_url.is_some()));
+        let first_two =
+            parse_search_collections(SEARCH_ARTISTS.as_bytes(), CollectionKind::Artist, 2).unwrap();
+        assert_eq!(first_two[..], found[..2]);
+        // Artists are not albums, nor albums artists.
+        assert!(
+            parse_search_collections(SEARCH_ARTISTS.as_bytes(), CollectionKind::Album, 12)
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            parse_search_collections(SEARCH_ALBUMS.as_bytes(), CollectionKind::Artist, 12)
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
     fn top_artist_is_read_from_the_leading_card() {
         let artist = parse_top_artist(SEARCH_TOP_ARTIST.as_bytes()).unwrap();
         assert_eq!(
             artist,
-            Some(TopArtist {
-                browse_id: "UCRr1xG_2WIDs18a6cIiCxeA".into(),
-                name: "Daft Punk".into(),
+            Some(Collection {
+                id: CollectionId {
+                    provider: ProviderId(PROVIDER.into()),
+                    id: "browse:UCRr1xG_2WIDs18a6cIiCxeA".into(),
+                },
+                kind: CollectionKind::Artist,
+                title: "Daft Punk".into(),
+                subtitle: Some("Artist \u{2022} 68.7M monthly audience".into()),
+                artwork_url: Some(
+                    "https://lh3.googleusercontent.com/qLhu6Py_4_xoBsoubKQsXlhOQGqU9YU1ZRAbFusF0LlrPkXbbpu7bEh-k_ZtE4JwLgubvucAQqcK1hRk=w120-h120-p-l90-rj".into()
+                ),
             })
         );
     }

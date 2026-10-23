@@ -1,5 +1,5 @@
-//! Innertube browse pages: the home feed, the Library's playlists, playlists (`VL…`) and
-//! albums (`MPREb_…`). Only Home's continuations are followed.
+//! Innertube browse pages: the home feed, the Library's playlists, playlists (`VL…`), albums
+//! (`MPREb_…`) and artists (`UC…`). Only Home's continuations are followed.
 
 use requiem_core::{
     Collection, CollectionId, CollectionKind, Item, ProviderError, ProviderId, Shelf, Track,
@@ -38,6 +38,8 @@ struct Header {
 pub(crate) fn collection_kind(browse_id: &str) -> CollectionKind {
     if browse_id.starts_with("MPREb_") {
         CollectionKind::Album
+    } else if browse_id.starts_with("UC") {
+        CollectionKind::Artist
     } else {
         CollectionKind::Playlist
     }
@@ -321,10 +323,11 @@ pub(crate) fn parse_library_playlists(body: &[u8]) -> Result<Vec<Collection>, Pr
     Ok(collections)
 }
 
-/// The albums and playlists an artist's page lists, in page order.
+/// The albums, singles and EPs, and playlists an artist's page lists, each in page order.
 #[derive(Debug, Default, PartialEq)]
 pub(crate) struct ArtistReleases {
     pub albums: Vec<Collection>,
+    pub singles: Vec<Collection>,
     pub playlists: Vec<Collection>,
 }
 
@@ -353,14 +356,19 @@ fn release_subtitle(subtitle: Option<&str>, artist: &str) -> String {
 /// discography shelves (Albums, then Singles & EPs) link their title to a
 /// `MUSIC_PAGE_TYPE_ARTIST_DISCOGRAPHY` page, and the playlists shelf ("Featured on") is the
 /// one whose title links nowhere. "Playlists by <artist>" links to the artist and is left out.
+/// Release subtitles name `artist`, unless it is empty.
 pub(crate) fn parse_artist_releases(
     body: &[u8],
     artist: &str,
 ) -> Result<ArtistReleases, ProviderError> {
-    let root = root(body, "artist")?;
+    Ok(artist_releases(&root(body, "artist")?, artist))
+}
+
+fn artist_releases(root: &Value, artist: &str) -> ArtistReleases {
     let mut carousels = Vec::new();
-    find_all(&root, &["musicCarouselShelfRenderer"], &mut carousels);
+    find_all(root, &["musicCarouselShelfRenderer"], &mut carousels);
     let mut found = ArtistReleases::default();
+    let mut discographies = 0;
     for carousel in carousels {
         let title_run = "/header/musicCarouselShelfBasicHeaderRenderer/title/runs/0";
         let link = carousel.pointer(&format!("{title_run}/navigationEndpoint"));
@@ -373,7 +381,13 @@ pub(crate) fn parse_artist_releases(
             .and_then(Value::as_str);
         let (kind, into) = match (link, page_type) {
             (Some(_), Some("MUSIC_PAGE_TYPE_ARTIST_DISCOGRAPHY")) => {
-                (CollectionKind::Album, &mut found.albums)
+                discographies += 1;
+                let into = if discographies == 1 {
+                    &mut found.albums
+                } else {
+                    &mut found.singles
+                };
+                (CollectionKind::Album, into)
             }
             (None, _) => (CollectionKind::Playlist, &mut found.playlists),
             _ => continue,
@@ -402,7 +416,55 @@ pub(crate) fn parse_artist_releases(
             into.push(c);
         }
     }
-    Ok(found)
+    found
+}
+
+/// The shelves of an artist's page, in this order, each left out when empty.
+const ARTIST_TOP_SONGS: &str = "Top songs";
+const ARTIST_ALBUMS: &str = "Albums";
+const ARTIST_SINGLES: &str = "Singles & EPs";
+const ARTIST_FEATURED: &str = "Featured on";
+
+/// An artist's page: its top songs, the page's first song list, then its albums, its singles
+/// and EPs, and the playlists it is featured on. The cards leave out the artist, whose page
+/// it is.
+pub(crate) fn parse_artist_page(body: &[u8]) -> Result<Vec<Shelf>, ProviderError> {
+    let root = root(body, "artist")?;
+    let mut lists = Vec::new();
+    find_all(&root, &["musicShelfRenderer"], &mut lists);
+    let mut rows = Vec::new();
+    if let Some(contents) = lists.first().and_then(|l| l.get("contents")) {
+        collect_items(contents, &mut rows);
+    }
+    let top: Vec<Item> = rows
+        .iter()
+        .filter_map(list_item_track)
+        .map(Item::Track)
+        .collect();
+    let releases = artist_releases(&root, "");
+    let collections = |cs: Vec<Collection>| cs.into_iter().map(Item::Collection).collect();
+    let shelves = [
+        (ARTIST_TOP_SONGS, top),
+        (ARTIST_ALBUMS, collections(releases.albums)),
+        (ARTIST_SINGLES, collections(releases.singles)),
+        (ARTIST_FEATURED, collections(releases.playlists)),
+    ];
+    Ok(shelves
+        .into_iter()
+        .filter(|(_, items)| !items.is_empty())
+        .map(|(title, items)| Shelf {
+            title: title.to_owned(),
+            items,
+        })
+        .collect())
+}
+
+/// The page `browse_id` opens: an artist's shelves, or a playlist or album as one shelf.
+pub(crate) fn parse_page(body: &[u8], browse_id: &str) -> Result<Vec<Shelf>, ProviderError> {
+    match collection_kind(browse_id) {
+        CollectionKind::Artist => parse_artist_page(body),
+        kind => Ok(vec![parse_collection(body, kind)?]),
+    }
 }
 
 /// A playlist or album page as one shelf named after it. Album rows leave out the artist
@@ -474,8 +536,9 @@ mod tests {
     const HOME: &str = include_str!("../../tests/fixtures/browse_home.json");
     const PLAYLIST: &str = include_str!("../../tests/fixtures/browse_playlist.json");
     const ALBUM: &str = include_str!("../../tests/fixtures/browse_album.json");
-    // Live anonymous capture of Daft Punk's artist page, 2026-10-23: its Albums, Singles & EPs,
-    // Videos, Featured on, Playlists by and Fans might also like shelves, trimmed.
+    // Live anonymous capture of Daft Punk's artist page, 2026-10-23: its Top songs, Albums,
+    // Singles & EPs, Videos, Featured on, Playlists by and Fans might also like shelves,
+    // trimmed.
     const ARTIST: &str = include_str!("../../tests/fixtures/browse_artist.json");
 
     fn track(item: &Item) -> &Track {
@@ -808,7 +871,7 @@ mod tests {
     fn artist_page_releases_are_found_by_shelf_structure() {
         let found = parse_artist_releases(ARTIST.as_bytes(), "Daft Punk").unwrap();
         let titles = |cs: &[Collection]| cs.iter().map(|c| c.title.clone()).collect::<Vec<_>>();
-        assert_eq!(found.albums.len(), 20);
+        assert_eq!((found.albums.len(), found.singles.len()), (10, 10));
         assert_eq!(
             titles(&found.albums)[..5],
             [
@@ -820,16 +883,22 @@ mod tests {
             ]
         );
         assert_eq!(found.albums[5].title, "Homework (25th Anniversary Edition)");
-        assert_eq!(found.albums[10].title, "GLBTM (Studio Outtakes)");
-        assert!(found.albums.iter().all(|a| a.kind == CollectionKind::Album
-            && a.id.id.starts_with("browse:MPREb_")
-            && a.artwork_url.is_some()));
+        assert_eq!(found.singles[0].title, "GLBTM (Studio Outtakes)");
+        assert!(
+            found
+                .albums
+                .iter()
+                .chain(&found.singles)
+                .all(|a| a.kind == CollectionKind::Album
+                    && a.id.id.starts_with("browse:MPREb_")
+                    && a.artwork_url.is_some())
+        );
         assert_eq!(
             found.albums[1].subtitle.as_deref(),
             Some("Album \u{2022} Daft Punk \u{2022} 2013")
         );
         assert_eq!(
-            found.albums[13].subtitle.as_deref(),
+            found.singles[3].subtitle.as_deref(),
             Some("Single \u{2022} Daft Punk \u{2022} 2005")
         );
         assert_eq!(
@@ -854,6 +923,79 @@ mod tests {
                 .playlists
                 .iter()
                 .all(|p| p.kind == CollectionKind::Playlist)
+        );
+    }
+
+    #[test]
+    fn artist_page_shelves_come_in_page_order_after_its_top_songs() {
+        let shelves = parse_artist_page(ARTIST.as_bytes()).unwrap();
+        let titles: Vec<&str> = shelves.iter().map(|s| s.title.as_str()).collect();
+        assert_eq!(
+            titles,
+            ["Top songs", "Albums", "Singles & EPs", "Featured on"]
+        );
+        let counts: Vec<usize> = shelves.iter().map(|s| s.items.len()).collect();
+        assert_eq!(counts, [5, 10, 10, 4]);
+        let top: Vec<&Track> = shelves[0].items.iter().map(track).collect();
+        assert_eq!(top[0].id.id, "khnokW3Mw24");
+        assert_eq!(top[0].title, "Instant Crush (feat. Julian Casablancas)");
+        assert_eq!(top[0].artists, ["Daft Punk", "Julian Casablancas"]);
+        assert_eq!(top[0].album.as_deref(), Some("Random Access Memories"));
+        assert_eq!(top[4].title, "Veridis Quo");
+        let collections = |i: usize| -> Vec<&Collection> {
+            shelves[i]
+                .items
+                .iter()
+                .map(|item| match item {
+                    Item::Collection(c) => c,
+                    Item::Track(t) => panic!("{} is no collection", t.title),
+                })
+                .collect()
+        };
+        assert_eq!(collections(1)[1].title, "Random Access Memories");
+        // The page is the artist's own, so its cards leave the artist out.
+        assert_eq!(
+            collections(1)[1].subtitle.as_deref(),
+            Some("Album \u{2022} 2013")
+        );
+        assert_eq!(collections(2)[0].title, "GLBTM (Studio Outtakes)");
+        assert_eq!(
+            collections(2)[3].subtitle.as_deref(),
+            Some("Single \u{2022} 2005")
+        );
+        assert_eq!(collections(3)[0].title, "Presenting Daft Punk");
+        assert!(
+            collections(3)
+                .iter()
+                .all(|c| c.kind == CollectionKind::Playlist)
+        );
+    }
+
+    #[test]
+    fn an_artist_page_leaves_out_its_empty_shelves() {
+        let v: Value = serde_json::from_str(ARTIST).unwrap();
+        let path = "/contents/singleColumnBrowseResultsRenderer/tabs/0/tabRenderer/content/sectionListRenderer/contents";
+        let sections = v.pointer(path).unwrap().as_array().unwrap();
+        // Featured on alone, without top songs or releases.
+        let only_featured = serde_json::json!({"contents": [sections[4]]});
+        let shelves = parse_artist_page(only_featured.to_string().as_bytes()).unwrap();
+        let titles: Vec<&str> = shelves.iter().map(|s| s.title.as_str()).collect();
+        assert_eq!(titles, ["Featured on"]);
+        assert!(parse_artist_page(br#"{"contents":{}}"#).unwrap().is_empty());
+        assert!(matches!(
+            parse_artist_page(b"{}"),
+            Err(ProviderError::Parse(_))
+        ));
+    }
+
+    #[test]
+    fn a_browse_id_picks_its_page_parser() {
+        let artist = parse_page(ARTIST.as_bytes(), "UCRr1xG_2WIDs18a6cIiCxeA").unwrap();
+        assert_eq!(artist, parse_artist_page(ARTIST.as_bytes()).unwrap());
+        let album = parse_page(ALBUM.as_bytes(), "MPREb_x").unwrap();
+        assert_eq!(
+            album,
+            [parse_collection(ALBUM.as_bytes(), CollectionKind::Album).unwrap()]
         );
     }
 
@@ -883,6 +1025,7 @@ mod tests {
     fn collection_kinds_and_bad_bodies() {
         assert_eq!(collection_kind("MPREb_x"), CollectionKind::Album);
         assert_eq!(collection_kind("VLPLx"), CollectionKind::Playlist);
+        assert_eq!(collection_kind("UCx"), CollectionKind::Artist);
         assert!(matches!(parse_home(b"{}"), Err(ProviderError::Parse(_))));
         assert!(matches!(
             parse_collection(b"nope", CollectionKind::Album),

@@ -24,7 +24,7 @@ use crate::innertube::{InnertubeClient, status_error};
 use crate::log::debug;
 use crate::parse::{
     BROWSE_PREFIX, PROVIDER, collection_kind, logged_in, parse_collection, parse_home,
-    parse_library_playlists,
+    parse_library_playlists, parse_page,
 };
 use crate::transport::Transport;
 
@@ -575,6 +575,13 @@ impl BrowserSession {
     pub(crate) fn collection(&self, s: &Signed, browse_id: &str) -> Result<Shelf, ProviderError> {
         let body = self.browse(s, "", &browse_body(browse_id))?;
         parse_collection(&body, collection_kind(browse_id))
+    }
+
+    /// The page `browse_id` opens, private playlists included: an artist's shelves, or a
+    /// playlist or album as one shelf.
+    pub(crate) fn page(&self, s: &Signed, browse_id: &str) -> Result<Vec<Shelf>, ProviderError> {
+        let body = self.browse(s, "", &browse_body(browse_id))?;
+        parse_page(&body, browse_id)
     }
 }
 

@@ -186,13 +186,9 @@ impl Provider for YtMusicProvider {
             Page::Collection(c) if c.provider.0 == PROVIDER => {
                 if let Some(id) = c.id.strip_prefix(BROWSE_PREFIX) {
                     if let Some(s) = session {
-                        return Ok(vec![self.session.collection(&s, id)?]);
+                        return self.session.page(&s, id);
                     }
-                    let body = self.client.browse(id)?;
-                    Ok(vec![parse::parse_collection(
-                        &body,
-                        parse::collection_kind(id),
-                    )?])
+                    parse::parse_page(&self.client.browse(id)?, id)
                 } else {
                     Err(ProviderError::Unplayable(format!(
                         "unknown collection {}",
@@ -267,13 +263,14 @@ mod tests {
     use requiem_core::{CollectionId, CollectionKind, ProviderId, SEARCH_COLLECTIONS};
 
     use super::*;
-    use crate::clients::{ALBUMS_PARAMS, PLAYLISTS_PARAMS, SONGS_PARAMS};
+    use crate::clients::{ALBUMS_PARAMS, ARTISTS_PARAMS, PLAYLISTS_PARAMS, SONGS_PARAMS};
     use crate::testing::{FakeMusic, TempDir};
 
     // Synthetic responses; every value in them is made up.
     const MENU: &str = include_str!("../tests/fixtures/account_menu.json");
     const HOME: &str = include_str!("../tests/fixtures/signed_in_home.json");
     const SEARCH: &str = include_str!("../tests/fixtures/search_songs.json");
+    const ARTISTS: &str = include_str!("../tests/fixtures/search_artists.json");
     const ALBUMS: &str = include_str!("../tests/fixtures/search_albums.json");
     const PLAYLISTS: &str = include_str!("../tests/fixtures/search_playlists.json");
     const TOP_ARTIST: &str = include_str!("../tests/fixtures/search_top_artist.json");
@@ -354,7 +351,7 @@ mod tests {
         rig.music.script(BROWSE_URL, 200, PLAYLIST);
         rig.music.script(BROWSE_URL, 200, LIBRARY);
         rig.music.script(BROWSE_URL, 200, PLAYLIST);
-        // Albums and playlists go unanswered, which leaves them out.
+        // Artists, albums and playlists go unanswered, which leaves them out.
         let tracks = p.search("fake query", 5).unwrap().tracks;
         assert!(!tracks.is_empty());
         p.resolve(&tracks[0].id).unwrap();
@@ -373,7 +370,9 @@ mod tests {
             .collect();
         assert_eq!(
             anonymous_urls,
-            [SEARCH_URL, SEARCH_URL, SEARCH_URL, SEARCH_URL, PLAYER_URL]
+            [
+                SEARCH_URL, SEARCH_URL, SEARCH_URL, SEARCH_URL, SEARCH_URL, PLAYER_URL
+            ]
         );
         for c in anonymous {
             for (k, v) in &c.headers {
@@ -588,12 +587,19 @@ mod tests {
                 .iter()
                 .all(|p| p.kind == CollectionKind::Playlist)
         );
-        let mut want = vec![SONGS_PARAMS, ALBUMS_PARAMS, PLAYLISTS_PARAMS];
+        let mut want = vec![
+            SONGS_PARAMS,
+            ARTISTS_PARAMS,
+            ALBUMS_PARAMS,
+            PLAYLISTS_PARAMS,
+        ];
         want.sort_unstable();
         assert_eq!(search_params(&rig), want);
     }
 
     fn script_filtered_searches(rig: &Rig) {
+        rig.music
+            .script_search(SEARCH_URL, ARTISTS_PARAMS, 200, ARTISTS);
         rig.music
             .script_search(SEARCH_URL, SONGS_PARAMS, 200, SEARCH);
         rig.music
@@ -648,6 +654,7 @@ mod tests {
             script_filtered_searches(&rig);
             rig.music.script(SEARCH_URL, 200, unfiltered);
             let found = rig.provider().search("one more time", 5).unwrap();
+            assert_eq!(names(&found.artists), ARTIST_NAMES);
             assert_eq!(found.albums.len(), 6);
             assert_eq!(found.albums[0].id.id, "browse:MPREb_K8qWMWVqXGi");
             assert_eq!(found.playlists.len(), 6);
@@ -682,6 +689,137 @@ mod tests {
         rig.music.script(SEARCH_URL, 503, "{}");
         let found = rig.provider().search("daft punk", 5).unwrap();
         assert_eq!((found.albums.len(), found.playlists.len()), (6, 6));
+    }
+
+    /// The artists the Artists filter finds for "daft punk", in its order.
+    const ARTIST_NAMES: [&str; 6] = [
+        "Daft Punk",
+        "The Weeknd",
+        "Pharrell",
+        "The Strokes",
+        "Pentatonix",
+        "LCD Soundsystem",
+    ];
+
+    fn names(found: &[requiem_core::Collection]) -> Vec<&str> {
+        found.iter().map(|c| c.title.as_str()).collect()
+    }
+
+    /// The Artists filter's answer with its first and third rows swapped.
+    fn artists_with_daft_punk_third() -> String {
+        let mut v: serde_json::Value = serde_json::from_str(ARTISTS).unwrap();
+        v.pointer_mut("/contents/tabbedSearchResultsRenderer/tabs/0/tabRenderer/content/sectionListRenderer/contents/0/musicShelfRenderer/contents")
+            .and_then(serde_json::Value::as_array_mut)
+            .unwrap()
+            .swap(0, 2);
+        v.to_string()
+    }
+
+    #[test]
+    fn search_finds_artists_with_the_top_card_first_and_once() {
+        let rig = Rig::new();
+        rig.music.script_search(
+            SEARCH_URL,
+            ARTISTS_PARAMS,
+            200,
+            &artists_with_daft_punk_third(),
+        );
+        script_filtered_searches(&rig);
+        rig.music.script(SEARCH_URL, 200, TOP_ARTIST);
+        rig.music
+            .script_browse(BROWSE_URL, "UCRr1xG_2WIDs18a6cIiCxeA", 200, ARTIST);
+        let found = rig.provider().search("daft punk", 5).unwrap();
+        assert_eq!(
+            names(&found.artists),
+            [
+                "Daft Punk",
+                "Pharrell",
+                "The Weeknd",
+                "The Strokes",
+                "Pentatonix",
+                "LCD Soundsystem"
+            ]
+        );
+        let lead = &found.artists[0];
+        assert_eq!(lead.id.id, "browse:UCRr1xG_2WIDs18a6cIiCxeA");
+        assert_eq!(lead.kind, CollectionKind::Artist);
+        assert_eq!(
+            lead.subtitle.as_deref(),
+            Some("Artist \u{2022} 68.7M monthly audience")
+        );
+        assert!(lead.artwork_url.is_some());
+        assert!(
+            found
+                .artists
+                .iter()
+                .all(|a| a.kind == CollectionKind::Artist)
+        );
+    }
+
+    #[test]
+    fn search_keeps_everything_else_when_the_artists_search_fails() {
+        let rig = Rig::new();
+        rig.music
+            .script_search(SEARCH_URL, ARTISTS_PARAMS, 500, "{}");
+        script_filtered_searches(&rig);
+        rig.music.script(SEARCH_URL, 200, SEARCH);
+        let found = rig.provider().search("daft punk", 5).unwrap();
+        assert!(found.artists.is_empty());
+        assert_eq!(found.tracks.len(), 5);
+        assert_eq!((found.albums.len(), found.playlists.len()), (6, 6));
+
+        // The card's artist still leads, alone.
+        let rig = Rig::new();
+        rig.music
+            .script_search(SEARCH_URL, ARTISTS_PARAMS, 200, "not json");
+        script_filtered_searches(&rig);
+        rig.music.script(SEARCH_URL, 200, TOP_ARTIST);
+        rig.music
+            .script_browse(BROWSE_URL, "UCRr1xG_2WIDs18a6cIiCxeA", 200, ARTIST);
+        let found = rig.provider().search("daft punk", 5).unwrap();
+        assert_eq!(names(&found.artists), ["Daft Punk"]);
+        assert_eq!(found.tracks.len(), 5);
+        assert_eq!(found.albums.len(), SEARCH_COLLECTIONS);
+    }
+
+    fn daft_punk() -> Page {
+        Page::Collection(CollectionId {
+            provider: ProviderId(PROVIDER.to_owned()),
+            id: "browse:UCRr1xG_2WIDs18a6cIiCxeA".into(),
+        })
+    }
+
+    fn titles(shelves: &[Shelf]) -> Vec<(&str, usize)> {
+        shelves
+            .iter()
+            .map(|s| (s.title.as_str(), s.items.len()))
+            .collect()
+    }
+
+    const ARTIST_SHELVES: [(&str, usize); 4] = [
+        ("Top songs", 5),
+        ("Albums", 10),
+        ("Singles & EPs", 10),
+        ("Featured on", 4),
+    ];
+
+    #[test]
+    fn an_artist_opens_as_its_page_signed_in_or_not() {
+        let rig = Rig::new();
+        rig.music
+            .script_browse(BROWSE_URL, "UCRr1xG_2WIDs18a6cIiCxeA", 200, ARTIST);
+        let shelves = rig.provider().browse(&daft_punk()).unwrap();
+        assert_eq!(titles(&shelves), ARTIST_SHELVES);
+
+        let rig = Rig::new();
+        let p = rig.signed_in();
+        rig.music
+            .script_browse(BROWSE_URL, "UCRr1xG_2WIDs18a6cIiCxeA", 200, ARTIST);
+        let shelves = p.browse(&daft_punk()).unwrap();
+        assert_eq!(titles(&shelves), ARTIST_SHELVES);
+        let calls = rig.music.calls.lock().unwrap();
+        let last = calls.last().unwrap();
+        assert!(last.signed && last.body.contains("UCRr1xG_2WIDs18a6cIiCxeA"));
     }
 
     #[test]
