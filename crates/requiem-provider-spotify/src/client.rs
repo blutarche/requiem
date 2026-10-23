@@ -10,8 +10,8 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use requiem_core::{
-    AccountState, AudioSource, FormatHint, Page, PageSink, Provider, ProviderError, ProviderId,
-    SearchResults, Shelf, TrackId,
+    AccountState, AudioSource, Browsed, FormatHint, Page, PageSink, Provider, ProviderError,
+    ProviderId, SearchResults, TrackId,
 };
 use serde::de::DeserializeOwned;
 
@@ -271,9 +271,12 @@ impl Provider for SpotifyProvider {
         })
     }
 
-    fn browse(&self, page: &Page) -> Result<Vec<Shelf>, ProviderError> {
+    fn browse(&self, page: &Page) -> Result<Browsed, ProviderError> {
         self.call::<Shelves>(&Request::Browse { page: page.clone() })
-            .map(|s| s.shelves)
+            .map(|s| Browsed {
+                about: s.about,
+                shelves: s.shelves,
+            })
     }
 
     fn has_home(&self) -> bool {

@@ -214,8 +214,8 @@ mod tests {
 
     use requiem_core::testing::{FakeEngineHandle, FakeProvider, Gate, Step};
     use requiem_core::{
-        AccountState, Command, Event, Item, Page, Provider, ProviderId, Session, SessionConfig,
-        Shelf, Track, TrackId,
+        AccountState, Collection, CollectionKind, Command, Event, Item, Page, Provider, ProviderId,
+        Session, SessionConfig, Shelf, Track, TrackId,
     };
 
     use super::*;
@@ -273,6 +273,7 @@ mod tests {
         PagePart {
             provider: ProviderId("fake".into()),
             account: Some("Me".into()),
+            about: None,
             shelves: vec![shelf(ids)],
         }
     }
@@ -323,6 +324,41 @@ mod tests {
             collections_path(&pages),
             PathBuf::from("/x/requiem/collections.json")
         );
+    }
+
+    #[test]
+    fn files_from_before_pages_said_what_they_are_about_still_load() {
+        let dir = TempDir::new();
+        save_all(&dir.file(), &pages());
+        for file in [dir.file(), collections_path(&dir.file())] {
+            let json = fs::read_to_string(&file).unwrap();
+            assert!(json.contains(r#""about":null,"#), "{json}");
+            fs::write(&file, json.replace(r#""about":null,"#, "")).unwrap();
+        }
+        assert_eq!(load(&dir.file()), pages());
+    }
+
+    #[test]
+    fn a_kept_artist_page_keeps_what_it_is_about() {
+        let dir = TempDir::new();
+        let mut artist = part(&["t1"]);
+        artist.about = Some(Collection {
+            id: collection_id("artist"),
+            kind: CollectionKind::Artist,
+            title: "Artist".into(),
+            subtitle: Some("Artist".into()),
+            artwork_url: Some("https://example.test/artist.jpg".into()),
+        });
+        let pages = SavedPages {
+            collections: vec![SavedCollection {
+                id: collection_id("artist"),
+                part: Arc::new(artist),
+                fetched: 1_800_000_000,
+            }],
+            ..SavedPages::default()
+        };
+        save_all(&dir.file(), &pages);
+        assert_eq!(load(&dir.file()), pages);
     }
 
     #[test]
@@ -441,6 +477,7 @@ mod tests {
                 req: 1,
                 page,
                 shelves: vec![shelf(&["x1"])],
+                about: None,
             }
         );
         gate.release();
@@ -475,6 +512,7 @@ mod tests {
                 req: 1,
                 page: Page::Library,
                 shelves: vec![shelf(&["a"])],
+                about: None,
             }
         );
         gate.release();

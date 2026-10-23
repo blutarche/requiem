@@ -10,9 +10,10 @@ use crossbeam_channel::{Receiver, Sender, bounded, unbounded};
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    AccountState, AudioSource, CollectionId, Command, Engine, EngineEvent, EngineEventSink,
-    EnqueueMode, Event, FailureKind, HOME_MIXES, HOME_PLAYLISTS, Item, Page, PlayState, Provider,
-    ProviderError, ProviderId, SearchResults, SeekTarget, Shelf, Track, TrackId,
+    AccountState, AudioSource, Browsed, Collection, CollectionId, Command, Engine, EngineEvent,
+    EngineEventSink, EnqueueMode, Event, FailureKind, HOME_MIXES, HOME_PLAYLISTS, Item, Page,
+    PlayState, Provider, ProviderError, ProviderId, SearchResults, SeekTarget, Shelf, Track,
+    TrackId,
 };
 
 /// What a restart restores. `resume` is the queue index Play would start.
@@ -32,6 +33,9 @@ pub struct PagePart {
     pub provider: ProviderId,
     /// The name of the account that answered.
     pub account: Option<String>,
+    /// As [`Browsed::about`]; parts saved by versions before it have none.
+    #[serde(default)]
+    pub about: Option<Collection>,
     pub shelves: Vec<Shelf>,
 }
 
@@ -162,7 +166,7 @@ enum Msg {
     Browsed {
         req: u64,
         page: Page,
-        result: Result<Vec<Shelf>, ProviderError>,
+        result: Result<Browsed, ProviderError>,
         accounts: Vec<(ProviderId, AccountState)>,
     },
     /// One provider's answer to fetch `run` of a kept page, with its state after it.
@@ -170,7 +174,7 @@ enum Msg {
         page: Page,
         run: u64,
         provider: ProviderId,
-        result: Result<Vec<Shelf>, ProviderError>,
+        result: Result<Browsed, ProviderError>,
         account: AccountState,
     },
     /// A provider says `page` has newer content than it gave.
@@ -543,12 +547,24 @@ fn merge_library(answers: Vec<Vec<Shelf>>) -> Vec<Shelf> {
     }]
 }
 
-/// `answers` are each provider's shelves, in provider order.
-fn merge(page: &Page, answers: Vec<Vec<Shelf>>) -> Vec<Shelf> {
+/// `answers` are each provider's, in provider order. Only a collection, which one provider
+/// answers, is about anything.
+fn merge(page: &Page, answers: Vec<Browsed>) -> Browsed {
+    let shelves = |answers: Vec<Browsed>| answers.into_iter().map(|b| b.shelves).collect();
     match page {
-        Page::Home => merge_home(answers),
-        Page::Library => merge_library(answers),
-        Page::Collection(_) => answers.into_iter().flatten().collect(),
+        Page::Home => Browsed {
+            about: None,
+            shelves: merge_home(shelves(answers)),
+        },
+        Page::Library => Browsed {
+            about: None,
+            shelves: merge_library(shelves(answers)),
+        },
+        Page::Collection(_) => answers.into_iter().fold(Browsed::default(), |mut all, b| {
+            all.about = all.about.or(b.about);
+            all.shelves.extend(b.shelves);
+            all
+        }),
     }
 }
 
@@ -694,7 +710,12 @@ impl Actor {
                     accounts,
                 } => {
                     match result {
-                        Ok(shelves) => self.emit(Event::BrowseResults { req, page, shelves }),
+                        Ok(Browsed { about, shelves }) => self.emit(Event::BrowseResults {
+                            req,
+                            page,
+                            shelves,
+                            about,
+                        }),
                         Err(e) => self.emit(Event::BrowseFailed {
                             req,
                             sign_in_required: matches!(e, ProviderError::SignInRequired(_)),
@@ -1058,11 +1079,12 @@ impl Actor {
         // Clients never browse on hearing of a change, which carries the shelves, so fetching
         // on every browse cannot loop.
         match self.served(&page) {
-            Some(shelves) => {
+            Some(Browsed { about, shelves }) => {
                 self.emit(Event::BrowseResults {
                     req,
                     page: page.clone(),
                     shelves: shelves.clone(),
+                    about,
                 });
                 self.shown(&page, &shelves);
                 self.fetch_page(page, None);
@@ -1111,15 +1133,18 @@ impl Actor {
 
     /// The kept parts of `page` merged, as all of them landing at once would be; `None` when
     /// none is kept.
-    fn served(&self, page: &Page) -> Option<Vec<Shelf>> {
+    fn served(&self, page: &Page) -> Option<Browsed> {
         let kept = self.kept(page)?;
-        let answers: Vec<Vec<Shelf>> = self
+        let answers: Vec<Browsed> = self
             .page_targets(page)
             .iter()
             .filter_map(|p| {
                 let id = p.id();
                 let part = kept.parts.iter().find(|part| part.provider == id)?;
-                Some(part.shelves.clone())
+                Some(Browsed {
+                    about: part.about.clone(),
+                    shelves: part.shelves.clone(),
+                })
             })
             .collect();
         (!answers.is_empty()).then(|| merge(page, answers))
@@ -1303,7 +1328,7 @@ impl Actor {
         page: Page,
         run: u64,
         provider: ProviderId,
-        result: Result<Vec<Shelf>, ProviderError>,
+        result: Result<Browsed, ProviderError>,
         account: AccountState,
     ) {
         let before = self.served(&page);
@@ -1336,13 +1361,14 @@ impl Actor {
             changed = kept.parts.len() != n;
         }
         match result {
-            Ok(shelves) => {
+            Ok(Browsed { about, shelves }) => {
                 if let Some(AccountState::SignedIn { name }) = asked
                     && same
                 {
                     let part = PagePart {
                         provider: provider.clone(),
                         account: name,
+                        about,
                         shelves,
                     };
                     fetched = true;
@@ -1392,11 +1418,12 @@ impl Actor {
             return;
         };
         // Parts with nothing in them answer only once every provider is in.
-        let answered = if after.as_deref().is_some_and(showable) || (done && after.is_some()) {
-            std::mem::take(&mut r.waiting)
-        } else {
-            Vec::new()
-        };
+        let answered =
+            if after.as_ref().is_some_and(|b| showable(&b.shelves)) || (done && after.is_some()) {
+                std::mem::take(&mut r.waiting)
+            } else {
+                Vec::new()
+            };
         let unanswered = !r.waiting.is_empty();
         let mut failed = None;
         if done {
@@ -1421,19 +1448,21 @@ impl Actor {
         if answered.is_empty() {
             // Browses still waiting are answered with the change once there is one to show.
             if !unanswered && !unseen && after != before {
-                let shelves = after.unwrap_or_default();
+                let Browsed { about, shelves } = after.unwrap_or_default();
                 shown = browsed.then(|| shelves.clone());
                 self.emit(Event::PageChanged {
                     page: page.clone(),
                     shelves,
+                    about,
                 });
             }
-        } else if let Some(shelves) = after {
+        } else if let Some(Browsed { about, shelves }) = after {
             for req in answered {
                 self.emit(Event::BrowseResults {
                     req,
                     page: page.clone(),
                     shelves: shelves.clone(),
+                    about: about.clone(),
                 });
             }
             shown = browsed.then_some(shelves);

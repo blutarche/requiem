@@ -11,7 +11,7 @@ use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
 
-use requiem_core::{Page, ProviderError, Shelf, Track};
+use requiem_core::{Browsed, Page, ProviderError, Track};
 use serde::Serialize;
 
 use crate::logger::redact;
@@ -24,7 +24,7 @@ use crate::wire::{
 /// What the helper serves. Every method blocks.
 pub trait Backend: Send + Sync + 'static {
     fn search(&self, q: &str, limit: usize) -> Result<Vec<Track>, ProviderError>;
-    fn browse(&self, page: &Page) -> Result<Vec<Shelf>, ProviderError>;
+    fn browse(&self, page: &Page) -> Result<Browsed, ProviderError>;
     /// Gets ready to stream `track` without opening a CDN connection; returns a stream id.
     fn prepare(&self, track: &str) -> Result<String, ProviderError>;
     /// Opens a stream `prepare` returned. Each id opens once.
@@ -145,7 +145,9 @@ fn handle(conn: UnixStream, backend: &dyn Backend) -> io::Result<()> {
         ),
         Request::Browse { page } => reply(
             &mut w,
-            backend.browse(&page).map(|shelves| Shelves { shelves }),
+            backend
+                .browse(&page)
+                .map(|Browsed { about, shelves }| Shelves { shelves, about }),
         ),
         Request::Prepare { track } => reply(
             &mut w,
@@ -235,6 +237,8 @@ pub(crate) mod tests {
     use std::io::BufRead;
     use std::sync::Mutex;
 
+    use requiem_core::Shelf;
+
     use super::*;
     use crate::testing::TempDir;
     use crate::wire::ReplyError;
@@ -280,11 +284,14 @@ pub(crate) mod tests {
             }
         }
 
-        fn browse(&self, _page: &Page) -> Result<Vec<Shelf>, ProviderError> {
-            Ok(vec![Shelf {
-                title: "Spotify".into(),
-                items: Vec::new(),
-            }])
+        fn browse(&self, _page: &Page) -> Result<Browsed, ProviderError> {
+            Ok(Browsed {
+                about: None,
+                shelves: vec![Shelf {
+                    title: "Spotify".into(),
+                    items: Vec::new(),
+                }],
+            })
         }
 
         fn prepare(&self, track: &str) -> Result<String, ProviderError> {

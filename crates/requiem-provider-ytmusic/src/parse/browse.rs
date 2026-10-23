@@ -5,8 +5,8 @@ use std::collections::HashMap;
 use std::time::Duration;
 
 use requiem_core::{
-    Collection, CollectionId, CollectionKind, Item, ProviderError, ProviderId, Shelf, Track,
-    TrackId,
+    Browsed, Collection, CollectionId, CollectionKind, Item, ProviderError, ProviderId, Shelf,
+    Track, TrackId,
 };
 use serde::Deserialize;
 use serde_json::Value;
@@ -37,6 +37,15 @@ struct Header {
     title: Option<Runs>,
     strapline_text_one: Option<Runs>,
     thumbnail: Option<Thumbnail>,
+}
+
+/// An artist page's header: its name, photo and audience ("68.1M monthly audience").
+#[derive(Deserialize, Default)]
+#[serde(default, rename_all = "camelCase")]
+struct ImmersiveHeader {
+    title: Option<Runs>,
+    thumbnail: Option<Thumbnail>,
+    monthly_listener_count: Option<Runs>,
 }
 
 pub(crate) fn collection_kind(browse_id: &str) -> CollectionKind {
@@ -465,6 +474,30 @@ pub(crate) fn parse_artist_page(body: &[u8]) -> Result<Vec<Shelf>, ProviderError
         .collect())
 }
 
+/// The artist page `browse_id` is about, from its header, as an artists search lists it:
+/// its photo, and "Artist • 68.1M monthly audience", or "Artist" without an audience.
+/// `None` without a header.
+fn artist_about(root: &Value, browse_id: &str) -> Option<Collection> {
+    let header = root.pointer("/header/musicImmersiveHeaderRenderer")?;
+    let header = ImmersiveHeader::deserialize(header).ok()?;
+    let audience = joined(header.monthly_listener_count.as_ref());
+    let audience = audience.trim();
+    Some(Collection {
+        id: CollectionId {
+            provider: ProviderId(PROVIDER.to_owned()),
+            id: format!("{BROWSE_PREFIX}{browse_id}"),
+        },
+        kind: CollectionKind::Artist,
+        title: joined(header.title.as_ref()),
+        subtitle: Some(if audience.is_empty() {
+            "Artist".to_owned()
+        } else {
+            format!("Artist{SEPARATOR}{audience}")
+        }),
+        artwork_url: largest(header.thumbnail.as_ref()),
+    })
+}
+
 /// The browse id of the playlist an artist's top songs link to ("Show all"): the page's first
 /// song list's `bottomEndpoint`, when it opens a playlist.
 fn top_songs_playlist(body: &[u8]) -> Option<String> {
@@ -525,20 +558,25 @@ fn fill_top_song_durations(
     }
 }
 
-/// The page `browse_id` opens: an artist's shelves, or a playlist or album as one shelf.
-/// `fetch_playlist` browses the playlist an artist's top songs link to, for their durations.
+/// The page `browse_id` opens: an artist's shelves, with the artist it is about, or a
+/// playlist or album as one shelf. `fetch_playlist` browses the playlist an artist's top
+/// songs link to, for their durations.
 pub(crate) fn parse_page(
     body: &[u8],
     browse_id: &str,
     fetch_playlist: impl FnOnce(&str) -> Result<Vec<u8>, ProviderError>,
-) -> Result<Vec<Shelf>, ProviderError> {
+) -> Result<Browsed, ProviderError> {
     match collection_kind(browse_id) {
         CollectionKind::Artist => {
             let mut shelves = parse_artist_page(body)?;
             fill_top_song_durations(body, &mut shelves, fetch_playlist);
-            Ok(shelves)
+            let about = artist_about(&root(body, "artist")?, browse_id);
+            Ok(Browsed { about, shelves })
         }
-        kind => Ok(vec![parse_collection(body, kind)?]),
+        kind => Ok(Browsed {
+            about: None,
+            shelves: vec![parse_collection(body, kind)?],
+        }),
     }
 }
 
@@ -615,7 +653,7 @@ mod tests {
     const ALBUM: &str = include_str!("../../tests/fixtures/browse_album.json");
     // Live anonymous capture of Daft Punk's artist page, 2026-10-23: its Top songs, Albums,
     // Singles & EPs, Videos, Featured on, Playlists by and Fans might also like shelves,
-    // trimmed.
+    // trimmed; its header's name, photo and audience from another capture that day.
     const ARTIST: &str = include_str!("../../tests/fixtures/browse_artist.json");
     // The playlist that artist's Top songs link to, 2026-10-23: the five songs the page lists.
     const TOP_SONGS: &str = include_str!("../../tests/fixtures/browse_artist_top_songs.json");
@@ -1101,12 +1139,49 @@ mod tests {
             Err(ProviderError::Parse("no playlist".into()))
         })
         .unwrap();
-        assert_eq!(artist, parse_artist_page(ARTIST.as_bytes()).unwrap());
+        assert_eq!(
+            artist.shelves,
+            parse_artist_page(ARTIST.as_bytes()).unwrap()
+        );
+        assert!(artist.about.is_some());
         let album = parse_page(ALBUM.as_bytes(), "MPREb_x", |_| unreachable!()).unwrap();
         assert_eq!(
             album,
-            [parse_collection(ALBUM.as_bytes(), CollectionKind::Album).unwrap()]
+            Browsed {
+                about: None,
+                shelves: vec![parse_collection(ALBUM.as_bytes(), CollectionKind::Album).unwrap()],
+            }
         );
+    }
+
+    #[test]
+    fn an_artist_page_is_about_the_artist_in_its_header() {
+        let page = parse_page(ARTIST.as_bytes(), DAFT_PUNK, |_| {
+            Err(ProviderError::Parse("no playlist".into()))
+        })
+        .unwrap();
+        assert_eq!(
+            page.about,
+            Some(Collection {
+                id: artist(DAFT_PUNK),
+                kind: CollectionKind::Artist,
+                title: "Daft Punk".into(),
+                subtitle: Some("Artist \u{2022} 68.1M monthly audience".into()),
+                artwork_url: Some(
+                    "https://lh3.googleusercontent.com/qLhu6Py_4_xoBsoubKQsXlhOQGqU9YU1ZRAbFusF0LlrPkXbbpu7bEh-k_ZtE4JwLgubvucAQqcK1hRk=w1080-h450-p-l90-rj".into()
+                ),
+            })
+        );
+
+        let mut v: Value = serde_json::from_str(ARTIST).unwrap();
+        v["header"]["musicImmersiveHeaderRenderer"]
+            .as_object_mut()
+            .unwrap()
+            .remove("monthlyListenerCount");
+        let about = artist_about(&v, DAFT_PUNK).unwrap();
+        assert_eq!(about.subtitle.as_deref(), Some("Artist"));
+        v.as_object_mut().unwrap().remove("header");
+        assert_eq!(artist_about(&v, DAFT_PUNK), None);
     }
 
     const DAFT_PUNK: &str = "UCRr1xG_2WIDs18a6cIiCxeA";
@@ -1141,7 +1216,8 @@ mod tests {
             asked.push(id.to_owned());
             Ok(TOP_SONGS.as_bytes().to_vec())
         })
-        .unwrap();
+        .unwrap()
+        .shelves;
         assert_eq!(asked, [TOP_SONGS_ID]);
         let bare = parse_artist_page(ARTIST.as_bytes()).unwrap();
         assert!(top_songs(&bare).iter().all(|t| t.duration.is_none()));
@@ -1182,7 +1258,8 @@ mod tests {
         let shelves = parse_page(ARTIST.as_bytes(), DAFT_PUNK, |_| {
             Ok(v.to_string().into_bytes())
         })
-        .unwrap();
+        .unwrap()
+        .shelves;
         let top = top_songs(&shelves);
         assert_eq!(top.len(), 5);
         assert_eq!(top[0].duration, Some(Duration::from_secs(5 * 60 + 38)));
@@ -1196,9 +1273,12 @@ mod tests {
         let failed = parse_page(ARTIST.as_bytes(), DAFT_PUNK, |_| {
             Err(ProviderError::Network("offline".into()))
         })
-        .unwrap();
+        .unwrap()
+        .shelves;
         assert_eq!(failed, bare);
-        let garbled = parse_page(ARTIST.as_bytes(), DAFT_PUNK, |_| Ok(b"nope".to_vec())).unwrap();
+        let garbled = parse_page(ARTIST.as_bytes(), DAFT_PUNK, |_| Ok(b"nope".to_vec()))
+            .unwrap()
+            .shelves;
         assert_eq!(garbled, bare);
         assert_eq!(top_songs(&failed).len(), 5);
     }

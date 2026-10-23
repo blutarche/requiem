@@ -257,7 +257,9 @@ impl Hub {
                 &format!("search failed: {error}"),
                 json!({ "type": "search_failed", "error": error }),
             ),
-            Event::BrowseResults { req, page, shelves } => {
+            Event::BrowseResults {
+                req, page, shelves, ..
+            } => {
                 if req != ui.latest_req {
                     return;
                 }

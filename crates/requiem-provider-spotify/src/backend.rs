@@ -31,8 +31,8 @@ use librespot_protocol::context_track::ContextTrack;
 use librespot_protocol::playlist4_external::{ListAttributes, SelectedListContent};
 use protobuf::Message;
 use requiem_core::{
-    Collection, CollectionId, CollectionKind, Item, Page, ProviderError, ProviderId, Shelf, Track,
-    TrackId,
+    Browsed, Collection, CollectionId, CollectionKind, Item, Page, ProviderError, ProviderId,
+    Shelf, Track, TrackId,
 };
 use serde_json::Value;
 use tokio::runtime::Runtime;
@@ -279,7 +279,7 @@ impl Librespot {
         Ok(home_shelves(liked, playlists?, recent))
     }
 
-    async fn collection(&self, id: &str) -> Result<Vec<Shelf>, ProviderError> {
+    async fn collection(&self, id: &str) -> Result<Browsed, ProviderError> {
         if let Some(artist) = artist_of(id) {
             return self.artist(artist).await;
         }
@@ -300,15 +300,18 @@ impl Librespot {
                 .unwrap_or_else(|| "Album".into()),
         };
         let tracks = tracks(&session, ids).await?;
-        Ok(vec![Shelf {
-            title,
-            items: tracks.into_iter().map(Item::Track).collect(),
-        }])
+        Ok(Browsed {
+            about: None,
+            shelves: vec![Shelf {
+                title,
+                items: tracks.into_iter().map(Item::Track).collect(),
+            }],
+        })
     }
 
     /// Artist `id`'s page: its top songs where the account is, then its albums, and its singles
-    /// and EPs, each in its latest release.
-    async fn artist(&self, id: SpotifyId) -> Result<Vec<Shelf>, ProviderError> {
+    /// and EPs, each in its latest release; about the artist, with its portrait.
+    async fn artist(&self, id: SpotifyId) -> Result<Browsed, ProviderError> {
         let session = self.session().await?;
         let artist = Artist::get(&session, &SpotifyUri::Artist { id })
             .await
@@ -319,7 +322,10 @@ impl Librespot {
         let (albums, singles) = releases?
             .into_iter()
             .partition(|(id, _)| wants.albums.contains(id));
-        Ok(artist_shelves(top?, albums, singles))
+        Ok(Browsed {
+            about: Some(artist_about(id, &artist.name, &artist.portraits)),
+            shelves: artist_shelves(top?, albums, singles),
+        })
     }
 
     async fn prepare_async(&self, track: &str) -> Result<String, ProviderError> {
@@ -451,10 +457,14 @@ impl Backend for Librespot {
         self.rt.block_on(self.search_async(q, limit))
     }
 
-    fn browse(&self, page: &Page) -> Result<Vec<Shelf>, ProviderError> {
+    fn browse(&self, page: &Page) -> Result<Browsed, ProviderError> {
+        let shelves = |shelves: Vec<Shelf>| Browsed {
+            about: None,
+            shelves,
+        };
         match page {
-            Page::Home => self.rt.block_on(self.home()),
-            Page::Library => self.rt.block_on(self.library()),
+            Page::Home => self.rt.block_on(self.home()).map(shelves),
+            Page::Library => self.rt.block_on(self.library()).map(shelves),
             Page::Collection(c) => self.rt.block_on(self.collection(&c.id)),
         }
     }
@@ -785,6 +795,18 @@ fn artist_page(id: SpotifyId) -> CollectionId {
 /// The artist a collection id opens, if it is an artist's.
 fn artist_of(id: &str) -> Option<SpotifyId> {
     SpotifyId::from_base62(id.strip_prefix(ARTIST_PREFIX)?).ok()
+}
+
+/// Artist `id`'s page is about it: `name`, and the widest of its `portraits`. The metadata
+/// has no audience to show.
+fn artist_about(id: SpotifyId, name: &str, portraits: &[Image]) -> Collection {
+    Collection {
+        id: artist_page(id),
+        kind: CollectionKind::Artist,
+        title: name.to_owned(),
+        subtitle: Some("Artist".into()),
+        artwork_url: artwork(portraits),
+    }
 }
 
 /// Album details for `ids`, in order and at most [`METADATA_IN_FLIGHT`] requests at a time.
@@ -1991,6 +2013,29 @@ mod tests {
         assert_eq!(url, format!("{IMAGE_URL}{}", "02".repeat(20)));
         let by_size = artwork(&[img(1, ImageSize::DEFAULT, 0), img(2, ImageSize::XLARGE, 0)]);
         assert!(by_size.unwrap().ends_with(&"02".repeat(20)));
+    }
+
+    #[test]
+    fn an_artist_page_is_about_the_artist_with_its_widest_portrait() {
+        let portrait = |n: u8, width| Image {
+            id: FileId([n; 20]),
+            size: ImageSize::DEFAULT,
+            width,
+            height: width,
+        };
+        let id = SpotifyId::from_base62("4tZwfgrHOc3mvqYlEYSvVi").unwrap();
+        let about = artist_about(id, "Daft Punk", &[portrait(1, 160), portrait(2, 640)]);
+        assert_eq!(
+            about,
+            Collection {
+                id: artist_page(id),
+                kind: CollectionKind::Artist,
+                title: "Daft Punk".into(),
+                subtitle: Some("Artist".into()),
+                artwork_url: Some(format!("{IMAGE_URL}{}", "02".repeat(20))),
+            }
+        );
+        assert_eq!(artist_about(id, "Daft Punk", &[]).artwork_url, None);
     }
 
     #[test]

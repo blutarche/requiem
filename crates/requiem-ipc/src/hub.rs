@@ -265,8 +265,18 @@ impl Hub {
             Event::SearchFailed { req, error } => {
                 self.route(req, |req| Event::SearchFailed { req, error });
             }
-            Event::BrowseResults { req, page, shelves } => {
-                self.route(req, |req| Event::BrowseResults { req, page, shelves });
+            Event::BrowseResults {
+                req,
+                page,
+                shelves,
+                about,
+            } => {
+                self.route(req, |req| Event::BrowseResults {
+                    req,
+                    page,
+                    shelves,
+                    about,
+                });
             }
             Event::BrowseFailed {
                 req,

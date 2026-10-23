@@ -7,8 +7,9 @@ use std::thread;
 use std::time::Duration;
 
 use crate::{
-    AccountState, AudioSource, ByteSource, Engine, EngineEvent, EngineEventSink, FormatHint, Page,
-    PageSink, Provider, ProviderError, ProviderId, SearchResults, Shelf, Track, TrackId,
+    AccountState, AudioSource, Browsed, ByteSource, Engine, EngineEvent, EngineEventSink,
+    FormatHint, Page, PageSink, Provider, ProviderError, ProviderId, SearchResults, Shelf, Track,
+    TrackId,
 };
 
 const WAIT: Duration = Duration::from_secs(5);
@@ -125,7 +126,7 @@ pub struct SignInScript {
 struct ProviderState {
     resolve_scripts: HashMap<String, VecDeque<Step<()>>>,
     search_scripts: HashMap<String, VecDeque<Step<SearchResults>>>,
-    browse_scripts: HashMap<Page, VecDeque<Step<Vec<Shelf>>>>,
+    browse_scripts: HashMap<Page, VecDeque<Step<Browsed>>>,
     sign_in_scripts: VecDeque<SignInScript>,
     sign_out_gate: Option<Gate>,
     sign_out_error: Option<ProviderError>,
@@ -216,7 +217,21 @@ impl FakeProvider {
             .insert(query.into(), steps.into());
     }
 
+    /// Browses that answer with shelves alone.
     pub fn script_browse(&self, page: Page, steps: Vec<Step<Vec<Shelf>>>) {
+        let steps = steps
+            .into_iter()
+            .map(|s| {
+                s.map(|shelves| Browsed {
+                    about: None,
+                    shelves,
+                })
+            })
+            .collect();
+        self.script_browsed(page, steps);
+    }
+
+    pub fn script_browsed(&self, page: Page, steps: Vec<Step<Browsed>>) {
         self.state
             .lock()
             .unwrap()
@@ -374,7 +389,7 @@ impl Provider for FakeProvider {
         }
     }
 
-    fn browse(&self, page: &Page) -> Result<Vec<Shelf>, ProviderError> {
+    fn browse(&self, page: &Page) -> Result<Browsed, ProviderError> {
         let step = {
             let mut st = self.state.lock().unwrap();
             st.browse_calls.push(page.clone());
@@ -385,7 +400,7 @@ impl Provider for FakeProvider {
         };
         match step {
             Some(s) => s.run(),
-            None => Ok(Vec::new()),
+            None => Ok(Browsed::default()),
         }
     }
 

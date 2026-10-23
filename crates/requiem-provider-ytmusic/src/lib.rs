@@ -21,8 +21,8 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use requiem_core::{
-    AccountState, AudioSource, Page, Provider, ProviderError, ProviderId, SearchResults, Shelf,
-    TrackId,
+    AccountState, AudioSource, Browsed, Page, Provider, ProviderError, ProviderId, SearchResults,
+    Shelf, TrackId,
 };
 
 use innertube::{ClientRefresher, InnertubeClient};
@@ -172,15 +172,21 @@ impl Provider for YtMusicProvider {
         })
     }
 
-    fn browse(&self, page: &Page) -> Result<Vec<Shelf>, ProviderError> {
+    fn browse(&self, page: &Page) -> Result<Browsed, ProviderError> {
         let session = self.session.current();
+        let shelves = |shelves: Result<Vec<Shelf>, ProviderError>| {
+            shelves.map(|shelves| Browsed {
+                about: None,
+                shelves,
+            })
+        };
         match page {
             Page::Home => match session {
-                Some(s) => self.session.home(&s),
+                Some(s) => shelves(self.session.home(&s)),
                 None => Err(ProviderError::SignInRequired(SIGNED_OUT.into())),
             },
             Page::Library => match session {
-                Some(s) => self.session.library(&s),
+                Some(s) => shelves(self.session.library(&s)),
                 None => Err(ProviderError::SignInRequired(SIGNED_OUT.into())),
             },
             Page::Collection(c) if c.provider.0 == PROVIDER => {
@@ -832,9 +838,10 @@ mod tests {
             .script_browse(BROWSE_URL, "UCRr1xG_2WIDs18a6cIiCxeA", 200, ARTIST);
         rig.music
             .script_browse(BROWSE_URL, TOP_SONGS_ID, 200, TOP_SONGS);
-        let shelves = rig.provider().browse(&daft_punk()).unwrap();
-        assert_eq!(titles(&shelves), ARTIST_SHELVES);
-        assert_eq!(durations(&shelves), TOP_SONGS_SECS);
+        let page = rig.provider().browse(&daft_punk()).unwrap();
+        assert_eq!(titles(&page.shelves), ARTIST_SHELVES);
+        assert_eq!(durations(&page.shelves), TOP_SONGS_SECS);
+        assert_eq!(page.about.unwrap().title, "Daft Punk");
         assert!(rig.music.calls.lock().unwrap().iter().all(|c| !c.signed));
 
         let rig = Rig::new();
@@ -843,9 +850,10 @@ mod tests {
             .script_browse(BROWSE_URL, "UCRr1xG_2WIDs18a6cIiCxeA", 200, ARTIST);
         rig.music
             .script_browse(BROWSE_URL, TOP_SONGS_ID, 200, TOP_SONGS);
-        let shelves = p.browse(&daft_punk()).unwrap();
-        assert_eq!(titles(&shelves), ARTIST_SHELVES);
-        assert_eq!(durations(&shelves), TOP_SONGS_SECS);
+        let page = p.browse(&daft_punk()).unwrap();
+        assert_eq!(titles(&page.shelves), ARTIST_SHELVES);
+        assert_eq!(durations(&page.shelves), TOP_SONGS_SECS);
+        assert_eq!(page.about.unwrap().title, "Daft Punk");
         let calls = rig.music.calls.lock().unwrap();
         let asked = |id: &str| calls.iter().find(|c| c.body.contains(id)).unwrap().signed;
         assert!(asked("UCRr1xG_2WIDs18a6cIiCxeA") && asked(TOP_SONGS_ID));
@@ -857,7 +865,7 @@ mod tests {
         rig.music
             .script_browse(BROWSE_URL, "UCRr1xG_2WIDs18a6cIiCxeA", 200, ARTIST);
         rig.music.script_browse(BROWSE_URL, TOP_SONGS_ID, 500, "{}");
-        let shelves = rig.provider().browse(&daft_punk()).unwrap();
+        let shelves = rig.provider().browse(&daft_punk()).unwrap().shelves;
         assert_eq!(titles(&shelves), ARTIST_SHELVES);
         assert_eq!(durations(&shelves), [None; 5]);
     }

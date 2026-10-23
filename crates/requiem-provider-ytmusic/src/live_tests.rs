@@ -124,7 +124,7 @@ fn summary(shelves: &[Shelf]) -> Vec<(String, usize)> {
 fn live_home() {
     let p = provider(false, IpFamily::Any);
     assert!(matches!(p.account(), AccountState::SignedIn { .. }));
-    let home = p.browse(&Page::Home).unwrap();
+    let home = p.browse(&Page::Home).unwrap().shelves;
     println!("home: {:?}", summary(&home));
     let titles: Vec<&str> = home.iter().map(|s| s.title.as_str()).collect();
     assert_eq!(titles.first(), Some(&"Liked songs"));
@@ -151,10 +151,10 @@ fn live_library() {
     let account = p.account();
     println!("account: {account:?}");
     assert!(matches!(account, AccountState::SignedIn { .. }));
-    let library = p.browse(&Page::Library).unwrap();
+    let library = p.browse(&Page::Library).unwrap().shelves;
     println!("library: {:?}", summary(&library));
     let page = first_collection(&library).expect("liked music");
-    let liked = p.browse(&page).unwrap();
+    let liked = p.browse(&page).unwrap().shelves;
     println!("{page:?}: {:?}", summary(&liked));
     for item in liked.iter().flat_map(|s| &s.items).take(3) {
         let Item::Track(t) = item else {

@@ -172,7 +172,7 @@ fn live() {
     assert!(found.iter().any(|t| t.artwork_url.is_some()));
 
     println!("2. Library, then Liked Songs");
-    let library = p.browse(&Page::Library).unwrap();
+    let library = p.browse(&Page::Library).unwrap().shelves;
     assert_eq!(library.len(), 1);
     assert_eq!(library[0].title, "Spotify");
     let Some(Item::Collection(liked)) = library[0].items.first() else {
@@ -190,7 +190,8 @@ fn live() {
             provider: spotify.clone(),
             id: "collection".into(),
         }))
-        .unwrap();
+        .unwrap()
+        .shelves;
     assert_eq!(liked[0].title, "Liked Songs");
     assert!(!liked[0].items.is_empty());
     println!("  {} liked tracks", liked[0].items.len());
@@ -218,7 +219,7 @@ fn live_home() {
     let tmp = TempDir::new();
     let p = live_provider(&tmp);
     assert!(p.has_home());
-    let home = p.browse(&Page::Home).unwrap();
+    let home = p.browse(&Page::Home).unwrap().shelves;
     for shelf in &home {
         println!("  {}: {} items", shelf.title, shelf.items.len());
         assert!(!shelf.items.is_empty());
@@ -262,7 +263,7 @@ fn live_covers() {
     };
     let load = || {
         let t = Instant::now();
-        let library = p.browse(&Page::Library).unwrap();
+        let library = p.browse(&Page::Library).unwrap().shelves;
         let cards: Vec<_> = library[0]
             .items
             .iter()

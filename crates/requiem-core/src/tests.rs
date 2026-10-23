@@ -1206,6 +1206,7 @@ fn browse_answers_under_the_request_id() {
             req: 7,
             page: Page::Home,
             shelves: vec![shelf],
+            about: None,
         }
     );
     r.send(Command::Browse {
@@ -1958,6 +1959,7 @@ fn library_comes_only_from_signed_in_providers_in_order() {
             req: 1,
             page: Page::Library,
             shelves: vec![shelf("a"), shelf("c")],
+            about: None,
         }
     );
     assert!(b.browse_calls().is_empty());
@@ -2067,6 +2069,7 @@ fn library_takes_the_providers_entries_in_turn_in_one_shelf() {
                     ("second", "b3")
                 ]
             )],
+            about: None,
         }
     );
 }
@@ -2104,6 +2107,7 @@ fn library_keeps_the_shelves_of_the_only_provider_with_entries() {
                 track_shelf("Spotify", "second", &["b1", "b2"]),
                 track_shelf("Playlists", "third", &[])
             ],
+            about: None,
         }
     );
 }
@@ -2141,6 +2145,7 @@ fn library_takes_the_others_in_turn_when_one_fails() {
                 "Library",
                 &[("first", "a1"), ("third", "c1"), ("first", "a2")]
             )],
+            about: None,
         }
     );
 }
@@ -2177,6 +2182,7 @@ fn home_comes_from_signed_in_providers_with_a_home_in_order() {
                 track_shelf("First", "first", &["a1"]),
                 track_shelf("Fourth", "fourth", &["d1"])
             ],
+            about: None,
         }
     );
     // Signed in without a Home, and with a Home but signed out.
@@ -2519,6 +2525,7 @@ fn home_answers_with_the_first_provider_before_a_slow_one_lands() {
             req: 1,
             page: Page::Home,
             shelves: vec![track_shelf("Fast", "second", &["b1"])],
+            about: None,
         }
     );
 }
@@ -2529,7 +2536,12 @@ fn browse_event(r: &Rig, req: u64, page: Page) -> Event {
 }
 
 fn results(req: u64, page: Page, shelves: Vec<Shelf>) -> Event {
-    Event::BrowseResults { req, page, shelves }
+    Event::BrowseResults {
+        req,
+        page,
+        shelves,
+        about: None,
+    }
 }
 
 #[test]
@@ -2558,6 +2570,7 @@ fn a_kept_home_answers_at_once_then_says_when_a_fetch_changed_it() {
         *e == Event::PageChanged {
             page: Page::Home,
             shelves: new.clone(),
+            about: None,
         }
     });
     assert_eq!(browse_event(&r, 3, Page::Home), results(3, Page::Home, new));
@@ -2641,6 +2654,7 @@ fn home_takes_a_slow_provider_in_once_it_lands_as_if_all_came_at_once() {
         *e == Event::PageChanged {
             page: Page::Home,
             shelves: all.clone(),
+            about: None,
         }
     });
     assert_eq!(browse_event(&r, 1, Page::Home), at_once);
@@ -2706,6 +2720,7 @@ fn a_kept_page_of_another_account_is_dropped_at_the_start() {
                     provider: ProviderId("first".into()),
                     account: Some("Someone else".into()),
                     shelves: vec![track_shelf("Library", "first", &["theirs"])],
+                    about: None,
                 }],
                 collections: vec![],
             },
@@ -2757,6 +2772,7 @@ fn a_kept_page_of_the_same_account_answers_a_restart_at_once() {
                     provider: ProviderId("first".into()),
                     account: Some("Me".into()),
                     shelves: kept.clone(),
+                    about: None,
                 }],
                 collections: vec![],
             },
@@ -2773,6 +2789,7 @@ fn a_kept_page_of_the_same_account_answers_a_restart_at_once() {
         *e == Event::PageChanged {
             page: Page::Library,
             shelves: vec![track_shelf("Library", "first", &["new"])],
+            about: None,
         }
     });
     let last = saved.lock().unwrap().last().cloned().expect("saved");
@@ -2782,6 +2799,7 @@ fn a_kept_page_of_the_same_account_answers_a_restart_at_once() {
             provider: ProviderId("first".into()),
             account: Some("Me".into()),
             shelves: vec![track_shelf("Library", "first", &["new"])],
+            about: None,
         }]
     );
 }
@@ -2806,6 +2824,7 @@ fn a_provider_saying_its_page_changed_has_it_fetched_again() {
         *e == Event::PageChanged {
             page: Page::Home,
             shelves: vec![track_shelf("Mixes", "first", &["a2"])],
+            about: None,
         }
     });
     assert_eq!(a.browse_calls(), vec![Page::Home, Page::Home]);
@@ -3129,6 +3148,7 @@ fn a_collection_opened_before_answers_at_once_then_says_when_a_fetch_changed_it(
         *e == Event::PageChanged {
             page: page.clone(),
             shelves: tracks_of(&["b"]),
+            about: None,
         }
     });
     assert_eq!(
@@ -3298,6 +3318,7 @@ fn a_kept_collection_answers_a_restart_at_once_unless_of_another_account() {
         part: Arc::new(PagePart {
             provider: fake_id(),
             account: Some(account.into()),
+            about: None,
             shelves: tracks_of(ids),
         }),
         fetched: 0,
@@ -3325,6 +3346,7 @@ fn a_kept_collection_answers_a_restart_at_once_unless_of_another_account() {
         *e == Event::PageChanged {
             page: collection_page("mine"),
             shelves: tracks_of(&["new"]),
+            about: None,
         }
     });
     r.provider
@@ -3333,6 +3355,85 @@ fn a_kept_collection_answers_a_restart_at_once_unless_of_another_account() {
         browse_event(&r, 2, collection_page("theirs")),
         results(2, collection_page("theirs"), tracks_of(&["u"]))
     );
+}
+
+fn artist_about(photo: &str) -> Collection {
+    Collection {
+        id: collection_id("artist"),
+        kind: CollectionKind::Artist,
+        title: "Artist".into(),
+        subtitle: Some("Artist \u{2022} 1M monthly audience".into()),
+        artwork_url: Some(format!("https://example.test/{photo}.jpg")),
+    }
+}
+
+#[test]
+fn a_kept_artist_page_answers_with_what_it_is_about_and_says_when_that_changed() {
+    let p = signed_in_fake();
+    let page = collection_page("artist");
+    let gate = Gate::new();
+    let browsed = |photo| Browsed {
+        about: Some(artist_about(photo)),
+        shelves: tracks_of(&["a"]),
+    };
+    p.script_browsed(
+        page.clone(),
+        vec![
+            Step::ok(browsed("old")),
+            Step::ok(browsed("new")).gated(&gate),
+        ],
+    );
+    let saved: Arc<std::sync::Mutex<Vec<SavedPages>>> = Arc::default();
+    let sink = saved.clone();
+    let r = rig_with(
+        p,
+        vec![],
+        SessionConfig {
+            save_pages: Some(Arc::new(move |pages| sink.lock().unwrap().push(pages))),
+            ..no_prefetch()
+        },
+    );
+    let answer = |req, photo| Event::BrowseResults {
+        req,
+        page: page.clone(),
+        shelves: tracks_of(&["a"]),
+        about: Some(artist_about(photo)),
+    };
+    assert_eq!(browse_event(&r, 1, page.clone()), answer(1, "old"));
+    r.settle();
+    let kept = saved.lock().unwrap().last().cloned().expect("saved");
+    assert_eq!(kept.collections[0].part.about, Some(artist_about("old")));
+
+    // The second fetch is held, yet the browse is answered with what was kept.
+    assert_eq!(browse_event(&r, 2, page.clone()), answer(2, "old"));
+    gate.release();
+    // Only the photo changed.
+    r.wait_event(|e| {
+        *e == Event::PageChanged {
+            page: page.clone(),
+            shelves: tracks_of(&["a"]),
+            about: Some(artist_about("new")),
+        }
+    });
+}
+
+#[test]
+fn home_and_the_library_are_about_nothing() {
+    let p = signed_in_fake();
+    p.set_has_home(true);
+    let browsed = || Browsed {
+        about: Some(artist_about("photo")),
+        shelves: tracks_of(&["a"]),
+    };
+    p.script_browsed(Page::Home, vec![Step::ok(browsed())]);
+    p.script_browsed(Page::Library, vec![Step::ok(browsed())]);
+    let r = rig_with(p, vec![], no_prefetch());
+    for (req, page) in [(1, Page::Home), (2, Page::Library)] {
+        let Event::BrowseResults { about, .. } = browse_event(&r, req, page) else {
+            panic!("no answer");
+        };
+        assert_eq!(about, None);
+    }
 }
 
 fn home_of_collections(p: &FakeProvider, shelves: Vec<Shelf>) {

@@ -10,8 +10,8 @@ use std::thread;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use requiem_core::{
-    AccountState, Collection, CollectionId, CollectionKind, HOME_LIKED, HOME_MIXES, HOME_PLAYLISTS,
-    Item, ProviderError, ProviderId, Shelf,
+    AccountState, Browsed, Collection, CollectionId, CollectionKind, HOME_LIKED, HOME_MIXES,
+    HOME_PLAYLISTS, Item, ProviderError, ProviderId, Shelf,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -577,9 +577,9 @@ impl BrowserSession {
         parse_collection(&body, collection_kind(browse_id))
     }
 
-    /// The page `browse_id` opens, private playlists included: an artist's shelves, or a
-    /// playlist or album as one shelf.
-    pub(crate) fn page(&self, s: &Signed, browse_id: &str) -> Result<Vec<Shelf>, ProviderError> {
+    /// The page `browse_id` opens, private playlists included: an artist's shelves, with the
+    /// artist it is about, or a playlist or album as one shelf.
+    pub(crate) fn page(&self, s: &Signed, browse_id: &str) -> Result<Browsed, ProviderError> {
         let body = self.browse(s, "", &browse_body(browse_id))?;
         parse_page(&body, browse_id, |playlist| {
             self.browse(s, "", &browse_body(playlist))
