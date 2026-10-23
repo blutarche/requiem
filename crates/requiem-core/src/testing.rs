@@ -131,6 +131,7 @@ struct ProviderState {
     sign_out_calls: usize,
     account: AccountState,
     has_home: bool,
+    fetch_ahead: bool,
     changed: Option<PageSink>,
 }
 
@@ -153,6 +154,7 @@ impl Default for ProviderState {
             sign_out_calls: 0,
             account: AccountState::SignedOut,
             has_home: false,
+            fetch_ahead: true,
             changed: None,
         }
     }
@@ -237,6 +239,10 @@ impl FakeProvider {
 
     pub fn set_has_home(&self, has_home: bool) {
         self.state.lock().unwrap().has_home = has_home;
+    }
+
+    pub fn set_fetch_ahead(&self, fetch_ahead: bool) {
+        self.state.lock().unwrap().fetch_ahead = fetch_ahead;
     }
 
     /// Tells the session that `page` has newer content, as a provider may.
@@ -363,6 +369,10 @@ impl Provider for FakeProvider {
 
     fn has_home(&self) -> bool {
         self.state.lock().unwrap().has_home
+    }
+
+    fn fetch_ahead(&self) -> bool {
+        self.state.lock().unwrap().fetch_ahead
     }
 
     fn on_page_changed(&self, changed: PageSink) {

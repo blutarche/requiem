@@ -10,6 +10,7 @@ pub mod testing;
 mod tests;
 
 pub use session::{
-    PagePart, PagesSink, PersistSink, PersistState, SavedPages, Session, SessionConfig,
+    PagePart, PagesSink, PersistSink, PersistState, SavedCollection, SavedPages, Session,
+    SessionConfig,
 };
 pub use types::*;

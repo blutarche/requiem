@@ -6,8 +6,7 @@ use std::time::{Duration, Instant};
 use crossbeam_channel::{Receiver, RecvTimeoutError, Sender, bounded};
 use requiem_audio::{AudioEngine, AudioOptions, LazyEngine};
 use requiem_core::{
-    Command, EngineEventSink, EnqueueMode, Event, PagesSink, PersistSink, SavedPages, Session,
-    SessionConfig,
+    Command, EngineEventSink, EnqueueMode, Event, PersistSink, SavedPages, Session, SessionConfig,
 };
 use requiem_ipc::{Instance, ServeError, Server, ServerHooks};
 use requiem_provider_spotify::{SpotifyOptions, SpotifyProvider};
@@ -170,16 +169,13 @@ fn main() -> ExitCode {
         }
         None => (None, None),
     };
-    let (kept_pages, pages_sink, pages_writer) = match pages_path {
+    let (kept_pages, pages_sink, [pages_writer, collections_writer]) = match pages_path {
         Some(path) => {
             let kept = pages::load(&path);
-            let (tx, handle) = pages::spawn_writer(path, kept.clone());
-            let sink: PagesSink = Arc::new(move |pages| {
-                let _ = tx.send(pages);
-            });
-            (kept, Some(sink), Some(handle))
+            let (sink, [pages, collections]) = pages::spawn_writer(path, kept.clone());
+            (kept, Some(sink), [Some(pages), Some(collections)])
         }
-        None => (SavedPages::default(), None, None),
+        None => (SavedPages::default(), None, [None, None]),
     };
     let session = Session::spawn(
         vec![spotify, provider],
@@ -245,7 +241,7 @@ fn main() -> ExitCode {
         drop(done_tx);
     });
     debug!("shutting down");
-    shut_down(server, [writer, pages_writer], &updater);
+    shut_down(server, [writer, pages_writer, collections_writer], &updater);
     ExitCode::SUCCESS
 }
 
@@ -273,9 +269,9 @@ fn self_test() -> ExitCode {
 }
 
 /// Stops serving, waits for the state writers, then installs a ready update.
-fn shut_down(server: Server, writers: [Option<JoinHandle<()>>; 2], updater: &Updater) {
+fn shut_down(server: Server, writers: [Option<JoinHandle<()>>; 3], updater: &Updater) {
     // Shutting the Session down drops its sinks and so closes the writers' channels.
-    let join = |writers: [Option<JoinHandle<()>>; 2]| {
+    let join = |writers: [Option<JoinHandle<()>>; 3]| {
         for writer in writers.into_iter().flatten() {
             let _ = writer.join();
         }
