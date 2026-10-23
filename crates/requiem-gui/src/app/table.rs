@@ -22,7 +22,7 @@ use objc2_foundation::{
     MainThreadMarker, NSAttributedString, NSEdgeInsets, NSIndexSet, NSInteger, NSNotification,
     NSNotificationCenter, NSObjectProtocol, NSPoint, NSRect, NSSize, NSString,
 };
-use requiem_core::{Collection, Track};
+use requiem_core::{Collection, CollectionKind, Track};
 use requiem_macos::artwork::Cover;
 
 use super::badge::{self, Badge};
@@ -116,6 +116,12 @@ pub fn rows(tracks: &[Track]) -> Vec<RowText> {
             badge: vm::badge(&t.id.provider, mixed),
         })
         .collect()
+}
+
+/// Whether the tracks of a collection of `kind` list their album: an album's own tracks all
+/// share one.
+pub fn lists_album(kind: CollectionKind) -> bool {
+    kind != CollectionKind::Album
 }
 
 /// Where the row `was`, selected at `at` before `rows` replaced the list, is now: at `at`
@@ -1092,6 +1098,8 @@ pub struct HeaderIvars {
     /// Per column: title and whether it is right-aligned.
     titles: Vec<(&'static str, bool)>,
     kind: Kind,
+    /// Whether the Album column may show, width allowing.
+    album: Cell<bool>,
 }
 
 define_class!(
@@ -1155,7 +1163,7 @@ define_class!(
 
 impl ColumnHeader {
     /// Sizes the text columns to the visible width: title, artists and album at 46/30/24,
-    /// with album dropped below `ALBUM_MIN_W`. Runs whenever the clip view resizes, which
+    /// with album dropped below `ALBUM_MIN_W` or when the table has none. Runs whenever the clip view resizes, which
     /// covers window resizes and a legacy scroller appearing.
     fn fit_columns(&self) {
         let Some(table) = self.ivars().table.get().and_then(Weak::load) else {
@@ -1166,7 +1174,7 @@ impl ColumnHeader {
         };
         let width = scroll.contentSize().width;
         let kind = self.ivars().kind;
-        let widths = column_widths(width, kind.adds());
+        let widths = column_widths(width, kind.adds(), self.ivars().album.get());
         for c in table.tableColumns().iter() {
             match Col::from_id(&c.identifier().to_string()) {
                 Some(Col::Title) => c.setWidth(widths.title),
@@ -1199,13 +1207,13 @@ struct Widths {
     album: Option<CGFloat>,
 }
 
-/// Text-column widths for a table `width` wide, with or without the "+" column. They fill
-/// what the fixed columns leave, rounding into the last, so the columns end flush with the
-/// table.
-fn column_widths(width: CGFloat, add: bool) -> Widths {
+/// Text-column widths for a table `width` wide, with or without the "+" column and the Album
+/// column. They fill what the fixed columns leave, rounding into the last, so the columns end
+/// flush with the table.
+fn column_widths(width: CGFloat, add: bool, album: bool) -> Widths {
     let add_w = if add { ADD_W } else { 0.0 };
     let flex = (width - add_w - DURATION_W).max(0.0);
-    if width < ALBUM_MIN_W {
+    if !album || width < ALBUM_MIN_W {
         let title = (flex * 46.0 / 76.0).floor();
         Widths {
             title,
@@ -1311,6 +1319,7 @@ impl Table {
             table: OnceCell::new(),
             titles,
             kind,
+            album: Cell::new(true),
         });
         let hframe = rect(0.0, h - HEADER_H, w, HEADER_H);
         // SAFETY: `initWithFrame:` is NSView's designated initializer.
@@ -1416,6 +1425,13 @@ impl Table {
 
     pub fn selected_row(&self) -> Option<usize> {
         usize::try_from(self.table.selectedRow()).ok()
+    }
+
+    /// Shows or hides the Album column, which a narrow table drops either way.
+    pub fn set_album(&self, shown: bool) {
+        if self.header.ivars().album.replace(shown) != shown {
+            self.header.fit_columns();
+        }
     }
 
     /// The height that shows `rows` rows under the header, with nothing to scroll.
@@ -1690,7 +1706,7 @@ mod tests {
 
     #[test]
     fn columns_split_46_30_24_and_fill_the_table() {
-        let w = column_widths(800.0, true);
+        let w = column_widths(800.0, true, true);
         assert_eq!(w.title, 310.0);
         assert_eq!(w.artists, 202.0);
         assert_eq!(w.album, Some(164.0));
@@ -1702,7 +1718,7 @@ mod tests {
 
     #[test]
     fn the_queue_gives_the_plus_column_to_the_text() {
-        let w = column_widths(800.0, false);
+        let w = column_widths(800.0, false, true);
         assert_eq!(w.title, 331.0);
         assert_eq!(w.artists, 216.0);
         assert_eq!(w.album, Some(173.0));
@@ -1711,11 +1727,27 @@ mod tests {
 
     #[test]
     fn narrow_tables_drop_the_album_column() {
-        let w = column_widths(ALBUM_MIN_W - 1.0, true);
+        let w = column_widths(ALBUM_MIN_W - 1.0, true, true);
         assert_eq!(w.album, None);
         assert_eq!(w.title + w.artists + ADD_W + DURATION_W, ALBUM_MIN_W - 1.0);
         assert!(w.title > w.artists);
-        assert!(column_widths(ALBUM_MIN_W, true).album.is_some());
+        assert!(column_widths(ALBUM_MIN_W, true, true).album.is_some());
+    }
+
+    #[test]
+    fn a_table_without_the_album_column_gives_its_width_to_title_and_artists() {
+        let w = column_widths(800.0, true, false);
+        assert_eq!(w.album, None);
+        assert_eq!(w.title + w.artists + ADD_W + DURATION_W, 800.0);
+        assert!(w.title > column_widths(800.0, true, true).title);
+        assert!(w.artists > column_widths(800.0, true, true).artists);
+    }
+
+    #[test]
+    fn only_an_albums_page_drops_the_album_column() {
+        assert!(!lists_album(CollectionKind::Album));
+        assert!(lists_album(CollectionKind::Playlist));
+        assert!(lists_album(CollectionKind::Artist));
     }
 
     #[test]

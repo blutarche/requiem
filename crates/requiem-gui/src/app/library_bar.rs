@@ -16,7 +16,6 @@ use crate::vm::{LibraryChip, LibrarySort};
 const PAD: CGFloat = 24.0;
 const FILTER_W: CGFloat = 200.0;
 const SORT_W: CGFloat = 112.0;
-const SORT_H: CGFloat = 26.0;
 const GAP: CGFloat = 8.0;
 
 pub struct LibraryBar {
@@ -44,11 +43,18 @@ impl LibraryBar {
         );
 
         let sort_x = w - PAD - SORT_W;
-        let sort = NSPopUpButton::initWithFrame_pullsDown(
-            NSPopUpButton::alloc(mtm),
-            rect(sort_x, ((h - SORT_H) / 2.0).round(), SORT_W, SORT_H),
-            false,
-        );
+        let sort =
+            NSPopUpButton::initWithFrame_pullsDown(NSPopUpButton::alloc(mtm), NSRect::ZERO, false);
+        // The popup has one height, which the filter field shares; both sit on the chips'
+        // row's centre.
+        let control_h = sort.intrinsicContentSize().height;
+        let mid = h / 2.0;
+        sort.setFrame(rect(
+            sort_x,
+            (mid - control_h / 2.0).round(),
+            SORT_W,
+            control_h,
+        ));
         for s in LibrarySort::CHOICES {
             sort.addItemWithTitle(&NSString::from_str(s.label()));
         }
@@ -66,9 +72,9 @@ impl LibraryBar {
             mtm,
             rect(
                 sort_x - GAP - FILTER_W,
-                ((h - Field::H) / 2.0).round(),
+                (mid - control_h / 2.0).round(),
                 FILTER_W,
-                Field::H,
+                control_h,
             ),
             PIN_RIGHT,
             "Filter",
