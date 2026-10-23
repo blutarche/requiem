@@ -264,7 +264,7 @@ fn browser_session(json: &str) -> Option<Result<String, ProviderError>> {
 mod tests {
     use std::fs;
 
-    use requiem_core::{CollectionId, CollectionKind, ProviderId};
+    use requiem_core::{CollectionId, CollectionKind, ProviderId, SEARCH_COLLECTIONS};
 
     use super::*;
     use crate::clients::{ALBUMS_PARAMS, PLAYLISTS_PARAMS, SONGS_PARAMS};
@@ -276,6 +276,8 @@ mod tests {
     const SEARCH: &str = include_str!("../tests/fixtures/search_songs.json");
     const ALBUMS: &str = include_str!("../tests/fixtures/search_albums.json");
     const PLAYLISTS: &str = include_str!("../tests/fixtures/search_playlists.json");
+    const TOP_ARTIST: &str = include_str!("../tests/fixtures/search_top_artist.json");
+    const ARTIST: &str = include_str!("../tests/fixtures/browse_artist.json");
     const PLAYER: &str = include_str!("../tests/fixtures/player_ok.json");
     const PLAYLIST: &str = include_str!("../tests/fixtures/browse_playlist.json");
     const LIBRARY: &str = include_str!("../tests/fixtures/signed_in_library_playlists.json");
@@ -371,7 +373,7 @@ mod tests {
             .collect();
         assert_eq!(
             anonymous_urls,
-            [SEARCH_URL, SEARCH_URL, SEARCH_URL, PLAYER_URL]
+            [SEARCH_URL, SEARCH_URL, SEARCH_URL, SEARCH_URL, PLAYER_URL]
         );
         for c in anonymous {
             for (k, v) in &c.headers {
@@ -589,6 +591,97 @@ mod tests {
         let mut want = vec![SONGS_PARAMS, ALBUMS_PARAMS, PLAYLISTS_PARAMS];
         want.sort_unstable();
         assert_eq!(search_params(&rig), want);
+    }
+
+    fn script_filtered_searches(rig: &Rig) {
+        rig.music
+            .script_search(SEARCH_URL, SONGS_PARAMS, 200, SEARCH);
+        rig.music
+            .script_search(SEARCH_URL, ALBUMS_PARAMS, 200, ALBUMS);
+        rig.music
+            .script_search(SEARCH_URL, PLAYLISTS_PARAMS, 200, PLAYLISTS);
+    }
+
+    fn ids(found: &[requiem_core::Collection]) -> Vec<&str> {
+        found.iter().map(|c| c.id.id.as_str()).collect()
+    }
+
+    #[test]
+    fn search_leads_with_the_artists_own_albums_and_playlists() {
+        let rig = Rig::new();
+        script_filtered_searches(&rig);
+        rig.music.script(SEARCH_URL, 200, TOP_ARTIST);
+        rig.music
+            .script_browse(BROWSE_URL, "UCRr1xG_2WIDs18a6cIiCxeA", 200, ARTIST);
+        let found = rig.provider().search("daft punk", 5).unwrap();
+
+        let titles: Vec<&str> = found.albums.iter().map(|a| a.title.as_str()).collect();
+        assert_eq!(found.albums.len(), SEARCH_COLLECTIONS);
+        assert_eq!(titles[0], "Random Access Memories (Drumless Edition)");
+        assert!(
+            titles.contains(&"Discovery")
+                && titles.contains(&"Homework (25th Anniversary Edition)")
+        );
+        // Ten albums, then the first singles; the title matches fall off the end.
+        assert_eq!(found.albums[10].title, "GLBTM (Studio Outtakes)");
+        assert_eq!(
+            found.albums[10].subtitle.as_deref(),
+            Some("Single \u{2022} Daft Punk \u{2022} 2023")
+        );
+        assert!(!titles.contains(&"New Daft Punk"));
+
+        // Four featured playlists, then the four title matches the page did not already list.
+        let listed = ids(&found.playlists);
+        assert_eq!(found.playlists[0].title, "Presenting Daft Punk");
+        assert_eq!(listed.len(), 4 + 6 - 2);
+        let mut unique = listed.clone();
+        unique.sort_unstable();
+        unique.dedup();
+        assert_eq!(unique.len(), listed.len());
+    }
+
+    #[test]
+    fn search_is_unchanged_without_an_artist_card() {
+        let album_card = TOP_ARTIST.replace("MUSIC_PAGE_TYPE_ARTIST", "MUSIC_PAGE_TYPE_ALBUM");
+        for unfiltered in [SEARCH, album_card.as_str()] {
+            let rig = Rig::new();
+            script_filtered_searches(&rig);
+            rig.music.script(SEARCH_URL, 200, unfiltered);
+            let found = rig.provider().search("one more time", 5).unwrap();
+            assert_eq!(found.albums.len(), 6);
+            assert_eq!(found.albums[0].id.id, "browse:MPREb_K8qWMWVqXGi");
+            assert_eq!(found.playlists.len(), 6);
+            let browses = rig.music.calls.lock().unwrap();
+            assert!(browses.iter().all(|c| !c.url.contains("/browse")));
+        }
+    }
+
+    #[test]
+    fn search_keeps_the_title_matches_when_the_artist_cannot_be_had() {
+        let rig = Rig::new();
+        script_filtered_searches(&rig);
+        rig.music.script(SEARCH_URL, 200, TOP_ARTIST);
+        rig.music
+            .script_browse(BROWSE_URL, "UCRr1xG_2WIDs18a6cIiCxeA", 500, "{}");
+        let found = rig.provider().search("daft punk", 5).unwrap();
+        assert_eq!(found.albums.len(), 6);
+        assert_eq!(found.albums[0].title, "Random Access Memories");
+        assert_eq!(found.playlists.len(), 6);
+
+        // An artist page nobody can read, and an unfiltered search that fails.
+        let rig = Rig::new();
+        script_filtered_searches(&rig);
+        rig.music.script(SEARCH_URL, 200, TOP_ARTIST);
+        rig.music
+            .script_browse(BROWSE_URL, "UCRr1xG_2WIDs18a6cIiCxeA", 200, "not json");
+        let found = rig.provider().search("daft punk", 5).unwrap();
+        assert_eq!((found.albums.len(), found.playlists.len()), (6, 6));
+
+        let rig = Rig::new();
+        script_filtered_searches(&rig);
+        rig.music.script(SEARCH_URL, 503, "{}");
+        let found = rig.provider().search("daft punk", 5).unwrap();
+        assert_eq!((found.albums.len(), found.playlists.len()), (6, 6));
     }
 
     #[test]

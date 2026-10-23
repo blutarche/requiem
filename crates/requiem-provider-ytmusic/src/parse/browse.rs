@@ -321,6 +321,83 @@ pub(crate) fn parse_library_playlists(body: &[u8]) -> Result<Vec<Collection>, Pr
     Ok(collections)
 }
 
+/// The albums and playlists an artist's page lists, in page order.
+#[derive(Debug, Default, PartialEq)]
+pub(crate) struct ArtistReleases {
+    pub albums: Vec<Collection>,
+    pub playlists: Vec<Collection>,
+}
+
+/// A release card's subtitle as a search shows it ("Album • Artist • 2013"). The artist's page
+/// leaves out the artist and, on its album shelf, the kind: "2013", or "Single • 2005".
+fn release_subtitle(subtitle: Option<&str>, artist: &str) -> String {
+    let mut groups: Vec<&str> = subtitle
+        .into_iter()
+        .flat_map(|s| s.split(SEPARATOR))
+        .filter(|g| !g.is_empty())
+        .collect();
+    let labelled = groups
+        .first()
+        .is_some_and(|g| !g.starts_with(|c: char| c.is_ascii_digit()));
+    let label = if labelled { groups.remove(0) } else { "Album" };
+    let mut parts = vec![label];
+    if !artist.is_empty() {
+        parts.push(artist);
+    }
+    parts.extend(groups);
+    parts.join(SEPARATOR)
+}
+
+/// An artist's albums, singles and EPs, and the YouTube Music playlists that feature them.
+/// Shelves are told apart by structure, not by their titles, which are localized: the
+/// discography shelves (Albums, then Singles & EPs) link their title to a
+/// `MUSIC_PAGE_TYPE_ARTIST_DISCOGRAPHY` page, and the playlists shelf ("Featured on") is the
+/// one whose title links nowhere. "Playlists by <artist>" links to the artist and is left out.
+pub(crate) fn parse_artist_releases(
+    body: &[u8],
+    artist: &str,
+) -> Result<ArtistReleases, ProviderError> {
+    let root = root(body, "artist")?;
+    let mut carousels = Vec::new();
+    find_all(&root, &["musicCarouselShelfRenderer"], &mut carousels);
+    let mut found = ArtistReleases::default();
+    for carousel in carousels {
+        let title_run = "/header/musicCarouselShelfBasicHeaderRenderer/title/runs/0";
+        let link = carousel.pointer(&format!("{title_run}/navigationEndpoint"));
+        let page_type = link
+            .and_then(|l| {
+                l.pointer(
+                    "/browseEndpoint/browseEndpointContextSupportedConfigs/browseEndpointContextMusicConfig/pageType",
+                )
+            })
+            .and_then(Value::as_str);
+        let (kind, into) = match (link, page_type) {
+            (Some(_), Some("MUSIC_PAGE_TYPE_ARTIST_DISCOGRAPHY")) => {
+                (CollectionKind::Album, &mut found.albums)
+            }
+            (None, _) => (CollectionKind::Playlist, &mut found.playlists),
+            _ => continue,
+        };
+        let cards = carousel
+            .get("contents")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(|entry| TwoRowItem::deserialize(entry.get("musicTwoRowItemRenderer")?).ok())
+            .filter_map(|card| match two_row_item(&card)? {
+                Item::Collection(c) if c.kind == kind => Some(c),
+                _ => None,
+            });
+        for mut c in cards {
+            if kind == CollectionKind::Album {
+                c.subtitle = Some(release_subtitle(c.subtitle.as_deref(), artist));
+            }
+            into.push(c);
+        }
+    }
+    Ok(found)
+}
+
 /// A playlist or album page as one shelf named after it. Album rows leave out the artist
 /// and artwork, which come from the page header.
 pub(crate) fn parse_collection(body: &[u8], kind: CollectionKind) -> Result<Shelf, ProviderError> {
@@ -389,6 +466,9 @@ mod tests {
     const HOME: &str = include_str!("../../tests/fixtures/browse_home.json");
     const PLAYLIST: &str = include_str!("../../tests/fixtures/browse_playlist.json");
     const ALBUM: &str = include_str!("../../tests/fixtures/browse_album.json");
+    // Live anonymous capture of Daft Punk's artist page, 2026-10-23: its Albums, Singles & EPs,
+    // Videos, Featured on, Playlists by and Fans might also like shelves, trimmed.
+    const ARTIST: &str = include_str!("../../tests/fixtures/browse_artist.json");
 
     fn track(item: &Item) -> &Track {
         match item {
@@ -714,6 +794,81 @@ mod tests {
                 .unwrap()
                 .contains("yt3.googleusercontent.com")
         );
+    }
+
+    #[test]
+    fn artist_page_releases_are_found_by_shelf_structure() {
+        let found = parse_artist_releases(ARTIST.as_bytes(), "Daft Punk").unwrap();
+        let titles = |cs: &[Collection]| cs.iter().map(|c| c.title.clone()).collect::<Vec<_>>();
+        assert_eq!(found.albums.len(), 20);
+        assert_eq!(
+            titles(&found.albums)[..5],
+            [
+                "Random Access Memories (Drumless Edition)",
+                "Random Access Memories",
+                "TRON: Legacy",
+                "Human After All",
+                "Discovery",
+            ]
+        );
+        assert_eq!(found.albums[5].title, "Homework (25th Anniversary Edition)");
+        assert_eq!(found.albums[10].title, "GLBTM (Studio Outtakes)");
+        assert!(found.albums.iter().all(|a| a.kind == CollectionKind::Album
+            && a.id.id.starts_with("browse:MPREb_")
+            && a.artwork_url.is_some()));
+        assert_eq!(
+            found.albums[1].subtitle.as_deref(),
+            Some("Album \u{2022} Daft Punk \u{2022} 2013")
+        );
+        assert_eq!(
+            found.albums[13].subtitle.as_deref(),
+            Some("Single \u{2022} Daft Punk \u{2022} 2005")
+        );
+        assert_eq!(
+            titles(&found.playlists),
+            [
+                "Presenting Daft Punk",
+                "Best Of French Touch",
+                "Going For Gold",
+                "Summer Dance Classics",
+            ]
+        );
+        assert_eq!(
+            found.playlists[0].id.id,
+            "browse:VLRDCLAK5uy_n20FRYQXNt1p1wS55Nj2r14IouO5weaYU"
+        );
+        assert_eq!(
+            found.playlists[0].subtitle.as_deref(),
+            Some("Playlist \u{2022} YouTube Music")
+        );
+        assert!(
+            found
+                .playlists
+                .iter()
+                .all(|p| p.kind == CollectionKind::Playlist)
+        );
+    }
+
+    #[test]
+    fn release_subtitles_take_the_kind_and_artist_a_search_shows() {
+        let sub = |s: Option<&str>| release_subtitle(s, "Daft Punk");
+        assert_eq!(sub(Some("2013")), "Album \u{2022} Daft Punk \u{2022} 2013");
+        assert_eq!(
+            sub(Some("EP \u{2022} 2005")),
+            "EP \u{2022} Daft Punk \u{2022} 2005"
+        );
+        assert_eq!(sub(None), "Album \u{2022} Daft Punk");
+        assert_eq!(release_subtitle(Some("2013"), ""), "Album \u{2022} 2013");
+    }
+
+    #[test]
+    fn artist_page_without_releases_has_none() {
+        let found = parse_artist_releases(br#"{"contents":{}}"#, "A").unwrap();
+        assert_eq!(found, ArtistReleases::default());
+        assert!(matches!(
+            parse_artist_releases(b"{}", "A"),
+            Err(ProviderError::Parse(_))
+        ));
     }
 
     #[test]

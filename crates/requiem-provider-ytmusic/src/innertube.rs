@@ -12,7 +12,8 @@ use crate::IpFamily;
 use crate::clients::*;
 use crate::log::debug;
 use crate::parse::{
-    PlayerOutcome, StreamFormat, classify_player, parse_search, parse_search_collections,
+    ArtistReleases, PlayerOutcome, StreamFormat, classify_player, merge_collections,
+    parse_artist_releases, parse_search, parse_search_collections, parse_top_artist,
     structure_summary, visitor_data,
 };
 use crate::range::{FetchError, RangeFetcher, RangeResponse, Refresher};
@@ -205,19 +206,33 @@ impl InnertubeClient {
         parse_search_collections(&resp.body, kind, limit)
     }
 
+    /// The releases of the artist an unfiltered search for `query` leads with, if it does: the
+    /// filtered searches match titles, so an artist's own albums can sit far down them.
+    fn artist_releases(&self, query: &str) -> Result<Option<ArtistReleases>, ProviderError> {
+        let body = json!({"context": Self::music_context(), "query": query});
+        let resp = self.post_music(self.family(), "artist search", SEARCH_URL, &body)?;
+        let Some(artist) = parse_top_artist(&resp.body)? else {
+            return Ok(None);
+        };
+        let page = self.browse(&artist.browse_id)?;
+        parse_artist_releases(&page, &artist.name).map(Some)
+    }
+
     /// Songs, albums and playlists, searched at once. Albums or playlists that could not be
-    /// had are left out; only a failed song search fails.
+    /// had are left out; only a failed song search fails. An artist the query leads to puts its
+    /// own albums and playlists ahead of the title matches.
     pub(crate) fn search_all(
         &self,
         query: &str,
         limit: usize,
     ) -> Result<SearchResults, ProviderError> {
         let found = |kind| self.search_collections(query, kind, SEARCH_COLLECTIONS);
-        let (tracks, albums, playlists) = thread::scope(|scope| {
+        let (tracks, albums, playlists, artist) = thread::scope(|scope| {
             let albums = scope.spawn(|| found(CollectionKind::Album));
             let playlists = scope.spawn(|| found(CollectionKind::Playlist));
+            let artist = scope.spawn(|| self.artist_releases(query));
             let tracks = self.search(query, limit);
-            (tracks, albums.join(), playlists.join())
+            (tracks, albums.join(), playlists.join(), artist.join())
         });
         let left_out =
             |joined: thread::Result<Result<Vec<Collection>, ProviderError>>, what| match joined {
@@ -231,10 +246,29 @@ impl InnertubeClient {
                     Vec::new()
                 }
             };
+        let artist = match artist {
+            Ok(Ok(releases)) => releases.unwrap_or_default(),
+            Ok(Err(e)) => {
+                debug!("search without the artist's releases: {e}");
+                ArtistReleases::default()
+            }
+            Err(_) => {
+                debug!("search without the artist's releases: the search panicked");
+                ArtistReleases::default()
+            }
+        };
         Ok(SearchResults {
             tracks: tracks?,
-            albums: left_out(albums, "albums"),
-            playlists: left_out(playlists, "playlists"),
+            albums: merge_collections(
+                artist.albums,
+                left_out(albums, "albums"),
+                SEARCH_COLLECTIONS,
+            ),
+            playlists: merge_collections(
+                artist.playlists,
+                left_out(playlists, "playlists"),
+                SEARCH_COLLECTIONS,
+            ),
         })
     }
 
