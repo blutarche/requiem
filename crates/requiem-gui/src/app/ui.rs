@@ -2332,6 +2332,7 @@ impl Ui {
         }
         if list {
             self.library_bar.set(&grid.chips, grid.sort);
+            self.layout_library();
         }
         // New collections for the same page, as a refresh brings, keep the place the user
         // scrolled to.
@@ -2580,6 +2581,17 @@ impl Ui {
         self.search_grid.view.setFrame(full);
     }
 
+    /// Fits the Library's toolbar, which takes a second row when it is narrow, and its grid
+    /// under the title.
+    fn layout_library(&self) {
+        let b = self.library_page.bounds();
+        let top = self.library_head.frame().origin.y;
+        let bottom = self.library_bar.fit(b.size.width, top);
+        self.library_grid
+            .view
+            .setFrame(rect(0.0, 0.0, b.size.width, (bottom - 4.0).max(0.0)));
+    }
+
     /// Fits the banner to its text and button at the current width: one line, or two when
     /// one is too narrow. Returns its height.
     fn layout_banner(&self) -> CGFloat {
@@ -2643,6 +2655,7 @@ impl Ui {
         if let Some(lead) = &*self.search_lead.borrow() {
             lead.layout();
         }
+        self.layout_library();
         self.library_grid.relayout();
         self.search_grid.relayout();
         self.settings.layout();

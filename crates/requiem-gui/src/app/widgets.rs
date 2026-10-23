@@ -1215,7 +1215,7 @@ pub struct Field {
 
 impl Field {
     pub const H: CGFloat = 36.0;
-    const RING: CGFloat = 2.0;
+    pub const RING: CGFloat = 2.0;
 
     /// `frame` is the box's frame in the superview.
     pub fn new(

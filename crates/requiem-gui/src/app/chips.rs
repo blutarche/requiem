@@ -201,6 +201,20 @@ impl<K: Copy + PartialEq + 'static> ChipRow<K> {
         ChipRow { chips }
     }
 
+    /// The right edge of the chips `state` shows, or the left pad's when it shows none.
+    pub fn end(&self, state: &[(K, bool)]) -> CGFloat {
+        let shown = self
+            .chips
+            .iter()
+            .filter(|(k, _)| state.iter().any(|(s, _)| s == k));
+        shown
+            .map(|(_, chip)| chip.frame().size.width)
+            .fold(None, |end, w| {
+                Some(end.map_or(PAD + w, |e| e + CHIP_GAP + w))
+            })
+            .unwrap_or(PAD)
+    }
+
     /// Shows the chips in `state`, `selected` or not, left to right, centred in a bar `h`
     /// high; the rest are hidden.
     pub fn set(&self, state: &[(K, bool)], h: CGFloat) {
