@@ -2,6 +2,7 @@
 //! the backend.
 
 use std::cell::{Cell, RefCell};
+use std::cmp::Ordering;
 use std::rc::Rc;
 use std::time::{Duration, Instant};
 
@@ -20,7 +21,8 @@ use objc2_app_kit::{
 };
 use objc2_core_foundation::CGFloat;
 use objc2_foundation::{
-    MainThreadMarker, NSAttributedString, NSDictionary, NSPoint, NSRect, NSSize, NSString, NSURL,
+    MainThreadMarker, NSAttributedString, NSComparisonResult, NSDictionary, NSPoint, NSRect,
+    NSSize, NSString, NSURL,
 };
 use requiem_core::ProviderId;
 use requiem_core::{Collection, Item, Shelf, Track};
@@ -30,6 +32,8 @@ use requiem_macos::artwork::Cover;
 use super::backend::{Backend, Msg};
 use super::badge;
 use super::bar::PlayerBar;
+use super::cover_grid::CoverGrid;
+use super::library_bar::LibraryBar;
 use super::now_playing::NowPlayingPage;
 use super::palette::Palette;
 use super::prefs;
@@ -45,8 +49,8 @@ use super::widgets::{
 use super::{Delegate, MainWindow};
 use crate::vm::{
     self, AccountRow, AccountRowState, Banner, Controls, Dirty, EmptyText, HomeView, Intent,
-    LibraryView, List, PageView, PaletteAction, Place, QueueEdit, Selection, Service,
-    ServiceFilter, Toast, UiState, Vm,
+    LibraryChip, LibrarySort, LibraryView, List, PageView, PaletteAction, Place, QueueEdit,
+    Selection, Service, ServiceFilter, Toast, UiState, Vm,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -324,7 +328,10 @@ pub struct Ui {
     library_page: Retained<NSView>,
     library_head: Retained<NSView>,
     library_who: Retained<NSTextField>,
-    library_table: Table,
+    pub library_bar: LibraryBar,
+    library_grid: CoverGrid,
+    /// What the Library's collections on screen are shown for, while they show.
+    library_shown: RefCell<Option<LibraryShown>>,
     library_state: EmptyState,
     sign_in: SignInPanel,
     expiry_scheduled: Cell<bool>,
@@ -599,7 +606,14 @@ impl Ui {
         library_head.addSubview(&library_title);
         library_head.addSubview(&library_who);
         library_head.addSubview(&sign_out);
-        let library_table = Table::new(mtm, list, Kind::Library);
+        let bar_y = library_head.frame().origin.y - LibraryBar::H;
+        let library_bar = LibraryBar::new(mtm, rect(0.0, bar_y, mw, LibraryBar::H), target);
+        // SAFETY: the field's delegate is weak. It is the app delegate, which `app::run` holds
+        // in a local until `app.run()`, which never returns.
+        unsafe { library_bar.filter.text.setDelegate(Some(delegate)) };
+        let library_grid = CoverGrid::new(mtm, rect(0.0, 0.0, mw, bar_y - 4.0), |c| {
+            with(|ui| ui.open_collection(c, Place::Library));
+        });
         let library_state = EmptyState::new(
             mtm,
             rect(0.0, 0.0, mw, mh),
@@ -609,8 +623,9 @@ impl Ui {
         );
         let sign_in = Self::sign_in_panel(mtm, mw, mh, target);
         library_page.addSubview(&library_head);
-        library_page.addSubview(&library_table.view);
+        library_page.addSubview(&library_grid.view);
         library_page.addSubview(&library_state.view);
+        library_page.addSubview(&library_bar.view);
         library_page.addSubview(&sign_in.view);
         main.addSubview(&library_page);
 
@@ -709,7 +724,9 @@ impl Ui {
             library_page,
             library_head,
             library_who,
-            library_table,
+            library_bar,
+            library_grid,
+            library_shown: RefCell::new(None),
             library_state,
             sign_in,
             expiry_scheduled: Cell::new(false),
@@ -991,8 +1008,13 @@ impl Ui {
         let table = match view {
             AppView::Search => &self.results,
             AppView::Queue => &self.queue,
-            AppView::Library => &self.library_table,
             AppView::Collection => &self.collection_table,
+            AppView::Library => {
+                // Keeps Space and the arrow keys from landing in a hidden text field.
+                self.window
+                    .makeFirstResponder(Some(self.library_grid.responder()));
+                return;
+            }
             AppView::Home | AppView::NowPlaying | AppView::Settings => {
                 // Keeps Space and the arrow keys from landing in a hidden text field.
                 self.window.makeFirstResponder(None);
@@ -1044,6 +1066,19 @@ impl Ui {
         self.nav_settings.set_active(lit == AppView::Settings);
     }
 
+    /// The Library's grid has the keyboard.
+    pub fn library_grid_focused(&self) -> bool {
+        self.view.get() == AppView::Library
+            && self.window.firstResponder().is_some_and(|r| {
+                std::ptr::eq::<AnyObject>(r.as_ref(), self.library_grid.responder().as_ref())
+            })
+    }
+
+    /// Moves the Library's selected card by `cols` columns and `rows` rows.
+    pub fn move_library_selection(&self, cols: isize, rows: isize) {
+        self.library_grid.move_selection(cols, rows);
+    }
+
     /// The results table has focus with its first row selected.
     pub fn results_at_top(&self) -> bool {
         let focused = self
@@ -1065,7 +1100,7 @@ impl Ui {
                 Selection { row, result: row }
             }
             AppView::Library => Selection {
-                row: self.library_table.selected_row().is_some(),
+                row: self.library_grid.selected().is_some(),
                 result: false,
             },
             AppView::Queue => Selection {
@@ -1210,6 +1245,33 @@ impl Ui {
         }
     }
 
+    /// A click on a Library chip: shows that kind of collection.
+    pub fn choose_library_chip(&self, chip: LibraryChip) {
+        self.run(Intent::SetLibraryChip(chip));
+    }
+
+    /// The user's choice of Library order: shown at once, and kept for the next launch. Demo
+    /// runs leave the saved choice alone.
+    pub fn choose_library_sort(&self, sort: LibrarySort) {
+        self.run(Intent::SetLibrarySort(sort));
+        if !matches!(self.backend, Backend::Demo(_)) {
+            prefs::save_library_sort(sort);
+        }
+    }
+
+    /// The Library filter's text changed: lists what matches, live.
+    pub fn library_filter_changed(&self) {
+        self.run(Intent::SetLibraryText(self.library_bar.filter.value()));
+    }
+
+    /// Moves the keyboard from the Library filter to the grid, on its first card unless a
+    /// card is selected.
+    pub fn focus_library_grid(&self) {
+        self.window
+            .makeFirstResponder(Some(self.library_grid.responder()));
+        self.library_grid.move_selection(0, 0);
+    }
+
     /// Appends item `i` of `list`, and confirms it on the row's "+" and to VoiceOver when it
     /// was sent.
     pub fn append_row(&self, list: List, i: usize) {
@@ -1239,20 +1301,7 @@ impl Ui {
         self.append_row(List::Shelf(shelf), index);
     }
 
-    pub fn open_library_row(&self, row: usize) {
-        let c = self
-            .vm
-            .borrow()
-            .ui()
-            .library_collections()
-            .get(row)
-            .map(|c| (*c).clone());
-        if let Some(c) = c {
-            self.open_collection(c, Place::Library);
-        }
-    }
-
-    fn open_collection(&self, collection: Collection, from: Place) {
+    pub fn open_collection(&self, collection: Collection, from: Place) {
         self.run(Intent::OpenCollection { collection, from });
         self.show(AppView::Collection);
     }
@@ -1616,8 +1665,8 @@ impl Ui {
                 None => {}
             },
             AppView::Library => {
-                if let Some(i) = self.library_table.selected_row().filter(|_| !append) {
-                    self.open_library_row(i);
+                if !append {
+                    self.library_grid.open_selected();
                 }
             }
             // Paste from Clipboard is the session form's default button.
@@ -1898,8 +1947,8 @@ impl Ui {
         if let Some((view, shelves, only)) = p.home {
             self.show_home(&view, &shelves, only);
         }
-        if let Some((view, rows, only)) = p.library {
-            self.show_library(&view, rows, only);
+        if let Some((view, grid, only)) = p.library {
+            self.show_library(&view, grid, only);
         }
         if let Some(rows) = p.settings {
             let speak = self.view.get() == AppView::Settings;
@@ -1954,7 +2003,6 @@ impl Ui {
             self.bar.set_controls(c);
             self.results.set_enabled(c.player);
             self.queue.set_enabled(c.player);
-            self.library_table.set_enabled(c.player);
             self.collection_table.set_enabled(c.player);
             self.collection_head.play.set_enabled(c.player);
             self.collection_head.add.set_enabled(c.player);
@@ -2032,7 +2080,7 @@ impl Ui {
         }
     }
 
-    fn show_library(&self, view: &LibraryView, rows: Vec<table::RowText>, only: Option<Service>) {
+    fn show_library(&self, view: &LibraryView, grid: LibraryPatch, only: Option<Service>) {
         let panel = matches!(view, LibraryView::Pending { .. });
         let list = matches!(
             view,
@@ -2040,12 +2088,15 @@ impl Ui {
                 page: PageView::Ready,
                 ..
             }
-        ) && !rows.is_empty();
+        ) && grid.stocked;
+        // The filter text can leave nothing to list; the toolbar stays to clear it.
+        let cards = list && !grid.collections.is_empty();
         let head = matches!(view, LibraryView::SignedIn { .. });
         self.sign_in.view.setHidden(!panel);
         self.library_head.setHidden(!head);
-        self.library_table.view.setHidden(!list);
-        self.library_state.view.setHidden(panel || list);
+        self.library_bar.view.setHidden(!list);
+        self.library_grid.view.setHidden(!cards);
+        self.library_state.view.setHidden(panel || cards);
         let state = &self.library_state;
         match view {
             LibraryView::Loading => state.set(Icon::Library, "Loading Library", "", None),
@@ -2074,17 +2125,37 @@ impl Ui {
                         .as_deref()
                         .map_or_else(|| "Signed in".to_owned(), |n| format!("Signed in as {n}")),
                 );
-                if *page == PageView::Ready && rows.is_empty() && only.is_none() {
+                if *page == PageView::Ready && !grid.stocked && only.is_none() {
                     state.set(Icon::Library, "Your Library is empty", "", None);
-                } else if *page != PageView::Ready || rows.is_empty() {
+                } else if *page != PageView::Ready || !grid.stocked {
                     Self::page_state(state, Icon::Library, page, "Library", only);
+                } else if !cards {
+                    state.set(
+                        Icon::Library,
+                        "Nothing matches",
+                        "Clear the filter to see everything.",
+                        None,
+                    );
                 }
             }
         }
-        self.library_table
-            .set_rows(if list { rows } else { Vec::new() }, None);
         if list {
-            self.library_table.deselect();
+            self.library_bar.set(&grid.chips, grid.sort);
+        }
+        // New collections for the same page, as a refresh brings, keep the place the user
+        // scrolled to.
+        let shown = LibraryShown {
+            only,
+            chip: grid.chips.iter().find(|c| c.1).map(|c| c.0),
+            text: grid.text,
+            sort: grid.sort,
+        };
+        let same = cards && self.library_shown.borrow().as_ref() == Some(&shown);
+        *self.library_shown.borrow_mut() = cards.then_some(shown);
+        if cards {
+            self.library_grid.set(&grid.collections, grid.mixed, same);
+        } else {
+            self.library_grid.set(&[], false, false);
         }
     }
 
@@ -2216,7 +2287,7 @@ impl Ui {
             PageView::Failed(e) => SnapshotState::Failed(e),
             PageView::Ready => SnapshotState::Loaded {
                 covers: self.shelves.covers_loading()
-                    || (self.view.get() == AppView::Library && self.library_table.covers_loading())
+                    || (self.view.get() == AppView::Library && self.library_grid.covers_loading())
                     || self.collection_head.cover.is_loading(),
             },
         }
@@ -2293,6 +2364,7 @@ impl Ui {
             self.palette.layout();
         }
         self.shelves.update_paging();
+        self.library_grid.relayout();
         self.settings.layout();
         if !self.banner_shown.get() {
             return;
@@ -2518,7 +2590,7 @@ impl Ui {
     fn set_toast_inset(&self, inset: CGFloat) {
         self.results.set_bottom_inset(inset);
         self.queue.set_bottom_inset(inset);
-        self.library_table.set_bottom_inset(inset);
+        self.library_grid.set_bottom_inset(inset);
         self.collection_table.set_bottom_inset(inset);
         self.shelves.set_bottom_inset(inset);
     }
@@ -2631,6 +2703,37 @@ struct NowPlaying {
     badge: Option<Service>,
 }
 
+/// The Library's collections as the page lists them.
+struct LibraryPatch {
+    collections: Vec<Collection>,
+    /// Whether the Library has any collection, before the chip and the filter text.
+    stocked: bool,
+    mixed: bool,
+    chips: Vec<(LibraryChip, bool)>,
+    text: String,
+    sort: LibrarySort,
+}
+
+/// What a list of the Library's collections is of: a new list for the same, as a refresh
+/// brings, keeps the scroll.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct LibraryShown {
+    only: Option<Service>,
+    chip: Option<LibraryChip>,
+    text: String,
+    sort: LibrarySort,
+}
+
+/// Orders titles as Finder does: whatever their case, with numbers and accents in the user's
+/// language.
+fn localized_cmp(a: &str, b: &str) -> Ordering {
+    match NSString::from_str(a).localizedCaseInsensitiveCompare(&NSString::from_str(b)) {
+        NSComparisonResult::Ascending => Ordering::Less,
+        NSComparisonResult::Descending => Ordering::Greater,
+        _ => Ordering::Equal,
+    }
+}
+
 /// Owned copies of the dirty regions, taken so the view-model borrow ends before AppKit
 /// runs.
 struct Patch {
@@ -2641,7 +2744,7 @@ struct Patch {
     queue_badge: Option<Option<String>>,
     /// The page, its shelves, and the service they are filtered to.
     home: Option<(HomeView, Vec<Shelf>, Option<Service>)>,
-    library: Option<(LibraryView, Vec<table::RowText>, Option<Service>)>,
+    library: Option<(LibraryView, LibraryPatch, Option<Service>)>,
     /// Whether the sidebar offers the service filter, and the choice.
     filter: Option<(bool, ServiceFilter)>,
     settings: Option<Vec<AccountRow>>,
@@ -2675,13 +2778,20 @@ impl Patch {
                     s.shown_service(),
                 )
             }),
-            library: (any(Dirty::LIBRARY) || any(Dirty::ACCOUNT)).then(|| {
-                (
-                    s.library_view(),
-                    table::collection_rows(&s.library_collections()),
-                    s.shown_service(),
-                )
-            }),
+            library: d
+                .intersects(Dirty::LIBRARY | Dirty::ACCOUNT | Dirty::LIBRARY_VIEW)
+                .then(|| {
+                    let grid = s.library_grid(localized_cmp);
+                    let patch = LibraryPatch {
+                        collections: grid.collections.into_iter().cloned().collect(),
+                        stocked: grid.stocked,
+                        mixed: grid.mixed,
+                        chips: grid.chips,
+                        text: s.library_text.clone(),
+                        sort: s.library_sort,
+                    };
+                    (s.library_view(), patch, s.shown_service())
+                }),
             filter: any(Dirty::ACCOUNT).then(|| (s.filter_shown(), s.filter)),
             settings: (any(Dirty::LIBRARY) || any(Dirty::ACCOUNT)).then(|| s.settings_view()),
             collection: any(Dirty::COLLECTION).then(|| {

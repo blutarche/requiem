@@ -644,7 +644,7 @@ fn parts(item: &Item) -> (&str, String, Option<&str>) {
 }
 
 /// What VoiceOver reads for a card: "title, subtitle", then the service its badge shows.
-fn spoken(title: &str, subtitle: &str, badge: Option<Service>) -> String {
+pub(super) fn spoken(title: &str, subtitle: &str, badge: Option<Service>) -> String {
     [Some(title), Some(subtitle), badge.map(Service::name)]
         .into_iter()
         .flatten()

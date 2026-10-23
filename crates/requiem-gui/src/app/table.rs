@@ -2,7 +2,6 @@
 //! headers.
 
 use std::cell::{Cell, OnceCell, RefCell};
-use std::ops::Range;
 use std::time::Duration;
 
 use dispatch2::{DispatchQueue, DispatchTime, MainThreadBound};
@@ -23,7 +22,7 @@ use objc2_foundation::{
     MainThreadMarker, NSAttributedString, NSEdgeInsets, NSIndexSet, NSInteger, NSNotification,
     NSNotificationCenter, NSObjectProtocol, NSPoint, NSRect, NSSize, NSString,
 };
-use requiem_core::{Collection, Track};
+use requiem_core::Track;
 use requiem_macos::artwork::Cover;
 
 use super::badge::{self, Badge};
@@ -33,11 +32,8 @@ use super::widgets::{self, FLEX_H, FLEX_W, HoverButton, PIN_BOTTOM, PIN_LEFT, PI
 use crate::vm::{self, Intent, List, QueueEdit, Service};
 
 pub const ROW_H: CGFloat = 36.0;
-/// The Library's rows are taller, for a larger cover.
-const LIBRARY_ROW_H: CGFloat = 52.0;
 /// The title's artwork, before the title.
 const THUMB: CGFloat = 32.0;
-const LIBRARY_THUMB: CGFloat = 40.0;
 const THUMB_GAP: CGFloat = 10.0;
 /// A played queue row's cover opacity.
 const PLAYED_COVER: CGFloat = 0.6;
@@ -51,29 +47,11 @@ const PAD: CGFloat = 12.0;
 pub enum Kind {
     Results,
     Queue,
-    /// The Library's playlists and albums: a cover, a title and a subtitle.
-    Library,
     /// The tracks of an open playlist or album, listed like results.
     Collection,
 }
 
 impl Kind {
-    fn row_h(self) -> CGFloat {
-        if self == Kind::Library {
-            LIBRARY_ROW_H
-        } else {
-            ROW_H
-        }
-    }
-
-    fn thumb(self) -> CGFloat {
-        if self == Kind::Library {
-            LIBRARY_THUMB
-        } else {
-            THUMB
-        }
-    }
-
     /// Whether rows have the "+" column.
     fn adds(self) -> bool {
         matches!(self, Kind::Results | Kind::Collection)
@@ -140,22 +118,6 @@ pub fn rows(tracks: &[Track]) -> Vec<RowText> {
         .collect()
 }
 
-/// The Library's rows: the title, and the subtitle in the details column.
-pub fn collection_rows(collections: &[&Collection]) -> Vec<RowText> {
-    let mixed = vm::mixed(collections.iter().map(|c| &c.id.provider));
-    collections
-        .iter()
-        .map(|c| RowText {
-            title: c.title.clone(),
-            artists: c.subtitle.clone().unwrap_or_default(),
-            album: String::new(),
-            duration: String::new(),
-            artwork: c.artwork_url.clone(),
-            badge: vm::badge(&c.id.provider, mixed),
-        })
-        .collect()
-}
-
 /// Where the row `was`, selected at `at` before `rows` replaced the list, is now: at `at`
 /// if it is still there, else the nearest row with the same text, else none.
 fn reselect(rows: &[RowText], was: &RowText, at: usize) -> Option<usize> {
@@ -165,19 +127,6 @@ fn reselect(rows: &[RowText], was: &RowText, at: usize) -> Option<usize> {
     (0..rows.len())
         .filter(|&i| rows[i] == *was)
         .min_by_key(|&i| i.abs_diff(at))
-}
-
-/// Whether a `visible` row's cover is still to come. `loading` says whether a row's cell waits
-/// on its cover, or `None` while the table hasn't made the cell, as before its first layout
-/// in a window that isn't on screen; such a row waits if it has artwork.
-fn covers_pending(
-    rows: &[RowText],
-    visible: Range<usize>,
-    loading: impl Fn(usize) -> Option<bool>,
-) -> bool {
-    visible.into_iter().any(|row| {
-        loading(row).unwrap_or_else(|| rows.get(row).is_some_and(|r| r.artwork.is_some()))
-    })
 }
 
 pub struct ControllerIvars {
@@ -356,7 +305,7 @@ impl Controller {
         match self.ivars().kind {
             Kind::Results => Some(List::Results),
             Kind::Collection => Some(List::Collection),
-            Kind::Queue | Kind::Library => None,
+            Kind::Queue => None,
         }
     }
 
@@ -395,7 +344,6 @@ impl Controller {
                 })
             }),
             Kind::Queue => ui::with(|ui| ui.play_queue(row)),
-            Kind::Library => ui::with(|ui| ui.open_library_row(row)),
         };
     }
 
@@ -454,7 +402,7 @@ impl Controller {
         // SAFETY: views under these identifiers are only ever `TextCell`s.
         let reused = unsafe { table.makeViewWithIdentifier_owner(&id, Some(self)) }
             .and_then(|v| v.downcast::<TextCell>().ok());
-        let cell = reused.unwrap_or_else(|| TextCell::new(mtm, &id, col, self.ivars().kind));
+        let cell = reused.unwrap_or_else(|| TextCell::new(mtm, &id, col));
         let text = match col {
             Col::Title => &r.title,
             Col::Artists => &r.artists,
@@ -745,8 +693,7 @@ define_class!(
 );
 
 impl TextCell {
-    fn new(mtm: MainThreadMarker, id: &NSString, col: Col, kind: Kind) -> Retained<Self> {
-        let (row_h, thumb) = (kind.row_h(), kind.thumb());
+    fn new(mtm: MainThreadMarker, id: &NSString, col: Col) -> Retained<Self> {
         let this = Self::alloc(mtm).set_ivars(TextCellIvars {
             label: OnceCell::new(),
             bar: OnceCell::new(),
@@ -759,7 +706,7 @@ impl TextCell {
         let w = 200.0;
         // SAFETY: `initWithFrame:` is NSView's designated initializer.
         let this: Retained<Self> =
-            unsafe { msg_send![super(this), initWithFrame: rect(0.0, 0.0, w, row_h)] };
+            unsafe { msg_send![super(this), initWithFrame: rect(0.0, 0.0, w, ROW_H)] };
         this.setIdentifier(Some(id));
         this.setWantsLayer(true);
         let (font, color) = match col {
@@ -768,7 +715,7 @@ impl TextCell {
             _ => (theme::font(14.0, Weight::Regular), theme::muted()),
         };
         let x = if col == Col::Title {
-            PAD + thumb + THUMB_GAP
+            PAD + THUMB + THUMB_GAP
         } else {
             PAD
         };
@@ -778,7 +725,7 @@ impl TextCell {
             &font,
             &color,
             x,
-            row_h / 2.0,
+            ROW_H / 2.0,
             w - x - PAD,
             FLEX_W | PIN_TOP | PIN_BOTTOM,
         );
@@ -790,7 +737,7 @@ impl TextCell {
         this.addSubview(&label);
         add_rule(mtm, &this, w);
         if col == Col::Title {
-            let at = rect(PAD, ((row_h - thumb) / 2.0).round(), thumb, thumb);
+            let at = rect(PAD, ((ROW_H - THUMB) / 2.0).round(), THUMB, THUMB);
             let cover = widgets::cover(mtm, at, 4.0, 14.0);
             cover.setAutoresizingMask(PIN_LEFT);
             this.addSubview(&cover);
@@ -802,7 +749,7 @@ impl TextCell {
             let _ = this.ivars().badge.set(badge);
             let bar = widgets::panel(
                 mtm,
-                rect(0.0, 0.0, 2.0, row_h),
+                rect(0.0, 0.0, 2.0, ROW_H),
                 FLEX_H | PIN_LEFT,
                 &theme::accent(),
             );
@@ -1082,18 +1029,6 @@ impl ColumnHeader {
         };
         let width = scroll.contentSize().width;
         let kind = self.ivars().kind;
-        if kind == Kind::Library {
-            let (title, details) = library_widths(width);
-            for c in table.tableColumns().iter() {
-                match Col::from_id(&c.identifier().to_string()) {
-                    Some(Col::Title) => c.setWidth(title),
-                    Some(Col::Artists) => c.setWidth(details),
-                    _ => {}
-                }
-            }
-            self.setNeedsDisplay(true);
-            return;
-        }
         let widths = column_widths(width, kind.adds());
         for c in table.tableColumns().iter() {
             match Col::from_id(&c.identifier().to_string()) {
@@ -1125,12 +1060,6 @@ struct Widths {
     title: CGFloat,
     artists: CGFloat,
     album: Option<CGFloat>,
-}
-
-/// The Library's title and details columns for a table `width` wide: 60/40, filling it.
-fn library_widths(width: CGFloat) -> (CGFloat, CGFloat) {
-    let title = (width * 0.6).floor();
-    (title, (width - title).max(0.0))
 }
 
 /// Text-column widths for a table `width` wide, with or without the "+" column. They fill
@@ -1172,7 +1101,7 @@ impl Table {
         table.setStyle(NSTableViewStyle::Plain);
         table.setSelectionHighlightStyle(NSTableViewSelectionHighlightStyle::None);
         table.setIntercellSpacing(NSSize::new(0.0, 0.0));
-        table.setRowHeight(kind.row_h());
+        table.setRowHeight(ROW_H);
         table.setBackgroundColor(&objc2_app_kit::NSColor::clearColor());
         table.setUsesAlternatingRowBackgroundColors(false);
         // `ColumnHeader::fit_columns` sizes the columns.
@@ -1185,17 +1114,13 @@ impl Table {
 
         // Time stays the last column, flush with the table's right edge in both tables. Only
         // results have the "+" column.
-        let cols: &[(Col, &str, CGFloat)] = if kind == Kind::Library {
-            &[(Col::Title, "Name", 0.0), (Col::Artists, "Details", 0.0)]
-        } else {
-            &[
-                (Col::Title, "Title", 0.0),
-                (Col::Artists, "Artists", 0.0),
-                (Col::Album, "Album", 0.0),
-                (Col::Add, "", ADD_W),
-                (Col::Duration, "Time", DURATION_W),
-            ]
-        };
+        let cols: &[(Col, &str, CGFloat)] = &[
+            (Col::Title, "Title", 0.0),
+            (Col::Artists, "Artists", 0.0),
+            (Col::Album, "Album", 0.0),
+            (Col::Add, "", ADD_W),
+            (Col::Duration, "Time", DURATION_W),
+        ];
         let add = kind.adds();
         let mut titles = Vec::with_capacity(cols.len());
         for &(col, title, width) in cols.iter().filter(|c| add || c.0 != Col::Add) {
@@ -1352,28 +1277,6 @@ impl Table {
         });
     }
 
-    /// A visible row's cover has not arrived.
-    pub fn covers_loading(&self) -> bool {
-        let col = self
-            .table
-            .columnWithIdentifier(&NSString::from_str(Col::Title.id()));
-        if col < 0 {
-            return false;
-        }
-        let range = self.table.rowsInRect(self.table.visibleRect());
-        let rows = self.controller.ivars().rows.borrow();
-        covers_pending(
-            &rows,
-            range.location..range.location + range.length,
-            |row| {
-                self.table
-                    .viewAtColumn_row_makeIfNecessary(col, row as isize, false)
-                    .and_then(|v| v.downcast::<TextCell>().ok())
-                    .map(|c| c.ivars().cover.get().is_some_and(|cv| cv.is_loading()))
-            },
-        )
-    }
-
     pub fn selected_row(&self) -> Option<usize> {
         usize::try_from(self.table.selectedRow()).ok()
     }
@@ -1454,7 +1357,6 @@ fn context_menu(mtm: MainThreadMarker, kind: Kind, target: &Controller) -> Retai
             Some(("Play", sel!(contextPlay:))),
             Some(("Add to Queue", sel!(contextAdd:))),
         ],
-        Kind::Library => &[Some(("Open", sel!(contextPlay:)))],
         Kind::Queue => &[
             Some(("Play", sel!(contextPlay:))),
             Some(("Remove from Queue", sel!(contextRemove:))),
@@ -1553,20 +1455,6 @@ mod tests {
     }
 
     #[test]
-    fn a_visible_row_with_artwork_waits_for_its_cover() {
-        let mut rows = named(&["liked", "mix", "plain"]);
-        rows[1].artwork = Some("https://i.scdn.co/image/ab".into());
-        // Before the table makes its cells, only the row with artwork waits.
-        assert!(covers_pending(&rows, 0..3, |_| None));
-        assert!(!covers_pending(&rows, 2..3, |_| None));
-        // Once made, each cell says.
-        assert!(covers_pending(&rows, 0..3, |r| Some(r == 1)));
-        assert!(!covers_pending(&rows, 0..3, |_| Some(false)));
-        // Rows scrolled away don't count.
-        assert!(!covers_pending(&rows, 2..2, |_| None));
-    }
-
-    #[test]
     fn only_the_current_title_reads_as_now_playing() {
         assert_eq!(spoken_title("One", true, false, None), "Now playing, One");
         assert_eq!(spoken_title("One", false, false, None), "One");
@@ -1651,30 +1539,6 @@ mod tests {
         let odd = rows(&[from("spotify", "One"), from("other", "Two")]);
         assert_eq!(odd[0].badge, Some(Service::Spotify));
         assert_eq!(odd[1].badge, None);
-    }
-
-    #[test]
-    fn library_rows_show_the_subtitle_and_badge_a_mixed_library() {
-        let collection = |provider: &str, subtitle: Option<&str>| Collection {
-            id: requiem_core::CollectionId {
-                provider: ProviderId(provider.into()),
-                id: "c".into(),
-            },
-            kind: requiem_core::CollectionKind::Playlist,
-            title: "Mix".into(),
-            subtitle: subtitle.map(Into::into),
-            artwork_url: None,
-        };
-        let (s, y) = (
-            collection("spotify", Some("Playlist")),
-            collection("ytmusic", None),
-        );
-        let mixed = collection_rows(&[&s, &y]);
-        assert_eq!(mixed[0].artists, "Playlist");
-        assert_eq!(mixed[1].artists, "");
-        assert_eq!(mixed[0].badge, Some(Service::Spotify));
-        assert_eq!(mixed[1].badge, Some(Service::YouTubeMusic));
-        assert_eq!(collection_rows(&[&s, &s])[0].badge, None);
     }
 
     #[test]

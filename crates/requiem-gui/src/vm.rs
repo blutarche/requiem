@@ -2,13 +2,14 @@
 //! intents to `Command`s. No AppKit types, so it is unit-tested on every OS.
 
 use std::borrow::Cow;
+use std::cmp::Ordering;
 use std::io;
 use std::ops::{BitOr, BitOrAssign};
 use std::time::{Duration, Instant};
 
 use requiem_core::{
-    AccountState, Collection, Command, EnqueueMode, Event, Item, Page, PlayState, ProviderId,
-    Redacted, SeekTarget, Shelf, Track, TrackId,
+    AccountState, Collection, CollectionKind, Command, EnqueueMode, Event, Item, Page, PlayState,
+    ProviderId, Redacted, SeekTarget, Shelf, Track, TrackId,
 };
 use requiem_ipc::{UpdateState, UpdateStatus};
 
@@ -67,7 +68,9 @@ impl Dirty {
     pub const COLLECTION: Dirty = Dirty(1 << 12);
     /// The account state, which the Library page and the palette show.
     pub const ACCOUNT: Dirty = Dirty(1 << 13);
-    pub const ALL: Dirty = Dirty((1 << 14) - 1);
+    /// The Library's chip, filter text or sort, which only its own page shows.
+    pub const LIBRARY_VIEW: Dirty = Dirty(1 << 14);
+    pub const ALL: Dirty = Dirty((1 << 15) - 1);
 
     pub fn contains(self, other: Dirty) -> bool {
         self.0 & other.0 == other.0
@@ -218,6 +221,13 @@ pub enum Intent {
     /// Shows one service's items, or all of them, on Home, the Library and in search results.
     /// Local to the window: nothing is sent.
     SetFilter(ServiceFilter),
+    /// Keeps one kind of collection on the Library page. Local to the window.
+    SetLibraryChip(LibraryChip),
+    /// Keeps the Library's collections whose title or subtitle has this text. Local to the
+    /// window.
+    SetLibraryText(String),
+    /// Orders the Library page. Local to the window.
+    SetLibrarySort(LibrarySort),
 }
 
 /// Where the window is.
@@ -321,6 +331,126 @@ pub enum LibraryView {
         name: Option<String>,
         page: PageView,
     },
+}
+
+/// The kind of collection a Library chip keeps.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum LibraryChip {
+    #[default]
+    All,
+    Playlists,
+    Mixes,
+    Albums,
+}
+
+impl LibraryChip {
+    pub const CHOICES: [LibraryChip; 4] = [
+        LibraryChip::All,
+        LibraryChip::Playlists,
+        LibraryChip::Mixes,
+        LibraryChip::Albums,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            LibraryChip::All => "All",
+            LibraryChip::Playlists => "Playlists",
+            LibraryChip::Mixes => "Mixes",
+            LibraryChip::Albums => "Albums",
+        }
+    }
+
+    /// Whether `c` is one the chip keeps.
+    fn keeps(self, c: &Collection) -> bool {
+        match self {
+            LibraryChip::All => true,
+            LibraryChip::Albums => c.kind == CollectionKind::Album,
+            LibraryChip::Mixes => c.kind == CollectionKind::Playlist && is_mix(c),
+            LibraryChip::Playlists => c.kind == CollectionKind::Playlist && !is_mix(c),
+        }
+    }
+}
+
+/// The order the Library lists its collections in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum LibrarySort {
+    /// The services' own order, taken in turn.
+    #[default]
+    Recent,
+    Alphabetical,
+}
+
+impl LibrarySort {
+    pub const CHOICES: [LibrarySort; 2] = [LibrarySort::Recent, LibrarySort::Alphabetical];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            LibrarySort::Recent => "Recent",
+            LibrarySort::Alphabetical => "A\u{2013}Z",
+        }
+    }
+
+    /// The value saved between launches.
+    pub fn key(self) -> &'static str {
+        match self {
+            LibrarySort::Recent => "recent",
+            LibrarySort::Alphabetical => "az",
+        }
+    }
+
+    /// The sort a saved `key` names; any other value is Recent.
+    pub fn from_key(key: &str) -> LibrarySort {
+        Self::CHOICES
+            .into_iter()
+            .find(|s| s.key() == key)
+            .unwrap_or_default()
+    }
+}
+
+// The providers' collection ids, which are private to them. A mix or a radio is a playlist
+// whose id, after the prefix, starts as Spotify's own playlists do (Daily Mixes, "This Is",
+// Discover Weekly) or as YouTube Music's `RD` radios do.
+const SPOTIFY_PLAYLIST: &str = "playlist:";
+const SPOTIFY_MIXES: [&str; 2] = ["37i9dQZF1", "37i9dQZEVX"];
+const YTMUSIC_PLAYLIST: &str = "browse:VL";
+const YTMUSIC_MIX: &str = "RD";
+const SPOTIFY_LIKED: &str = "collection";
+const YTMUSIC_LIKED: &str = "browse:VLLM";
+
+fn is_mix(c: &Collection) -> bool {
+    let id = c.id.id.as_str();
+    match c.id.provider.0.as_str() {
+        "spotify" => id
+            .strip_prefix(SPOTIFY_PLAYLIST)
+            .is_some_and(|b| SPOTIFY_MIXES.iter().any(|p| b.starts_with(p))),
+        "ytmusic" => id
+            .strip_prefix(YTMUSIC_PLAYLIST)
+            .is_some_and(|b| b.starts_with(YTMUSIC_MIX)),
+        _ => false,
+    }
+}
+
+/// Where a liked collection sits among the pinned: Spotify's, then YouTube Music's.
+fn liked_rank(c: &Collection) -> Option<u8> {
+    match (c.id.provider.0.as_str(), c.id.id.as_str()) {
+        ("spotify", SPOTIFY_LIKED) => Some(0),
+        ("ytmusic", YTMUSIC_LIKED) => Some(1),
+        _ => None,
+    }
+}
+
+/// What the Library page shows once signed in.
+#[derive(Debug, Clone, PartialEq)]
+pub struct LibraryGrid<'a> {
+    /// The chips with something to keep, with whether each is the one in force.
+    pub chips: Vec<(LibraryChip, bool)>,
+    /// The collections to list.
+    pub collections: Vec<&'a Collection>,
+    /// Whether the Library has any collection at all, before the chip and the filter text.
+    pub stocked: bool,
+    /// Whether the Library mixes services, so its cards show their service's badge. The chip
+    /// and the filter text do not change it.
+    pub mixed: bool,
 }
 
 /// What the Home page shows.
@@ -511,6 +641,10 @@ pub struct UiState {
     pub update: Option<UpdateStatus>,
     /// The user's choice of service; `shown_filter` is what it comes to.
     pub filter: ServiceFilter,
+    /// The Library's chip, filter text and sort; `library_grid` is what they come to.
+    pub library_chip: LibraryChip,
+    pub library_text: String,
+    pub library_sort: LibrarySort,
 }
 
 impl Default for UiState {
@@ -537,6 +671,9 @@ impl Default for UiState {
             setup: None,
             update: None,
             filter: ServiceFilter::All,
+            library_chip: LibraryChip::All,
+            library_text: String::new(),
+            library_sort: LibrarySort::Recent,
         }
     }
 }
@@ -909,6 +1046,52 @@ impl UiState {
                 Item::Collection(_) | Item::Track(_) => None,
             })
             .collect()
+    }
+
+    /// What the Library page lists. The service switch and the chip pick the collections, the
+    /// filter text keeps those whose title or subtitle has it, and the sort orders them, with
+    /// the liked collections first, Spotify's before YouTube Music's. `collate` orders titles
+    /// for A–Z. A chip with nothing to keep is left out, and with the chosen one gone
+    /// the page falls back to All.
+    pub fn library_grid(&self, collate: impl Fn(&str, &str) -> Ordering) -> LibraryGrid<'_> {
+        let base = self.library_collections();
+        let stocked = !base.is_empty();
+        let mixed = mixed(base.iter().map(|c| &c.id.provider));
+        let mut chips: Vec<(LibraryChip, bool)> = LibraryChip::CHOICES
+            .into_iter()
+            .filter(|chip| base.iter().any(|c| chip.keeps(c)))
+            .map(|chip| (chip, false))
+            .collect();
+        let chosen = if chips.iter().any(|(c, _)| *c == self.library_chip) {
+            self.library_chip
+        } else {
+            LibraryChip::All
+        };
+        for (chip, selected) in &mut chips {
+            *selected = *chip == chosen;
+        }
+        let text = self.library_text.to_lowercase();
+        let mut collections: Vec<&Collection> = base
+            .into_iter()
+            .filter(|c| chosen.keeps(c))
+            .filter(|c| {
+                text.is_empty()
+                    || c.title.to_lowercase().contains(&text)
+                    || c.subtitle
+                        .as_deref()
+                        .is_some_and(|s| s.to_lowercase().contains(&text))
+            })
+            .collect();
+        if self.library_sort == LibrarySort::Alphabetical {
+            collections.sort_by(|a, b| collate(&a.title, &b.title));
+        }
+        collections.sort_by_key(|c| liked_rank(c).unwrap_or(u8::MAX));
+        LibraryGrid {
+            chips,
+            collections,
+            stocked,
+            mixed,
+        }
     }
 
     /// The tracks of `list` from item `from` on.
@@ -1563,6 +1746,27 @@ impl Vm {
                 if self.ui.filter != filter {
                     self.ui.filter = filter;
                     self.dirty |= Dirty::RESULTS | Dirty::HOME | Dirty::LIBRARY | Dirty::ACCOUNT;
+                }
+                Vec::new()
+            }
+            Intent::SetLibraryChip(chip) => {
+                if self.ui.library_chip != chip {
+                    self.ui.library_chip = chip;
+                    self.dirty |= Dirty::LIBRARY_VIEW;
+                }
+                Vec::new()
+            }
+            Intent::SetLibraryText(text) => {
+                if self.ui.library_text != text {
+                    self.ui.library_text = text;
+                    self.dirty |= Dirty::LIBRARY_VIEW;
+                }
+                Vec::new()
+            }
+            Intent::SetLibrarySort(sort) => {
+                if self.ui.library_sort != sort {
+                    self.ui.library_sort = sort;
+                    self.dirty |= Dirty::LIBRARY_VIEW;
                 }
                 Vec::new()
             }
@@ -6317,6 +6521,249 @@ mod tests {
         assert_eq!(rows(&vm), ["a", "c"]);
         vm.intent(Intent::SetFilter(ONLY_YT));
         assert_eq!(rows(&vm), ["b", "d"]);
+    }
+
+    /// A Library of `(provider, id, kind, title, subtitle)` as the merged page lists it.
+    type Entry<'a> = (
+        &'a ProviderId,
+        &'a str,
+        CollectionKind,
+        &'a str,
+        Option<&'a str>,
+    );
+
+    fn library_of(entries: &[Entry]) -> Vm {
+        let mut vm = both_signed_in();
+        let items = entries
+            .iter()
+            .map(|&(p, id, kind, title, subtitle)| {
+                let mut c = collection_of(p, id);
+                c.kind = kind;
+                c.title = title.into();
+                c.subtitle = subtitle.map(str::to_owned);
+                Item::Collection(c)
+            })
+            .collect();
+        let req = browses(&vm.take_commands())
+            .into_iter()
+            .rfind(|(_, page)| *page == Page::Library)
+            .expect("a Library fetch")
+            .0;
+        vm.apply(results(req, Page::Library, vec![shelf("Library", items)]));
+        vm
+    }
+
+    const SP_LIKED: &str = "collection";
+    const SP_DAILY_MIX: &str = "playlist:37i9dQZF1E39abc";
+    const SP_DISCOVER: &str = "playlist:37i9dQZEVXcabc";
+    const SP_OWN: &str = "playlist:1pKYYY0dkg23sQQXi0Q5zN";
+    const YT_LIKED: &str = "browse:VLLM";
+    const YT_MIX: &str = "browse:VLRDTMAKabc";
+    const YT_OWN: &str = "browse:VLPLroad";
+    const YT_ALBUM: &str = "browse:MPREb_abc";
+
+    fn lowercase(a: &str, b: &str) -> Ordering {
+        a.to_lowercase().cmp(&b.to_lowercase())
+    }
+
+    fn mixed_library() -> Vm {
+        use CollectionKind::{Album, Playlist};
+        let (s, y) = (spotify(), provider());
+        // As the merge takes them in turn, Spotify first; the liked cards, the mixes and the
+        // album are scattered.
+        library_of(&[
+            (&s, SP_OWN, Playlist, "road trip", Some("12 songs")),
+            (&y, YT_MIX, Playlist, "My Supermix", Some("Mix")),
+            (&s, SP_LIKED, Playlist, "Liked Songs", Some("247 songs")),
+            (&y, YT_OWN, Playlist, "Night", None),
+            (
+                &s,
+                SP_DAILY_MIX,
+                Playlist,
+                "Daily Mix 1",
+                Some("Made for you"),
+            ),
+            (&y, YT_LIKED, Playlist, "Liked music", None),
+            (&s, SP_DISCOVER, Playlist, "Discover Weekly", None),
+            (&y, YT_ALBUM, Album, "Blue Hour", Some("Album")),
+            (&s, "playlist:2b", Playlist, "Alpha", Some("1 song")),
+        ])
+    }
+
+    fn titles(vm: &Vm) -> Vec<String> {
+        vm.ui()
+            .library_grid(lowercase)
+            .collections
+            .iter()
+            .map(|c| c.title.clone())
+            .collect()
+    }
+
+    fn chips(vm: &Vm) -> Vec<(LibraryChip, bool)> {
+        vm.ui().library_grid(lowercase).chips
+    }
+
+    #[test]
+    fn the_library_keeps_the_services_order_with_the_liked_collections_first() {
+        let vm = mixed_library();
+        assert_eq!(
+            titles(&vm),
+            [
+                "Liked Songs",
+                "Liked music",
+                "road trip",
+                "My Supermix",
+                "Night",
+                "Daily Mix 1",
+                "Discover Weekly",
+                "Blue Hour",
+                "Alpha"
+            ]
+        );
+    }
+
+    #[test]
+    fn a_collection_is_liked_by_its_id_not_its_title() {
+        let (s, y) = (spotify(), provider());
+        let vm = library_of(&[
+            (&s, SP_OWN, CollectionKind::Playlist, "Liked Songs", None),
+            (&y, YT_LIKED, CollectionKind::Playlist, "Favourites", None),
+            (&s, SP_LIKED, CollectionKind::Playlist, "Saved", None),
+        ]);
+        assert_eq!(titles(&vm), ["Saved", "Favourites", "Liked Songs"]);
+    }
+
+    #[test]
+    fn the_chips_keep_playlists_mixes_and_albums_apart() {
+        let mut vm = mixed_library();
+        let with = |vm: &mut Vm, chip| {
+            vm.intent(Intent::SetLibraryChip(chip));
+            titles(vm)
+        };
+        assert_eq!(
+            with(&mut vm, LibraryChip::Playlists),
+            ["Liked Songs", "Liked music", "road trip", "Night", "Alpha"]
+        );
+        assert_eq!(
+            with(&mut vm, LibraryChip::Mixes),
+            ["My Supermix", "Daily Mix 1", "Discover Weekly"]
+        );
+        assert_eq!(with(&mut vm, LibraryChip::Albums), ["Blue Hour"]);
+        assert_eq!(with(&mut vm, LibraryChip::All).len(), 9);
+        assert_eq!(
+            chips(&vm).iter().map(|c| c.0).collect::<Vec<_>>(),
+            LibraryChip::CHOICES
+        );
+    }
+
+    #[test]
+    fn a_chip_with_nothing_to_keep_is_hidden_and_the_page_falls_back_to_all() {
+        let (s, y) = (spotify(), provider());
+        let mut vm = library_of(&[
+            (&s, SP_LIKED, CollectionKind::Playlist, "Liked Songs", None),
+            (&y, YT_OWN, CollectionKind::Playlist, "Night", None),
+        ]);
+        assert_eq!(
+            chips(&vm),
+            [(LibraryChip::All, true), (LibraryChip::Playlists, false)]
+        );
+        vm.intent(Intent::SetLibraryChip(LibraryChip::Mixes));
+        assert_eq!(titles(&vm), ["Liked Songs", "Night"]);
+        assert_eq!(
+            chips(&vm),
+            [(LibraryChip::All, true), (LibraryChip::Playlists, false)]
+        );
+        vm.intent(Intent::SetLibraryChip(LibraryChip::Playlists));
+        assert_eq!(chips(&vm)[1], (LibraryChip::Playlists, true));
+    }
+
+    #[test]
+    fn the_filter_text_matches_titles_and_subtitles_whatever_the_case() {
+        let mut vm = mixed_library();
+        vm.intent(Intent::SetLibraryText("ROAD".into()));
+        assert_eq!(titles(&vm), ["road trip"]);
+        vm.intent(Intent::SetLibraryText("made for".into()));
+        assert_eq!(titles(&vm), ["Daily Mix 1"]);
+        vm.intent(Intent::SetLibraryText("zzz".into()));
+        assert!(titles(&vm).is_empty());
+        // The chips and the page's being stocked do not depend on the text.
+        let grid = vm.ui().library_grid(lowercase);
+        assert!(grid.stocked && grid.mixed);
+        assert_eq!(grid.chips.len(), 4);
+        vm.intent(Intent::SetLibraryText(String::new()));
+        assert_eq!(titles(&vm).len(), 9);
+    }
+
+    #[test]
+    fn a_to_z_orders_by_title_without_regard_to_case_and_keeps_the_liked_first() {
+        let mut vm = mixed_library();
+        vm.intent(Intent::SetLibrarySort(LibrarySort::Alphabetical));
+        assert_eq!(
+            titles(&vm),
+            [
+                "Liked Songs",
+                "Liked music",
+                "Alpha",
+                "Blue Hour",
+                "Daily Mix 1",
+                "Discover Weekly",
+                "My Supermix",
+                "Night",
+                "road trip"
+            ]
+        );
+        vm.intent(Intent::SetLibrarySort(LibrarySort::Recent));
+        assert_eq!(titles(&vm)[2], "road trip");
+    }
+
+    #[test]
+    fn the_service_switch_narrows_the_chips_and_the_grid() {
+        let mut vm = mixed_library();
+        vm.intent(Intent::SetFilter(ONLY_SPOTIFY));
+        assert!(!vm.ui().library_grid(lowercase).mixed);
+        assert_eq!(
+            titles(&vm),
+            [
+                "Liked Songs",
+                "road trip",
+                "Daily Mix 1",
+                "Discover Weekly",
+                "Alpha"
+            ]
+        );
+        // Spotify has no albums here.
+        assert_eq!(
+            chips(&vm).iter().map(|c| c.0).collect::<Vec<_>>(),
+            [LibraryChip::All, LibraryChip::Playlists, LibraryChip::Mixes]
+        );
+        vm.intent(Intent::SetLibraryChip(LibraryChip::Mixes));
+        assert_eq!(titles(&vm), ["Daily Mix 1", "Discover Weekly"]);
+        vm.intent(Intent::SetFilter(ONLY_YT));
+        assert_eq!(titles(&vm), ["My Supermix"]);
+        vm.intent(Intent::SetLibraryChip(LibraryChip::Albums));
+        assert_eq!(titles(&vm), ["Blue Hour"]);
+    }
+
+    #[test]
+    fn the_library_view_changes_redraw_only_the_library_page() {
+        let mut vm = mixed_library();
+        vm.take_dirty();
+        vm.intent(Intent::SetLibraryText("a".into()));
+        assert_eq!(vm.take_dirty(), Dirty::LIBRARY_VIEW);
+        vm.intent(Intent::SetLibraryText("a".into()));
+        assert!(vm.take_dirty().is_empty());
+        vm.intent(Intent::SetLibraryChip(LibraryChip::Mixes));
+        vm.intent(Intent::SetLibrarySort(LibrarySort::Alphabetical));
+        assert_eq!(vm.take_dirty(), Dirty::LIBRARY_VIEW);
+    }
+
+    #[test]
+    fn the_saved_sort_is_read_by_its_key_and_anything_else_is_recent() {
+        for sort in LibrarySort::CHOICES {
+            assert_eq!(LibrarySort::from_key(sort.key()), sort);
+        }
+        assert_eq!(LibrarySort::from_key("name"), LibrarySort::Recent);
+        assert_eq!(LibrarySort::Alphabetical.label(), "A–Z");
     }
 
     #[test]
