@@ -219,10 +219,10 @@ pub fn covers() -> Vec<(String, usize)> {
     out
 }
 
-/// Spotify has 6 of the results and 4 of the Library's entries, which the merged lists take
+/// Spotify has 6 of the results and 8 of the Library's entries, which the merged lists take
 /// in turn with YouTube Music's, Spotify first: the even ones of the first this many.
 const MIXED_RESULTS: usize = 12;
-const MIXED_LIBRARY: usize = 8;
+const MIXED_LIBRARY: usize = 16;
 
 fn spotify() -> ProviderId {
     ProviderId("spotify".into())
@@ -241,14 +241,10 @@ fn taken_in_turn(i: usize, mixed: usize) -> ProviderId {
     }
 }
 
-/// The Library's entries alternate for the first `MIXED_LIBRARY`, then are YouTube Music's;
 /// Home's shelves alternate throughout, as both services have them.
 fn collection_id(kind: &str, i: usize) -> CollectionId {
     CollectionId {
-        provider: match kind {
-            "lib" => taken_in_turn(i, MIXED_LIBRARY),
-            _ => taken_in_turn(i, usize::MAX),
-        },
+        provider: taken_in_turn(i, usize::MAX),
         id: format!("demo-{kind}-{i:02}"),
     }
 }
@@ -335,39 +331,172 @@ pub fn home() -> Vec<Shelf> {
     ]
 }
 
+/// One entry of a service's Library: its id, kind, title and subtitle.
+type LibraryEntry = (
+    &'static str,
+    CollectionKind,
+    &'static str,
+    Option<&'static str>,
+);
+
+const PLAYLIST: CollectionKind = CollectionKind::Playlist;
+const ALBUM: CollectionKind = CollectionKind::Album;
+
+/// Spotify's Library in its own order, with ids as the provider makes them: the liked
+/// collection, then mixes, an album and playlists of the user's.
+const SPOTIFY_LIBRARY: [LibraryEntry; 8] = [
+    (
+        "collection",
+        PLAYLIST,
+        "Liked Songs",
+        Some("Auto playlist · 312 songs"),
+    ),
+    (
+        "playlist:37i9dQZF1E39demoMix01",
+        PLAYLIST,
+        "Daily Mix 1",
+        Some("Playlist · 50 songs"),
+    ),
+    (
+        "playlist:37i9dQZEVXcdemoWeekly",
+        PLAYLIST,
+        "Discover Weekly",
+        Some("Playlist · 30 songs"),
+    ),
+    (
+        "playlist:2demoGoldenMornings01",
+        PLAYLIST,
+        "Golden Mornings",
+        Some("Playlist · 22 songs"),
+    ),
+    (
+        "album:4demoAlbumFieldNotes001",
+        ALBUM,
+        "Field Notes",
+        Some("Album · Hollow Coast"),
+    ),
+    (
+        "playlist:2demoMidnightRooms02",
+        PLAYLIST,
+        "Midnight Rooms",
+        Some("Playlist · 57 songs"),
+    ),
+    (
+        "playlist:2demoEarlyWaves00003",
+        PLAYLIST,
+        "Early Waves",
+        Some("Playlist · 78 songs"),
+    ),
+    (
+        "playlist:2demoSlowRoads000004",
+        PLAYLIST,
+        "Slow Roads",
+        Some("Playlist · 8 songs"),
+    ),
+];
+
+/// YouTube Music's Library in its own order: the liked collection, then mixes and radios,
+/// albums and playlists of the user's.
+const YTMUSIC_LIBRARY: [LibraryEntry; 12] = [
+    (
+        "browse:VLLM",
+        PLAYLIST,
+        "Liked music",
+        Some("Auto playlist · 188 songs"),
+    ),
+    (
+        "browse:VLRDTMAKdemoSupermix01",
+        PLAYLIST,
+        "My Supermix",
+        Some("Playlist · 50 videos"),
+    ),
+    (
+        "browse:VLPLdemoQuietRoads0001",
+        PLAYLIST,
+        "Quiet Roads",
+        Some("Playlist · 15 videos"),
+    ),
+    (
+        "browse:VLRDCLAKdemoChillMix02",
+        PLAYLIST,
+        "Chill Mix",
+        Some("Playlist · 25 videos"),
+    ),
+    (
+        "browse:MPREb_demoAlbumBlueHour",
+        ALBUM,
+        "Blue Hour",
+        Some("Album · Hollow Coast"),
+    ),
+    (
+        "browse:VLPLdemoGoldenRoads002",
+        PLAYLIST,
+        "Golden Roads",
+        Some("Playlist · 43 videos"),
+    ),
+    (
+        "browse:MPREb_demoAlbumLanterns",
+        ALBUM,
+        "Paper Lanterns",
+        Some("Album · The Verdant Hours"),
+    ),
+    (
+        "browse:VLPLdemoMidnightWaves3",
+        PLAYLIST,
+        "Midnight Waves",
+        Some("Playlist · 57 videos"),
+    ),
+    (
+        "browse:VLPLdemoEarlyMornings4",
+        PLAYLIST,
+        "Early Mornings",
+        Some("Playlist · 64 videos"),
+    ),
+    (
+        "browse:VLPLdemoLongTitle00005",
+        PLAYLIST,
+        "Songs to Drive Through the Rain at Midnight With the Windows Down",
+        Some("Playlist · 120 videos"),
+    ),
+    (
+        "browse:VLPLdemoSlowMornings06",
+        PLAYLIST,
+        "Slow Mornings",
+        Some("Playlist · 36 videos"),
+    ),
+    (
+        "browse:VLPLdemoGoldenRooms007",
+        PLAYLIST,
+        "Golden Rooms",
+        Some("Playlist · 50 videos"),
+    ),
+];
+
+/// The Library as both accounts merge into it: their entries taken in turn, Spotify first,
+/// for as long as both have any, then the rest of YouTube Music's.
 pub fn library() -> Vec<Shelf> {
+    let mut spotify_entries = SPOTIFY_LIBRARY.iter();
+    let mut ytmusic_entries = YTMUSIC_LIBRARY.iter();
     let items = (0..LIBRARY_LEN)
         .map(|i| {
-            let (title, subtitle) = if i == 0 {
-                (
-                    "Liked Songs".to_owned(),
-                    "Auto playlist · 312 songs".to_owned(),
-                )
-            } else if taken_in_turn(i, MIXED_LIBRARY) == spotify() {
-                (
-                    format!(
-                        "{} {}",
-                        LIBRARY_ADJECTIVES[i % LIBRARY_ADJECTIVES.len()],
-                        LIBRARY_NOUNS[i % LIBRARY_NOUNS.len()]
-                    ),
-                    format!("Playlist · {} songs", 8 + 7 * i),
-                )
-            } else {
-                (
-                    format!(
-                        "{} {}",
-                        LIBRARY_ADJECTIVES[i % LIBRARY_ADJECTIVES.len()],
-                        LIBRARY_NOUNS[i % LIBRARY_NOUNS.len()]
-                    ),
-                    format!("Playlist · {} videos", 8 + 7 * i),
-                )
-            };
+            let (provider, &(id, kind, title, subtitle)) =
+                if taken_in_turn(i, MIXED_LIBRARY) == spotify() {
+                    (spotify(), spotify_entries.next().expect("a Spotify entry"))
+                } else {
+                    (
+                        ytmusic(),
+                        ytmusic_entries.next().expect("a YouTube Music entry"),
+                    )
+                };
             Item::Collection(Collection {
-                id: collection_id("lib", i),
-                kind: CollectionKind::Playlist,
-                title,
-                subtitle: Some(subtitle),
-                artwork_url: (i % 6 != 5).then(|| demo_url(LIBRARY_ART + i)),
+                id: CollectionId {
+                    provider,
+                    id: id.into(),
+                },
+                kind,
+                title: title.into(),
+                subtitle: subtitle.map(str::to_owned),
+                artwork_url: (i % 7 != 4).then(|| demo_url(LIBRARY_ART + i)),
             })
         })
         .collect();
@@ -377,9 +506,10 @@ pub fn library() -> Vec<Shelf> {
     }]
 }
 
-/// The collection the `collection` view opens: the Library's second playlist.
+/// The collection the `collection` view opens: the Library's first YouTube Music playlist
+/// that is not the liked one.
 pub fn collection() -> Collection {
-    match library().remove(0).items.remove(1) {
+    match library().remove(0).items.remove(5) {
         Item::Collection(c) => c,
         Item::Track(_) => unreachable!("the Library lists playlists"),
     }
@@ -956,8 +1086,9 @@ mod tests {
             .iter()
             .filter(|i| *vm::item_provider(i) == spotify())
             .count();
-        assert_eq!(spotify_entries, 4);
+        assert_eq!(spotify_entries, SPOTIFY_LIBRARY.len());
         assert_eq!(*vm::item_provider(&library[1]), ytmusic());
+        assert_eq!(*vm::item_provider(&library[5]), ytmusic());
         // A collection's tracks are all its own provider's.
         let c = collection();
         assert!(
