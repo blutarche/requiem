@@ -1277,7 +1277,9 @@ impl Field {
             x = 36.0;
         }
         let th = line_height(&Self::font());
-        let tframe = rect(x, ((h - th) / 2.0).round(), w - x - 12.0, th);
+        // The text draws at the top of its frame, above the 2 pt `line_height` adds, so the
+        // frame sits 1 pt low to centre it.
+        let tframe = rect(x, ((h - th) / 2.0).round() - 1.0, w - x - 12.0, th);
         (ring, boxv, tframe)
     }
 
