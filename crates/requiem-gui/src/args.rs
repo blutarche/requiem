@@ -3,7 +3,7 @@
 use std::path::PathBuf;
 
 pub const USAGE: &str = "\
-usage: requiem-gui [--demo] [--smoke] [--snapshot <png>] [--view <view>]
+usage: requiem-gui [--demo] [--smoke] [--snapshot <png>] [--view <view>] [--size <w>x<h>]
 
   --demo             fill the window with fixed fake data; no player daemon
   --smoke            like --demo, then exit 0 after 2 s
@@ -16,7 +16,9 @@ usage: requiem-gui [--demo] [--smoke] [--snapshot <png>] [--view <view>]
                      now-playing-last, library-signed-out, library-unavailable, signin,
                      settings-session, empty, disconnected, toast, out-of-date,
                      update-ready, update-failed, not-updatable, up-to-date, search-albums,
-                     search-songs, search-artists, artist or album";
+                     search-songs, search-artists, search-song-selected,
+                     search-card-selected, artist or album
+  --size <w>x<h>     the window's content size in points, at least 800x500";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum View {
@@ -80,10 +82,15 @@ pub enum View {
     ArtistSpotify,
     /// Demo only: an album's page, opened from the search results.
     Album,
+    /// Demo only: the All view of the search results with a song selected by the keyboard.
+    SearchSongSelected,
+    /// Demo only: the All view of the search results with an album's card selected by the
+    /// keyboard.
+    SearchCardSelected,
 }
 
 impl View {
-    const NAMES: [(&str, View); 32] = [
+    const NAMES: [(&str, View); 34] = [
         ("home", View::Home),
         ("search", View::Search),
         ("library", View::Library),
@@ -116,6 +123,8 @@ impl View {
         ("artist", View::Artist),
         ("artist-spotify", View::ArtistSpotify),
         ("album", View::Album),
+        ("search-song-selected", View::SearchSongSelected),
+        ("search-card-selected", View::SearchCardSelected),
     ];
 
     /// Whether the view is a staged demo state rather than a place in the app.
@@ -143,6 +152,8 @@ pub struct Args {
     pub smoke: bool,
     pub snapshot: Option<PathBuf>,
     pub view: View,
+    /// The window's content size, in points.
+    pub size: Option<(u32, u32)>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -180,6 +191,16 @@ pub fn parse(args: impl IntoIterator<Item = String>) -> Result<Args, ArgsError> 
                         ))
                     })?;
             }
+            "--size" => {
+                let size = it
+                    .next()
+                    .ok_or_else(|| ArgsError::Bad("--size needs a value".into()))?;
+                out.size = Some(parse_size(&size).ok_or_else(|| {
+                    ArgsError::Bad(format!(
+                        "bad size {size:?}; expected <w>x<h>, at least {MIN_W}x{MIN_H}"
+                    ))
+                })?);
+            }
             "-h" | "--help" => return Err(ArgsError::Help),
             other => return Err(ArgsError::Bad(format!("unknown argument {other:?}"))),
         }
@@ -198,6 +219,17 @@ pub fn parse(args: impl IntoIterator<Item = String>) -> Result<Args, ArgsError> 
         ));
     }
     Ok(out)
+}
+
+/// The window's smallest content size, in points.
+const MIN_W: u32 = 800;
+const MIN_H: u32 = 500;
+
+/// `<w>x<h>` in whole points, no smaller than the window allows.
+fn parse_size(s: &str) -> Option<(u32, u32)> {
+    let (w, h) = s.split_once('x')?;
+    let (w, h) = (w.parse().ok()?, h.parse().ok()?);
+    (w >= MIN_W && h >= MIN_H).then_some((w, h))
 }
 
 impl Args {
@@ -240,6 +272,20 @@ mod tests {
     fn smoke_uses_demo_data() {
         let a = p(&["--smoke"]).unwrap();
         assert!(a.smoke && a.uses_demo_data());
+    }
+
+    #[test]
+    fn a_size_is_width_by_height_no_smaller_than_the_window_allows() {
+        let a = p(&["--demo", "--size", "2200x1440"]).unwrap();
+        assert_eq!(a.size, Some((2200, 1440)));
+        assert_eq!(p(&["--demo"]).unwrap().size, None);
+        for bad in ["2200", "x1440", "2200x", "799x600", "1000x499", "wide"] {
+            assert!(
+                matches!(p(&["--size", bad]), Err(ArgsError::Bad(_))),
+                "{bad}"
+            );
+        }
+        assert!(matches!(p(&["--size"]), Err(ArgsError::Bad(_))));
     }
 
     #[test]
@@ -302,6 +348,8 @@ mod tests {
             ("artist", View::Artist),
             ("artist-spotify", View::ArtistSpotify),
             ("album", View::Album),
+            ("search-song-selected", View::SearchSongSelected),
+            ("search-card-selected", View::SearchCardSelected),
         ] {
             assert_eq!(p(&["--demo", "--view", name]).unwrap().view, view);
             assert_eq!(p(&["--smoke", "--view", name]).unwrap().view, view);

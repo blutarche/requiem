@@ -23,7 +23,7 @@ use requiem_core::{Collection, CollectionKind};
 use requiem_macos::artwork::Cover;
 
 use super::badge::{self, Badge};
-use super::shelves::spoken;
+use super::shelves::{self, spoken};
 use super::theme::{self, Weight};
 use super::widgets::{self, FLEX_H, FLEX_W, rect};
 use crate::vm::{self, Service};
@@ -50,6 +50,16 @@ fn cover_radius(collection: &Collection, side: CGFloat) -> CGFloat {
 const VIEW_MARGIN: CGFloat = 160.0;
 const SELECTED_W: CGFloat = 2.0;
 
+/// Shows a card as the keyboard's choice, or not: an accent ring, and selected to VoiceOver.
+pub(super) fn show_selected(card: &NSView, selected: bool) {
+    card.setAccessibilitySelected(selected);
+    widgets::border(
+        card,
+        &theme::accent(),
+        if selected { SELECTED_W } else { 0.0 },
+    );
+}
+
 /// The columns that fill a grid `width` wide and the side of the square covers in them.
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct Layout {
@@ -74,9 +84,9 @@ impl Layout {
         widgets::line_height(&theme::font(12.0, Weight::Regular))
     }
 
-    /// A card's frame height: cover, title, subtitle and the hover inset.
+    /// A card's frame height: cover, title, room for two subtitle lines, and the hover inset.
     fn card_h(self) -> CGFloat {
-        2.0 * INSET + self.side + 8.0 + Self::title_h() + 2.0 + Self::sub_h()
+        2.0 * INSET + self.side + 8.0 + Self::title_h() + 2.0 + 2.0 * Self::sub_h()
     }
 
     /// From the top of one row of cards to the next.
@@ -257,14 +267,15 @@ define_class!(
 );
 
 impl GridCard {
-    /// `badge` is the collection's service, in a grid that mixes services.
+    /// `badge` is the collection's service, in a grid that mixes services; `artists` says the
+    /// grid lists artists, whose subtitles need not say so.
     fn new(
         mtm: MainThreadMarker,
         layout: Layout,
         index: usize,
         collection: &Collection,
         open: &Rc<dyn Fn(Collection)>,
-        badge: Option<Service>,
+        (badge, artists): (Option<Service>, bool),
     ) -> Retained<Self> {
         let this = Self::alloc(mtm).set_ivars(CardIvars {
             collection: collection.clone(),
@@ -294,10 +305,11 @@ impl GridCard {
         let subtitle = collection.subtitle.as_deref().unwrap_or_default();
         let sub = widgets::label(
             mtm,
-            subtitle,
+            shelves::shown_subtitle(subtitle, artists),
             &theme::font(12.0, Weight::Regular),
             &theme::muted(),
         );
+        shelves::two_lines(&sub);
         this.addSubview(&cover);
         this.addSubview(&title);
         this.addSubview(&sub);
@@ -340,7 +352,7 @@ impl GridCard {
             INSET,
             y + Layout::title_h() + 2.0,
             layout.side,
-            Layout::sub_h(),
+            2.0 * Layout::sub_h(),
         ));
         if let Some(b) = &p.badge {
             b.setFrame(badge::frame(cover, INSET, true));
@@ -355,14 +367,8 @@ impl GridCard {
         widgets::fill(self, fill.as_deref());
     }
 
-    /// The keyboard's choice: an accent ring, and selected to VoiceOver.
     fn set_selected(&self, selected: bool) {
-        self.setAccessibilitySelected(selected);
-        widgets::border(
-            self,
-            &theme::accent(),
-            if selected { SELECTED_W } else { 0.0 },
-        );
+        show_selected(self, selected);
     }
 
     fn activate(&self) {
@@ -382,6 +388,8 @@ struct State {
     items: Vec<Collection>,
     /// Whether the grid mixes services, so its cards show their service's badge.
     mixed: bool,
+    /// Whether the grid lists artists, as search's Artists do, which says what they are.
+    artists: bool,
     layout: Layout,
     cards: HashMap<usize, Retained<GridCard>>,
 }
@@ -422,7 +430,7 @@ impl Inner {
             }
             let c = &st.items[i];
             let badge = vm::badge(&c.id.provider, st.mixed);
-            let card = GridCard::new(self.mtm, st.layout, i, c, &self.open, badge);
+            let card = GridCard::new(self.mtm, st.layout, i, c, &self.open, (badge, st.artists));
             card.set_selected(self.selected.get() == Some(i));
             self.doc.addSubview(&card);
             st.cards.insert(i, card);
@@ -482,6 +490,7 @@ impl CoverGrid {
             state: RefCell::new(State {
                 items: Vec::new(),
                 mixed: false,
+                artists: false,
                 layout: Layout::of(frame.size.width),
                 cards: HashMap::new(),
             }),
@@ -539,6 +548,12 @@ impl CoverGrid {
         g.view.contentView().scrollToPoint(top);
         g.view.reflectScrolledClipView(&g.view.contentView());
         g.sync();
+    }
+
+    /// Says whether the lists set from now on are artists under a heading that says so, whose
+    /// cards then leave "Artist" out of their subtitles.
+    pub fn set_artists(&self, artists: bool) {
+        self.inner.state.borrow_mut().artists = artists;
     }
 
     /// Fits the grid to its width, after the window resized.

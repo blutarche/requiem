@@ -38,6 +38,7 @@ use super::library_bar::LibraryBar;
 use super::now_playing::NowPlayingPage;
 use super::palette::Palette;
 use super::prefs;
+use super::search_keys::{Dir, Move, Shape, Spot};
 use super::search_lead::SearchLead;
 use super::service_switch::ServiceSwitch;
 use super::settings::SettingsPage;
@@ -308,12 +309,14 @@ struct CollectionHead {
 /// What the results area lists that the keyboard can act on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SearchList {
-    /// An empty state, or the All view, whose cards the keyboard does not reach.
+    /// An empty state.
     Nothing,
     /// The song table.
     Table,
     /// The grid of albums or of playlists.
     Grid,
+    /// The All view: the top result, its songs, and rows of covers.
+    All,
 }
 
 pub struct Ui {
@@ -372,6 +375,8 @@ pub struct Ui {
     /// The All view's albums and playlists, under its lead.
     pub search_shelves: Shelves,
     search_lead: RefCell<Option<SearchLead>>,
+    /// What the keyboard has selected in the All view.
+    all_spot: Cell<Option<Spot>>,
     search_grid: CoverGrid,
     /// What the results area lists, which the keyboard acts on.
     search_list: Cell<SearchList>,
@@ -774,6 +779,7 @@ impl Ui {
             search_chips,
             search_shelves,
             search_lead: RefCell::new(None),
+            all_spot: Cell::new(None),
             search_grid,
             search_list: Cell::new(SearchList::Nothing),
             search_status_shown: Cell::new(false),
@@ -1060,7 +1066,13 @@ impl Ui {
     pub fn show(&self, view: AppView) {
         self.switch_to(view);
         self.visit(view.place());
-        if view == AppView::Search && self.search_list.get() == SearchList::Nothing {
+        if view == AppView::Search
+            && matches!(
+                self.search_list.get(),
+                SearchList::Nothing | SearchList::All
+            )
+        {
+            self.select_all(None);
             self.window.makeFirstResponder(Some(&self.search.text));
             return;
         }
@@ -1151,14 +1163,99 @@ impl Ui {
         }
     }
 
-    /// Down from the search field: into the song table or the grid, whichever lists the
-    /// results.
+    /// Down from the search field: into the song table, the grid or the All view, whichever
+    /// lists the results.
     pub fn results_move_down(&self) {
         self.show(AppView::Search);
         match self.search_list.get() {
             SearchList::Table => self.results.select_first(),
             SearchList::Grid => self.search_grid.move_selection(0, 0),
+            SearchList::All => {
+                self.window
+                    .makeFirstResponder(Some(self.search_shelves.responder()));
+                self.move_all_selection(Dir::Down);
+            }
             SearchList::Nothing => {}
+        }
+    }
+
+    /// The All view of the search results shows and has the keyboard.
+    pub fn all_focused(&self) -> bool {
+        let page = self.search_shelves.responder();
+        self.view.get() == AppView::Search
+            && self.search_list.get() == SearchList::All
+            && self
+                .window
+                .firstResponder()
+                .is_some_and(|r| std::ptr::eq::<AnyObject>(r.as_ref(), page.as_ref()))
+    }
+
+    /// Something in the All view is selected.
+    pub fn all_selected(&self) -> bool {
+        self.all_spot.get().is_some()
+    }
+
+    /// What the All view has selected.
+    pub fn all_spot(&self) -> Option<Spot> {
+        self.all_spot.get()
+    }
+
+    fn all_shape(&self) -> Shape {
+        let lead = self.search_lead.borrow();
+        Shape {
+            top: lead.is_some(),
+            songs: lead.as_ref().map_or(0, SearchLead::songs),
+            rows: self.search_shelves.row_lengths(),
+        }
+    }
+
+    /// Moves the All view's selection by an arrow key; up from the top, to the search field.
+    pub fn move_all_selection(&self, dir: Dir) {
+        match self.all_shape().step(self.all_spot.get(), dir) {
+            Move::To(spot) => self.select_all(Some(spot)),
+            Move::Field => self.focus_search(),
+            Move::Stay => {}
+        }
+    }
+
+    /// Selects `spot` in the All view, scrolled into view; `None` clears the selection.
+    fn select_all(&self, spot: Option<Spot>) {
+        self.all_spot.set(spot);
+        if let Some(lead) = &*self.search_lead.borrow() {
+            lead.select(spot);
+        }
+        let card = match spot {
+            Some(Spot::Card { row, col }) => Some((row, col)),
+            _ => None,
+        };
+        self.search_shelves.select(card);
+    }
+
+    /// A click anywhere but on the All view's selection clears it.
+    pub fn clicked(&self, event: &NSEvent) {
+        let Some(spot) = self.all_spot.get() else {
+            return;
+        };
+        let view: Option<Retained<NSView>> = match spot {
+            Spot::Card { .. } => self.search_shelves.selected_view(),
+            s => self
+                .search_lead
+                .borrow()
+                .as_ref()
+                .and_then(|l| l.press_view(s))
+                .map(Retained::into_super),
+        };
+        let here = event
+            .window(self.mtm)
+            .is_some_and(|w| Retained::as_ptr(&w) == Retained::as_ptr(&self.window));
+        let on = here
+            && view.is_some_and(|v| {
+                let at = v.convertPoint_fromView(event.locationInWindow(), None);
+                let b = v.bounds();
+                at.x >= 0.0 && at.x < b.size.width && at.y >= 0.0 && at.y < b.size.height
+            });
+        if !on {
+            self.select_all(None);
         }
     }
 
@@ -1183,6 +1280,15 @@ impl Ui {
                     row: self.search_grid.selected().is_some(),
                     result: false,
                 },
+                SearchList::All => {
+                    let spot = self.all_spot.get();
+                    let lead = self.search_lead.borrow();
+                    let song = spot.zip(lead.as_ref()).and_then(|(s, l)| l.song_at(s));
+                    Selection {
+                        row: spot.is_some(),
+                        result: song.is_some(),
+                    }
+                }
                 SearchList::Nothing => Selection::default(),
             },
             AppView::Collection => {
@@ -1265,6 +1371,7 @@ impl Ui {
         // through.
         self.switch_to(AppView::Search);
         self.visit(Place::Search);
+        self.select_all(None);
         self.window.makeFirstResponder(Some(&self.search.text));
     }
 
@@ -1785,6 +1892,7 @@ impl Ui {
                         self.search_grid.open_selected();
                     }
                 }
+                SearchList::All => self.activate_all(append),
                 SearchList::Nothing => {}
             },
             AppView::Collection => match self.collection_table.selected_row() {
@@ -1808,6 +1916,30 @@ impl Ui {
                     self.play_queue(i);
                 }
             }
+        }
+    }
+
+    /// Return on the All view's selection does what a click on it does; with `append`, a song
+    /// joins the queue instead.
+    fn activate_all(&self, append: bool) {
+        let Some(spot) = self.all_spot.get() else {
+            return;
+        };
+        if let Spot::Card { .. } = spot {
+            if let Some((shelf, index)) = self.search_shelves.selected_item() {
+                self.card_clicked(Surface::Search, shelf, index);
+            }
+            return;
+        }
+        // Out of the borrow first: a press can bring new results, and a new lead.
+        let (song, press) = match &*self.search_lead.borrow() {
+            Some(lead) => (lead.song_at(spot), lead.press_view(spot)),
+            None => return,
+        };
+        match (song, press) {
+            (Some(i), _) if append => self.append_row(List::Results, i),
+            (_, Some(press)) => press.activate(),
+            _ => {}
         }
     }
 
@@ -2205,15 +2337,24 @@ impl Ui {
                 all = true;
             }
             SearchBody::Collections { items, mixed } => {
+                let artists = self.vm.borrow().ui().search_chip == SearchChip::Artists;
+                self.search_grid.set_artists(artists);
                 self.search_grid.set(&items, mixed, false);
                 grid = true;
             }
         }
-        self.search_list.set(match (songs, grid) {
-            (true, _) => SearchList::Table,
-            (_, true) => SearchList::Grid,
+        self.search_list.set(match (songs, grid, all) {
+            (true, _, _) => SearchList::Table,
+            (_, true, _) => SearchList::Grid,
+            (_, _, true) => SearchList::All,
             _ => SearchList::Nothing,
         });
+        // New results keep the All view's selection where they still have its place.
+        let kept = self
+            .all_spot
+            .get()
+            .filter(|&s| all && self.all_shape().holds(s));
+        self.select_all(kept);
         self.results.view.setHidden(!songs);
         self.search_shelves.view.setHidden(!all);
         self.search_grid.view.setHidden(!grid);
@@ -2649,9 +2790,9 @@ impl Ui {
         if self.palette.is_open() {
             self.palette.layout();
         }
-        self.shelves.update_paging();
-        self.search_shelves.update_paging();
-        self.artist_shelves.update_paging();
+        self.shelves.relayout();
+        self.search_shelves.relayout();
+        self.artist_shelves.relayout();
         if let Some(lead) = &*self.search_lead.borrow() {
             lead.layout();
         }

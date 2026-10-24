@@ -8,7 +8,8 @@ use objc2::rc::Retained;
 use objc2::runtime::NSObject;
 use objc2::{DefinedClass, MainThreadOnly, Message, define_class, msg_send};
 use objc2_app_kit::{
-    NSColor, NSEvent, NSResponder, NSTextAlignment, NSTextField, NSTrackingAreaOptions, NSView,
+    NSAccessibility, NSColor, NSEvent, NSResponder, NSTextAlignment, NSTextField,
+    NSTrackingAreaOptions, NSView,
 };
 use objc2_core_foundation::CGFloat;
 use objc2_foundation::{MainThreadMarker, NSPoint, NSRect};
@@ -16,7 +17,9 @@ use requiem_core::Track;
 use requiem_macos::artwork::Cover;
 
 use super::badge::{self, Badge};
-use super::shelves::{FlippedView, spoken};
+use super::cover_grid;
+use super::search_keys::Spot;
+use super::shelves::{self, FlippedView, spoken};
 use super::theme::{self, Icon, Weight};
 use super::ui;
 use super::widgets::{self, FLEX_W, rect};
@@ -50,6 +53,8 @@ pub struct PressIvars {
     hovered: Cell<bool>,
     pressed: Cell<bool>,
     enabled: Cell<bool>,
+    /// Selected with the keyboard, as a row of the song table is.
+    selected: Cell<bool>,
 }
 
 define_class!(
@@ -150,6 +155,7 @@ impl PressView {
             hovered: Cell::new(false),
             pressed: Cell::new(false),
             enabled: Cell::new(true),
+            selected: Cell::new(false),
         });
         // SAFETY: `initWithFrame:` is NSView's designated initializer.
         let this: Retained<Self> = unsafe { msg_send![super(this), initWithFrame: frame] };
@@ -177,9 +183,24 @@ impl PressView {
         }
     }
 
+    /// Shows the row as the keyboard's choice, in the song table's selected row's fill.
+    fn set_row_selected(&self, selected: bool) {
+        self.setAccessibilitySelected(selected);
+        if self.ivars().selected.replace(selected) != selected {
+            self.paint();
+        }
+    }
+
     fn paint(&self) {
         let iv = self.ivars();
-        let color = if iv.hovered.get() && iv.enabled.get() {
+        let hovered = iv.hovered.get() && iv.enabled.get();
+        if iv.selected.get() {
+            let base = if hovered { theme::ROW_HOVER } else { theme::BG };
+            let fill = theme::mix(base, theme::ACCENT, theme::SELECTED);
+            widgets::fill(self, Some(&fill));
+            return;
+        }
+        let color = if hovered {
             Some(&iv.hover)
         } else {
             iv.rest.as_ref()
@@ -187,7 +208,7 @@ impl PressView {
         widgets::fill(self, color.map(|c| &**c));
     }
 
-    fn activate(&self) {
+    pub(super) fn activate(&self) {
         if !self.ivars().enabled.get() {
             return;
         }
@@ -230,11 +251,15 @@ struct SongRow {
     title: Retained<NSTextField>,
     artists: Retained<NSTextField>,
     duration: Retained<NSTextField>,
+    /// The song's place in the results.
+    from: usize,
 }
 
 pub struct SearchLead {
     pub view: Retained<FlippedView>,
     top: TopCard,
+    /// Whether the top result is a song, the results' first.
+    top_song: bool,
     songs_title: Option<Retained<NSTextField>>,
     songs: Vec<SongRow>,
 }
@@ -287,6 +312,7 @@ impl SearchLead {
         let lead = SearchLead {
             view,
             top,
+            top_song: first == 1,
             songs_title,
             songs,
         };
@@ -324,7 +350,12 @@ impl SearchLead {
     ) -> TopCard {
         let card = TopFace {
             title: &artist.title,
-            sub: "Artist",
+            // With its audience, when the service gave it.
+            sub: artist
+                .subtitle
+                .as_deref()
+                .filter(|s| !s.is_empty())
+                .unwrap_or("Artist"),
             art: artist.artwork_url.as_deref(),
             service: vm::badge(&artist.id.provider, mixed),
             radius: CARD_COVER / 2.0,
@@ -379,6 +410,7 @@ impl SearchLead {
             &theme::font(13.0, Weight::Regular),
             &theme::muted(),
         );
+        shelves::two_lines(&sub);
         card.addSubview(&title);
         card.addSubview(&sub);
         let mark = service.map(|s| Self::badge(mtm, &card, s, rect(0.0, 0.0, 0.0, 0.0)));
@@ -470,6 +502,7 @@ impl SearchLead {
             title,
             artists: sub,
             duration,
+            from,
         }
     }
 
@@ -512,7 +545,7 @@ impl SearchLead {
             CARD_PAD,
             title_y + title_h + 2.0,
             inner - PLAY - 8.0,
-            widgets::line_height(&theme::font(13.0, Weight::Regular)),
+            2.0 * widgets::line_height(&theme::font(13.0, Weight::Regular)),
         ));
         let cover = rect(CARD_PAD, CARD_PAD, CARD_COVER, CARD_COVER);
         t.cover.setFrame(cover);
@@ -555,6 +588,58 @@ impl SearchLead {
                 DURATION_W,
                 sub_h,
             ));
+        }
+    }
+
+    /// How many songs are listed beside the top result.
+    pub fn songs(&self) -> usize {
+        self.songs.len()
+    }
+
+    /// Shows `spot` as the keyboard's choice, if it is the top result or a song: the card as
+    /// a cover grid's selected card, a song as the song table's selected row.
+    pub fn select(&self, spot: Option<Spot>) {
+        cover_grid::show_selected(&self.top.card, spot == Some(Spot::Top));
+        for (i, s) in self.songs.iter().enumerate() {
+            let on = spot == Some(Spot::Song(i));
+            s.row.set_row_selected(on);
+            // Raised for contrast against the selection, as the table's are.
+            let c = if on { theme::ink_2() } else { theme::muted() };
+            s.artists.setTextColor(Some(&c));
+            s.duration.setTextColor(Some(&c));
+        }
+        if let Some(r) = spot.and_then(|s| self.frame_of(s)) {
+            self.view.scrollRectToVisible(r);
+        }
+    }
+
+    /// Where `spot` is in the lead: the top result with its heading, or a song's row.
+    fn frame_of(&self, spot: Spot) -> Option<NSRect> {
+        match spot {
+            Spot::Top => {
+                let f = self.top.card.frame();
+                Some(rect(f.origin.x, 0.0, f.size.width, HEAD_H + f.size.height))
+            }
+            Spot::Song(i) => self.songs.get(i).map(|s| s.row.frame()),
+            Spot::Card { .. } => None,
+        }
+    }
+
+    /// What a click on `spot` presses: the top result's card, or a song's row.
+    pub fn press_view(&self, spot: Spot) -> Option<Retained<PressView>> {
+        match spot {
+            Spot::Top => Some(self.top.card.clone()),
+            Spot::Song(i) => self.songs.get(i).map(|s| s.row.clone()),
+            Spot::Card { .. } => None,
+        }
+    }
+
+    /// The place in the results of the song at `spot`, which can join the queue.
+    pub fn song_at(&self, spot: Spot) -> Option<usize> {
+        match spot {
+            Spot::Top => self.top_song.then_some(0),
+            Spot::Song(i) => self.songs.get(i).map(|s| s.from),
+            Spot::Card { .. } => None,
         }
     }
 

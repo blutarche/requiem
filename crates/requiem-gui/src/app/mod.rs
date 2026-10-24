@@ -10,6 +10,7 @@ mod library_bar;
 mod now_playing;
 mod palette;
 mod prefs;
+mod search_keys;
 mod search_lead;
 mod service_switch;
 mod settings;
@@ -37,7 +38,7 @@ use objc2_app_kit::{
     NSEventModifierFlags, NSMenu, NSMenuItem, NSPopUpButton, NSResponder, NSText,
     NSTextFieldDelegate, NSTextView, NSWindow, NSWindowDelegate, NSWindowStyleMask,
 };
-use objc2_foundation::{MainThreadMarker, NSNotification, NSRect, NSString};
+use objc2_foundation::{MainThreadMarker, NSNotification, NSRect, NSSize, NSString};
 
 use requiem_macos::artwork;
 
@@ -47,6 +48,7 @@ use crate::vm::{
     Intent, LibrarySort, PaletteAction, QueueEdit, SEEK_STEP_SECS, Service, VOLUME_STEP, Vm,
 };
 use backend::{Backend, Live};
+use search_keys::{Dir, Spot};
 use ui::{AppView, Ui};
 
 define_class!(
@@ -711,6 +713,9 @@ fn key_down(ui: &Ui, event: &NSEvent) -> bool {
             | NSEventModifierFlags::Option,
     );
     let grid = ui.grid_focused();
+    let all = ui.all_focused();
+    // Left and Right seek until something in the All view is selected.
+    let along = all && ui.all_selected();
     match code {
         KEY_ESCAPE if plain && ui.current_view() == AppView::NowPlaying => ui.go_back(),
         KEY_SPACE if plain && !on_button => ui.intent(Intent::Toggle),
@@ -719,6 +724,10 @@ fn key_down(ui: &Ui, event: &NSEvent) -> bool {
         KEY_RIGHT if plain && grid => ui.move_grid_selection(1, 0),
         KEY_UP if plain && grid => ui.move_grid_selection(0, -1),
         KEY_DOWN if plain && grid => ui.move_grid_selection(0, 1),
+        KEY_LEFT if plain && along => ui.move_all_selection(Dir::Left),
+        KEY_RIGHT if plain && along => ui.move_all_selection(Dir::Right),
+        KEY_UP if plain && all => ui.move_all_selection(Dir::Up),
+        KEY_DOWN if plain && all => ui.move_all_selection(Dir::Down),
         KEY_LEFT if plain => ui.intent(Intent::SeekBy(-SEEK_STEP_SECS)),
         KEY_RIGHT if plain => ui.intent(Intent::SeekBy(SEEK_STEP_SECS)),
         KEY_UP if plain && ui.results_at_top() => ui.focus_search(),
@@ -751,6 +760,22 @@ fn install_key_monitor() {
     let monitor = unsafe {
         NSEvent::addLocalMonitorForEventsMatchingMask_handler(NSEventMask::KeyDown, &block)
     };
+    // The monitor lives as long as the process.
+    std::mem::forget(monitor);
+}
+
+/// Hears clicks, which clear the All view's keyboard selection when they land elsewhere.
+fn install_click_monitor() {
+    let block = RcBlock::new(|event: NonNull<NSEvent>| -> *mut NSEvent {
+        // SAFETY: AppKit passes an event that is valid for the duration of the call.
+        let ev = unsafe { event.as_ref() };
+        ui::with(|ui| ui.clicked(ev));
+        event.as_ptr()
+    });
+    let mask =
+        NSEventMask::LeftMouseDown | NSEventMask::RightMouseDown | NSEventMask::OtherMouseDown;
+    // SAFETY: the handler returns the event it was given, as the API requires.
+    let monitor = unsafe { NSEvent::addLocalMonitorForEventsMatchingMask_handler(mask, &block) };
     // The monitor lives as long as the process.
     std::mem::forget(monitor);
 }
@@ -1027,6 +1052,11 @@ pub fn run(args: Args) {
     ui::install(ui.clone());
     ui.window
         .setDelegate(Some(ProtocolObject::from_ref(&*delegate)));
+    if let Some((w, h)) = args.size {
+        ui.window
+            .setContentSize(NSSize::new(f64::from(w), f64::from(h)));
+        ui.window_resized();
+    }
     // The window is not on screen yet, which `render` waits for.
     ui.render_now();
     match args.view {
@@ -1064,6 +1094,23 @@ pub fn run(args: Args) {
         | View::SearchAlbums
         | View::SearchSongs
         | View::SearchArtists => ui.show(AppView::Search),
+        View::SearchSongSelected => {
+            ui.results_move_down();
+            ui.move_all_selection(Dir::Down);
+            ui.move_all_selection(Dir::Down);
+        }
+        View::SearchCardSelected => {
+            ui.results_move_down();
+            // Down through the songs and the Artists row to the Albums row, then along it.
+            for _ in 0..64 {
+                if matches!(ui.all_spot(), Some(Spot::Card { row: 1, .. })) {
+                    break;
+                }
+                ui.move_all_selection(Dir::Down);
+            }
+            ui.move_all_selection(Dir::Right);
+            ui.move_all_selection(Dir::Right);
+        }
     }
 
     app.setDelegate(Some(ProtocolObject::from_ref(&*delegate)));
@@ -1087,6 +1134,7 @@ pub fn run(args: Args) {
     app.setMainMenu(Some(&menu));
     app.setWindowsMenu(Some(&window_menu));
     install_key_monitor();
+    install_click_monitor();
     ui.window.makeKeyAndOrderFront(None);
     if !ui.palette.is_open() {
         ui.show(ui.current_view());
