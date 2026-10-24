@@ -2429,9 +2429,8 @@ impl Ui {
         ) && grid.stocked;
         // The filter text can leave nothing to list; the toolbar stays to clear it.
         let cards = list && !grid.collections.is_empty();
-        let head = matches!(view, LibraryView::SignedIn { .. });
         self.sign_in.view.setHidden(!panel);
-        self.library_head.setHidden(!head);
+        self.library_head.setHidden(panel);
         self.library_bar.view.setHidden(!list);
         self.library_grid.view.setHidden(!cards);
         self.library_state.view.setHidden(panel || cards);
