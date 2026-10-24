@@ -1255,6 +1255,8 @@ pub fn start_in(view: View) -> (Vm, Daemon) {
             }
         }
         View::Search
+        | View::SearchSongSelected
+        | View::SearchCardSelected
         | View::Queue
         | View::Settings
         | View::Palette

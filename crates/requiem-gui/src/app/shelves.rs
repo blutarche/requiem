@@ -25,6 +25,7 @@ use requiem_core::{CollectionKind, Item, Shelf};
 use requiem_macos::artwork::Cover;
 
 use super::badge::{self, Badge};
+use super::cover_grid::{self, GridDoc};
 use super::theme::{self, Icon, Weight};
 use super::ui;
 use super::widgets::{self, FLEX_W, HoverButton, PIN_RIGHT, rect};
@@ -521,7 +522,8 @@ impl ShelfCard {
         menu
     }
 
-    /// `badge` is the item's service, on a page that mixes services.
+    /// `badge` is the item's service, on a page that mixes services; `artists` says the card
+    /// is in a section of artists, whose subtitles need not say so.
     #[allow(clippy::too_many_arguments)]
     fn new(
         mtm: MainThreadMarker,
@@ -532,6 +534,7 @@ impl ShelfCard {
         item: &Item,
         compact: bool,
         badge: Option<Service>,
+        artists: bool,
     ) -> Retained<Self> {
         let this = Self::alloc(mtm).set_ivars(CardIvars {
             surface,
@@ -553,7 +556,7 @@ impl ShelfCard {
             } else {
                 COVER_RADIUS
             };
-            this.fill_card(mtm, title, &subtitle, art, radius);
+            this.fill_card(mtm, title, shown_subtitle(&subtitle, artists), art, radius);
         }
         if badge.is_some() {
             let (cover, room) = if compact {
@@ -571,8 +574,8 @@ impl ShelfCard {
         this
     }
 
-    /// A 128 pt cover with corners of `radius`, a title of up to two lines, and a muted
-    /// subtitle.
+    /// A 128 pt cover with corners of `radius`, a title of one line, and a muted subtitle of
+    /// up to two.
     fn fill_card(
         &self,
         mtm: MainThreadMarker,
@@ -585,28 +588,19 @@ impl ShelfCard {
         cover.set_url(art);
         self.addSubview(&cover);
         let title_font = theme::font(13.0, Weight::Medium);
-        let lines = widgets::label(mtm, title, &title_font, &theme::ink());
-        lines.setUsesSingleLineMode(false);
-        lines.setMaximumNumberOfLines(2);
-        lines.setLineBreakMode(NSLineBreakMode::ByWordWrapping);
-        if let Some(cell) = lines.cell() {
-            cell.setTruncatesLastVisibleLine(true);
-        }
-        let max_h = 2.0 * widgets::line_height(&title_font);
-        let fits = lines.cell().map_or(max_h, |c| {
-            c.cellSizeForBounds(rect(0.0, 0.0, CARD_W, 1000.0)).height
-        });
-        let title_h = fits.ceil().min(max_h);
+        let name = widgets::label(mtm, title, &title_font, &theme::ink());
+        let title_h = widgets::line_height(&title_font);
         let y = INSET + CARD_W + 8.0;
-        lines.setFrame(rect(INSET, y, CARD_W, title_h));
-        self.addSubview(&lines);
+        name.setFrame(rect(INSET, y, CARD_W, title_h));
+        self.addSubview(&name);
         let sub_font = theme::font(12.0, Weight::Regular);
         let sub = widgets::label(mtm, subtitle, &sub_font, &theme::muted());
+        two_lines(&sub);
         sub.setFrame(rect(
             INSET,
             y + title_h + 2.0,
             CARD_W,
-            widgets::line_height(&sub_font),
+            2.0 * widgets::line_height(&sub_font),
         ));
         self.addSubview(&sub);
     }
@@ -649,6 +643,10 @@ impl ShelfCard {
         widgets::fill(self, fill.as_deref());
     }
 
+    fn set_selected(&self, selected: bool) {
+        cover_grid::show_selected(self, selected);
+    }
+
     /// Activates the card if it was pressed and is let go over it.
     fn release(&self, up: &NSEvent) {
         let was = self.ivars().pressed.replace(false);
@@ -683,6 +681,29 @@ pub(super) fn is_artist(item: &Item) -> bool {
     matches!(item, Item::Collection(c) if c.kind == CollectionKind::Artist)
 }
 
+/// The subtitle a card shows: under a section of artists, which already says what they are,
+/// without the leading "Artist".
+pub(super) fn shown_subtitle(subtitle: &str, artists: bool) -> &str {
+    if !artists {
+        return subtitle;
+    }
+    match subtitle.strip_prefix("Artist") {
+        Some("") => "",
+        Some(rest) => rest.strip_prefix(" \u{2022} ").unwrap_or(subtitle),
+        None => subtitle,
+    }
+}
+
+/// Lets a one-line label wrap to a second line, with an ellipsis only past that.
+pub(super) fn two_lines(label: &NSTextField) {
+    label.setUsesSingleLineMode(false);
+    label.setMaximumNumberOfLines(2);
+    label.setLineBreakMode(NSLineBreakMode::ByWordWrapping);
+    if let Some(cell) = label.cell() {
+        cell.setTruncatesLastVisibleLine(true);
+    }
+}
+
 /// What VoiceOver reads for a card: "title, subtitle", then the service its badge shows.
 pub(super) fn spoken(title: &str, subtitle: &str, badge: Option<Service>) -> String {
     [Some(title), Some(subtitle), badge.map(Service::name)]
@@ -698,13 +719,100 @@ fn is_grid(shelf: &Shelf) -> bool {
     !shelf.items.is_empty() && shelf.items.iter().all(|i| matches!(i, Item::Track(_)))
 }
 
-/// The items whose cards cover the horizontal span `lo..hi` of a row's document, as a range
-/// of item indexes.
-fn visible_items(n: usize, grid: bool, lo: CGFloat, hi: CGFloat) -> std::ops::Range<usize> {
-    let (first, pitch, per) = if grid {
-        (PAD, GRID_COL_W + CARD_GAP, GRID_ROWS)
+/// How a row's columns fit the width it shows. A row that fits between its pads keeps
+/// `CARD_GAP` gaps. A longer one fits as many columns as it can at least `PAD` apart and
+/// spreads the room left over into its gaps in whole points, so a page holds whole columns,
+/// its last one ends at the right pad or a few points into it, and the columns either side of
+/// the page fall wholly past the edges.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct Fit {
+    /// The columns a page shows.
+    count: usize,
+    /// From one column's left edge to the next one's.
+    pitch: CGFloat,
+}
+
+impl Fit {
+    /// `cols` columns `col_w` wide, in a row `width` wide.
+    fn of(width: CGFloat, col_w: CGFloat, cols: usize) -> Fit {
+        let room = width - 2.0 * PAD;
+        let fits = |gap: CGFloat| ((room + gap) / (col_w + gap)).floor().max(1.0) as usize;
+        let count = fits(CARD_GAP);
+        if cols <= count {
+            return Fit {
+                count,
+                pitch: col_w + CARD_GAP,
+            };
+        }
+        let count = fits(PAD);
+        let pitch = if count > 1 {
+            let gap = ((room - count as CGFloat * col_w) / (count - 1) as CGFloat)
+                .floor()
+                .max(PAD);
+            // The whole points the floor drops could leave the next column's edge in view; it
+            // takes up to `count` points of the right pad to push it past.
+            (col_w + gap).max(((width - PAD) / count as CGFloat).ceil())
+        } else {
+            (width - PAD).max(col_w + PAD)
+        };
+        Fit { count, pitch }
+    }
+
+    /// The document's width for `cols` columns `col_w` wide in a row `width` wide: past one
+    /// page, whole pitches more, so every page offset lands on a column.
+    fn content_w(self, width: CGFloat, col_w: CGFloat, cols: usize) -> CGFloat {
+        if cols > self.count {
+            width + (cols - self.count) as CGFloat * self.pitch
+        } else {
+            2.0 * PAD + cols as CGFloat * col_w + cols.saturating_sub(1) as CGFloat * CARD_GAP
+        }
+    }
+
+    /// The offset that shows column `i` whole from `offset`: unmoved if it shows already,
+    /// else the nearest page edge that has it, within `0..=max`.
+    fn reveal(
+        self,
+        offset: CGFloat,
+        width: CGFloat,
+        col_w: CGFloat,
+        i: usize,
+        max: CGFloat,
+    ) -> CGFloat {
+        let x = PAD + i as CGFloat * self.pitch;
+        let to = if x < offset {
+            i as CGFloat * self.pitch
+        } else if x + col_w > offset + width {
+            (i + 1).saturating_sub(self.count) as CGFloat * self.pitch
+        } else {
+            offset
+        };
+        to.clamp(0.0, max.max(0.0))
+    }
+}
+
+/// The columns of `n` items in a row: a grid stacks `GRID_ROWS` in each.
+fn columns(n: usize, grid: bool) -> usize {
+    if grid { n.div_ceil(GRID_ROWS) } else { n }
+}
+
+/// A row's column width: a card's, or a grid column's.
+fn col_w(grid: bool) -> CGFloat {
+    if grid { GRID_COL_W } else { CARD_W }
+}
+
+/// The items whose cards cover the horizontal span `lo..hi` of a row's document, columns
+/// `pitch` apart, as a range of item indexes.
+fn visible_items(
+    n: usize,
+    grid: bool,
+    pitch: CGFloat,
+    lo: CGFloat,
+    hi: CGFloat,
+) -> std::ops::Range<usize> {
+    let (first, per) = if grid {
+        (PAD, GRID_ROWS)
     } else {
-        (PAD - INSET, CARD_W + CARD_GAP, 1)
+        (PAD - INSET, 1)
     };
     let cols = n.div_ceil(per);
     let first_col = ((lo - SIDE_MARGIN - first) / pitch).floor().max(0.0) as usize;
@@ -724,21 +832,29 @@ fn page_buttons(content: CGFloat, visible: CGFloat, offset: CGFloat) -> Option<(
     (max > 0.5).then_some((offset > 0.5, offset < max - 0.5))
 }
 
-/// The offset a page back or forward from `offset`: the visible width rounded down to whole
-/// columns of `pitch`, at least one, kept within the row.
+/// The offset a page back or forward from `offset`: a page of `fit`'s columns, landing on a
+/// column's edge even after a free scroll left the row part-way into one, so a column shown
+/// only in part is on the new page; kept within the row.
 fn page_offset(
     content: CGFloat,
     visible: CGFloat,
-    pitch: CGFloat,
+    fit: Fit,
     offset: CGFloat,
     forward: bool,
 ) -> CGFloat {
-    let step = (visible / pitch).floor().max(1.0) * pitch;
-    let to = if forward {
-        offset + step
+    // A trackpad leaves fractional offsets.
+    let at = offset / fit.pitch;
+    let first = if forward {
+        (at + 0.01).floor()
     } else {
-        offset - step
+        (at - 0.01).ceil()
     };
+    let count = fit.count as CGFloat;
+    let to = if forward {
+        first + count
+    } else {
+        first - count
+    } * fit.pitch;
     to.clamp(0.0, (content - visible).max(0.0))
 }
 
@@ -799,17 +915,13 @@ fn keeps_card<T: PartialEq>(old: &[T], new: &[T], i: usize) -> bool {
     old.get(i).is_some_and(|o| new.get(i) == Some(o))
 }
 
-/// A row's height without its title, and its document's width.
-fn row_size(items: usize, grid: bool) -> (CGFloat, CGFloat) {
+/// A row's height without its title, and its document's width, `width` showing `fit`.
+fn row_size(items: usize, grid: bool, fit: Fit, width: CGFloat) -> (CGFloat, CGFloat) {
+    let content = fit.content_w(width, col_w(grid), columns(items, grid));
     if grid {
-        let cols = items.div_ceil(GRID_ROWS) as CGFloat;
-        (
-            GRID_ROWS as CGFloat * GRID_ROW_H,
-            2.0 * PAD + cols * GRID_COL_W + (cols - 1.0) * CARD_GAP,
-        )
+        (GRID_ROWS as CGFloat * GRID_ROW_H, content)
     } else {
-        let n = items as CGFloat;
-        (card_h(), 2.0 * PAD + n * CARD_W + (n - 1.0) * CARD_GAP)
+        (card_h(), content)
     }
 }
 
@@ -828,10 +940,18 @@ struct ShelfRow {
     grid: bool,
     /// Whether the page mixes services, so its cards show their service's badge.
     mixed: bool,
+    /// Whether the row is search's row of artists, which says what its cards are.
+    artists: bool,
+    fit: Cell<Fit>,
     /// Top and bottom of the row, title included, in the page's document.
     top: CGFloat,
     bottom: CGFloat,
     cards: RefCell<HashMap<usize, Retained<ShelfCard>>>,
+}
+
+/// Whether `items` are search's row of artists.
+fn artists_row(surface: Surface, items: &[Item]) -> bool {
+    surface == Surface::Search && !items.is_empty() && items.iter().all(is_artist)
 }
 
 impl ShelfRow {
@@ -853,8 +973,9 @@ impl ShelfRow {
     /// stay, the rest go for `fill` to make again, and the document fits the new items.
     fn update(&mut self, shelf: usize, new: &Shelf, mixed: bool, changed: bool) {
         let grid = is_grid(new);
-        // A new layout or badge changes every card.
-        let restyle = grid != self.grid || mixed != self.mixed;
+        let artists = artists_row(self.surface, &new.items);
+        // A new layout, badge or subtitle rule changes every card.
+        let restyle = grid != self.grid || mixed != self.mixed || artists != self.artists;
         self.cards.borrow_mut().retain(|&i, card| {
             let keep = !restyle && (!changed || keeps_card(&self.items, &new.items, i));
             if keep {
@@ -867,11 +988,58 @@ impl ShelfRow {
         if changed {
             self.items = new.items.clone();
         }
-        (self.shelf, self.grid, self.mixed) = (shelf, grid, mixed);
-        let (row_h, content_w) = row_size(self.items.len(), grid);
+        (self.shelf, self.grid, self.mixed, self.artists) = (shelf, grid, mixed, artists);
+        self.refit();
+    }
+
+    /// Fits the row's columns and document to the width it shows, keeping the scroll on the
+    /// column it was at, and moves the cards to their places.
+    fn refit(&self) {
+        let width = self.scroll.contentSize().width;
+        let cols = columns(self.items.len(), self.grid);
+        let fit = Fit::of(width, col_w(self.grid), cols);
+        let old = self.fit.replace(fit);
+        let (row_h, content_w) = row_size(self.items.len(), self.grid, fit, width);
         let size = NSSize::new(content_w, row_h);
         if self.doc.frame().size != size {
             self.doc.setFrameSize(size);
+        }
+        if old != fit {
+            let clip = self.scroll.contentView();
+            let column = (clip.bounds().origin.x / old.pitch).round();
+            self.scroll
+                .scroll_to((column * fit.pitch).clamp(0.0, self.scroll.max_offset()));
+            let frames: Vec<(usize, Retained<ShelfCard>)> = self
+                .cards
+                .borrow()
+                .iter()
+                .map(|(&i, c)| (i, c.clone()))
+                .collect();
+            for (i, card) in frames {
+                card.setFrame(self.card_frame(i));
+            }
+        }
+        self.clamp_scroll();
+    }
+
+    /// Where item `i`'s card goes in the row's document.
+    fn card_frame(&self, i: usize) -> NSRect {
+        let pitch = self.fit.get().pitch;
+        if self.grid {
+            let (col, row) = (i / GRID_ROWS, i % GRID_ROWS);
+            rect(
+                PAD + col as CGFloat * pitch,
+                row as CGFloat * GRID_ROW_H,
+                GRID_COL_W,
+                GRID_ROW_H,
+            )
+        } else {
+            rect(
+                PAD - INSET + i as CGFloat * pitch,
+                0.0,
+                CARD_W + 2.0 * INSET,
+                card_h(),
+            )
         }
     }
 
@@ -910,15 +1078,6 @@ impl ShelfRow {
         }
     }
 
-    /// One column: a card, or a grid column, and the gap after it.
-    fn pitch(&self) -> CGFloat {
-        if self.grid {
-            GRID_COL_W + CARD_GAP
-        } else {
-            CARD_W + CARD_GAP
-        }
-    }
-
     fn update_paging(&self) {
         let clip = self.scroll.contentView().bounds();
         let state = page_buttons(self.doc.frame().size.width, clip.size.width, clip.origin.x);
@@ -929,9 +1088,10 @@ impl ShelfRow {
         }
     }
 
-    /// Keeps the cards of `visible_items` and drops the rest.
-    fn fill(&self, mtm: MainThreadMarker, lo: CGFloat, hi: CGFloat) {
-        let want = visible_items(self.items.len(), self.grid, lo, hi);
+    /// Keeps the cards of `visible_items` and drops the rest; a new card for item `selected`
+    /// shows it selected.
+    fn fill(&self, mtm: MainThreadMarker, lo: CGFloat, hi: CGFloat, selected: Option<usize>) {
+        let want = visible_items(self.items.len(), self.grid, self.fit.get().pitch, lo, hi);
         let mut cards = self.cards.borrow_mut();
         cards.retain(|i, card| {
             let keep = want.contains(i);
@@ -944,48 +1104,37 @@ impl ShelfRow {
             if cards.contains_key(&i) {
                 continue;
             }
-            let frame = if self.grid {
-                let (col, row) = (i / GRID_ROWS, i % GRID_ROWS);
-                rect(
-                    PAD + col as CGFloat * (GRID_COL_W + CARD_GAP),
-                    row as CGFloat * GRID_ROW_H,
-                    GRID_COL_W,
-                    GRID_ROW_H,
-                )
-            } else {
-                rect(
-                    PAD - INSET + i as CGFloat * (CARD_W + CARD_GAP),
-                    0.0,
-                    CARD_W + 2.0 * INSET,
-                    card_h(),
-                )
-            };
             let item = &self.items[i];
             let badge = vm::badge(vm::item_provider(item), self.mixed);
             let card = ShelfCard::new(
                 mtm,
                 self.surface,
-                frame,
+                self.card_frame(i),
                 self.shelf,
                 i,
                 item,
                 self.grid,
                 badge,
+                self.artists,
             );
+            if selected == Some(i) {
+                card.set_selected(true);
+            }
             self.doc.addSubview(&card);
             cards.insert(i, card);
         }
     }
 }
 
-/// A card's height: cover, up to two title lines, one subtitle line, and the hover inset.
+/// A card's height: cover, one title line, two subtitle lines, and the hover inset. Every
+/// card keeps room for both subtitle lines, so a row's titles and subtitles line up.
 fn card_h() -> CGFloat {
     2.0 * INSET
         + CARD_W
         + 8.0
-        + 2.0 * widgets::line_height(&theme::font(13.0, Weight::Medium))
+        + widgets::line_height(&theme::font(13.0, Weight::Medium))
         + 2.0
-        + widgets::line_height(&theme::font(12.0, Weight::Regular))
+        + 2.0 * widgets::line_height(&theme::font(12.0, Weight::Regular))
 }
 
 /// A row's scroll view, and its cards by item index.
@@ -1002,9 +1151,11 @@ pub struct Shelves {
     mtm: MainThreadMarker,
     surface: Surface,
     pub view: Retained<NSScrollView>,
-    doc: Retained<FlippedView>,
+    doc: Retained<NSView>,
     rows: RefCell<Vec<ShelfRow>>,
     lead: RefCell<Option<Lead>>,
+    /// The card selected with the keyboard: its row's place in `rows`, and its item's index.
+    selected: Cell<Option<(usize, usize)>>,
     watcher: Retained<ScrollWatcher>,
 }
 
@@ -1023,14 +1174,21 @@ impl Shelves {
         view.setBorderType(NSBorderType::NoBorder);
         view.contentView().setDrawsBackground(false);
         view.setFocusRingType(NSFocusRingType::None);
-        let doc: Retained<FlippedView> = {
-            // SAFETY: `initWithFrame:` is NSView's designated initializer.
-            let v: Retained<FlippedView> = unsafe {
-                msg_send![FlippedView::alloc(mtm), initWithFrame: rect(0.0, 0.0, frame.size.width, 0.0)]
-            };
-            v.setAutoresizingMask(FLEX_W);
-            v
+        let at = rect(0.0, 0.0, frame.size.width, 0.0);
+        // Search's page takes the keyboard, whose arrows move through its results.
+        // SAFETY: `initWithFrame:` is NSView's designated initializer.
+        let doc: Retained<NSView> = unsafe {
+            if surface == Surface::Search {
+                let v: Retained<GridDoc> = msg_send![GridDoc::alloc(mtm), initWithFrame: at];
+                v.setFocusRingType(NSFocusRingType::None);
+                Retained::into_super(v)
+            } else {
+                let v: Retained<FlippedView> =
+                    msg_send![FlippedView::alloc(mtm), initWithFrame: at];
+                Retained::into_super(v)
+            }
         };
+        doc.setAutoresizingMask(FLEX_W);
         view.setDocumentView(Some(&doc));
         let watcher = ScrollWatcher::alloc(mtm).set_ivars(WatcherIvars { surface });
         // SAFETY: NSObject's `init`.
@@ -1042,8 +1200,14 @@ impl Shelves {
             doc,
             rows: RefCell::new(Vec::new()),
             lead: RefCell::new(None),
+            selected: Cell::new(None),
             watcher,
         }
+    }
+
+    /// The view that takes the keyboard, on search's page.
+    pub fn responder(&self) -> &NSView {
+        &self.doc
     }
 
     /// Puts `view`, `height` high and as wide as the page, above the first shelf, in place of
@@ -1071,8 +1235,9 @@ impl Shelves {
     /// title it is, keeps its views: unchanged, it is left alone, and changed, it keeps its
     /// scroll and the cards of the items it still has in the same place. The page stays
     /// scrolled where it was, as far as the new shelves reach. Otherwise every row is made
-    /// anew and the page starts at its top.
+    /// anew and the page starts at its top. Nothing is selected.
     pub fn set_shelves(&self, shelves: &[Shelf], keep_scroll: bool) {
+        self.select(None);
         let shown: Vec<(usize, &Shelf)> = shelves
             .iter()
             .enumerate()
@@ -1208,7 +1373,9 @@ impl Shelves {
             &format!("Show more in {}", shelf.title),
         );
         let y = top + SHELF_TITLE_H + SHELF_TITLE_GAP;
-        let (row_h, content_w) = row_size(shelf.items.len(), grid);
+        let n = shelf.items.len();
+        let fit = Fit::of(width, col_w(grid), columns(n, grid));
+        let (row_h, content_w) = row_size(n, grid, fit, width);
         let scroll = RowScroll::new(self.mtm, rect(0.0, y, width, row_h));
         scroll.setAutoresizingMask(FLEX_W);
         scroll.setHasHorizontalScroller(true);
@@ -1236,6 +1403,8 @@ impl Shelves {
             items: shelf.items.clone(),
             grid,
             mixed,
+            artists: artists_row(self.surface, &shelf.items),
+            fit: Cell::new(fit),
             top,
             bottom: y + row_h,
             cards: RefCell::new(HashMap::new()),
@@ -1245,17 +1414,95 @@ impl Shelves {
     /// Creates the cards near the visible area and drops those that left it.
     pub fn sync(&self) {
         let vis = self.view.documentVisibleRect();
-        for row in self.rows.borrow().iter() {
+        let selected = self.selected.get();
+        for (at, row) in self.rows.borrow().iter().enumerate() {
             let near = row.bottom > vis.origin.y - VIEW_MARGIN
                 && row.top < vis.origin.y + vis.size.height + VIEW_MARGIN;
             if near {
                 let inner = row.scroll.documentVisibleRect();
-                row.fill(self.mtm, inner.origin.x, inner.origin.x + inner.size.width);
+                let pick = selected.filter(|s| s.0 == at).map(|s| s.1);
+                row.fill(
+                    self.mtm,
+                    inner.origin.x,
+                    inner.origin.x + inner.size.width,
+                    pick,
+                );
             } else {
                 row.clear();
             }
             row.update_paging();
         }
+    }
+
+    /// Fits each row's columns to the page's width, after the window resized.
+    pub fn relayout(&self) {
+        for row in self.rows.borrow().iter() {
+            row.refit();
+        }
+        self.sync();
+    }
+
+    /// How many cards each row has, in order.
+    pub fn row_lengths(&self) -> Vec<usize> {
+        self.rows.borrow().iter().map(|r| r.items.len()).collect()
+    }
+
+    /// Selects card `index` of row `row`, the row's place among those shown, scrolled into
+    /// view along its row and down the page; `None` clears the selection.
+    pub fn select(&self, at: Option<(usize, usize)>) {
+        let old = self.selected.replace(at);
+        let card = |(r, i): (usize, usize)| {
+            let rows = self.rows.borrow();
+            let row = rows.get(r)?;
+            row.cards.borrow().get(&i).cloned()
+        };
+        if let Some(c) = old.and_then(card) {
+            c.set_selected(false);
+        }
+        let Some((r, i)) = at else { return };
+        let (scroll, to, span) = {
+            let rows = self.rows.borrow();
+            let Some(row) = rows.get(r) else { return };
+            row.scroll.stop_fling();
+            let b = row.scroll.contentView().bounds();
+            let fit = row.fit.get();
+            let to = fit.reveal(
+                b.origin.x,
+                b.size.width,
+                col_w(row.grid),
+                i,
+                row.scroll.max_offset(),
+            );
+            let span = rect(
+                0.0,
+                row.top,
+                self.doc.frame().size.width,
+                row.bottom - row.top,
+            );
+            (row.scroll.clone(), to, span)
+        };
+        if to != scroll.contentView().bounds().origin.x {
+            scroll.scroll_to(to);
+        }
+        self.doc.scrollRectToVisible(span);
+        self.sync();
+        if let Some(c) = card((r, i)) {
+            c.set_selected(true);
+        }
+    }
+
+    /// The shelf, as the page's list counts, and item of the selected card.
+    pub fn selected_item(&self) -> Option<(usize, usize)> {
+        let (r, i) = self.selected.get()?;
+        self.rows.borrow().get(r).map(|row| (row.shelf, i))
+    }
+
+    /// The selected card's view, while it has one.
+    pub fn selected_view(&self) -> Option<Retained<NSView>> {
+        let (r, i) = self.selected.get()?;
+        let rows = self.rows.borrow();
+        let card = rows.get(r)?.cards.borrow().get(&i).cloned()?;
+        Some(Retained::into_super(card))
     }
 
     /// Each row's scroll view, and its cards with their items' indexes, in order: what a test
@@ -1278,13 +1525,6 @@ impl Shelves {
             .collect()
     }
 
-    /// Updates the paging buttons for the rows' widths, after the window resized.
-    pub fn update_paging(&self) {
-        for row in self.rows.borrow().iter() {
-            row.update_paging();
-        }
-    }
-
     /// The place in the page of the first row of cards, not a grid.
     pub fn first_card_row(&self) -> Option<usize> {
         self.rows.borrow().iter().position(|r| !r.grid)
@@ -1300,7 +1540,7 @@ impl Shelves {
         let x = page_offset(
             row.doc.frame().size.width,
             b.size.width,
-            row.pitch(),
+            row.fit.get(),
             b.origin.x,
             forward,
         );
@@ -1624,26 +1864,141 @@ mod tests {
     fn cards_exist_only_near_the_visible_span() {
         // Cards 144 pt apart, the first at x = 18: with 72 pt of margin, a 0..800 span
         // reaches 872 and keeps the cards starting before it.
-        let r = visible_items(100, false, 0.0, 800.0);
+        let pitch = CARD_W + CARD_GAP;
+        let r = visible_items(100, false, pitch, 0.0, 800.0);
         assert_eq!(r.start, 0);
         assert!(r.end >= 6 && r.end <= 8, "{r:?}");
         // Scrolled far right, the left cards are gone.
-        let r = visible_items(100, false, 4000.0, 4800.0);
+        let r = visible_items(100, false, pitch, 4000.0, 4800.0);
         assert!(r.start > 20 && r.end < 40 && r.start < r.end, "{r:?}");
         // Short rows take what they have; none past the end.
-        assert_eq!(visible_items(3, false, 0.0, 800.0), 0..3);
-        assert_eq!(visible_items(0, false, 0.0, 800.0), 0..0);
-        assert_eq!(visible_items(3, false, 5000.0, 5800.0), 0..0);
+        assert_eq!(visible_items(3, false, pitch, 0.0, 800.0), 0..3);
+        assert_eq!(visible_items(0, false, pitch, 0.0, 800.0), 0..0);
+        assert_eq!(visible_items(3, false, pitch, 5000.0, 5800.0), 0..0);
+        // Wider gaps, fewer cards in the same span.
+        let wide = visible_items(100, false, 2.0 * pitch, 0.0, 800.0);
+        assert!(wide.end >= 3 && wide.end <= 4, "{wide:?}");
     }
 
     #[test]
     fn grid_columns_hold_four_rows() {
         // 316 pt per column: an 860 pt span shows three columns and a margin into the 4th.
-        let r = visible_items(40, true, 0.0, 860.0);
+        let pitch = GRID_COL_W + CARD_GAP;
+        let r = visible_items(40, true, pitch, 0.0, 860.0);
         assert_eq!(r.start, 0);
         assert_eq!(r.end % GRID_ROWS, 0);
         assert!(r.end >= 12 && r.end <= 16, "{r:?}");
-        assert_eq!(visible_items(6, true, 0.0, 860.0), 0..6);
+        assert_eq!(visible_items(6, true, pitch, 0.0, 860.0), 0..6);
+    }
+
+    /// The columns, of `cols` columns `col_w` wide, that show whole and in part at `offset`
+    /// in a row `width` wide fitted by `fit`.
+    fn shown(
+        fit: Fit,
+        width: CGFloat,
+        col_w: CGFloat,
+        cols: usize,
+        offset: CGFloat,
+    ) -> (usize, usize) {
+        let (mut whole, mut part) = (0, 0);
+        for i in 0..cols {
+            let x = PAD + i as CGFloat * fit.pitch - offset;
+            let (l, r) = (x, x + col_w);
+            if l >= 0.0 && r <= width {
+                whole += 1;
+            } else if r > 0.0 && l < width {
+                part += 1;
+            }
+        }
+        (whole, part)
+    }
+
+    #[test]
+    fn a_row_shows_only_whole_columns_on_every_page_at_any_width() {
+        for (col_w, cols) in [(CARD_W, 30), (GRID_COL_W, 8), (CARD_W, 3)] {
+            for w in (600..=2600).step_by(7) {
+                let width = w as CGFloat;
+                let fit = Fit::of(width, col_w, cols);
+                let content = fit.content_w(width, col_w, cols);
+                let max = (content - width).max(0.0);
+                // From the start, every page forward, and the end.
+                let mut offset = 0.0;
+                let mut pages = vec![0.0];
+                while offset < max {
+                    offset = page_offset(content, width, fit, offset, true);
+                    pages.push(offset);
+                }
+                for &at in &pages {
+                    let (whole, part) = shown(fit, width, col_w, cols, at);
+                    assert_eq!(part, 0, "{col_w} pt × {cols} at {width} pt, offset {at}");
+                    assert_eq!(whole, fit.count.min(cols), "{width} pt, offset {at}");
+                }
+                // The last column ends at the right pad or a few points into it, or a short
+                // row fits within it.
+                let last = PAD + (cols - 1) as CGFloat * fit.pitch + col_w - max;
+                let into = fit.count.saturating_sub(1) as CGFloat;
+                assert!(last <= width - PAD + into, "{width} pt: ends at {last}");
+            }
+        }
+    }
+
+    #[test]
+    fn the_room_left_over_widens_the_gaps_of_a_row_that_pages() {
+        // 2200 pt: the 2152 pt between the pads holds 14 cards of 128 pt at least 24 pt apart;
+        // the 48 pt over spreads across their 13 gaps, whole points each, and one more point
+        // each puts the 15th wholly past the edge.
+        let fit = Fit::of(2200.0, CARD_W, 30);
+        assert_eq!(fit.count, 14);
+        assert_eq!(fit.pitch, CARD_W + PAD + 4.0);
+        assert!(PAD + 14.0 * fit.pitch >= 2200.0);
+        // 2304 pt: exactly 15 at 24 pt.
+        let fit = Fit::of(2304.0, CARD_W, 30);
+        assert_eq!(fit.count, 15);
+        assert_eq!(fit.pitch, CARD_W + PAD);
+        // A row that fits keeps its 16 pt gaps: nothing to page to.
+        let fit = Fit::of(2200.0, CARD_W, 15);
+        assert_eq!(fit.pitch, CARD_W + CARD_GAP);
+        assert_eq!(
+            fit.content_w(2200.0, CARD_W, 15),
+            2.0 * PAD + 15.0 * CARD_W + 14.0 * CARD_GAP
+        );
+        // Narrower than one column, still one, and the next one starts past the edge.
+        let fit = Fit::of(100.0, CARD_W, 5);
+        assert_eq!(fit.count, 1);
+        assert!(PAD + fit.pitch >= 100.0);
+    }
+
+    #[test]
+    fn a_selected_column_scrolls_to_the_page_edge_that_shows_it() {
+        let fit = Fit::of(860.0, CARD_W, 20);
+        let (n, p) = (fit.count, fit.pitch);
+        let max = fit.content_w(860.0, CARD_W, 20) - 860.0;
+        // Already whole: no move.
+        assert_eq!(fit.reveal(0.0, 860.0, CARD_W, 0, max), 0.0);
+        assert_eq!(fit.reveal(0.0, 860.0, CARD_W, n - 1, max), 0.0);
+        // Just past the right edge: it becomes the last column shown.
+        assert_eq!(fit.reveal(0.0, 860.0, CARD_W, n, max), p);
+        // Left of the view: it becomes the first.
+        assert_eq!(fit.reveal(5.0 * p, 860.0, CARD_W, 2, max), 2.0 * p);
+        // Never past the row's end.
+        assert_eq!(fit.reveal(0.0, 860.0, CARD_W, 19, max), max);
+    }
+
+    #[test]
+    fn subtitles_under_artists_leave_the_kind_out() {
+        let sub = "Artist \u{2022} 68.1M monthly audience";
+        assert_eq!(shown_subtitle(sub, true), "68.1M monthly audience");
+        assert_eq!(shown_subtitle(sub, false), sub);
+        assert_eq!(shown_subtitle("Artist", true), "");
+        assert_eq!(shown_subtitle("Artist", false), "Artist");
+        // Only a leading kind, and only "Artist".
+        let album = "Album \u{2022} Daft Punk \u{2022} 2013";
+        assert_eq!(shown_subtitle(album, true), album);
+        assert_eq!(
+            shown_subtitle("Artistic \u{2022} 2", true),
+            "Artistic \u{2022} 2"
+        );
+        assert_eq!(shown_subtitle("", true), "");
     }
 
     #[test]
@@ -1658,22 +2013,26 @@ mod tests {
     }
 
     #[test]
-    fn a_page_is_the_visible_width_in_whole_columns_within_the_row() {
-        let pitch = CARD_W + CARD_GAP;
+    fn a_page_is_the_fitted_columns_within_the_row() {
+        let fit = |count, pitch| Fit { count, pitch };
+        let five = fit(5, 144.0);
         // At the start, back stays put; forward moves five 144 pt columns.
-        assert_eq!(page_offset(2000.0, 860.0, pitch, 0.0, false), 0.0);
-        assert_eq!(page_offset(2000.0, 860.0, pitch, 0.0, true), 720.0);
-        // The last page is partial: it stops at the row's end, 1140 pt in.
-        assert_eq!(page_offset(2000.0, 860.0, pitch, 720.0, true), 1140.0);
-        assert_eq!(page_offset(2000.0, 860.0, pitch, 1140.0, true), 1140.0);
-        assert_eq!(page_offset(2000.0, 860.0, pitch, 1140.0, false), 420.0);
-        assert_eq!(page_offset(1184.0, 860.0, pitch, 0.0, true), 324.0);
-        // Narrower than a column, a page is still one column.
-        assert_eq!(page_offset(2000.0, 100.0, pitch, 0.0, true), 144.0);
-        assert_eq!(page_offset(2000.0, 100.0, pitch, 144.0, false), 0.0);
-        // A grid steps by its own columns: two of 316 pt fit in 860.
-        let grid = GRID_COL_W + CARD_GAP;
-        assert_eq!(page_offset(2000.0, 860.0, grid, 0.0, true), 632.0);
+        assert_eq!(page_offset(2000.0, 860.0, five, 0.0, false), 0.0);
+        assert_eq!(page_offset(2000.0, 860.0, five, 0.0, true), 720.0);
+        // The last page stops at the row's end.
+        assert_eq!(page_offset(2000.0, 860.0, five, 720.0, true), 1140.0);
+        assert_eq!(page_offset(2000.0, 860.0, five, 1140.0, true), 1140.0);
+        // Back from part-way into a column starts the page on the next one.
+        assert_eq!(page_offset(2000.0, 860.0, five, 1140.0, false), 432.0);
+        assert_eq!(page_offset(2000.0, 860.0, five, 300.0, true), 1008.0);
+        assert_eq!(page_offset(2000.0, 860.0, five, 300.0, false), 0.0);
+        // Gaps wide enough to leave a page's width under its columns' pitches still step
+        // a whole page.
+        let wide = fit(4, 180.0);
+        assert_eq!(page_offset(3000.0, 700.0, wide, 0.0, true), 720.0);
+        // One column a page.
+        assert_eq!(page_offset(2000.0, 100.0, fit(1, 144.0), 0.0, true), 144.0);
+        assert_eq!(page_offset(2000.0, 100.0, fit(1, 144.0), 144.0, false), 0.0);
     }
 
     #[test]
