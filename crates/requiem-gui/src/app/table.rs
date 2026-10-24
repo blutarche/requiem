@@ -146,6 +146,8 @@ pub struct ControllerIvars {
     menu_row: Cell<Option<NSInteger>>,
     /// The pages of the artists of the context menu's row: Go to Artist's, by tag.
     artists: RefCell<Vec<Collection>>,
+    /// Whether titles carry their row's number where the cover would be.
+    numbered: Cell<bool>,
 }
 
 define_class!(
@@ -483,14 +485,26 @@ impl Controller {
         if let Some(bar) = iv.bar.get() {
             bar.setHidden(!current);
         }
+        let numbered = self.ivars().numbered.get();
         if let Some(cover) = iv.cover.get() {
-            cover.set_url(r.artwork.as_deref());
+            cover.setHidden(numbered);
+            cover.set_url(if numbered { None } else { r.artwork.as_deref() });
         }
         if let Some(b) = iv.badge.get() {
-            b.set(r.badge);
+            b.setHidden(numbered);
+            b.set(if numbered { None } else { r.badge });
+        }
+        if let Some(n) = iv.number.get() {
+            n.setHidden(!numbered);
+            widgets::set_text(n, &track_number(row));
         }
         Some(Retained::into_super(cell))
     }
+}
+
+/// A row's number in an album's list.
+fn track_number(row: usize) -> String {
+    (row + 1).to_string()
 }
 
 /// What VoiceOver reads for a title cell. The current and played rows, and the service a
@@ -818,6 +832,8 @@ pub struct TextCellIvars {
     /// The title's artwork.
     cover: OnceCell<Retained<Cover>>,
     badge: OnceCell<Retained<Badge>>,
+    /// The row's number, in the artwork's place.
+    number: OnceCell<Retained<NSTextField>>,
     /// Muted text, raised to ink-2 on a selected row.
     secondary: bool,
     row_selected: Cell<bool>,
@@ -842,6 +858,7 @@ impl TextCell {
             bar: OnceCell::new(),
             cover: OnceCell::new(),
             badge: OnceCell::new(),
+            number: OnceCell::new(),
             secondary: col != Col::Title,
             row_selected: Cell::new(false),
             played: Cell::new(false),
@@ -890,6 +907,21 @@ impl TextCell {
             badge.setAutoresizingMask(PIN_LEFT);
             this.addSubview(&badge);
             let _ = this.ivars().badge.set(badge);
+            let number = widgets::placed_label(
+                mtm,
+                "",
+                &theme::tabular(14.0, Weight::Regular),
+                &theme::muted(),
+                at.origin.x,
+                ROW_H / 2.0,
+                THUMB,
+                PIN_LEFT | PIN_TOP | PIN_BOTTOM,
+            );
+            number.setAlignment(NSTextAlignment::Right);
+            number.setHidden(true);
+            widgets::hide_from_accessibility(&number);
+            this.addSubview(&number);
+            let _ = this.ivars().number.set(number);
             let bar = widgets::panel(
                 mtm,
                 rect(0.0, 0.0, 2.0, ROW_H),
@@ -953,6 +985,14 @@ impl TextCell {
             (true, false, false) => theme::muted(),
         };
         l.setTextColor(Some(&c));
+        if let Some(n) = iv.number.get() {
+            let c = if iv.row_selected.get() {
+                theme::ink_2()
+            } else {
+                theme::muted()
+            };
+            n.setTextColor(Some(&c));
+        }
     }
 }
 
@@ -1296,6 +1336,7 @@ impl Table {
             table: OnceCell::new(),
             menu_row: Cell::new(None),
             artists: RefCell::new(Vec::new()),
+            numbered: Cell::new(false),
         });
         // SAFETY: NSObject's `init`.
         let controller: Retained<Controller> = unsafe { msg_send![super(controller), init] };
@@ -1427,8 +1468,10 @@ impl Table {
         usize::try_from(self.table.selectedRow()).ok()
     }
 
-    /// Shows or hides the Album column, which a narrow table drops either way.
+    /// Shows or hides the Album column, which a narrow table drops either way. Without it, as on an
+    /// album's page, titles are numbered in place of their covers.
     pub fn set_album(&self, shown: bool) {
+        self.controller.ivars().numbered.set(!shown);
         if self.header.ivars().album.replace(shown) != shown {
             self.header.fit_columns();
         }
@@ -1748,6 +1791,12 @@ mod tests {
         assert!(!lists_album(CollectionKind::Album));
         assert!(lists_album(CollectionKind::Playlist));
         assert!(lists_album(CollectionKind::Artist));
+    }
+
+    #[test]
+    fn an_albums_rows_count_from_one() {
+        assert_eq!(track_number(0), "1");
+        assert_eq!(track_number(9), "10");
     }
 
     #[test]
