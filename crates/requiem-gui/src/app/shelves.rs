@@ -34,7 +34,6 @@ use crate::vm::{self, Service};
 const PAD: CGFloat = 24.0;
 const TOP_PAD: CGFloat = 8.0;
 const CARD_W: CGFloat = 128.0;
-const CARD_GAP: CGFloat = 16.0;
 /// A card's hover fill reaches this far past its content, on every side.
 const INSET: CGFloat = 6.0;
 const COVER_RADIUS: CGFloat = 8.0;
@@ -719,11 +718,11 @@ fn is_grid(shelf: &Shelf) -> bool {
     !shelf.items.is_empty() && shelf.items.iter().all(|i| matches!(i, Item::Track(_)))
 }
 
-/// How a row's columns fit the width it shows. A row that fits between its pads keeps
-/// `CARD_GAP` gaps. A longer one fits as many columns as it can at least `PAD` apart and
-/// spreads the room left over into its gaps in whole points, so a page holds whole columns,
-/// its last one ends at the right pad or a few points into it, and the columns either side of
-/// the page fall wholly past the edges.
+/// How a row's columns fit the width it shows: as many as it can at least `PAD` apart, with
+/// the room left over spread into the gaps in whole points, so a page holds whole columns, its
+/// last one ends at the right pad or a few points into it, and the columns either side of the
+/// page fall wholly past the edges. Short rows space theirs the same, so the columns of every
+/// row on a page line up.
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct Fit {
     /// The columns a page shows.
@@ -733,18 +732,10 @@ struct Fit {
 }
 
 impl Fit {
-    /// `cols` columns `col_w` wide, in a row `width` wide.
-    fn of(width: CGFloat, col_w: CGFloat, cols: usize) -> Fit {
+    /// Columns `col_w` wide, in a row `width` wide.
+    fn of(width: CGFloat, col_w: CGFloat) -> Fit {
         let room = width - 2.0 * PAD;
-        let fits = |gap: CGFloat| ((room + gap) / (col_w + gap)).floor().max(1.0) as usize;
-        let count = fits(CARD_GAP);
-        if cols <= count {
-            return Fit {
-                count,
-                pitch: col_w + CARD_GAP,
-            };
-        }
-        let count = fits(PAD);
+        let count = ((room + PAD) / (col_w + PAD)).floor().max(1.0) as usize;
         let pitch = if count > 1 {
             let gap = ((room - count as CGFloat * col_w) / (count - 1) as CGFloat)
                 .floor()
@@ -764,7 +755,9 @@ impl Fit {
         if cols > self.count {
             width + (cols - self.count) as CGFloat * self.pitch
         } else {
-            2.0 * PAD + cols as CGFloat * col_w + cols.saturating_sub(1) as CGFloat * CARD_GAP
+            // A full page's last column may reach a few points into the right pad; that is no
+            // reason to scroll.
+            (2.0 * PAD + cols.saturating_sub(1) as CGFloat * self.pitch + col_w).min(width)
         }
     }
 
@@ -996,8 +989,7 @@ impl ShelfRow {
     /// column it was at, and moves the cards to their places.
     fn refit(&self) {
         let width = self.scroll.contentSize().width;
-        let cols = columns(self.items.len(), self.grid);
-        let fit = Fit::of(width, col_w(self.grid), cols);
+        let fit = Fit::of(width, col_w(self.grid));
         let old = self.fit.replace(fit);
         let (row_h, content_w) = row_size(self.items.len(), self.grid, fit, width);
         let size = NSSize::new(content_w, row_h);
@@ -1374,7 +1366,7 @@ impl Shelves {
         );
         let y = top + SHELF_TITLE_H + SHELF_TITLE_GAP;
         let n = shelf.items.len();
-        let fit = Fit::of(width, col_w(grid), columns(n, grid));
+        let fit = Fit::of(width, col_w(grid));
         let (row_h, content_w) = row_size(n, grid, fit, width);
         let scroll = RowScroll::new(self.mtm, rect(0.0, y, width, row_h));
         scroll.setAutoresizingMask(FLEX_W);
@@ -1864,7 +1856,7 @@ mod tests {
     fn cards_exist_only_near_the_visible_span() {
         // Cards 144 pt apart, the first at x = 18: with 72 pt of margin, a 0..800 span
         // reaches 872 and keeps the cards starting before it.
-        let pitch = CARD_W + CARD_GAP;
+        let pitch = CARD_W + 16.0;
         let r = visible_items(100, false, pitch, 0.0, 800.0);
         assert_eq!(r.start, 0);
         assert!(r.end >= 6 && r.end <= 8, "{r:?}");
@@ -1883,7 +1875,7 @@ mod tests {
     #[test]
     fn grid_columns_hold_four_rows() {
         // 316 pt per column: an 860 pt span shows three columns and a margin into the 4th.
-        let pitch = GRID_COL_W + CARD_GAP;
+        let pitch = GRID_COL_W + 16.0;
         let r = visible_items(40, true, pitch, 0.0, 860.0);
         assert_eq!(r.start, 0);
         assert_eq!(r.end % GRID_ROWS, 0);
@@ -1918,7 +1910,7 @@ mod tests {
         for (col_w, cols) in [(CARD_W, 30), (GRID_COL_W, 8), (CARD_W, 3)] {
             for w in (600..=2600).step_by(7) {
                 let width = w as CGFloat;
-                let fit = Fit::of(width, col_w, cols);
+                let fit = Fit::of(width, col_w);
                 let content = fit.content_w(width, col_w, cols);
                 let max = (content - width).max(0.0);
                 // From the start, every page forward, and the end.
@@ -1947,30 +1939,32 @@ mod tests {
         // 2200 pt: the 2152 pt between the pads holds 14 cards of 128 pt at least 24 pt apart;
         // the 48 pt over spreads across their 13 gaps, whole points each, and one more point
         // each puts the 15th wholly past the edge.
-        let fit = Fit::of(2200.0, CARD_W, 30);
+        let fit = Fit::of(2200.0, CARD_W);
         assert_eq!(fit.count, 14);
         assert_eq!(fit.pitch, CARD_W + PAD + 4.0);
         assert!(PAD + 14.0 * fit.pitch >= 2200.0);
         // 2304 pt: exactly 15 at 24 pt.
-        let fit = Fit::of(2304.0, CARD_W, 30);
+        let fit = Fit::of(2304.0, CARD_W);
         assert_eq!(fit.count, 15);
         assert_eq!(fit.pitch, CARD_W + PAD);
-        // A row that fits keeps its 16 pt gaps: nothing to page to.
-        let fit = Fit::of(2200.0, CARD_W, 15);
-        assert_eq!(fit.pitch, CARD_W + CARD_GAP);
+        // A row that fits spaces its columns as one that pages, so they line up, and has
+        // nothing to scroll.
+        let fit = Fit::of(2200.0, CARD_W);
+        assert_eq!(fit.pitch, CARD_W + PAD + 4.0);
         assert_eq!(
-            fit.content_w(2200.0, CARD_W, 15),
-            2.0 * PAD + 15.0 * CARD_W + 14.0 * CARD_GAP
+            fit.content_w(2200.0, CARD_W, 5),
+            2.0 * PAD + 4.0 * fit.pitch + CARD_W
         );
+        assert_eq!(fit.content_w(2200.0, CARD_W, 14), 2200.0);
         // Narrower than one column, still one, and the next one starts past the edge.
-        let fit = Fit::of(100.0, CARD_W, 5);
+        let fit = Fit::of(100.0, CARD_W);
         assert_eq!(fit.count, 1);
         assert!(PAD + fit.pitch >= 100.0);
     }
 
     #[test]
     fn a_selected_column_scrolls_to_the_page_edge_that_shows_it() {
-        let fit = Fit::of(860.0, CARD_W, 20);
+        let fit = Fit::of(860.0, CARD_W);
         let (n, p) = (fit.count, fit.pitch);
         let max = fit.content_w(860.0, CARD_W, 20) - 860.0;
         // Already whole: no move.
