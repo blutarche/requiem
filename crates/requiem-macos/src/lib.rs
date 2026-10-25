@@ -1,7 +1,7 @@
 //! macOS menu-bar status item, Now Playing and media keys for the player daemon, and the
 //! artwork loader it shares with the GUI.
 //!
-//! On other OSes the types still exist and `run` only waits for `stop`.
+//! On other OSes the types still exist and `run` drains updates until `stop`.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
@@ -80,14 +80,24 @@ pub fn wants_positions() -> bool {
 ///
 /// On macOS the loop reads `updates` and `stop` only when woken: call [`wake`] after every
 /// send on either. A disconnected `stop` counts as fired. On macOS this panics off the main
-/// thread.
+/// thread. On other OSes it drains `updates` so publishers stay connected until `stop`.
 pub fn run(updates: Receiver<UiUpdate>, actions: Sender<UiAction>, stop: Receiver<()>) {
     #[cfg(target_os = "macos")]
     macos::run(updates, actions, stop);
     #[cfg(not(target_os = "macos"))]
     {
-        let _ = (updates, actions);
-        let _ = stop.recv();
+        let _actions = actions;
+        loop {
+            crossbeam_channel::select! {
+                recv(stop) -> _ => return,
+                recv(updates) -> update => {
+                    if update.is_err() {
+                        let _ = stop.recv();
+                        return;
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -112,6 +122,23 @@ mod tests {
         let (actions, _actions_rx) = unbounded();
         let (stop_tx, stop) = unbounded();
         let handle = thread::spawn(move || run(updates, actions, stop));
+        stop_tx.send(()).unwrap();
+        handle.join().unwrap();
+    }
+
+    #[test]
+    fn run_drains_updates_until_stopped() {
+        let (updates_tx, updates) = crossbeam_channel::bounded(0);
+        let (actions, _actions_rx) = unbounded();
+        let (stop_tx, stop) = unbounded();
+        let handle = thread::spawn(move || run(updates, actions, stop));
+
+        for volume in [40, 80] {
+            updates_tx
+                .send_timeout(UiUpdate::Volume(volume), Duration::from_secs(5))
+                .expect("the platform loop must keep draining updates");
+        }
+        assert!(!handle.is_finished(), "only stop ends the platform loop");
         stop_tx.send(()).unwrap();
         handle.join().unwrap();
     }

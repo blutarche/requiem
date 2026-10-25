@@ -53,7 +53,9 @@ smoke='
 set -eu
 tarball="$1"; name="$2"; version="$3"
 apt-get update -qq
-apt-get install -y -qq --no-install-recommends libasound2 ca-certificates >/dev/null
+apt-get install -y -qq --no-install-recommends libasound2 ca-certificates dbus playerctl >/dev/null
+DBUS_SESSION_BUS_ADDRESS="$(dbus-daemon --session --fork --print-address)"
+export DBUS_SESSION_BUS_ADDRESS
 mkdir /opt/requiem
 tar -xzf "/dist/$tarball" -C /opt/requiem
 cd "/opt/requiem/$name"
@@ -70,6 +72,8 @@ out="$(printf "search daft punk\nawait results 30\n" | ./requiem --connect --scr
 echo "$out"
 grep -Eq "^ +1\. " <<<"$out" || { echo "no search results printed" >&2; exit 1; }
 grep -lx requiemd /proc/[0-9]*/comm >/dev/null || { echo "requiemd is not running" >&2; exit 1; }
+[ "$(playerctl -p requiem status)" = "Stopped" ]
+printf "shutdown-daemon\n" | ./requiem --connect --script - >/dev/null
 echo "smoke test passed"
 '
 
