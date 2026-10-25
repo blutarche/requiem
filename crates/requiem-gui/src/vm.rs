@@ -632,6 +632,20 @@ pub fn session_json(paste: &str) -> Result<Redacted, String> {
 }
 
 /// Whether `provider` signs in with a session pasted from a browser: YouTube Music.
+/// The form shows its error among full sentences; the player's errors, which toasts also show,
+/// may start in lower case and end without a full stop.
+fn sentence(text: &str) -> String {
+    let mut chars = text.chars();
+    let mut s: String = chars
+        .next()
+        .map(|c| c.to_uppercase().chain(chars).collect())
+        .unwrap_or_default();
+    if !s.is_empty() && !s.ends_with(['.', '!', '?']) {
+        s.push('.');
+    }
+    s
+}
+
 fn takes_session(provider: &ProviderId) -> bool {
     Service::of(provider) == Some(Service::YouTubeMusic)
 }
@@ -1144,7 +1158,7 @@ impl UiState {
                 };
                 let state = match (setup, account) {
                     (Some(s), _) => AccountRowState::Session(SessionForm {
-                        error: s.error.clone(),
+                        error: s.error.as_deref().map(sentence),
                         checking,
                     }),
                     (None, AccountState::SignedIn { name }) => {
@@ -6228,7 +6242,7 @@ mod tests {
         assert_eq!(
             session_form(&vm),
             SessionForm {
-                error: Some(refused.into()),
+                error: Some(format!("{refused}.")),
                 checking: false,
             }
         );
@@ -6278,7 +6292,10 @@ mod tests {
             error: unfinished.into(),
         });
         // Alone, it reads as a refusal.
-        assert_eq!(session_form(&vm).error.as_deref(), Some(unfinished));
+        assert_eq!(
+            session_form(&vm).error.as_deref(),
+            Some("Signed in, but the old session could not be removed.")
+        );
         assert!(!vm.ui().setup.as_ref().unwrap().importing);
         vm.apply(account(AccountState::SignedIn {
             name: Some("Bo".into()),
