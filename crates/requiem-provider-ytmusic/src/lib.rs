@@ -16,6 +16,7 @@ mod live_tests;
 #[cfg(test)]
 mod testing;
 
+use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -73,9 +74,16 @@ pub fn session_file() -> Option<PathBuf> {
 
 /// Deletes the Google sign-in that earlier versions kept, which nothing reads any more, and a
 /// copy a save of it left behind. Nothing is revoked online. The user's own Google client file
-/// stays.
+/// stays. A browser session that `REQUIEM_GOOGLE_TOKEN_FILE` made earlier versions keep beside
+/// that file moves to [`session_file`] first, unless one is already there.
 pub fn remove_old_google_sign_in() {
     let var = std::env::var_os(OLD_TOKEN_ENV).map(PathBuf::from);
+    if let Some(old) = old_session_file(var.clone(), files::data_dir())
+        && let Some(new) = session_file()
+        && let Err(e) = move_old_session(&old, &new)
+    {
+        eprintln!("[ytmusic] cannot move {}: {e}", old.display());
+    }
     if let Some(path) = old_token_file(var, files::data_dir())
         && let Err(e) = remove_old_token(&path)
     {
@@ -89,6 +97,36 @@ fn old_token_file(var: Option<PathBuf>, dir: Option<PathBuf>) -> Option<PathBuf>
         Some(p) if p.is_absolute() => Some(p),
         _ => Some(dir?.join(OLD_TOKEN_NAME)),
     }
+}
+
+/// The browser session file earlier versions kept beside `REQUIEM_GOOGLE_TOKEN_FILE` as `var`,
+/// when it is absolute and not already the one in `dir`.
+fn old_session_file(var: Option<PathBuf>, dir: Option<PathBuf>) -> Option<PathBuf> {
+    let old = session::path_in(var.filter(|p| p.is_absolute())?.parent())?;
+    (Some(&old) != session::path_in(dir.as_deref()).as_ref()).then_some(old)
+}
+
+/// Moves the session `old` to `new` unless there is none at `old` or a session already at
+/// `new`, which is never replaced. The result is private to the user, as a saved one is.
+fn move_old_session(old: &Path, new: &Path) -> io::Result<()> {
+    if !old.exists() || new.exists() {
+        return Ok(());
+    }
+    files::private_dir(new)?;
+    if fs::rename(old, new).is_err() {
+        // Likely another volume: copy through a private temp file, then drop the original.
+        let tmp = files::stage_private(new, &files::read_capped(old)?)?;
+        files::commit(&tmp, new)?;
+        files::remove(old)?;
+    }
+    files::tighten(new);
+    session::exclude_from_backups(new);
+    debug!(
+        "moved the browser session {} to {}",
+        old.display(),
+        new.display()
+    );
+    Ok(())
 }
 
 fn remove_old_token(path: &Path) -> io::Result<()> {
@@ -542,6 +580,67 @@ mod tests {
             Some(PathBuf::from("/st/requiem/google-token.json"))
         );
         assert_eq!(old_token_file(None, None), None);
+    }
+
+    #[test]
+    fn the_old_session_is_looked_for_beside_the_variables_token() {
+        let dir = Some(PathBuf::from("/st/requiem"));
+        assert_eq!(
+            old_session_file(Some("/elsewhere/t.json".into()), dir.clone()),
+            Some(PathBuf::from("/elsewhere/ytmusic-session.json"))
+        );
+        // Unset, relative, or beside the default folder's own: nothing to move.
+        assert_eq!(old_session_file(None, dir.clone()), None);
+        assert_eq!(old_session_file(Some("t.json".into()), dir.clone()), None);
+        assert_eq!(
+            old_session_file(Some("/st/requiem/t.json".into()), dir),
+            None
+        );
+        assert_eq!(
+            old_session_file(Some("/elsewhere/t.json".into()), None),
+            Some(PathBuf::from("/elsewhere/ytmusic-session.json"))
+        );
+    }
+
+    #[test]
+    fn a_session_beside_the_old_token_moves_to_the_default_folder_privately() {
+        use std::os::unix::fs::PermissionsExt;
+        let rig = Rig::new();
+        let old = rig.tmp.path().join("elsewhere/ytmusic-session.json");
+        fs::create_dir_all(old.parent().unwrap()).unwrap();
+        fs::write(&old, b"session-bytes").unwrap();
+        fs::set_permissions(&old, fs::Permissions::from_mode(0o644)).unwrap();
+
+        move_old_session(&old, &rig.session_file()).unwrap();
+
+        assert!(!old.exists());
+        assert_eq!(fs::read(rig.session_file()).unwrap(), b"session-bytes");
+        let mode = |p: &Path| fs::metadata(p).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode(&rig.session_file()), 0o600);
+        assert_eq!(mode(&rig.dir()), 0o700);
+    }
+
+    #[test]
+    fn a_session_already_in_the_default_folder_is_never_replaced() {
+        let rig = Rig::new();
+        let old = rig.tmp.path().join("elsewhere/ytmusic-session.json");
+        fs::create_dir_all(old.parent().unwrap()).unwrap();
+        fs::create_dir_all(rig.dir()).unwrap();
+        fs::write(&old, b"old").unwrap();
+        fs::write(rig.session_file(), b"new").unwrap();
+
+        move_old_session(&old, &rig.session_file()).unwrap();
+
+        assert_eq!(fs::read(&old).unwrap(), b"old");
+        assert_eq!(fs::read(rig.session_file()).unwrap(), b"new");
+    }
+
+    #[test]
+    fn no_old_session_moves_nothing() {
+        let rig = Rig::new();
+        let old = rig.tmp.path().join("elsewhere/ytmusic-session.json");
+        move_old_session(&old, &rig.session_file()).unwrap();
+        assert!(!rig.session_file().exists() && !rig.dir().exists());
     }
 
     #[test]
