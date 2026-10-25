@@ -625,7 +625,9 @@ fn field_command(ui: &Ui, control: &NSControl, text: &NSTextView, command: Sel) 
         if command == sel!(insertNewline:) {
             ui.search_submitted();
         } else if command == sel!(moveDown:) {
-            ui.results_move_down();
+            let _ = ui.results_move_down();
+        } else if command == sel!(insertTab:) {
+            return ui.results_move_down();
         } else if command == sel!(cancelOperation:) {
             if text.string().length() > 0 {
                 text.setString(&NSString::new());
@@ -1095,12 +1097,12 @@ pub fn run(args: Args) {
         | View::SearchSongs
         | View::SearchArtists => ui.show(AppView::Search),
         View::SearchSongSelected => {
-            ui.results_move_down();
+            let _ = ui.results_move_down();
             ui.move_all_selection(Dir::Down);
             ui.move_all_selection(Dir::Down);
         }
         View::SearchCardSelected => {
-            ui.results_move_down();
+            let _ = ui.results_move_down();
             // Down through the songs and the Artists row to the Albums row, then along it.
             for _ in 0..64 {
                 if matches!(ui.all_spot(), Some(Spot::Card { row: 1, .. })) {

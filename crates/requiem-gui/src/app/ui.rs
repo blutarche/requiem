@@ -1165,7 +1165,11 @@ impl Ui {
 
     /// Down from the search field: into the song table, the grid or the All view, whichever
     /// lists the results.
-    pub fn results_move_down(&self) {
+    /// Moves the keyboard into the search results; false when there are none to move into.
+    pub fn results_move_down(&self) -> bool {
+        if self.search_list.get() == SearchList::Nothing {
+            return false;
+        }
         self.show(AppView::Search);
         match self.search_list.get() {
             SearchList::Table => self.results.select_first(),
@@ -1177,6 +1181,7 @@ impl Ui {
             }
             SearchList::Nothing => {}
         }
+        true
     }
 
     /// The All view of the search results shows and has the keyboard.
