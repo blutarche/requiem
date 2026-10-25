@@ -22,6 +22,17 @@ On macOS, download `Requiem-<version>.dmg` from the [latest release](https://git
 
 The first time you open Requiem, macOS blocks it because it isn't notarized: click **Done**, then in **System Settings → Privacy & Security** click **Open Anyway**.
 
+On Linux (x86_64 or aarch64), the release has the player and the CLI, without the window, as `requiem-<version>-linux-<arch>.tar.gz`. Install ALSA's library, unpack the tarball for your machine and put both programs on your `PATH`:
+
+```sh
+sudo apt install libasound2t64     # Ubuntu 24.04 and later; libasound2 on Debian 12 and older Ubuntu
+tar -xzf requiem-<version>-linux-$(uname -m).tar.gz
+install -D -m 755 -t ~/.local/bin requiem-<version>-linux-$(uname -m)/requiem requiem-<version>-linux-$(uname -m)/requiemd
+requiem --connect
+```
+
+If the shell can't find `requiem`, open a new terminal: most distributions add `~/.local/bin` to `PATH` once it exists. `requiem` starts `requiemd` when it isn't running. Requiem doesn't update itself on Linux: install a newer tarball the same way.
+
 ## Build from source
 
 Needs Rust (see `rust-toolchain.toml`) and libopus: `brew install opus` on macOS, `libopus-dev libasound2-dev pkg-config` on Debian/Ubuntu.
