@@ -2,7 +2,9 @@
 //! Each window hands over its own way to reach its main thread.
 
 use std::cell::RefCell;
+use std::ffi::OsStr;
 use std::io;
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, PoisonError};
@@ -159,7 +161,20 @@ fn daemon_path() -> PathBuf {
         .ok()
         .and_then(|exe| beside(&exe))
         .filter(|p| cfg!(target_os = "macos") || p.exists())
+        .or_else(|| on_path("requiemd", &std::env::var_os("PATH")?))
         .unwrap_or_else(|| PathBuf::from("requiemd"))
+}
+
+/// The first executable `name` in `path`'s directories, as a shell would find it. Relative
+/// directories are skipped: the daemon is spawned by absolute path.
+fn on_path(name: &str, path: &OsStr) -> Option<PathBuf> {
+    std::env::split_paths(path)
+        .filter(|dir| dir.is_absolute())
+        .map(|dir| dir.join(name))
+        .find(|p| {
+            p.metadata()
+                .is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
+        })
 }
 
 /// In an app bundle, the daemon is the helper app `Contents/Helpers/requiemd.app`; elsewhere
@@ -320,6 +335,26 @@ mod tests {
         )));
         assert!(!in_bundle(Path::new("/work/target/release/requiem-gui")));
         assert!(!in_bundle(Path::new("/requiem-gui")));
+    }
+
+    #[test]
+    fn a_daemon_not_beside_the_window_is_found_on_path() {
+        let root = std::env::temp_dir().join(format!("rqpath{}", std::process::id()));
+        let (empty, plain, bin) = (root.join("empty"), root.join("plain"), root.join("bin"));
+        for d in [&empty, &plain, &bin] {
+            std::fs::create_dir_all(d).unwrap();
+        }
+        // Not executable: skipped, as a shell would.
+        std::fs::write(plain.join("requiemd"), b"").unwrap();
+        let exe = bin.join("requiemd");
+        std::fs::write(&exe, b"").unwrap();
+        std::fs::set_permissions(&exe, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let path = std::env::join_paths(["rel".as_ref(), empty.as_path(), &plain, &bin]).unwrap();
+        let found = on_path("requiemd", &path);
+        let none = on_path("requiemd", &std::env::join_paths([&empty, &plain]).unwrap());
+        let _ = std::fs::remove_dir_all(&root);
+        assert_eq!(found, Some(exe));
+        assert_eq!(none, None);
     }
 
     #[test]

@@ -69,6 +69,8 @@ scale.volume highlight { background-image: linear-gradient(to right, #7C70F5, #E
 scale.seek slider, scale.volume slider { min-width: 10px; min-height: 10px; margin: -4px; background-color: #F2EFEA; border: none; box-shadow: none; opacity: 0; }
 scale.seek:hover slider, scale.volume:hover slider { opacity: 1; }
 scale { padding: 6px 0; }
+/* The default theme's negative margins leave a sliver of fill at zero. */
+scale.seek highlight, scale.volume highlight { margin: 0; min-width: 0; min-height: 0; }
 
 /* Pages */
 .page { background-color: #0A0A0C; }
