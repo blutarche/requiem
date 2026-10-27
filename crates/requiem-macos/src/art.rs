@@ -19,7 +19,7 @@ const SIZED_HOSTS: [&str; 2] = ["googleusercontent.com", "ggpht.com"];
 /// The options are the `-`-separated part after the last `=` of the last path segment:
 /// `w`, `h` and `s` sizes are replaced and the rest (quality, format, crop) kept. A URL with
 /// no size gets one.
-pub(crate) fn sized_url(url: &str, px: u32) -> String {
+pub fn sized_url(url: &str, px: u32) -> String {
     let unchanged = || url.to_owned();
     let Some(rest) = url.strip_prefix("https://") else {
         return unchanged();
@@ -66,7 +66,7 @@ pub(crate) fn sized_url(url: &str, px: u32) -> String {
 }
 
 /// Bytes of decoded RGBA pixels in a `w` × `h` image.
-pub(crate) fn pixel_cost(w: usize, h: usize) -> usize {
+pub fn pixel_cost(w: usize, h: usize) -> usize {
     w.saturating_mul(h).saturating_mul(4)
 }
 
@@ -78,7 +78,7 @@ struct Entry<V> {
 
 /// Values by key, least recently used evicted first once their costs pass `cap`. The newest
 /// entry stays even if it alone is over.
-pub(crate) struct Lru<V> {
+pub struct Lru<V> {
     cap: usize,
     total: usize,
     clock: u64,
@@ -86,7 +86,7 @@ pub(crate) struct Lru<V> {
 }
 
 impl<V: Clone> Lru<V> {
-    pub(crate) fn new(cap: usize) -> Self {
+    pub fn new(cap: usize) -> Self {
         Self {
             cap,
             total: 0,
@@ -95,20 +95,20 @@ impl<V: Clone> Lru<V> {
         }
     }
 
-    pub(crate) fn set_cap(&mut self, cap: usize) {
+    pub fn set_cap(&mut self, cap: usize) {
         self.cap = cap;
         self.evict();
     }
 
     /// Marks `key` used.
-    pub(crate) fn get(&mut self, key: &str) -> Option<V> {
+    pub fn get(&mut self, key: &str) -> Option<V> {
         self.clock += 1;
         let entry = self.entries.get_mut(key)?;
         entry.used = self.clock;
         Some(entry.value.clone())
     }
 
-    pub(crate) fn insert(&mut self, key: String, value: V, cost: usize) {
+    pub fn insert(&mut self, key: String, value: V, cost: usize) {
         self.clock += 1;
         let entry = Entry {
             value,
@@ -144,13 +144,13 @@ impl<V: Clone> Lru<V> {
 
 /// Requests waiting for the fetcher, newest first, at most `limit`: rows scrolled into view
 /// are fetched before those scrolled past.
-pub(crate) struct Queue<T> {
+pub struct Queue<T> {
     keys: VecDeque<T>,
     limit: usize,
 }
 
 impl<T> Queue<T> {
-    pub(crate) fn new(limit: usize) -> Self {
+    pub fn new(limit: usize) -> Self {
         Self {
             keys: VecDeque::new(),
             limit: limit.max(1),
@@ -158,7 +158,7 @@ impl<T> Queue<T> {
     }
 
     /// Returns the oldest key when `key` pushes it out.
-    pub(crate) fn push(&mut self, key: T) -> Option<T> {
+    pub fn push(&mut self, key: T) -> Option<T> {
         self.keys.push_front(key);
         if self.keys.len() > self.limit {
             self.keys.pop_back()
@@ -168,13 +168,13 @@ impl<T> Queue<T> {
     }
 
     /// The newest key.
-    pub(crate) fn pop(&mut self) -> Option<T> {
+    pub fn pop(&mut self) -> Option<T> {
         self.keys.pop_front()
     }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Want {
+pub enum Want {
     /// Not loading yet: queue a fetch.
     Fetch,
     /// Already loading; the waiter joined it.
@@ -184,13 +184,19 @@ pub(crate) enum Want {
 }
 
 /// Fetches in progress, with whoever waits on each, and the keys that failed.
-pub(crate) struct Book<W> {
+pub struct Book<W> {
     waiting: HashMap<String, Vec<W>>,
     failed: HashSet<String>,
 }
 
+impl<W> Default for Book<W> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl<W> Book<W> {
-    pub(crate) fn new() -> Self {
+    pub fn new() -> Self {
         Self {
             waiting: HashMap::new(),
             failed: HashSet::new(),
@@ -198,7 +204,7 @@ impl<W> Book<W> {
     }
 
     /// For a key not in the cache.
-    pub(crate) fn want(&mut self, key: &str, waiter: W) -> Want {
+    pub fn want(&mut self, key: &str, waiter: W) -> Want {
         if self.failed.contains(key) {
             return Want::Failed;
         }
@@ -211,7 +217,7 @@ impl<W> Book<W> {
     }
 
     /// The fetch of `key` ended; returns its waiters. A failure is remembered.
-    pub(crate) fn finish(&mut self, key: &str, ok: bool) -> Vec<W> {
+    pub fn finish(&mut self, key: &str, ok: bool) -> Vec<W> {
         if !ok {
             self.failed.insert(key.to_owned());
         }
@@ -219,20 +225,20 @@ impl<W> Book<W> {
     }
 
     /// `key` left the queue unfetched, so a later `want` fetches it.
-    pub(crate) fn dropped(&mut self, key: &str) {
+    pub fn dropped(&mut self, key: &str) {
         self.waiting.remove(key);
     }
 }
 
 /// Overrides where downloaded artwork is kept, so tests and private daemons leave the user's
 /// cache alone.
-pub(crate) const CACHE_DIR_ENV: &str = "REQUIEM_ART_CACHE_DIR";
+pub const CACHE_DIR_ENV: &str = "REQUIEM_ART_CACHE_DIR";
 
 /// Where downloaded artwork is kept: `REQUIEM_ART_CACHE_DIR`, or
 /// `~/Library/Caches/<bundle id>/artwork`, `requiem` standing in for a missing bundle id.
 /// `None` turns the disk cache off, as does an override that is not absolute: falling back to
 /// the real cache would defeat it.
-pub(crate) fn cache_dir(
+pub fn cache_dir(
     over: Option<OsString>,
     home: Option<PathBuf>,
     bundle_id: Option<&str>,
@@ -253,7 +259,7 @@ pub(crate) fn cache_dir(
 
 /// The file `url`'s bytes are kept in: the hex SHA-256 of the URL, which unlike `std`'s hasher
 /// stays the same across toolchains.
-pub(crate) fn file_name(url: &str) -> String {
+pub fn file_name(url: &str) -> String {
     let digest = ring::digest::digest(&ring::digest::SHA256, url.as_bytes());
     let mut name = String::with_capacity(64);
     for b in digest.as_ref() {
@@ -273,7 +279,7 @@ static TMP_SEQ: AtomicU64 = AtomicU64::new(0);
 
 /// Downloaded images by URL, the least recently used removed once their bytes pass `cap`.
 /// Threads and processes may share it: files are replaced whole, by rename.
-pub(crate) struct DiskCache {
+pub struct DiskCache {
     dir: PathBuf,
     cap: u64,
     /// Bytes on disk as of the last prune plus those written since; `None` before the first
@@ -282,7 +288,7 @@ pub(crate) struct DiskCache {
 }
 
 impl DiskCache {
-    pub(crate) fn new(dir: PathBuf, cap: u64) -> Self {
+    pub fn new(dir: PathBuf, cap: u64) -> Self {
         Self {
             dir,
             cap,
@@ -290,12 +296,12 @@ impl DiskCache {
         }
     }
 
-    pub(crate) fn path(&self, url: &str) -> PathBuf {
+    pub fn path(&self, url: &str) -> PathBuf {
         self.dir.join(file_name(url))
     }
 
     /// `url`'s bytes, marking them used.
-    pub(crate) fn read(&self, url: &str) -> Option<Vec<u8>> {
+    pub fn read(&self, url: &str) -> Option<Vec<u8>> {
         let mut file = File::open(self.path(url)).ok()?;
         let mut bytes = Vec::new();
         file.read_to_end(&mut bytes).ok()?;
@@ -304,13 +310,13 @@ impl DiskCache {
     }
 
     /// Drops `url`'s bytes, as for a file that no longer decodes.
-    pub(crate) fn remove(&self, url: &str) {
+    pub fn remove(&self, url: &str) {
         let _ = fs::remove_file(self.path(url));
     }
 
     /// Keeps `bytes` as `url`'s, so a reader sees the old file or the new one, never part of
     /// one. Prunes once past the cap.
-    pub(crate) fn write(&self, url: &str, bytes: &[u8]) -> io::Result<()> {
+    pub fn write(&self, url: &str, bytes: &[u8]) -> io::Result<()> {
         fs::create_dir_all(&self.dir)?;
         let name = file_name(url);
         let tmp = self.dir.join(format!(
@@ -344,7 +350,7 @@ impl DiskCache {
     /// Once over the cap, removes the least recently used files until a quarter of it is free,
     /// so a full cache is not scanned on every write. Also removes what writes that never
     /// finished left; other files in the directory stay.
-    pub(crate) fn prune(&self) {
+    pub fn prune(&self) {
         let mut total = self.total.lock().unwrap_or_else(PoisonError::into_inner);
         let Ok(entries) = fs::read_dir(&self.dir) else {
             *total = Some(0);

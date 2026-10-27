@@ -38,7 +38,6 @@ use super::library_bar::LibraryBar;
 use super::now_playing::NowPlayingPage;
 use super::palette::Palette;
 use super::prefs;
-use super::search_keys::{Dir, Move, Shape, Spot};
 use super::search_lead::SearchLead;
 use super::service_switch::ServiceSwitch;
 use super::settings::SettingsPage;
@@ -50,51 +49,15 @@ use super::widgets::{
     PIN_BOTTOM, PIN_LEFT, PIN_RIGHT, PIN_TOP, rect,
 };
 use super::{Delegate, MainWindow};
+use crate::search_keys::{Dir, Move, Shape, Spot};
+pub(super) use crate::view::unix_now;
+pub use crate::view::{AppView, SnapshotState};
+use crate::view::{back_to, collection_shelves, queue_count_text};
 use crate::vm::{
     self, AccountRow, AccountRowState, Banner, CollectionPage, Controls, Dirty, HomeView, Intent,
     LibraryChip, LibrarySort, LibraryView, List, PageView, PaletteAction, Place, QueueEdit,
     SearchBody, SearchChip, SearchView, Selection, Service, ServiceFilter, Toast, UiState, Vm,
 };
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum AppView {
-    Home,
-    Search,
-    Library,
-    Queue,
-    /// A playlist or album opened from Home or the Library; not in the sidebar.
-    Collection,
-    /// The playing track's page; not in the sidebar.
-    NowPlaying,
-    /// The accounts; at the foot of the sidebar.
-    Settings,
-}
-
-impl AppView {
-    fn place(self) -> Place {
-        match self {
-            AppView::Home => Place::Home,
-            AppView::Search => Place::Search,
-            AppView::Library => Place::Library,
-            AppView::Queue => Place::Queue,
-            AppView::Collection => Place::Collection,
-            AppView::NowPlaying => Place::NowPlaying,
-            AppView::Settings => Place::Settings,
-        }
-    }
-
-    fn of(place: Place) -> AppView {
-        match place {
-            Place::Home => AppView::Home,
-            Place::Search => AppView::Search,
-            Place::Library => AppView::Library,
-            Place::Queue => AppView::Queue,
-            Place::Collection => AppView::Collection,
-            Place::NowPlaying => AppView::NowPlaying,
-            Place::Settings => AppView::Settings,
-        }
-    }
-}
 
 /// `text`, numbered steps a line each, with a line that wraps indented under the text after
 /// its number.
@@ -120,27 +83,6 @@ pub(super) fn numbered(text: &str, font: &NSFont) -> Retained<NSAttributedString
         );
         NSAttributedString::new_with_attributes(&NSString::from_str(text), &attrs)
     }
-}
-
-/// Where Back leaves Now Playing or Settings, `here`, for: the view it was opened `from`; Home
-/// instead of a collection that is no longer open, or whose Back, from the `origin` of its
-/// pages, would come back `here`.
-fn back_to(from: AppView, here: AppView, origin: Option<Place>) -> AppView {
-    match from {
-        AppView::Collection if origin.is_none_or(|o| o == here.place()) => AppView::Home,
-        view => view,
-    }
-}
-
-/// Whether a snapshot of a connected window has what it waits for.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum SnapshotState {
-    Waiting,
-    /// The page is in; its covers may still be arriving.
-    Loaded {
-        covers: bool,
-    },
-    Failed(String),
 }
 
 thread_local! {
@@ -3114,35 +3056,6 @@ struct CollectionPatch {
     shelves: Vec<Shelf>,
 }
 
-/// The queue's count line: nothing while it is empty.
-fn queue_count_text(songs: usize) -> String {
-    match songs {
-        0 => String::new(),
-        1 => "1 song".to_owned(),
-        n => format!("{n} songs"),
-    }
-}
-
-/// The collections of `shelves`, a shelf each, leaving out the tracks and the shelves they
-/// leave empty.
-fn collection_shelves(shelves: &[Shelf]) -> Vec<Shelf> {
-    shelves
-        .iter()
-        .filter_map(|s| {
-            let items: Vec<Item> = s
-                .items
-                .iter()
-                .filter(|i| matches!(i, Item::Collection(_)))
-                .cloned()
-                .collect();
-            (!items.is_empty()).then(|| Shelf {
-                title: s.title.clone(),
-                items,
-            })
-        })
-        .collect()
-}
-
 /// The sign-in panels' buttons, one per provider: a title and the provider's badge.
 fn sign_in_actions(providers: &[ProviderId]) -> Vec<(String, Option<Retained<NSImage>>)> {
     providers
@@ -3160,12 +3073,6 @@ fn labelled(actions: &[(String, Option<Retained<NSImage>>)]) -> Vec<(&str, Optio
         .iter()
         .map(|(title, image)| (title.as_str(), image.as_deref()))
         .collect()
-}
-
-pub(super) fn unix_now() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |d| d.as_secs())
 }
 
 struct NowPlaying {

@@ -1,4 +1,4 @@
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 fn main() {
     use requiem_gui::args::{self, ArgsError};
 
@@ -18,11 +18,17 @@ fn main() {
             std::process::exit(2);
         }
     };
+    #[cfg(target_os = "macos")]
     requiem_gui::app::run(args);
+    #[cfg(target_os = "linux")]
+    std::process::exit(requiem_gui::gtk::run(args));
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
 fn main() {
-    eprintln!("requiem-gui: the GUI is macOS-only in v1; use `requiem --connect`");
+    eprintln!(
+        "requiem-gui: the window runs on macOS and Linux only; use `requiem --connect` to drive \
+         the player from a terminal"
+    );
     std::process::exit(2);
 }

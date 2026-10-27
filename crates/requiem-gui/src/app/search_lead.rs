@@ -18,11 +18,11 @@ use requiem_macos::artwork::Cover;
 
 use super::badge::{self, Badge};
 use super::cover_grid;
-use super::search_keys::Spot;
 use super::shelves::{self, FlippedView, spoken};
 use super::theme::{self, Icon, Weight};
 use super::ui;
 use super::widgets::{self, FLEX_W, rect};
+use crate::search_keys::Spot;
 use crate::vm::{self, Intent, List, Place, Service, TOP_SONGS, TopResult};
 
 const PAD: CGFloat = 24.0;

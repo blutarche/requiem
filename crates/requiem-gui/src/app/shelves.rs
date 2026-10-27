@@ -21,7 +21,7 @@ use objc2_foundation::{
     MainThreadMarker, NSEdgeInsets, NSNotification, NSNotificationCenter, NSPoint, NSRect, NSSize,
     NSString,
 };
-use requiem_core::{CollectionKind, Item, Shelf};
+use requiem_core::{Item, Shelf};
 use requiem_macos::artwork::Cover;
 
 use super::badge::{self, Badge};
@@ -29,6 +29,8 @@ use super::cover_grid::{self, GridDoc};
 use super::theme::{self, Icon, Weight};
 use super::ui;
 use super::widgets::{self, FLEX_W, HoverButton, PIN_RIGHT, rect};
+use crate::view::{card_parts as parts, is_grid};
+pub(super) use crate::view::{is_artist, shown_subtitle};
 use crate::vm::{self, Service};
 
 const PAD: CGFloat = 24.0;
@@ -663,36 +665,6 @@ impl ShelfCard {
     }
 }
 
-/// A card's title, subtitle and artwork. A track's subtitle is its artists.
-fn parts(item: &Item) -> (&str, String, Option<&str>) {
-    match item {
-        Item::Track(t) => (&t.title, vm::artists(t), t.artwork_url.as_deref()),
-        Item::Collection(c) => (
-            &c.title,
-            c.subtitle.clone().unwrap_or_default(),
-            c.artwork_url.as_deref(),
-        ),
-    }
-}
-
-/// Whether `item` is an artist, whose photo is round.
-pub(super) fn is_artist(item: &Item) -> bool {
-    matches!(item, Item::Collection(c) if c.kind == CollectionKind::Artist)
-}
-
-/// The subtitle a card shows: under a section of artists, which already says what they are,
-/// without the leading "Artist".
-pub(super) fn shown_subtitle(subtitle: &str, artists: bool) -> &str {
-    if !artists {
-        return subtitle;
-    }
-    match subtitle.strip_prefix("Artist") {
-        Some("") => "",
-        Some(rest) => rest.strip_prefix(" \u{2022} ").unwrap_or(subtitle),
-        None => subtitle,
-    }
-}
-
 /// Lets a one-line label wrap to a second line, with an ellipsis only past that.
 pub(super) fn two_lines(label: &NSTextField) {
     label.setUsesSingleLineMode(false);
@@ -711,11 +683,6 @@ pub(super) fn spoken(title: &str, subtitle: &str, badge: Option<Service>) -> Str
         .filter(|s| !s.is_empty())
         .collect::<Vec<_>>()
         .join(", ")
-}
-
-/// Whether a shelf is a grid of tracks, YouTube Music's compact "Quick picks" layout.
-fn is_grid(shelf: &Shelf) -> bool {
-    !shelf.items.is_empty() && shelf.items.iter().all(|i| matches!(i, Item::Track(_)))
 }
 
 /// How a row's columns fit the width it shows: as many as it can at least `PAD` apart, with

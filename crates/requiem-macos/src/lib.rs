@@ -9,8 +9,9 @@ use std::time::Duration;
 use crossbeam_channel::{Receiver, Sender};
 use requiem_core::PlayState;
 
-#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
-mod art;
+/// Artwork bookkeeping without a toolkit, shared with the Linux window.
+#[doc(hidden)]
+pub mod art;
 #[cfg(target_os = "macos")]
 mod macos;
 mod view;

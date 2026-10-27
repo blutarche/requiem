@@ -10,7 +10,6 @@ mod library_bar;
 mod now_playing;
 mod palette;
 mod prefs;
-mod search_keys;
 mod search_lead;
 mod service_switch;
 mod settings;
@@ -44,11 +43,11 @@ use requiem_macos::artwork;
 
 use crate::args::{Args, View};
 use crate::demo;
+use crate::search_keys::{Dir, Spot};
 use crate::vm::{
     Intent, LibrarySort, PaletteAction, QueueEdit, SEEK_STEP_SECS, Service, VOLUME_STEP, Vm,
 };
 use backend::{Backend, Live};
-use search_keys::{Dir, Spot};
 use ui::{AppView, Ui};
 
 define_class!(
@@ -1048,7 +1047,7 @@ pub fn run(args: Args) {
         let mut vm = Vm::new();
         vm.intent(Intent::SetFilter(prefs::service_filter()));
         vm.intent(Intent::SetLibrarySort(prefs::library_sort()));
-        (vm, Backend::Live(Live::start()))
+        (vm, Backend::Live(Live::start(backend::HOOKS)))
     };
     let ui = Ui::new(mtm, vm, backend, &delegate);
     ui::install(ui.clone());

@@ -22,13 +22,17 @@ use objc2_foundation::{
     MainThreadMarker, NSAttributedString, NSEdgeInsets, NSIndexSet, NSInteger, NSNotification,
     NSNotificationCenter, NSObjectProtocol, NSPoint, NSRect, NSSize, NSString,
 };
-use requiem_core::{Collection, CollectionKind, Track};
+use requiem_core::Collection;
 use requiem_macos::artwork::Cover;
 
 use super::badge::{self, Badge};
 use super::theme::{self, Icon, Weight};
 use super::ui;
 use super::widgets::{self, FLEX_H, FLEX_W, HoverButton, PIN_BOTTOM, PIN_LEFT, PIN_TOP, rect};
+#[cfg(test)]
+use crate::view::ALBUM_MIN_W;
+use crate::view::{ADD_W, DURATION_W, column_widths, track_number};
+pub use crate::view::{RowText, lists_album, rows};
 use crate::vm::{self, GoToArtist, Intent, List, Place, QueueEdit, Service};
 
 pub const ROW_H: CGFloat = 36.0;
@@ -89,39 +93,6 @@ impl Col {
         .into_iter()
         .find(|c| c.id() == id)
     }
-}
-
-/// One row's text, formatted once per list change, and its artwork.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct RowText {
-    title: String,
-    artists: String,
-    album: String,
-    duration: String,
-    artwork: Option<String>,
-    /// The service badge on the artwork, in a list that mixes services.
-    badge: Option<Service>,
-}
-
-pub fn rows(tracks: &[Track]) -> Vec<RowText> {
-    let mixed = vm::mixed(tracks.iter().map(|t| &t.id.provider));
-    tracks
-        .iter()
-        .map(|t| RowText {
-            title: t.title.clone(),
-            artists: vm::artists(t),
-            album: t.album.clone().unwrap_or_default(),
-            duration: t.duration.map(vm::fmt_time).unwrap_or_default(),
-            artwork: t.artwork_url.clone(),
-            badge: vm::badge(&t.id.provider, mixed),
-        })
-        .collect()
-}
-
-/// Whether the tracks of a collection of `kind` list their album: an album's own tracks all
-/// share one.
-pub fn lists_album(kind: CollectionKind) -> bool {
-    kind != CollectionKind::Album
 }
 
 /// Where the row `was`, selected at `at` before `rows` replaced the list, is now: at `at`
@@ -500,11 +471,6 @@ impl Controller {
         }
         Some(Retained::into_super(cell))
     }
-}
-
-/// A row's number in an album's list.
-fn track_number(row: usize) -> String {
-    (row + 1).to_string()
 }
 
 /// What VoiceOver reads for a title cell. The current and played rows, and the service a
@@ -1232,44 +1198,9 @@ impl ColumnHeader {
     }
 }
 
-const ADD_W: CGFloat = 44.0;
 const ADD_ICON: CGFloat = 16.0;
-const DURATION_W: CGFloat = 80.0;
-/// Narrower tables drop the album column.
-const ALBUM_MIN_W: CGFloat = 640.0;
 /// How long a "+" shows its check after an add.
 const ADDED_FOR: Duration = Duration::from_millis(1200);
-
-#[derive(Debug, Clone, Copy, PartialEq)]
-struct Widths {
-    title: CGFloat,
-    artists: CGFloat,
-    album: Option<CGFloat>,
-}
-
-/// Text-column widths for a table `width` wide, with or without the "+" column and the Album
-/// column. They fill what the fixed columns leave, rounding into the last, so the columns end
-/// flush with the table.
-fn column_widths(width: CGFloat, add: bool, album: bool) -> Widths {
-    let add_w = if add { ADD_W } else { 0.0 };
-    let flex = (width - add_w - DURATION_W).max(0.0);
-    if !album || width < ALBUM_MIN_W {
-        let title = (flex * 46.0 / 76.0).floor();
-        Widths {
-            title,
-            artists: flex - title,
-            album: None,
-        }
-    } else {
-        let title = (flex * 0.46).floor();
-        let artists = (flex * 0.30).floor();
-        Widths {
-            title,
-            artists,
-            album: Some(flex - title - artists),
-        }
-    }
-}
 
 pub struct Table {
     /// Header and scroll view.
@@ -1635,7 +1566,7 @@ fn artists_menu(mtm: MainThreadMarker, names: &[&str], target: &Controller) -> R
 mod tests {
     use std::time::Duration;
 
-    use requiem_core::{ProviderId, TrackId};
+    use requiem_core::{CollectionKind, ProviderId, Track, TrackId};
 
     use super::*;
 
