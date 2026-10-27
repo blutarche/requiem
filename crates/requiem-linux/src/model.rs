@@ -15,11 +15,14 @@ pub enum Action {
     Prev,
     Seek(Duration),
     SetVolume(u8),
+    /// Raise the window, launching it when none is open.
+    ShowWindow,
     Quit,
 }
 
 impl Action {
-    /// The session command to send; `None` for `Quit`, which stops the daemon instead.
+    /// The session command to send; `None` for `ShowWindow` and `Quit`, which the daemon
+    /// handles itself.
     pub fn command(self) -> Option<Command> {
         Some(match self {
             Action::Resume => Command::Resume,
@@ -29,7 +32,7 @@ impl Action {
             Action::Prev => Command::Prev,
             Action::Seek(to) => Command::Seek(SeekTarget::Absolute(to)),
             Action::SetVolume(v) => Command::SetVolume(v),
-            Action::Quit => return None,
+            Action::ShowWindow | Action::Quit => return None,
         })
     }
 }
@@ -392,6 +395,7 @@ mod tests {
             Some(Command::Seek(SeekTarget::Absolute(Duration::from_secs(3))))
         );
         assert_eq!(Action::SetVolume(9).command(), Some(Command::SetVolume(9)));
+        assert_eq!(Action::ShowWindow.command(), None);
         assert_eq!(Action::Quit.command(), None);
     }
 }

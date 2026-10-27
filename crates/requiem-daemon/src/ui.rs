@@ -116,9 +116,14 @@ pub fn run_platform(
             .spawn_scoped(scope, move || {
                 // Ends once the view thread drops `desktop`, the last holder of a sender.
                 for action in desktop_actions {
-                    match action.command() {
-                        Some(cmd) => server.send(cmd),
-                        None => crate::request_stop(stop_tx),
+                    match (action, action.command()) {
+                        (_, Some(cmd)) => server.send(cmd),
+                        (requiem_linux::model::Action::ShowWindow, None) => {
+                            if !server.raise_gui() {
+                                launch_gui(exe);
+                            }
+                        }
+                        (_, None) => crate::request_stop(stop_tx),
                     }
                 }
             });
@@ -160,10 +165,15 @@ fn launch_gui(exe: Option<&Path>) {
     match gui_app(exe) {
         Some(app) => open_app(app),
         None => {
-            let gui: PathBuf = exe.with_file_name("requiem-gui");
+            let mut gui: PathBuf = exe.with_file_name("requiem-gui");
             if !gui.exists() {
-                eprintln!("requiemd: {} not found", gui.display());
-                return;
+                if cfg!(target_os = "linux") {
+                    // Installed elsewhere on PATH, as a distribution package would put it.
+                    gui = PathBuf::from("requiem-gui");
+                } else {
+                    eprintln!("requiemd: {} not found", gui.display());
+                    return;
+                }
             }
             launched(spawn_detached(&gui));
         }

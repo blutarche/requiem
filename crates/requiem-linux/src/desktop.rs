@@ -17,7 +17,8 @@ pub struct Desktop {
 
 /// Registers on the session bus. `None`, after one line on stderr, when neither the tray nor
 /// MPRIS could register (typically no session bus); the daemon then carries on headless.
-/// `actions` gets what the user asks for; `Action::Quit` means stop the daemon.
+/// `actions` gets what the user asks for; `Action::Quit` means stop the daemon and
+/// `Action::ShowWindow` raise or launch the window.
 pub fn start(actions: Sender<Action>) -> Option<Desktop> {
     let shared: mpris::Shared = Arc::new(Mutex::new(Snapshot::default()));
     let mpris = Mpris::start(shared.clone(), actions.clone());

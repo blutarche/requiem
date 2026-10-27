@@ -80,6 +80,8 @@ impl ksni::Tray for Tray {
             Self::item("Next", Action::Next),
             Self::item("Previous", Action::Prev),
             MenuItem::Separator,
+            Self::item("Show Window", Action::ShowWindow),
+            MenuItem::Separator,
             Self::item("Quit", Action::Quit),
         ]
     }
