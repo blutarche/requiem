@@ -63,6 +63,7 @@ On x86_64 or aarch64, the release has the player and the CLI, without the window
 
 ```sh
 sudo apt install libasound2t64     # Ubuntu 24.04 and later; libasound2 on Debian 12 and older Ubuntu
+sudo dnf install alsa-lib           # Fedora
 tar -xzf requiem-<version>-linux-$(uname -m).tar.gz
 install -D -m 755 -t ~/.local/bin requiem-<version>-linux-$(uname -m)/requiem requiem-<version>-linux-$(uname -m)/requiemd
 requiem --connect
