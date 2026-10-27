@@ -134,7 +134,7 @@ gridview.cards > child { padding-bottom: 8px; }
 gridview.cards > child box { margin: 0; border-spacing: 0; }
 gridview.cards > child > box > box { padding: 6px; }
 listview.cards > row:hover, gridview.cards > child:hover { background-color: #22222A; }
-listview.cards > row:selected, gridview.cards > child:selected { background-color: rgba(124, 112, 245, 0.32); }
+.card.selected, listview.cards > row:selected, gridview.cards > child:selected { box-shadow: inset 0 0 0 2px #7C70F5; }
 listview.cards > row:focus, gridview.cards > child:focus { outline: none; }
 
 /* Song tables */

@@ -166,15 +166,20 @@ fn show_view(ui: &Ui, view: View) {
         }
         View::SearchCardSelected => {
             let _ = ui.results_move_down();
-            // Down through the songs and the Artists row to the Albums row, then along it.
-            for _ in 0..64 {
-                if matches!(ui.all_spot(), Some(Spot::Card { row: 1, .. })) {
-                    break;
-                }
-                ui.move_all_selection(Dir::Down);
-            }
-            ui.move_all_selection(Dir::Right);
-            ui.move_all_selection(Dir::Right);
+            // Once laid out, so the selected card scrolls into view.
+            glib::idle_add_local_once(|| {
+                ui::with(|ui| {
+                    // Down through the songs and the Artists row to the Albums row, then along it.
+                    for _ in 0..64 {
+                        if matches!(ui.all_spot(), Some(Spot::Card { row: 1, .. })) {
+                            break;
+                        }
+                        ui.move_all_selection(Dir::Down);
+                    }
+                    ui.move_all_selection(Dir::Right);
+                    ui.move_all_selection(Dir::Right);
+                });
+            });
         }
     }
 }
@@ -207,7 +212,9 @@ fn demo_snapshot(path: PathBuf) {
             || started.elapsed() >= SNAPSHOT_WAIT
         {
             exit_with_snapshot(&path);
+            return true;
         }
+        false
     });
 }
 
@@ -221,10 +228,14 @@ fn live_snapshot(path: PathBuf, started: Instant) {
         });
         let waited = started.elapsed();
         match state {
-            Some(SnapshotState::Loaded { covers: false }) => exit_with_snapshot(&path),
+            Some(SnapshotState::Loaded { covers: false }) => {
+                exit_with_snapshot(&path);
+                return true;
+            }
             // Covers that never arrive show their placeholders.
             Some(SnapshotState::Loaded { covers: true }) if waited >= SNAPSHOT_WAIT => {
                 exit_with_snapshot(&path);
+                return true;
             }
             Some(SnapshotState::Failed(e)) => {
                 eprintln!("requiem-gui: the page did not load: {e}");
@@ -239,19 +250,40 @@ fn live_snapshot(path: PathBuf, started: Instant) {
             }
             _ => {}
         }
+        false
     });
 }
 
 /// Runs `f` every `SNAPSHOT_POLL`, once nothing else is pending: layout, deferred fills and
-/// frames go first, which a slow software renderer would otherwise starve.
-fn poll(mut f: impl FnMut() + 'static) {
+/// frames go first, which a slow software renderer would otherwise starve. Stops once `f`
+/// returns true.
+fn poll(mut f: impl FnMut() -> bool + 'static) {
     glib::timeout_add_local_full(SNAPSHOT_POLL, glib::Priority::LOW, move || {
-        f();
-        glib::ControlFlow::Continue
+        if f() {
+            glib::ControlFlow::Break
+        } else {
+            glib::ControlFlow::Continue
+        }
     });
 }
 
-fn exit_with_snapshot(path: &Path) -> ! {
+/// Writes the snapshot after the next frame is laid out: a widget waiting for its
+/// allocation draws nothing, so a scroll just before would blank the picture.
+fn exit_with_snapshot(path: &Path) {
+    let clock = ui::with(|ui| {
+        ui.window.queue_draw();
+        ui.window.frame_clock()
+    })
+    .flatten();
+    let Some(clock) = clock else {
+        write_and_exit(path)
+    };
+    let path = path.to_owned();
+    clock.connect_after_paint(move |_| write_and_exit(&path));
+    clock.request_phase(gdk::FrameClockPhase::LAYOUT | gdk::FrameClockPhase::PAINT);
+}
+
+fn write_and_exit(path: &Path) -> ! {
     match ui::with(|ui| write_snapshot(&ui.root, path)) {
         Some(Ok(())) => std::process::exit(0),
         Some(Err(e)) => {
