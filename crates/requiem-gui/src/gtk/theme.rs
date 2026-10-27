@@ -17,9 +17,12 @@ pub fn rgb(hex: u32) -> (f64, f64, f64) {
 /// The palette's tokens and every class the window uses. Primary buttons fill with the accent
 /// darkened 40% toward accent-deep (#5A4FC0), as on macOS, so the white label keeps 4.6:1.
 const CSS: &str = r#"
+/* Sizes are px throughout: KDE's gtk-xft-dpi already carries the display scale, so pt-based
+   defaults would scale twice on top of Wayland's own scale. */
 window.requiem, window.requiem > * {
   background-color: #0A0A0C;
   color: #F2EFEA;
+  font-size: 13px;
 }
 .requiem .root { background-color: #0A0A0C; }
 .requiem * { outline-color: rgba(124, 112, 245, 0.6); }
@@ -34,7 +37,7 @@ window.requiem, window.requiem > * {
 button.nav {
   background: none; border: none; box-shadow: none;
   border-radius: 6px; padding: 0 14px; min-height: 36px; margin-bottom: 4px;
-  color: #E8E5DE; font-weight: 600;
+  color: #E8E5DE; font-weight: 600; font-size: 14px;
 }
 button.nav:hover { background-color: #14141A; }
 button.nav.active { background-color: #15132B; }
