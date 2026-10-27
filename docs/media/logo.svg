@@ -1,0 +1,41 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="160" height="160" viewBox="0 0 256 256" role="img" aria-label="Requiem">
+  <defs>
+    <linearGradient id="bars" gradientUnits="userSpaceOnUse" x1="56" y1="190" x2="200" y2="66">
+      <stop offset="0" stop-color="#7C70F5"/>
+      <stop offset="1" stop-color="#EBA6D2"/>
+    </linearGradient>
+    <linearGradient id="tile" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#1F1F26"/>
+      <stop offset="1" stop-color="#121216"/>
+    </linearGradient>
+    <filter id="glow" x="-50%" y="-50%" width="200%" height="200%">
+      <feGaussianBlur stdDeviation="7"/>
+    </filter>
+  </defs>
+  <style>
+    .bar { transform-box: fill-box; transform-origin: center; animation: pulse 1.6s ease-in-out infinite; }
+    .b1 { animation-delay: -0.9s; }
+    .b2 { animation-delay: -0.3s; }
+    .b3 { animation-delay: -1.2s; }
+    .b4 { animation-delay: -0.6s; }
+    @keyframes pulse {
+      0%, 100% { transform: scaleY(1); }
+      50% { transform: scaleY(0.55); }
+    }
+    @media (prefers-reduced-motion: reduce) { .bar { animation: none; } }
+  </style>
+  <rect x="8" y="8" width="240" height="240" rx="56" fill="url(#tile)"/>
+  <rect x="8.5" y="8.5" width="239" height="239" rx="55.5" fill="none" stroke="#ffffff" stroke-opacity="0.06"/>
+  <g fill="url(#bars)" filter="url(#glow)" opacity="0.45">
+    <rect class="bar b1" x="56" y="102" width="24" height="56" rx="12"/>
+    <rect class="bar b2" x="96" y="80" width="24" height="100" rx="12"/>
+    <rect class="bar b3" x="136" y="66" width="24" height="124" rx="12"/>
+    <rect class="bar b4" x="176" y="92" width="24" height="76" rx="12"/>
+  </g>
+  <g fill="url(#bars)">
+    <rect class="bar b1" x="56" y="102" width="24" height="56" rx="12"/>
+    <rect class="bar b2" x="96" y="80" width="24" height="100" rx="12"/>
+    <rect class="bar b3" x="136" y="66" width="24" height="124" rx="12"/>
+    <rect class="bar b4" x="176" y="92" width="24" height="76" rx="12"/>
+  </g>
+</svg>
