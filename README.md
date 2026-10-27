@@ -34,11 +34,11 @@ Measured on an Apple Silicon Mac (physical footprint). Close the window and the 
 ## Features
 
 - **Two services, one library.** Home, search and your Library mix YouTube Music and Spotify, each cover badged with its service. Show both or just one.
-- **Native, not a webview.** AppKit on macOS, Rust underneath. No Electron, no Chromium.
+- **Native, not a webview.** AppKit on macOS, GTK 4 on Linux, Rust underneath. No Electron, no Chromium.
 - **Lives in the menu bar.** Play/pause and skip from the menu bar icon; it publishes Now Playing and answers the media keys.
-- **Keyboard first.** Cmd+K opens a command palette, and the everyday actions have shortcuts.
+- **Keyboard first.** Cmd+K (Ctrl+K on Linux) opens a command palette, and the everyday actions have shortcuts.
 - **Scriptable.** A CLI drives the running player, with `--json` output for scripts, and a [Raycast extension](integrations/raycast) is built on it.
-- **Linux too.** The player and CLI run headless with a tray icon and MPRIS, so `playerctl`, media keys and desktop widgets control it.
+- **Linux too.** The same window on GTK 4, and a player with a tray icon and MPRIS, so `playerctl`, media keys and desktop widgets control it.
 - **Remembers where you were.** Queue, the resume point and volume survive restarts.
 - **Updates itself** on macOS from signed GitHub releases.
 - **No telemetry.** The developer runs no servers and receives nothing. See [PRIVACY.md](PRIVACY.md).
@@ -59,17 +59,19 @@ The first time you open Requiem, macOS blocks it because it isn't notarized: cli
 
 ### Linux
 
-On x86_64 or aarch64, the release has the player and the CLI, without the window, as `requiem-<version>-linux-<arch>.tar.gz`. Install ALSA's library, unpack the tarball for your machine and put both programs on your `PATH`:
+On x86_64 or aarch64, the release has the window, the player and the CLI as `requiem-<version>-linux-<arch>.tar.gz`. The window needs GTK 4.8 or later. Install ALSA's and GTK's libraries, unpack the tarball for your machine, put the programs on your `PATH`, and add the window to your applications menu:
 
 ```sh
-sudo apt install libasound2t64     # Ubuntu 24.04 and later; libasound2 on Debian 12 and older Ubuntu
-sudo dnf install alsa-lib           # Fedora
+sudo apt install libasound2t64 libgtk-4-1   # Ubuntu 24.04 and later; libasound2 on Debian 12 and older Ubuntu
+sudo dnf install alsa-lib gtk4               # Fedora
 tar -xzf requiem-<version>-linux-$(uname -m).tar.gz
-install -D -m 755 -t ~/.local/bin requiem-<version>-linux-$(uname -m)/requiem requiem-<version>-linux-$(uname -m)/requiemd
-requiem --connect
+cd requiem-<version>-linux-$(uname -m)
+install -D -m 755 -t ~/.local/bin requiem requiemd requiem-gui
+install -D -m 644 -t ~/.local/share/applications io.github.blutarche.Requiem.desktop
+cp -r icons ~/.local/share/
 ```
 
-If the shell can't find `requiem`, open a new terminal: most distributions add `~/.local/bin` to `PATH` once it exists. `requiem` starts `requiemd` when it isn't running. Requiem doesn't update itself on Linux: install a newer tarball the same way.
+Then open Requiem from the applications menu, or run `requiem-gui`. If the shell can't find it, open a new terminal: most distributions add `~/.local/bin` to `PATH` once it exists. The window and `requiem --connect` start `requiemd` when it isn't running; closing the window leaves the music playing, and the tray icon's Show Window brings it back. Requiem doesn't update itself on Linux: install a newer tarball the same way.
 
 ### From source
 
@@ -81,7 +83,7 @@ cargo build --release   # target/release/{requiemd,requiem-gui,requiem}
 
 ## Quick start
 
-Search and playback of YouTube Music work without signing in. Open Requiem, press Cmd+F, type a song and press Return, then double-click a result to play it.
+Search and playback of YouTube Music work without signing in. Open Requiem, press Cmd+F, type a song and press Return, then double-click a result to play it. On Linux, use Ctrl where these say Cmd and Alt where they say Option.
 
 | Keys | Does |
 | --- | --- |

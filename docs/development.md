@@ -2,13 +2,14 @@
 
 ## Build from source
 
-Needs Rust (see `rust-toolchain.toml`) and libopus: `brew install opus` on macOS, `libopus-dev libasound2-dev pkg-config` on Debian/Ubuntu.
+Needs Rust (see `rust-toolchain.toml`) and libopus: `brew install opus` on macOS, `libopus-dev libasound2-dev libgtk-4-dev pkg-config` on Debian/Ubuntu, `opus-devel alsa-lib-devel gtk4-devel` on Fedora. GTK 4.8 is the floor, the version Debian 12 has.
 
 ```sh
 cargo build --release          # target/release/{requiemd,requiem-gui,requiem}
 scripts/bundle-macos.sh        # macOS: target/Requiem.app (ad-hoc signed), CLI at Contents/MacOS/requiem
 scripts/make-dmg.sh            # macOS: bundles, then target/Requiem-<version>.dmg, the installer
 scripts/release-macos.sh 0.1.0 # macOS: signed release files in target/release-files/v0.1.0/ (--publish tags and uploads)
+scripts/release-linux.sh 0.1.0 # Linux tarballs (window, player, CLI, .desktop file, icons), built and smoke-tested in Docker
 ```
 
 `make-dmg.sh` installs [dmgbuild](https://github.com/dmgbuild/dmgbuild) from PyPI into `target/dmgbuild-venv` on its first run.
@@ -17,7 +18,7 @@ The bundle embeds Homebrew's libopus. Its minimum macOS version is whatever that
 
 ## Snapshots
 
-`requiem-gui --demo --snapshot out.png --view <view>` renders a view from fixed fake data without showing a window; `requiem-gui --help` lists the views (`home`, `search`, `album`, `palette` and more). For `home` and `library`, `--snapshot` also works without `--demo`: it asks the running player (starting one if needed), waits up to 20 s for the page and its covers, then writes the PNG, exiting 1 if the page fails to load.
+`requiem-gui --demo --snapshot out.png --view <view>` renders a view from fixed fake data without showing a window (on Linux it draws an undecorated window, so run it under `xvfb-run` or a headless compositor); `requiem-gui --help` lists the views (`home`, `search`, `album`, `palette` and more). For `home` and `library`, `--snapshot` also works without `--demo`: it asks the running player (starting one if needed), waits up to 20 s for the page and its covers, then writes the PNG, exiting 1 if the page fails to load.
 
 ## Footprint
 
