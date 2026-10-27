@@ -17,7 +17,7 @@
 </p>
 
 <p align="center">
-  <img src="docs/media/demo.gif" width="880" alt="Tour of the Requiem window: Home, search, an album, an artist, the queue and the command palette">
+  <img src="docs/media/demo.gif" width="880" alt="Tour of the Requiem window: Home, search, an artist, an album, Now Playing, the queue and the command palette">
 </p>
 
 ## Why
@@ -117,16 +117,14 @@ Signing in adds your own music to Home and the Library.
 
 <table>
   <tr>
-    <td><img src="docs/media/home.png" alt="Home: liked songs, mixes and playlists from both services"></td>
-    <td><img src="docs/media/search-albums.png" alt="Search results filtered to albums"></td>
+    <td><img src="docs/media/home.jpg" alt="Home: liked songs and mixes from Spotify and YouTube Music, each cover badged with its service"></td>
+    <td><img src="docs/media/search-albums.jpg" alt="Search results for Bring Me The Horizon, filtered to albums"></td>
   </tr>
   <tr>
-    <td><img src="docs/media/album.png" alt="An album's tracks with Play and Add to Queue"></td>
-    <td><img src="docs/media/palette.png" alt="The Cmd+K command palette"></td>
+    <td><img src="docs/media/album.jpg" alt="An album's tracks with Play and Add to Queue"></td>
+    <td><img src="docs/media/now-playing.jpg" alt="Now Playing: the cover, the track and what comes up next"></td>
   </tr>
 </table>
-
-Screenshots use the app's built-in demo data: `requiem-gui --demo --snapshot out.png --view home`.
 
 ## Documentation
 
