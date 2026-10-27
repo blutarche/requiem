@@ -53,17 +53,24 @@ smoke='
 set -eu
 tarball="$1"; name="$2"; version="$3"
 apt-get update -qq
-apt-get install -y -qq --no-install-recommends libasound2 ca-certificates dbus playerctl >/dev/null
+apt-get install -y -qq --no-install-recommends libasound2 libgtk-4-1 ca-certificates dbus playerctl xvfb xauth fonts-dejavu-core >/dev/null
 DBUS_SESSION_BUS_ADDRESS="$(dbus-daemon --session --fork --print-address)"
 export DBUS_SESSION_BUS_ADDRESS
 mkdir /opt/requiem
 tar -xzf "/dist/$tarball" -C /opt/requiem
 cd "/opt/requiem/$name"
 ls
-missing="$(ldd requiem requiemd | grep "not found" || true)"
+missing="$(ldd requiem requiemd requiem-gui | grep "not found" || true)"
 [ -z "$missing" ] || { echo "missing libraries:" >&2; echo "$missing" >&2; exit 1; }
 ./requiem --help
 [ "$(./requiem --version)" = "requiem $version" ]
+# The window draws its demo library headless, without a player.
+GSK_RENDERER=cairo GTK_A11Y=none timeout 120 xvfb-run -a ./requiem-gui --demo --snapshot /tmp/window.png
+[ -s /tmp/window.png ] || { echo "the window drew nothing" >&2; exit 1; }
+for s in 16 32 48 64 128 256 512; do
+  [ -s "icons/hicolor/${s}x${s}/apps/io.github.blutarche.Requiem.png" ] || { echo "no ${s}px icon" >&2; exit 1; }
+done
+grep -qx "Exec=requiem-gui" io.github.blutarche.Requiem.desktop
 out="$(printf "search daft punk\nawait results 30\n" | ./requiem --connect --script - 2>&1)" || {
   echo "$out" >&2
   echo "the search script failed" >&2
@@ -90,16 +97,22 @@ for arch in x86_64 aarch64; do
   image="requiem-linux-build:$toolchain-$arch"
 
   if [ "$arch" = "$host_arch" ]; then
-    deps="pkg-config libasound2-dev libopus-dev"
+    deps="pkg-config libasound2-dev libopus-dev libgtk-4-dev"
     env_lines=""
+    stub=""
     method="native"
   else
     [ "$host_arch" = aarch64 ] || die "cross-compiling $arch from $host_arch is not supported"
-    deps="pkg-config gcc-x86-64-linux-gnu libc6-dev-amd64-cross libasound2-dev:$dpkg_arch libopus-dev:$dpkg_arch"
+    deps="pkg-config gcc-x86-64-linux-gnu libc6-dev-amd64-cross libasound2-dev:$dpkg_arch libopus-dev:$dpkg_arch libgtk-4-dev:$dpkg_arch"
     env_lines="ENV CC_x86_64_unknown_linux_gnu=x86_64-linux-gnu-gcc \\
     CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER=x86_64-linux-gnu-gcc \\
     PKG_CONFIG_ALLOW_CROSS=1 \\
     PKG_CONFIG_LIBDIR=/usr/lib/x86_64-linux-gnu/pkgconfig:/usr/share/pkgconfig"
+    # libgraphene-1.0-dev pulls in GObject introspection, whose amd64 build needs an amd64
+    # Python beside the native one. Linking needs none of it, so an empty package stands in.
+    stub="&& mkdir -p /tmp/gir/DEBIAN \\
+    && printf 'Package: libgirepository1.0-dev\\nVersion: 1.74.0-3+stub\\nArchitecture: $dpkg_arch\\nMaintainer: requiem\\nDescription: stand-in for linking only\\n' >/tmp/gir/DEBIAN/control \\
+    && dpkg-deb --build /tmp/gir /tmp/gir.deb >/dev/null && dpkg -i /tmp/gir.deb >/dev/null"
     method="cross-compiled from $host_arch"
   fi
 
@@ -107,7 +120,7 @@ for arch in x86_64 aarch64; do
   docker build --quiet --platform "$build_platform" -t "$image" - >/dev/null <<EOF
 FROM rust:$toolchain-bookworm
 RUN dpkg --add-architecture $dpkg_arch \\
-    && apt-get update -qq \\
+    && apt-get update -qq $stub \\
     && apt-get install -y -qq --no-install-recommends $deps \\
     && rustup target add --toolchain $toolchain $triple \\
     && rm -rf /var/lib/apt/lists/*
@@ -124,11 +137,17 @@ EOF
     -v requiem-linux-cargo-git:/usr/local/cargo/git \
     -v "requiem-linux-target-$arch:/target" \
     -w /src "$image" bash -euc '
-      cargo build --release --locked --target "$1" -p requiem-cli -p requiem-daemon
+      cargo build --release --locked --target "$1" -p requiem-cli -p requiem-daemon -p requiem-gui
       stage="/out/$2"
       mkdir -p "$stage"
-      install -m 755 "/target/$1/release/requiem" "/target/$1/release/requiemd" "$stage"
-      install -m 644 README.md LICENSE-MIT LICENSE-APACHE "$stage"
+      install -m 755 "/target/$1/release/requiem" "/target/$1/release/requiemd" \
+        "/target/$1/release/requiem-gui" "$stage"
+      install -m 644 README.md LICENSE-MIT LICENSE-APACHE \
+        crates/requiem-gui/assets/linux/io.github.blutarche.Requiem.desktop "$stage"
+      for s in 16 32 48 64 128 256 512; do
+        install -D -m 644 "crates/requiem-gui/assets/linux/io.github.blutarche.Requiem-$s.png" \
+          "$stage/icons/hicolor/${s}x${s}/apps/io.github.blutarche.Requiem.png"
+      done
       tar --owner=0 --group=0 --numeric-owner --sort=name -czf "/out/$3" -C /out "$2"
     ' build "$triple" "$name" "$tarball" >&2
 

@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Requiem
+Comment=Native desktop client for YouTube Music and Spotify
+Exec=requiem-gui
+Icon=io.github.blutarche.Requiem
+Terminal=false
+Categories=AudioVideo;Audio;Player;
+StartupWMClass=io.github.blutarche.Requiem
