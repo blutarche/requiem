@@ -4,23 +4,26 @@ Search and playback work without signing in. Signing in adds your own YouTube Mu
 
 ## Sign in with your browser session
 
-Requiem signs in to YouTube Music with the session of a browser where you are signed in. Home shows the first 6 shelves of YouTube Music's own Home, Library shows your Liked music and your playlists, and your private playlists and mixes open. Requiem sends the session only to YouTube Music's own API, for Home, Library, the playlists you open and your account's name. Search and playback stay anonymous, and plays aren't reported to Google.
+Requiem signs in to YouTube Music with a browser session copied from a private window. Home shows the first 6 shelves of YouTube Music's own Home, Library shows your Liked music and your playlists, and your private playlists and mixes open. Requiem sends the session only to YouTube Music's own API, for Home, Library, the playlists you open and your account's name. Search and playback stay anonymous, and plays aren't reported to Google.
 
-1. In a browser where you are signed in, open [music.youtube.com](https://music.youtube.com).
+1. Open a private window (in Safari, **File → New Private Window**; in Chrome, **New Incognito Window**; in Firefox, **New Private Window**), sign in to Google there, and open [music.youtube.com](https://music.youtube.com).
 2. Open the browser's developer tools with Option+Cmd+I and go to the **Network** tab. In Safari, first turn on **Show features for web developers** in **Safari → Settings… → Advanced**.
 3. Type `browse` in the Network tab's filter, then click **Explore** or **Library** in YouTube Music's sidebar (or scroll Home) so a `browse` request appears. Right-click it (in Safari, Control-click).
    - **Chrome:** choose **Copy → Copy as cURL**.
    - **Firefox:** in the **Copy** submenu, choose **Copy Request Headers** or **Copy as cURL**.
    - **Safari:** choose **Copy as cURL**.
 4. In Requiem, choose **Sign in to YouTube Music** (on Home, the Library or in the palette), or open **Settings** and click **Sign In…** under YouTube Music. Settings shows these steps; click **Paste from Clipboard**, or press Cmd+V.
+5. Close the private window without signing out.
+
+**Why a private window:** Google replaces a session's cookies while a browser keeps YouTube open, which ends the copy Requiem kept. A private window that is closed right away never replaces them, so the copy lasts until Google ends it. Signing out first would end it at once.
 
 Requiem checks the session with YouTube Music before it keeps it. Once it does, it clears this Mac's clipboard, unless you copied something else since. Clear the clipboard yourself on a computer you copied from.
 
 **What Requiem keeps:** the request's cookie and its `X-Goog-AuthUser`, `X-Goog-PageId` and `X-Goog-Visitor-Id` headers, with your account's name, in `ytmusic-session.json` next to `state.json` (on macOS, `~/Library/Application Support/requiem/`). The rest of the paste is dropped. The file is readable only by you and, on macOS, excluded from Time Machine backups. A new session replaces it: **Use Browser Session…** in Settings, while you are signed in, takes another. `account` in the CLI shows the state.
 
-**The risks:** the cookie is your Google sign-in, not just YouTube Music's. Anyone who has the file, or the copied text, can use your Google account until that browser signs out. Using it is against YouTube's terms, and Google could flag the account.
+**The risks:** the cookie is your Google sign-in, not just YouTube Music's. Anyone who has the file, or the copied text, can use your Google account until Google ends the session. Using it is against YouTube's terms, and Google could flag the account.
 
-**Signing out:** **Sign Out…** in Settings, or `signout ytmusic` in the CLI, deletes the file. If the file can't be deleted, it says why, and the session stays until you sign out again. Requiem can't sign your browser out: the copied cookie keeps working until you sign out of Google in that browser profile, which ends it. When Google ends a session, Requiem signs YouTube Music out and asks for a new one in Settings.
+**Signing out:** **Sign Out…** in Settings, or `signout ytmusic` in the CLI, deletes the file. If the file can't be deleted, it says why, and the session stays until you sign out again. Sign Out deletes only Requiem's copy; the cookie itself keeps working until Google ends the session, and changing your Google password signs out every session. When Google ends a session, Requiem signs YouTube Music out and asks for a new one in Settings.
 
 **From another computer:** over ssh, the CLI reads the paste from stdin with `-`, or from a file. Copy the headers on the computer with the browser, then send them from that computer's clipboard, so they never land on the Mac's disk or in a shell history:
 

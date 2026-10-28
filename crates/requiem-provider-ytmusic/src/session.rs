@@ -44,8 +44,8 @@ const LIKED: &str = "LM";
 const LIKED_ARTWORK: &str =
     "https://www.gstatic.com/youtube/media/ytm/images/pbg/liked-music-@576.png";
 
-const ENDED: &str = "Your YouTube Music browser session ended; paste a new one in Settings";
-const NOT_ACCEPTED: &str = "Google didn't accept that session; copy it again from a browser where you're signed in to YouTube Music";
+const ENDED: &str = "Your YouTube Music browser session ended; copy a new one from a private window, close it without signing out, and paste it in Settings";
+const NOT_ACCEPTED: &str = "Google didn't accept that session; copy it again from a private window where you're signed in to YouTube Music";
 const WEB_PAGE: &str =
     "YouTube answered with a web page, not data; the session may need consent or a fresh sign-in";
 const REDIRECTED: &str = "YouTube redirected a signed-in request";

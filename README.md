@@ -114,7 +114,7 @@ Every shortcut, the Home and Library pages, and the queue: [docs/usage.md](docs/
 
 Signing in adds your own music to Home and the Library.
 
-- **YouTube Music** signs in with a session copied from a browser where you are signed in. The copied cookie is your Google sign-in, so read [docs/youtube-music.md](docs/youtube-music.md) before you do it.
+- **YouTube Music** signs in with a session copied from a private browser window. The copied cookie is your Google sign-in, so read [docs/youtube-music.md](docs/youtube-music.md) before you do it.
 - **Spotify** signs in with a code at <https://www.spotify.com/pair> and needs Premium. It plays through [librespot](https://github.com/librespot-org/librespot); Spotify doesn't allow unofficial players, so your account could be suspended. See [docs/spotify.md](docs/spotify.md).
 
 ## Screenshots

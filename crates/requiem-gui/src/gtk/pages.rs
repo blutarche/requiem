@@ -1013,10 +1013,11 @@ impl CodePanel {
     }
 }
 
-const SESSION_STEPS: [&str; 3] = [
-    "Open music.youtube.com in a browser where you're signed in.",
+const SESSION_STEPS: [&str; 4] = [
+    "Open a private window and sign in to music.youtube.com there.",
     "Open the browser's developer tools on the Network tab and filter for browse.",
     "Click Explore or Library in the sidebar (or scroll Home) so a browse request appears, then copy its request headers, or choose Copy as cURL.",
+    "Close the private window without signing out. A browser that keeps YouTube open replaces the session, which ends the copy.",
 ];
 const DISCLOSURE: &str = "This copies your Google sign-in from your browser. Anyone who has it \
 can use your Google account, so Requiem keeps it only on this computer. Using it is against \

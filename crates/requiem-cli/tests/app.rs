@@ -1446,7 +1446,7 @@ fn requiem_signin_browser_exits_as_signin_client_does() {
             vec![
                 Event::AccountError {
                     provider: fake(),
-                    error: "Google didn't accept that session; copy it again from a browser where you're signed in to YouTube Music".into(),
+                    error: "Google didn't accept that session; copy it again from a private window where you're signed in to YouTube Music".into(),
                 },
                 Event::Account {
                     provider: fake(),
@@ -1470,7 +1470,7 @@ fn requiem_signin_browser_exits_as_signin_client_does() {
             assert!(text.contains("signed in as Requiem Tester\n"), "{text}");
         } else {
             assert!(
-                text.contains("account error: Google didn't accept that session; copy it again from a browser where you're signed in to YouTube Music\n"),
+                text.contains("account error: Google didn't accept that session; copy it again from a private window where you're signed in to YouTube Music\n"),
                 "{text}"
             );
         }

@@ -652,7 +652,7 @@ mod tests {
         assert_eq!(
             e,
             ProviderError::SignInRequired(
-                "Your YouTube Music browser session ended; paste a new one in Settings".into()
+                "Your YouTube Music browser session ended; copy a new one from a private window, close it without signing out, and paste it in Settings".into()
             )
         );
         assert_eq!(p.account(), AccountState::SignedOut);

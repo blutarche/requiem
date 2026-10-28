@@ -538,9 +538,10 @@ impl CodeView {
     }
 }
 
-const SESSION_STEPS: &str = "1. Open music.youtube.com in a browser where you're signed in.\n\
+const SESSION_STEPS: &str = "1. Open a private window and sign in to music.youtube.com there.\n\
 2. Open the browser's developer tools on the Network tab and filter for browse.\n\
-3. Click Explore or Library in the sidebar (or scroll Home) so a browse request appears, then copy its request headers, or choose Copy as cURL.";
+3. Click Explore or Library in the sidebar (or scroll Home) so a browse request appears, then copy its request headers, or choose Copy as cURL.\n\
+4. Close the private window without signing out. A browser that keeps YouTube open replaces the session, which ends the copy.";
 const DISCLOSURE: &str = "This copies your Google sign-in from your browser. Anyone who has it \
 can use your Google account, so Requiem keeps it only on this Mac, out of backups. Using it is \
 against YouTube's terms and could get the account flagged.";
