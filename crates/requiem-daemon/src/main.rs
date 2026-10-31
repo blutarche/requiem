@@ -148,6 +148,7 @@ fn main() -> ExitCode {
     let engine = LazyEngine::new(forward, open_audio, first);
     let provider = Arc::new(YtMusicProvider::new(YtMusicOptions {
         prefer_aac,
+        region: requiem_macos::region(),
         ..YtMusicOptions::default()
     }));
     let spotify = Arc::new(SpotifyProvider::new(SpotifyOptions {

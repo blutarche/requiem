@@ -1,6 +1,6 @@
 //! A YouTube Music browser session: the cookie of a signed-in music.youtube.com tab, checked
 //! with YouTube Music and kept in the provider's folder. Home, the Library and private
-//! playlists come with it as music.youtube.com shows them. Search and playback never carry it.
+//! playlists come with it as music.youtube.com shows them. Search and the song radio carry it too; playback never does.
 
 use std::fmt::{self, Write as _};
 use std::io;
@@ -20,7 +20,7 @@ use crate::IpFamily;
 use crate::browser::{self, BrowserHeaders};
 use crate::clients::{MUSIC_CLIENT_ID, MUSIC_CLIENT_VERSION, MUSIC_ORIGIN, MUSIC_UA};
 use crate::files::{commit, private_dir, read_capped, remove, stage_private, tighten};
-use crate::innertube::{InnertubeClient, status_error};
+use crate::innertube::{music_context, status_error};
 use crate::log::debug;
 use crate::parse::{
     BROWSE_PREFIX, PROVIDER, collection_kind, logged_in, parse_collection, parse_home,
@@ -111,6 +111,14 @@ struct Slot {
     sign_outs: u64,
 }
 
+/// Why a search or radio request made with the session got no answer.
+pub(crate) enum Refused {
+    /// Google no longer takes the session (it has been forgotten if it was signed out), or
+    /// refused this request.
+    Session,
+    Other(ProviderError),
+}
+
 /// Why a signed request failed.
 enum Failure {
     /// A 401, or an answer that takes the request as signed out.
@@ -124,6 +132,8 @@ pub(crate) struct BrowserSession {
     transport: Arc<dyn Transport>,
     clock: Arc<dyn Clock>,
     family: IpFamily,
+    /// The system's region, for a session whose cookie names none.
+    region: Option<String>,
     /// `None` when there is no usable location for it.
     path: Option<PathBuf>,
     slot: Mutex<Slot>,
@@ -264,10 +274,6 @@ fn joined<T>(
         .unwrap_or_else(|_| Err(ProviderError::Parse("a browse panicked".into())))
 }
 
-fn browse_body(browse_id: &str) -> Value {
-    json!({"context": InnertubeClient::music_context(), "browseId": browse_id})
-}
-
 /// The signed-in account's name and channel handle from `account/account_menu`.
 fn account_of(body: &[u8]) -> Option<(String, Option<String>)> {
     let root: Value = serde_json::from_slice(body).ok()?;
@@ -291,6 +297,7 @@ impl BrowserSession {
         transport: Arc<dyn Transport>,
         clock: Arc<dyn Clock>,
         family: IpFamily,
+        region: Option<String>,
         path: Option<PathBuf>,
     ) -> Self {
         let current = path.as_deref().and_then(load).map(Arc::new);
@@ -298,6 +305,7 @@ impl BrowserSession {
             transport,
             clock,
             family,
+            region,
             path,
             slot: Mutex::new(Slot {
                 current,
@@ -315,6 +323,40 @@ impl BrowserSession {
         self.current().map(|s| AccountState::SignedIn {
             name: Some(s.account_name.clone()),
         })
+    }
+
+    /// The region the account's cookie names, else the system's.
+    fn context(&self, headers: &BrowserHeaders) -> Value {
+        let region = browser::cookie_region(headers.cookie.expose());
+        music_context(region.as_deref().or(self.region.as_deref()))
+    }
+
+    fn browse_body(&self, headers: &BrowserHeaders, browse_id: &str) -> Value {
+        json!({"context": self.context(headers), "browseId": browse_id})
+    }
+
+    /// The request context of `s`.
+    pub(crate) fn context_of(&self, s: &Signed) -> Value {
+        self.context(&s.headers)
+    }
+
+    /// POSTs a search or radio request with `s`. A session Google refuses is forgotten when
+    /// it was signed out, as a browse forgets it.
+    pub(crate) fn post(
+        &self,
+        s: &Signed,
+        endpoint: &str,
+        body: &Value,
+    ) -> Result<Vec<u8>, Refused> {
+        self.call(&s.headers, endpoint, "", body)
+            .map_err(|f| match f {
+                Failure::SignedOut => {
+                    self.expire(s);
+                    Refused::Session
+                }
+                Failure::Forbidden => Refused::Session,
+                Failure::Other(e) => Refused::Other(e),
+            })
     }
 
     /// POSTs to music.youtube.com's Innertube with the session, never anywhere else.
@@ -390,13 +432,18 @@ impl BrowserSession {
                 &headers,
                 "account/account_menu",
                 "",
-                &json!({"context": InnertubeClient::music_context()}),
+                &json!({"context": self.context(&headers)}),
             )
             .map_err(checked)?;
         let (name, handle) =
             account_of(&menu).ok_or_else(|| ProviderError::SignInRequired(NO_NAME.into()))?;
         let home = self
-            .call(&headers, "browse", "", &browse_body("FEmusic_home"))
+            .call(
+                &headers,
+                "browse",
+                "",
+                &self.browse_body(&headers, "FEmusic_home"),
+            )
             .map_err(checked)?;
         if !parse_home(&home).is_ok_and(|p| !p.shelves.is_empty()) {
             return Err(ProviderError::SignInRequired(NO_HOME.into()));
@@ -518,7 +565,7 @@ impl BrowserSession {
     /// Home's first page, then its next pages until there are `HOME_SHELVES` shelves. A next
     /// page that fails ends Home early, unless the session ended.
     fn home_feed(&self, s: &Signed) -> Result<Vec<Shelf>, ProviderError> {
-        let body = browse_body("FEmusic_home");
+        let body = self.browse_body(&s.headers, "FEmusic_home");
         let first = parse_home(&self.browse(s, "", &body)?)?;
         let mut shelves = first.shelves;
         let mut next = first.next;
@@ -548,7 +595,11 @@ impl BrowserSession {
 
     /// Liked music, then the playlists on the Library's Playlists tab.
     pub(crate) fn library(&self, s: &Signed) -> Result<Vec<Shelf>, ProviderError> {
-        let body = self.browse(s, "", &browse_body("FEmusic_liked_playlists"))?;
+        let body = self.browse(
+            s,
+            "",
+            &self.browse_body(&s.headers, "FEmusic_liked_playlists"),
+        )?;
         let liked = format!("{BROWSE_PREFIX}VL{LIKED}");
         let playlists = parse_library_playlists(&body)?
             .into_iter()
@@ -573,16 +624,16 @@ impl BrowserSession {
 
     /// A playlist or album, private ones included.
     pub(crate) fn collection(&self, s: &Signed, browse_id: &str) -> Result<Shelf, ProviderError> {
-        let body = self.browse(s, "", &browse_body(browse_id))?;
+        let body = self.browse(s, "", &self.browse_body(&s.headers, browse_id))?;
         parse_collection(&body, collection_kind(browse_id))
     }
 
     /// The page `browse_id` opens, private playlists included: an artist's shelves, with the
     /// artist it is about, or a playlist or album as one shelf.
     pub(crate) fn page(&self, s: &Signed, browse_id: &str) -> Result<Browsed, ProviderError> {
-        let body = self.browse(s, "", &browse_body(browse_id))?;
+        let body = self.browse(s, "", &self.browse_body(&s.headers, browse_id))?;
         parse_page(&body, browse_id, |playlist| {
-            self.browse(s, "", &browse_body(playlist))
+            self.browse(s, "", &self.browse_body(&s.headers, playlist))
         })
     }
 }
@@ -635,6 +686,7 @@ mod tests {
                 self.music.clone(),
                 Arc::new(SystemClock),
                 IpFamily::Any,
+                None,
                 Some(self.path()),
             )
         }

@@ -92,6 +92,24 @@ pub(crate) fn sapisid(cookie: &str) -> Option<&str> {
         .filter(|v| !v.is_empty())
 }
 
+/// `code` in uppercase when it is exactly two ASCII letters.
+pub(crate) fn region_code(code: &str) -> Option<String> {
+    (code.len() == 2 && code.bytes().all(|b| b.is_ascii_alphabetic()))
+        .then(|| code.to_ascii_uppercase())
+}
+
+/// The region of the account's `PREF` cookie (`...&gl=TH&hl=en`), if it names one.
+pub(crate) fn cookie_region(cookie: &str) -> Option<String> {
+    let pref = cookie
+        .split(';')
+        .filter_map(|pair| pair.trim().split_once('='))
+        .find(|(name, _)| *name == "PREF")?
+        .1;
+    pref.split('&')
+        .find_map(|kv| kv.strip_prefix("gl="))
+        .and_then(region_code)
+}
+
 /// Checks headers read back from a saved session as a paste's are checked.
 pub(crate) fn from_parts(
     cookie: &str,
@@ -381,6 +399,23 @@ mod tests {
 
     fn ok(text: &str) -> BrowserHeaders {
         parse_paste(text).unwrap_or_else(|e| panic!("{e}"))
+    }
+
+    #[test]
+    fn the_region_of_a_cookie_is_its_pref_gl() {
+        let cookie = |pref: &str| format!("{COOKIE}; PREF={pref}");
+        for (pref, region) in [
+            ("f6=40000000&tz=Asia.Bangkok&gl=th&hl=en", Some("TH")),
+            ("gl=DE", Some("DE")),
+            ("f6=40000000&hl=en", None),
+            ("gl=USA", None),
+            ("gl=", None),
+        ] {
+            assert_eq!(cookie_region(&cookie(pref)).as_deref(), region, "{pref}");
+        }
+        assert_eq!(cookie_region(COOKIE), None);
+        // Only PREF names the region.
+        assert_eq!(cookie_region(&format!("{COOKIE}; X=gl=FR")), None);
     }
 
     #[test]

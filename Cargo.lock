@@ -2887,6 +2887,7 @@ dependencies = [
  "requiem-audio",
  "requiem-core",
  "requiem-ipc",
+ "requiem-macos",
  "requiem-provider-ytmusic",
  "serde_json",
 ]

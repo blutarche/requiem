@@ -26,11 +26,12 @@ use requiem_core::{
     Shelf, Track, TrackId,
 };
 
-use innertube::{ClientRefresher, InnertubeClient};
+use innertube::{ClientRefresher, InnertubeClient, Route};
 use log::debug;
 use parse::{BROWSE_PREFIX, PROVIDER, StreamFormat};
 use range::{HttpRangeSource, RangeConfig};
-use session::{BrowserSession, Clock, SystemClock};
+use serde_json::Value;
+use session::{BrowserSession, Clock, Refused, Signed, SystemClock};
 use transport::{Transport, UreqTransport};
 
 /// The most an `import_client` payload carrying a browser session may hold.
@@ -51,11 +52,14 @@ pub enum IpFamily {
     V6,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct YtMusicOptions {
     /// Prefer AAC (itag 140) over Opus.
     pub prefer_aac: bool,
     pub ip_family: IpFamily,
+    /// The system's region, an ISO 3166 alpha-2 code, which YouTube ranks search for unless a
+    /// browser session names the account's own. Anything else, or none, is the US.
+    pub region: Option<String>,
 }
 
 pub struct YtMusicProvider {
@@ -162,9 +166,16 @@ impl YtMusicProvider {
         session_file: Option<PathBuf>,
     ) -> YtMusicProvider {
         let homeless = session_file.is_none();
-        let session = BrowserSession::new(transport.clone(), clock, opts.ip_family, session_file);
+        let region = opts.region.as_deref().and_then(browser::region_code);
+        let session = BrowserSession::new(
+            transport.clone(),
+            clock,
+            opts.ip_family,
+            region.clone(),
+            session_file,
+        );
         Self {
-            client: Arc::new(InnertubeClient::new(transport, opts.ip_family)),
+            client: Arc::new(InnertubeClient::new(transport, opts.ip_family, region)),
             session,
             homeless,
             prefer_aac: opts.prefer_aac,
@@ -193,13 +204,56 @@ impl YtMusicProvider {
     }
 }
 
+/// A browser session's route to search and radio. A request Google refuses the session for goes
+/// out anonymously instead, so a session that has gone bad never breaks search.
+struct SignedRoute<'a> {
+    client: &'a InnertubeClient,
+    session: &'a BrowserSession,
+    signed: &'a Signed,
+}
+
+impl Route for SignedRoute<'_> {
+    fn context(&self) -> Value {
+        self.session.context_of(self.signed)
+    }
+
+    fn post(&self, what: &str, endpoint: &str, body: &Value) -> Result<Vec<u8>, ProviderError> {
+        match self.session.post(self.signed, endpoint, body) {
+            Ok(body) => Ok(body),
+            Err(Refused::Session) => {
+                debug!("{what}: the session was refused; asking anonymously");
+                self.client.post(what, endpoint, body)
+            }
+            Err(Refused::Other(e)) => Err(e),
+        }
+    }
+
+    fn anonymous(&self) -> bool {
+        false
+    }
+}
+
+impl YtMusicProvider {
+    /// Runs `f` through the browser session when there is one, else anonymously.
+    fn routed<T>(&self, f: impl FnOnce(&dyn Route) -> T) -> T {
+        match self.session.current() {
+            Some(signed) => f(&SignedRoute {
+                client: &self.client,
+                session: &self.session,
+                signed: &signed,
+            }),
+            None => f(self.client.as_ref()),
+        }
+    }
+}
+
 impl Provider for YtMusicProvider {
     fn id(&self) -> ProviderId {
         ProviderId(PROVIDER.to_owned())
     }
 
     fn search(&self, query: &str, limit: usize) -> Result<SearchResults, ProviderError> {
-        self.client.search_all(query, limit)
+        self.routed(|route| self.client.search_all(route, query, limit))
     }
 
     fn resolve(&self, track: &TrackId) -> Result<AudioSource, ProviderError> {
@@ -211,7 +265,7 @@ impl Provider for YtMusicProvider {
     }
 
     fn radio(&self, seed: &TrackId) -> Result<Vec<Track>, ProviderError> {
-        self.client.radio(&seed.id)
+        self.routed(|route| InnertubeClient::radio(route, &seed.id))
     }
 
     fn browse(&self, page: &Page) -> Result<Browsed, ProviderError> {
@@ -326,10 +380,8 @@ mod tests {
     const TOP_ARTIST: &str = include_str!("../tests/fixtures/search_top_artist.json");
     const ARTIST: &str = include_str!("../tests/fixtures/browse_artist.json");
     const PLAYER: &str = include_str!("../tests/fixtures/player_ok.json");
-    const PLAYLIST: &str = include_str!("../tests/fixtures/browse_playlist.json");
     const TOP_SONGS: &str = include_str!("../tests/fixtures/browse_artist_top_songs.json");
     const TOP_SONGS_ID: &str = "VLOLAK5uy_lNVBcjNtiCwq-n95uoxJ-Gd4vsfMkyZNs";
-    const LIBRARY: &str = include_str!("../tests/fixtures/signed_in_library_playlists.json");
 
     const SECRET: &str = "fakeSID-MARKER";
     const SAPISID: &str = "FAKEsapisid-0123/AbCdEfGh";
@@ -338,6 +390,12 @@ mod tests {
     const BROWSE_URL: &str = "https://music.youtube.com/youtubei/v1/browse";
     const SEARCH_URL: &str = "https://music.youtube.com/youtubei/v1/search";
     const PLAYER_URL: &str = "https://www.youtube.com/youtubei/v1/player";
+    const NEXT_URL: &str = "https://music.youtube.com/youtubei/v1/next";
+    const SUGGESTIONS_URL: &str =
+        "https://music.youtube.com/youtubei/v1/music/get_search_suggestions";
+    const RADIO: &str = include_str!("../tests/fixtures/next_radio.json");
+    const VISITOR: &str = r#"{"responseContext":{"visitorData":"fakeAnonVisitor"}}"#;
+    const SIGNED_OUT_ANSWER: &str = r#"{"responseContext":{"serviceTrackingParams":[{"service":"GFEEDBACK","params":[{"key":"logged_in","value":"0"}]}]}}"#;
 
     fn paste() -> String {
         format!(
@@ -389,42 +447,74 @@ mod tests {
         }
     }
 
+    /// The Innertube path of a call: `search`, `next`, `player`.
+    fn endpoint(call: &crate::testing::MusicCall) -> &str {
+        let path = call.url.split('?').next().unwrap();
+        path.rsplit("/v1/").next().unwrap()
+    }
+
+    fn header<'a>(call: &'a crate::testing::MusicCall, name: &str) -> Option<&'a str> {
+        call.headers
+            .iter()
+            .find(|(k, _)| k == name)
+            .map(|(_, v)| v.as_str())
+    }
+
+    fn context_of(call: &crate::testing::MusicCall) -> serde_json::Value {
+        let body: serde_json::Value = serde_json::from_str(&call.body).unwrap();
+        body["context"]["client"].clone()
+    }
+
     #[test]
-    fn the_session_never_reaches_search_or_playback() {
+    fn a_session_signs_search_and_radio_but_never_playback() {
         let rig = Rig::new();
         let p = rig.signed_in();
+        rig.music.calls.lock().unwrap().clear();
         rig.music
             .script_search(SEARCH_URL, SONGS_PARAMS, 200, SEARCH);
+        rig.music.script(NEXT_URL, 200, RADIO);
+        rig.music.script(SUGGESTIONS_URL, 200, VISITOR);
         rig.music.script(PLAYER_URL, 200, PLAYER);
-        rig.music.script(BROWSE_URL, 200, HOME);
-        rig.music
-            .script(BROWSE_URL, 200, r#"{"continuationContents":{}}"#);
-        // Home's liked music and the library, then the collection.
-        rig.music.script(BROWSE_URL, 200, PLAYLIST);
-        rig.music.script(BROWSE_URL, 200, LIBRARY);
-        rig.music.script(BROWSE_URL, 200, PLAYLIST);
         // Artists, albums and playlists go unanswered, which leaves them out.
         let tracks = p.search("fake query", 5).unwrap().tracks;
         assert!(!tracks.is_empty());
+        assert!(
+            !p.radio(&TrackId {
+                provider: ProviderId(PROVIDER.to_owned()),
+                id: "Jb6gcoR266U".into(),
+            })
+            .unwrap()
+            .is_empty()
+        );
         p.resolve(&tracks[0].id).unwrap();
-        p.browse(&Page::Home).unwrap();
-        p.browse(&Page::Collection(CollectionId {
-            provider: ProviderId(PROVIDER.to_owned()),
-            id: "browse:VLPLfakeRoadTrip01".into(),
-        }))
-        .unwrap();
 
         let calls = rig.music.calls.lock().unwrap();
-        let anonymous: Vec<_> = calls.iter().filter(|c| !c.signed).collect();
-        let anonymous_urls: Vec<_> = anonymous
-            .iter()
-            .map(|c| c.url.split('?').next().unwrap())
-            .collect();
+        let (signed, anonymous): (Vec<_>, Vec<_>) = calls.iter().partition(|c| c.signed);
+        let signed_endpoints: Vec<_> = signed.iter().map(|c| endpoint(c)).collect();
+        // Songs, artists, albums, playlists and the top artist, then the radio.
         assert_eq!(
-            anonymous_urls,
-            [
-                SEARCH_URL, SEARCH_URL, SEARCH_URL, SEARCH_URL, SEARCH_URL, PLAYER_URL
-            ]
+            signed_endpoints.iter().filter(|e| **e == "search").count(),
+            5
+        );
+        assert_eq!(signed_endpoints.iter().filter(|e| **e == "next").count(), 1);
+        assert!(
+            signed_endpoints
+                .iter()
+                .all(|e| ["search", "next"].contains(e))
+        );
+        for c in &signed {
+            assert!(header(c, "Cookie").unwrap().contains(SECRET), "{}", c.url);
+            assert!(
+                header(c, "Authorization")
+                    .unwrap()
+                    .starts_with("SAPISIDHASH ")
+            );
+            assert_eq!(header(c, "X-Goog-AuthUser"), Some("0"));
+        }
+        let anonymous_endpoints: Vec<_> = anonymous.iter().map(|c| endpoint(c)).collect();
+        assert_eq!(
+            anonymous_endpoints,
+            ["music/get_search_suggestions", "player"]
         );
         for c in anonymous {
             for (k, v) in &c.headers {
@@ -439,17 +529,151 @@ mod tests {
             }
             assert!(!c.body.contains(SECRET) && !c.body.contains(SAPISID));
         }
-        let signed: Vec<_> = calls
-            .iter()
-            .filter(|c| c.signed)
-            .map(|c| c.url.split('?').next().unwrap())
-            .collect();
-        assert_eq!(
-            signed,
-            [
-                MENU_URL, BROWSE_URL, BROWSE_URL, BROWSE_URL, BROWSE_URL, BROWSE_URL, BROWSE_URL
-            ]
+    }
+
+    #[test]
+    fn signed_out_search_and_radio_stay_anonymous() {
+        let rig = Rig::new();
+        let p = rig.provider();
+        rig.music
+            .script_search(SEARCH_URL, SONGS_PARAMS, 200, SEARCH);
+        rig.music.script(NEXT_URL, 200, RADIO);
+        assert!(!p.search("fake query", 5).unwrap().tracks.is_empty());
+        assert!(
+            !p.radio(&TrackId {
+                provider: ProviderId(PROVIDER.to_owned()),
+                id: "Jb6gcoR266U".into(),
+            })
+            .unwrap()
+            .is_empty()
         );
+        let calls = rig.music.calls.lock().unwrap();
+        assert_eq!(calls.len(), 6);
+        for c in calls.iter() {
+            assert!(!c.signed, "{}", c.url);
+            assert!(header(c, "Cookie").is_none() && header(c, "Authorization").is_none());
+        }
+    }
+
+    #[test]
+    fn a_search_or_radio_the_session_is_refused_for_asks_anonymously() {
+        let rig = Rig::new();
+        let p = rig.signed_in();
+        rig.music.calls.lock().unwrap().clear();
+        // A refusal keeps the session; a signed-out answer ends it, as in a browse.
+        rig.music.script_search(SEARCH_URL, SONGS_PARAMS, 403, "{}");
+        rig.music
+            .script_search(SEARCH_URL, SONGS_PARAMS, 200, SEARCH);
+        rig.music.script(NEXT_URL, 200, SIGNED_OUT_ANSWER);
+        rig.music.script(NEXT_URL, 200, RADIO);
+
+        assert!(!p.search("fake query", 5).unwrap().tracks.is_empty());
+        assert!(matches!(p.account(), AccountState::SignedIn { .. }));
+        let seed = TrackId {
+            provider: ProviderId(PROVIDER.to_owned()),
+            id: "Jb6gcoR266U".into(),
+        };
+        assert!(!p.radio(&seed).unwrap().is_empty());
+        assert_eq!(p.account(), AccountState::SignedOut);
+
+        let calls = rig.music.calls.lock().unwrap();
+        let songs: Vec<_> = calls
+            .iter()
+            .filter(|c| endpoint(c) == "search" && c.body.contains(SONGS_PARAMS))
+            .map(|c| c.signed)
+            .collect();
+        assert_eq!(songs, [true, false]);
+        let radio: Vec<_> = calls
+            .iter()
+            .filter(|c| endpoint(c) == "next")
+            .map(|c| c.signed)
+            .collect();
+        assert_eq!(radio, [true, false]);
+    }
+
+    #[test]
+    fn other_errors_of_a_signed_search_are_not_retried_anonymously() {
+        let rig = Rig::new();
+        let p = rig.signed_in();
+        rig.music.calls.lock().unwrap().clear();
+        rig.music.script_search(SEARCH_URL, SONGS_PARAMS, 500, "{}");
+        let e = p.search("fake query", 5).unwrap_err();
+        assert!(matches!(e, ProviderError::Network(_)), "{e}");
+        let calls = rig.music.calls.lock().unwrap();
+        let songs: Vec<_> = calls
+            .iter()
+            .filter(|c| c.body.contains(SONGS_PARAMS))
+            .collect();
+        assert_eq!(songs.len(), 1);
+        assert!(songs[0].signed);
+    }
+
+    #[test]
+    fn the_context_asks_in_english_for_the_users_region() {
+        let rig = Rig::new();
+        let search = |region: Option<&str>| {
+            let p = YtMusicProvider::with(
+                YtMusicOptions {
+                    region: region.map(str::to_owned),
+                    ..YtMusicOptions::default()
+                },
+                rig.music.clone(),
+                Arc::new(SystemClock),
+                None,
+            );
+            rig.music.calls.lock().unwrap().clear();
+            rig.music
+                .script_search(SEARCH_URL, SONGS_PARAMS, 200, SEARCH);
+            p.search("fake query", 5).unwrap();
+            let calls = rig.music.calls.lock().unwrap();
+            let client = context_of(
+                calls
+                    .iter()
+                    .find(|c| c.body.contains(SONGS_PARAMS))
+                    .unwrap(),
+            );
+            (client["gl"].clone(), client["hl"].clone())
+        };
+        for (region, gl) in [
+            (Some("TH"), "TH"),
+            (Some("th"), "TH"),
+            (Some("USA"), "US"),
+            (Some("1A"), "US"),
+            (None, "US"),
+        ] {
+            assert_eq!(search(region), (gl.into(), "en".into()), "{region:?}");
+        }
+    }
+
+    #[test]
+    fn the_accounts_own_region_comes_before_the_systems() {
+        let rig = Rig::new();
+        rig.music.script(MENU_URL, 200, MENU);
+        rig.music.script(BROWSE_URL, 200, HOME);
+        let p = YtMusicProvider::with(
+            YtMusicOptions {
+                region: Some("TH".into()),
+                ..YtMusicOptions::default()
+            },
+            rig.music.clone(),
+            Arc::new(SystemClock),
+            session::path_in(Some(&rig.dir())),
+        );
+        let paste = format!(
+            "cookie: SID={SECRET}; __Secure-3PAPISID={SAPISID}; PREF=tz=Asia.Tokyo&gl=jp&hl=en\n"
+        );
+        p.import_client(&serde_json::json!({ "browser_session": paste }).to_string())
+            .unwrap();
+        rig.music
+            .script_search(SEARCH_URL, SONGS_PARAMS, 200, SEARCH);
+        p.search("fake query", 5).unwrap();
+        let calls = rig.music.calls.lock().unwrap();
+        // The import's own calls already ask for the account's region.
+        for c in calls.iter().filter(|c| c.signed) {
+            assert_eq!(context_of(c)["gl"], "JP", "{}", c.url);
+            assert_eq!(context_of(c)["hl"], "en");
+        }
+        assert!(calls.iter().filter(|c| c.signed).count() >= 3);
     }
 
     #[test]

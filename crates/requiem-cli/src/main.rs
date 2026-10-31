@@ -141,6 +141,7 @@ fn main() -> ExitCode {
     };
     let provider = Arc::new(YtMusicProvider::new(YtMusicOptions {
         prefer_aac: args.prefer_aac,
+        region: requiem_macos::region(),
         ..YtMusicOptions::default()
     }));
     let session = Session::spawn(

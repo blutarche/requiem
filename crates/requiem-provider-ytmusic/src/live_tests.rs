@@ -16,6 +16,7 @@ fn provider(prefer_aac: bool, ip_family: IpFamily) -> YtMusicProvider {
     YtMusicProvider::new(YtMusicOptions {
         prefer_aac,
         ip_family,
+        ..YtMusicOptions::default()
     })
 }
 

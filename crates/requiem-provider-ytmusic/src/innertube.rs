@@ -19,13 +19,12 @@ use crate::parse::{
 use crate::range::{FetchError, RangeFetcher, RangeResponse, Refresher};
 use crate::transport::{HttpResponse, Transport};
 
-const SEARCH_URL: &str = "https://music.youtube.com/youtubei/v1/search?prettyPrint=false";
-const BROWSE_URL: &str = "https://music.youtube.com/youtubei/v1/browse?prettyPrint=false";
-const NEXT_URL: &str = "https://music.youtube.com/youtubei/v1/next?prettyPrint=false";
+const MUSIC_API: &str = "https://music.youtube.com/youtubei/v1/";
+/// The region YouTube ranks for when none is known.
+const DEFAULT_REGION: &str = "US";
 // Smallest WEB_REMIX call that returns `responseContext.visitorData`: measured 2026-10-10
 // at 609 bytes, against ~198 KB for a songs search.
-const SUGGESTIONS_URL: &str =
-    "https://music.youtube.com/youtubei/v1/music/get_search_suggestions?prettyPrint=false";
+const SUGGESTIONS_ENDPOINT: &str = "music/get_search_suggestions";
 const PLAYER_URL: &str = "https://www.youtube.com/youtubei/v1/player?prettyPrint=false";
 
 /// Why a resolve attempt on one family failed.
@@ -78,8 +77,33 @@ impl RangeFetcher for PinnedFetcher {
     }
 }
 
+/// How a WEB_REMIX call reaches YouTube Music: anonymously, or through a signed-in session.
+pub(crate) trait Route: Sync {
+    /// The request context, which carries the region.
+    fn context(&self) -> Value;
+    /// POSTs `body` to the Innertube `endpoint` and returns the answer's body.
+    fn post(&self, what: &str, endpoint: &str, body: &Value) -> Result<Vec<u8>, ProviderError>;
+    /// Whether the answers are anonymous, and so may set the visitorData playback reuses.
+    fn anonymous(&self) -> bool;
+}
+
+/// The WEB_REMIX context for `region`, falling back to the default when it is not an ISO
+/// 3166 alpha-2 code. `hl` stays English: the parsers read English labels.
+pub(crate) fn music_context(region: Option<&str>) -> Value {
+    let gl = region
+        .and_then(crate::browser::region_code)
+        .unwrap_or_else(|| DEFAULT_REGION.to_owned());
+    json!({"client": {
+        "clientName": MUSIC_CLIENT_NAME,
+        "clientVersion": MUSIC_CLIENT_VERSION,
+        "hl": "en",
+        "gl": gl,
+    }})
+}
+
 pub(crate) struct InnertubeClient {
     transport: Arc<dyn Transport>,
+    region: Option<String>,
     configured: IpFamily,
     /// Family used for API calls: `configured`, until a fallback from `Any` pins one.
     pinned: Mutex<IpFamily>,
@@ -95,9 +119,14 @@ pub(crate) fn status_error(what: &str, status: u16) -> ProviderError {
 }
 
 impl InnertubeClient {
-    pub(crate) fn new(transport: Arc<dyn Transport>, configured: IpFamily) -> Self {
+    pub(crate) fn new(
+        transport: Arc<dyn Transport>,
+        configured: IpFamily,
+        region: Option<String>,
+    ) -> Self {
         Self {
             transport,
+            region,
             configured,
             pinned: Mutex::new(configured),
             visitor: Mutex::new(None),
@@ -130,12 +159,12 @@ impl InnertubeClient {
         &self,
         family: IpFamily,
         what: &str,
-        url: &str,
+        endpoint: &str,
         body: &Value,
     ) -> Result<HttpResponse, ProviderError> {
         let resp = self.transport.post_json(
             family,
-            url,
+            &format!("{MUSIC_API}{endpoint}?prettyPrint=false"),
             &[
                 ("X-YouTube-Client-Name", MUSIC_CLIENT_ID),
                 ("X-YouTube-Client-Version", MUSIC_CLIENT_VERSION),
@@ -150,46 +179,49 @@ impl InnertubeClient {
         Ok(resp)
     }
 
-    pub(crate) fn music_context() -> Value {
-        json!({"client": {
-            "clientName": MUSIC_CLIENT_NAME,
-            "clientVersion": MUSIC_CLIENT_VERSION,
-            "hl": "en",
-            "gl": "US",
-        }})
-    }
-
-    fn search_once(&self, query: &str, limit: usize) -> Result<Vec<Track>, ProviderError> {
+    fn search_once(
+        &self,
+        route: &dyn Route,
+        query: &str,
+        limit: usize,
+    ) -> Result<Vec<Track>, ProviderError> {
         let body = json!({
-            "context": Self::music_context(),
+            "context": route.context(),
             "query": query,
             "params": SONGS_PARAMS,
         });
-        let resp = self.post_music(self.family(), "search", SEARCH_URL, &body)?;
-        if let Some(v) = visitor_data(&resp.body) {
+        let resp = route.post("search", "search", &body)?;
+        if route.anonymous()
+            && let Some(v) = visitor_data(&resp)
+        {
             self.set_visitor(Some(v));
         }
-        let tracks = parse_search(&resp.body, limit)?;
+        let tracks = parse_search(&resp, limit)?;
         if tracks.is_empty() && crate::log::enabled() {
-            debug!("empty search: {}", structure_summary(&resp.body));
+            debug!("empty search: {}", structure_summary(&resp));
         }
         Ok(tracks)
     }
 
-    pub(crate) fn search(&self, query: &str, limit: usize) -> Result<Vec<Track>, ProviderError> {
-        let tracks = self.search_once(query, limit)?;
+    pub(crate) fn search(
+        &self,
+        route: &dyn Route,
+        query: &str,
+        limit: usize,
+    ) -> Result<Vec<Track>, ProviderError> {
+        let tracks = self.search_once(route, query, limit)?;
         // Real queries are never empty; a zero-item response is an anomaly tied to the
         // visitorData / connection, so retry once from a fresh one.
         if tracks.is_empty() && !query.trim().is_empty() && limit > 0 {
             self.reset_visitor();
-            return self.search_once(query, limit);
+            return self.search_once(route, query, limit);
         }
         Ok(tracks)
     }
 
     /// At most `limit` of the albums or playlists a search for `query` finds.
     fn search_collections(
-        &self,
+        route: &dyn Route,
         query: &str,
         kind: CollectionKind,
         limit: usize,
@@ -200,24 +232,24 @@ impl InnertubeClient {
             CollectionKind::Artist => ("artists search", ARTISTS_PARAMS),
         };
         let body = json!({
-            "context": Self::music_context(),
+            "context": route.context(),
             "query": query,
             "params": params,
         });
-        let resp = self.post_music(self.family(), what, SEARCH_URL, &body)?;
-        parse_search_collections(&resp.body, kind, limit)
+        let resp = route.post(what, "search", &body)?;
+        parse_search_collections(&resp, kind, limit)
     }
 
     /// The artist an unfiltered search for `query` leads with, if it does, and its releases:
     /// the filtered searches match titles, so an artist's own albums can sit far down them,
     /// and the artist below others. Releases that could not be had are left out.
     fn top_artist(
-        &self,
+        route: &dyn Route,
         query: &str,
     ) -> Result<Option<(Collection, ArtistReleases)>, ProviderError> {
-        let body = json!({"context": Self::music_context(), "query": query});
-        let resp = self.post_music(self.family(), "artist search", SEARCH_URL, &body)?;
-        let Some(artist) = parse_top_artist(&resp.body)? else {
+        let body = json!({"context": route.context(), "query": query});
+        let resp = route.post("artist search", "search", &body)?;
+        let Some(artist) = parse_top_artist(&resp)? else {
             return Ok(None);
         };
         let browse_id = artist
@@ -225,8 +257,9 @@ impl InnertubeClient {
             .id
             .strip_prefix(BROWSE_PREFIX)
             .unwrap_or(&artist.id.id);
-        let releases = self
-            .browse(browse_id)
+        let browse = json!({"context": route.context(), "browseId": browse_id});
+        let releases = route
+            .post("browse", "browse", &browse)
             .and_then(|page| parse_artist_releases(&page, &artist.title))
             .unwrap_or_else(|e| {
                 debug!("search without the artist's releases: {e}");
@@ -241,16 +274,17 @@ impl InnertubeClient {
     /// playlists ahead of the title matches.
     pub(crate) fn search_all(
         &self,
+        route: &dyn Route,
         query: &str,
         limit: usize,
     ) -> Result<SearchResults, ProviderError> {
-        let found = |kind| self.search_collections(query, kind, SEARCH_COLLECTIONS);
+        let found = |kind| Self::search_collections(route, query, kind, SEARCH_COLLECTIONS);
         let (tracks, artists, albums, playlists, top) = thread::scope(|scope| {
             let artists = scope.spawn(|| found(CollectionKind::Artist));
             let albums = scope.spawn(|| found(CollectionKind::Album));
             let playlists = scope.spawn(|| found(CollectionKind::Playlist));
-            let top = scope.spawn(|| self.top_artist(query));
-            let tracks = self.search(query, limit);
+            let top = scope.spawn(|| Self::top_artist(route, query));
+            let tracks = self.search(route, query, limit);
             (
                 tracks,
                 artists.join(),
@@ -305,23 +339,21 @@ impl InnertubeClient {
 
     /// The first page of an anonymous browse of `browse_id`.
     pub(crate) fn browse(&self, browse_id: &str) -> Result<Vec<u8>, ProviderError> {
-        let body = json!({"context": Self::music_context(), "browseId": browse_id});
-        Ok(self
-            .post_music(self.family(), "browse", BROWSE_URL, &body)?
-            .body)
+        let body = json!({"context": self.context(), "browseId": browse_id});
+        self.post("browse", "browse", &body)
     }
 
-    /// The songs of `video_id`'s radio, anonymously, without `video_id`.
-    pub(crate) fn radio(&self, video_id: &str) -> Result<Vec<Track>, ProviderError> {
+    /// The songs of `video_id`'s radio, without `video_id`.
+    pub(crate) fn radio(route: &dyn Route, video_id: &str) -> Result<Vec<Track>, ProviderError> {
         let body = json!({
-            "context": Self::music_context(),
+            "context": route.context(),
             "videoId": video_id,
             "playlistId": format!("RDAMVM{video_id}"),
             "isAudioOnly": true,
             "enablePersistentPlaylistPanel": true,
         });
-        let resp = self.post_music(self.family(), "radio", NEXT_URL, &body)?;
-        parse_radio(&resp.body, video_id)
+        let resp = route.post("radio", "next", &body)?;
+        parse_radio(&resp, video_id)
     }
 
     /// Forgets the cached visitorData and the connection pool, so the next resolve
@@ -332,8 +364,8 @@ impl InnertubeClient {
     }
 
     fn fetch_visitor(&self, family: IpFamily) -> Result<String, ProviderError> {
-        let body = json!({"context": Self::music_context(), "input": ""});
-        let resp = self.post_music(family, "visitor data", SUGGESTIONS_URL, &body)?;
+        let body = json!({"context": self.context(), "input": ""});
+        let resp = self.post_music(family, "visitor data", SUGGESTIONS_ENDPOINT, &body)?;
         let v = visitor_data(&resp.body).ok_or_else(|| {
             ProviderError::Parse("response carries no responseContext.visitorData".to_owned())
         })?;
@@ -477,6 +509,20 @@ impl InnertubeClient {
             resolved_on
         };
         (f, family)
+    }
+}
+
+impl Route for InnertubeClient {
+    fn context(&self) -> Value {
+        music_context(self.region.as_deref())
+    }
+
+    fn post(&self, what: &str, endpoint: &str, body: &Value) -> Result<Vec<u8>, ProviderError> {
+        Ok(self.post_music(self.family(), what, endpoint, body)?.body)
+    }
+
+    fn anonymous(&self) -> bool {
+        true
     }
 }
 
@@ -631,12 +677,16 @@ mod tests {
         format!(r#"{{"responseContext":{{"visitorData":"{v}"}}}}"#)
     }
 
+    fn search(c: &InnertubeClient, query: &str, limit: usize) -> Result<Vec<Track>, ProviderError> {
+        c.search(c, query, limit)
+    }
+
     fn client(t: &Arc<FakeTransport>) -> InnertubeClient {
         client_on(t, IpFamily::Any)
     }
 
     fn client_on(t: &Arc<FakeTransport>, family: IpFamily) -> InnertubeClient {
-        InnertubeClient::new(t.clone(), family)
+        InnertubeClient::new(t.clone(), family, None)
     }
 
     #[test]
@@ -671,7 +721,7 @@ mod tests {
     fn radio_asks_next_for_the_songs_radio_as_web_remix() {
         const RADIO: &str = include_str!("../tests/fixtures/next_radio.json");
         let t = FakeTransport::with(vec![(200, RADIO)]);
-        let tracks = client(&t).radio("Jb6gcoR266U").unwrap();
+        let tracks = InnertubeClient::radio(&client(&t), "Jb6gcoR266U").unwrap();
         assert_eq!(tracks.len(), 4);
         assert!(tracks.iter().all(|t| t.id.id != "Jb6gcoR266U"));
         assert_eq!(t.urls(), vec!["next"]);
@@ -687,7 +737,7 @@ mod tests {
     #[test]
     fn empty_search_retries_once_with_fresh_visitor() {
         let t = FakeTransport::with(vec![(200, r#"{"contents":{"x":[]}}"#), (200, SEARCH)]);
-        let tracks = client(&t).search("daft punk", 3).unwrap();
+        let tracks = search(&client(&t), "daft punk", 3).unwrap();
         assert_eq!(tracks.len(), 3);
         assert_eq!(t.urls(), vec!["search", "search"]);
         assert_eq!(*t.resets.lock().unwrap(), 1);
@@ -697,7 +747,7 @@ mod tests {
     fn empty_search_after_retry_is_returned_without_third_attempt() {
         let empty = r#"{"contents":{}}"#;
         let t = FakeTransport::with(vec![(200, empty), (200, empty)]);
-        assert!(client(&t).search("daft punk", 3).unwrap().is_empty());
+        assert!(search(&client(&t), "daft punk", 3).unwrap().is_empty());
         assert_eq!(t.urls().len(), 2);
     }
 
@@ -705,7 +755,7 @@ mod tests {
     fn search_fills_visitor_cache() {
         let t = FakeTransport::with(vec![(200, SEARCH), (200, OK)]);
         let c = client(&t);
-        assert_eq!(c.search("q", 3).unwrap().len(), 3);
+        assert_eq!(search(&c, "q", 3).unwrap().len(), 3);
         c.resolve("vid", false).unwrap();
         assert_eq!(t.urls(), vec!["search", "player"]);
         assert_eq!(
@@ -847,7 +897,7 @@ mod tests {
             (403, false),
         ] {
             let t = FakeTransport::with(vec![(status, "{}")]);
-            let err = client(&t).search("q", 1).unwrap_err();
+            let err = search(&client(&t), "q", 1).unwrap_err();
             assert_eq!(
                 matches!(err, ProviderError::Network(_)),
                 network,
@@ -872,7 +922,7 @@ mod tests {
             VecDeque::from([Err(ProviderError::Network("timeout".into()))]),
         );
         assert!(matches!(
-            client(&t).search("q", 1),
+            search(&client(&t), "q", 1),
             Err(ProviderError::Network(_))
         ));
     }

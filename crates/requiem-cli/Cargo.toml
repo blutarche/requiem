@@ -15,6 +15,7 @@ requiem-core.workspace = true
 requiem-audio.workspace = true
 requiem-provider-ytmusic.workspace = true
 requiem-ipc.workspace = true
+requiem-macos.workspace = true
 crossbeam-channel.workspace = true
 serde_json.workspace = true
 
