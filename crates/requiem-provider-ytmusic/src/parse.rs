@@ -315,13 +315,18 @@ fn parse_subtitle<'a>(runs: impl IntoIterator<Item = &'a Run>) -> Subtitle {
             _ => {}
         }
     }
-    let counted = |g: &Group| g.text.ends_with(" views") || g.text.ends_with(" plays");
+    let is_count = |t: &str| {
+        [" views", " plays", " likes"]
+            .iter()
+            .any(|s| t.ends_with(s))
+    };
+    let counted = |g: &Group| is_count(&g.text);
     if artists.is_empty() && album.is_none() {
-        // Video results put a view or play count where a song has its album.
+        // Video results put view, play or like counts where a song has its album.
         let mut untyped = groups
             .into_iter()
             .map(|g| g.text)
-            .filter(|g| !g.is_empty() && !g.ends_with(" views") && !g.ends_with(" plays"));
+            .filter(|g| !g.is_empty() && !is_count(g));
         if let Some(a) = untyped.next() {
             artists.push(a);
         }
@@ -813,6 +818,16 @@ mod tests {
         let t = &parse_search(body.as_bytes(), 1).unwrap()[0];
         assert_eq!(t.artists, vec!["A"]);
         assert_eq!(t.album, None);
+    }
+
+    #[test]
+    fn a_videos_like_count_is_not_an_album() {
+        let sub = subtitle_of(
+            r#"[{"text":"A"},{"text":" \u2022 "},{"text":"139M views"},
+               {"text":" \u2022 "},{"text":"1.2M likes"}]"#,
+        );
+        assert_eq!(sub.artists, ["A"]);
+        assert_eq!(sub.album, None);
     }
 
     fn subtitle_of(runs: &str) -> Subtitle {
