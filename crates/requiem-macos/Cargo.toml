@@ -102,6 +102,8 @@ objc2-app-kit = { workspace = true, features = [
 objc2-media-player = { workspace = true, features = [
     "std",
     "block2",
+    "objc2-app-kit",
+    "objc2-core-foundation",
     "MPMediaItem",
     "MPNowPlayingInfoCenter",
     "MPRemoteCommand",

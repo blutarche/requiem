@@ -1,4 +1,6 @@
+use std::cell::RefCell;
 use std::ptr::NonNull;
+use std::rc::Rc;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
@@ -6,19 +8,35 @@ use std::time::Duration;
 use block2::RcBlock;
 use crossbeam_channel::Sender;
 use objc2::rc::Retained;
-use objc2::runtime::AnyObject;
-use objc2_foundation::{NSDictionary, NSNumber, NSString};
+use objc2::runtime::{AnyObject, ProtocolObject};
+use objc2::{AnyThread, Message};
+use objc2_app_kit::NSImage;
+use objc2_core_foundation::CGSize;
+use objc2_foundation::{
+    MainThreadMarker, NSCopying, NSDictionary, NSMutableDictionary, NSNumber, NSString,
+};
 use objc2_media_player::{
-    MPChangePlaybackPositionCommandEvent, MPMediaItemPropertyAlbumTitle, MPMediaItemPropertyArtist,
-    MPMediaItemPropertyPlaybackDuration, MPMediaItemPropertyTitle, MPNowPlayingInfoCenter,
-    MPNowPlayingInfoPropertyElapsedPlaybackTime, MPNowPlayingInfoPropertyPlaybackRate,
-    MPNowPlayingPlaybackState, MPRemoteCommand, MPRemoteCommandCenter, MPRemoteCommandEvent,
-    MPRemoteCommandHandlerStatus,
+    MPChangePlaybackPositionCommandEvent, MPMediaItemArtwork, MPMediaItemPropertyAlbumTitle,
+    MPMediaItemPropertyArtist, MPMediaItemPropertyArtwork, MPMediaItemPropertyPlaybackDuration,
+    MPMediaItemPropertyTitle, MPNowPlayingInfoCenter, MPNowPlayingInfoPropertyElapsedPlaybackTime,
+    MPNowPlayingInfoPropertyPlaybackRate, MPNowPlayingPlaybackState, MPRemoteCommand,
+    MPRemoteCommandCenter, MPRemoteCommandEvent, MPRemoteCommandHandlerStatus,
 };
 use requiem_core::PlayState;
 
-use super::is_active;
+use super::{art, is_active};
 use crate::{PlayerView, UiAction};
+
+/// Decoded size of the cover handed to MediaPlayer: Control Center and Raycast draw it up to
+/// about 300 pt, so 600 px is sharp on Retina without holding a full-size image.
+const ARTWORK_PX: u32 = 600;
+
+/// The artwork for the URL the published info is currently about.
+#[derive(Default)]
+struct Cover {
+    url: Option<String>,
+    artwork: Option<Retained<MPMediaItemArtwork>>,
+}
 
 /// `MPNowPlayingInfoCenter` plus the `MPRemoteCommandCenter` handlers.
 pub(super) struct NowPlaying {
@@ -26,6 +44,46 @@ pub(super) struct NowPlaying {
     /// Read by remote handlers, which MediaPlayer does not promise to call on the main thread.
     active: Arc<AtomicBool>,
     targets: Vec<(Retained<MPRemoteCommand>, Retained<AnyObject>)>,
+    /// Shared with the callback that adds a cover once it has loaded.
+    cover: Rc<RefCell<Cover>>,
+}
+
+fn artwork_for(image: &NSImage) -> Retained<MPMediaItemArtwork> {
+    let image = image.retain();
+    let ptr = NonNull::from(&*image);
+    // The handler returns `image`, which the block keeps alive for as long as the artwork
+    // holds the block; MediaPlayer scales it to whatever size it asks for.
+    let handler = RcBlock::new(move |_: CGSize| {
+        let _keep = &image;
+        ptr
+    });
+    let side = f64::from(ARTWORK_PX);
+    // SAFETY: the handler returns a valid image pointer, kept alive by the block's capture.
+    unsafe {
+        MPMediaItemArtwork::initWithBoundsSize_requestHandler(
+            MPMediaItemArtwork::alloc(),
+            CGSize::new(side, side),
+            &handler,
+        )
+    }
+}
+
+/// Adds `artwork` to the info already published, leaving elapsed time and rate as they are.
+fn add_artwork(center: &MPNowPlayingInfoCenter, artwork: &MPMediaItemArtwork) {
+    // SAFETY: plain getter on the shared info center.
+    let Some(current) = (unsafe { center.nowPlayingInfo() }) else {
+        return;
+    };
+    let info = NSMutableDictionary::dictionaryWithDictionary(&current);
+    // SAFETY: `MPMediaItemPropertyArtwork` is an immutable string constant, and its documented
+    // value is an `MPMediaItemArtwork`.
+    unsafe {
+        info.setObject_forKey(
+            artwork as &AnyObject,
+            ProtocolObject::from_ref(MPMediaItemPropertyArtwork) as &ProtocolObject<dyn NSCopying>,
+        );
+        center.setNowPlayingInfo(Some(&info));
+    }
 }
 
 fn status(sent: bool) -> MPRemoteCommandHandlerStatus {
@@ -116,6 +174,7 @@ impl NowPlaying {
             center,
             active,
             targets,
+            cover: Rc::default(),
         }
     }
 
@@ -124,6 +183,7 @@ impl NowPlaying {
     pub(super) fn show(&self, view: Option<&PlayerView>) {
         let Some(view) = view else {
             self.active.store(false, Ordering::Relaxed);
+            *self.cover.borrow_mut() = Cover::default();
             // SAFETY: `nil` clears the info; the state setter takes a plain enum.
             unsafe {
                 self.center.setNowPlayingInfo(None);
@@ -171,6 +231,13 @@ impl NowPlaying {
             keys.push(k_duration);
             values.push(duration);
         }
+        let artwork = self.artwork(view.artwork_url.as_deref());
+        // SAFETY: an immutable string constant from MediaPlayer.
+        let k_artwork = unsafe { MPMediaItemPropertyArtwork };
+        if let Some(artwork) = &artwork {
+            keys.push(k_artwork);
+            values.push(artwork);
+        }
         let info = NSDictionary::from_slices(&keys, &values);
 
         // Buffering reports `Playing` at rate 0 so Control Center offers pause, as the menu does.
@@ -185,6 +252,38 @@ impl NowPlaying {
             self.center.setNowPlayingInfo(Some(&info));
             self.center.setPlaybackState(state);
         }
+    }
+
+    /// The cover for `url` if it is loaded. Otherwise requests it and, when it arrives for a
+    /// view still showing `url`, adds it to the published info.
+    fn artwork(&self, url: Option<&str>) -> Option<Retained<MPMediaItemArtwork>> {
+        let mut cover = self.cover.borrow_mut();
+        if cover.url.as_deref() != url {
+            *cover = Cover {
+                url: url.map(str::to_owned),
+                artwork: None,
+            };
+        }
+        if let Some(artwork) = &cover.artwork {
+            return Some(artwork.clone());
+        }
+        let url = url?;
+        // `show` runs on the main thread; without a marker there is no image to load.
+        let mtm = MainThreadMarker::new()?;
+        let (shared, center, wanted) =
+            (Rc::clone(&self.cover), self.center.clone(), url.to_owned());
+        let image = art::load(mtm, url, ARTWORK_PX, move |image| {
+            let mut cover = shared.borrow_mut();
+            if cover.url.as_deref() != Some(&wanted) || cover.artwork.is_some() {
+                return;
+            }
+            let artwork = artwork_for(image);
+            add_artwork(&center, &artwork);
+            cover.artwork = Some(artwork);
+        })?;
+        let artwork = artwork_for(&image);
+        cover.artwork = Some(artwork.clone());
+        Some(artwork)
     }
 
     pub(super) fn close(&self) {
