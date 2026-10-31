@@ -2,7 +2,7 @@
 //! and held decoded in a small cache, as the macOS window does; and the cover that shows it.
 
 use std::cell::{Cell, RefCell};
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::io::Read;
 use std::path::PathBuf;
 use std::rc::Rc;
@@ -20,18 +20,22 @@ use crate::vm::Service;
 /// Decoded covers kept for reuse, in bytes.
 const CAPACITY: usize = 8 * 1024 * 1024;
 const DISK_CAPACITY: u64 = 256 * 1024 * 1024;
-/// Requests waiting for the network; older ones are dropped for newer.
+/// Requests waiting for the network; older ones move to the backlog for newer.
 const QUEUE_LIMIT: usize = 48;
+/// Requests pushed out of the queue, waiting for it to empty; older ones are given up for newer.
+const BACKLOG_LIMIT: usize = 256;
 const NETWORK_THREADS: usize = 4;
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 const IO_TIMEOUT: Duration = Duration::from_secs(10);
 const MAX_BODY: u64 = 4 * 1024 * 1024;
 
-type Waiter = Box<dyn FnOnce(&gdk::Texture)>;
+/// Runs on the main thread with the texture, or `None` when the load failed or was given up.
+type Waiter = Box<dyn FnOnce(Option<&gdk::Texture>)>;
 
 struct Loader {
     cache: Lru<gdk::Texture>,
     book: Book<Waiter>,
+    backlog: Backlog<Request>,
     fetcher: Option<Arc<Fetcher>>,
     /// The demo's made-up covers by seed, drawn at whatever size is asked.
     demo: HashMap<String, usize>,
@@ -41,6 +45,7 @@ thread_local! {
     static LOADER: RefCell<Loader> = RefCell::new(Loader {
         cache: Lru::new(CAPACITY),
         book: Book::new(),
+        backlog: Backlog::new(BACKLOG_LIMIT),
         fetcher: None,
         demo: HashMap::new(),
     });
@@ -52,6 +57,42 @@ struct Request {
     key: String,
     url: String,
     px: u32,
+}
+
+/// Requests pushed out of a full queue, kept to refill it once it empties; newest first out.
+struct Backlog<T> {
+    held: VecDeque<T>,
+    limit: usize,
+}
+
+impl<T> Backlog<T> {
+    fn new(limit: usize) -> Self {
+        Backlog {
+            held: VecDeque::new(),
+            limit: limit.max(1),
+        }
+    }
+
+    fn is_empty(&self) -> bool {
+        self.held.is_empty()
+    }
+
+    /// Keeps `item`; returns the oldest held when that overflows the limit.
+    fn park(&mut self, item: T) -> Option<T> {
+        self.held.push_front(item);
+        if self.held.len() > self.limit {
+            self.held.pop_back()
+        } else {
+            None
+        }
+    }
+
+    /// Up to `room` of the newest, oldest first: pushed in that order, the newest pops first.
+    fn take(&mut self, room: usize) -> Vec<T> {
+        let mut out: Vec<T> = (0..room).map_while(|_| self.held.pop_front()).collect();
+        out.reverse();
+        out
+    }
 }
 
 /// A request queue that blocks its readers while empty.
@@ -78,6 +119,13 @@ impl Lane {
         dropped
     }
 
+    fn is_empty(&self) -> bool {
+        self.queue
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .is_empty()
+    }
+
     fn pop(&self) -> Request {
         let mut q = self.queue.lock().unwrap_or_else(PoisonError::into_inner);
         loop {
@@ -92,6 +140,16 @@ impl Lane {
 struct Fetcher {
     disk: Option<(DiskCache, Lane)>,
     network: Lane,
+}
+
+impl Fetcher {
+    /// Where new requests go: the disk lane if there is one, else the network's.
+    fn entry(&self) -> &Lane {
+        match &self.disk {
+            Some((_, lane)) => lane,
+            None => &self.network,
+        }
+    }
 }
 
 /// Pixels decoded on a worker, made a texture on the main thread.
@@ -114,43 +172,89 @@ pub fn busy() -> bool {
 }
 
 /// `url`'s artwork `px` pixels square: at once if cached; otherwise `None`, and `done` runs on
-/// the main thread when it arrives. It never runs when the load fails or is dropped for newer
-/// requests. Only https URLs are fetched.
+/// the main thread with the texture when it arrives, or with `None` when the load failed or was
+/// given up for newer requests. Only https URLs are fetched.
 pub fn load(
     url: &str,
     px: u32,
-    done: impl FnOnce(&gdk::Texture) + 'static,
+    done: impl FnOnce(Option<&gdk::Texture>) + 'static,
 ) -> Option<gdk::Texture> {
     let sized = sized_url(url, px);
     let key = format!("{px} {sized}");
-    LOADER.with_borrow_mut(|l| {
+    let mut done = Some(done);
+    let (shown, gone) = LOADER.with_borrow_mut(|l| {
         if let Some(t) = l.cache.get(&key) {
-            return Some(t);
+            return (Some(t), Vec::new());
         }
         if let Some(&seed) = l.demo.get(url) {
-            let t = icons::demo_cover(seed, px as i32)?;
-            l.cache
-                .insert(key, t.clone(), pixel_cost(px as usize, px as usize));
-            return Some(t);
+            let t = icons::demo_cover(seed, px as i32);
+            if let Some(t) = &t {
+                l.cache
+                    .insert(key, t.clone(), pixel_cost(px as usize, px as usize));
+            }
+            return (t, Vec::new());
         }
-        if sized.starts_with("https://") && l.book.want(&key, Box::new(done)) == Want::Fetch {
+        if !sized.starts_with("https://") {
+            return (None, Vec::new());
+        }
+        if l.book.has_failed(&key) {
+            let waiter = done.take().map(|d| Box::new(d) as Waiter);
+            return (None, waiter.into_iter().collect());
+        }
+        let waiter = done.take().map(|d| Box::new(d) as Waiter);
+        if let Some(waiter) = waiter
+            && l.book.want(&key, waiter) == Want::Fetch
+        {
             IN_FLIGHT.set(IN_FLIGHT.get() + 1);
             let fetcher = l.fetcher.get_or_insert_with(start_fetcher).clone();
-            let lane = match &fetcher.disk {
-                Some((_, lane)) => lane,
-                None => &fetcher.network,
-            };
-            if let Some(dropped) = lane.push(Request {
+            if let Some(pushed_out) = fetcher.entry().push(Request {
                 key,
                 url: sized,
                 px,
             }) {
-                l.book.dropped(&dropped.key);
-                IN_FLIGHT.set(IN_FLIGHT.get().saturating_sub(1));
+                return (None, park(l, pushed_out));
             }
         }
-        None
-    })
+        (None, Vec::new())
+    });
+    fail(gone);
+    shown
+}
+
+/// Keeps a request the queue had no room for; returns the waiters of one given up for it.
+fn park(l: &mut Loader, request: Request) -> Vec<Waiter> {
+    let Some(gone) = l.backlog.park(request) else {
+        return Vec::new();
+    };
+    IN_FLIGHT.set(IN_FLIGHT.get().saturating_sub(1));
+    // Not `dropped`, which discards the waiters: they are told, and the key is not marked
+    // failed, so a later `load` fetches it.
+    l.book.finish(&gone.key, true)
+}
+
+/// Moves the backlog's newest requests into the entry queue once it has emptied; returns the
+/// waiters of any given up on the way.
+fn refill(l: &mut Loader) -> Vec<Waiter> {
+    let mut gone = Vec::new();
+    let Some(fetcher) = l.fetcher.clone() else {
+        return gone;
+    };
+    let lane = fetcher.entry();
+    if l.backlog.is_empty() || !lane.is_empty() {
+        return gone;
+    }
+    for request in l.backlog.take(QUEUE_LIMIT) {
+        if let Some(pushed_out) = lane.push(request) {
+            gone.extend(park(l, pushed_out));
+        }
+    }
+    gone
+}
+
+fn fail(waiters: Vec<Waiter>) {
+    for w in waiters {
+        w(None);
+    }
 }
 
 /// `$REQUIEM_ART_CACHE_DIR`, or `$XDG_CACHE_HOME/requiem/artwork`, or
@@ -224,10 +328,14 @@ fn disk_loop(fetcher: &Fetcher) {
             }
             disk.remove(&request.url);
         }
-        if let Some(dropped) = fetcher.network.push(request) {
+        if let Some(pushed_out) = fetcher.network.push(request) {
             glib::MainContext::default().invoke(move || {
-                LOADER.with_borrow_mut(|l| l.book.dropped(&dropped.key));
-                IN_FLIGHT.set(IN_FLIGHT.get().saturating_sub(1));
+                let gone = LOADER.with_borrow_mut(|l| {
+                    let mut gone = park(l, pushed_out);
+                    gone.extend(refill(l));
+                    gone
+                });
+                fail(gone);
             });
         }
     }
@@ -306,18 +414,18 @@ fn deliver(key: &str, image: Option<Decoded>) {
             gdk::MemoryTexture::new(d.width, d.height, format, &d.bytes, d.stride).upcast();
         (t, cost)
     });
-    let waiters = LOADER.with_borrow_mut(|l| {
+    let (waiters, gone) = LOADER.with_borrow_mut(|l| {
         let waiters = l.book.finish(key, texture.is_some());
         if let Some((t, cost)) = &texture {
             l.cache.insert(key.to_owned(), t.clone(), *cost);
         }
-        waiters
+        (waiters, refill(l))
     });
-    if let Some((t, _)) = texture {
-        for w in waiters {
-            w(&t);
-        }
+    let t = texture.as_ref().map(|(t, _)| t);
+    for w in waiters {
+        w(t);
     }
+    fail(gone);
 }
 
 /// The device pixels a cover `side` points across needs, at the display's scale.
@@ -423,8 +531,8 @@ impl Cover {
         self.root.set_opacity(if dim { 0.6 } else { 1.0 });
     }
 
-    /// Shows `url`'s artwork, or the placeholder for `None`. Loads only what `near` allows: a
-    /// cover far off screen keeps its placeholder until `set_url` comes again.
+    /// Shows `url`'s artwork, or the placeholder for `None`. The placeholder stays if the load
+    /// fails.
     pub fn set_url(&self, url: Option<&str>) {
         if self.url.borrow().as_deref() == url && (self.picture.is_visible() || self.loading.get())
         {
@@ -441,24 +549,24 @@ impl Cover {
         let placeholder = self.placeholder.downgrade();
         let loading = self.loading.clone();
         let asked = url.to_owned();
+        // Set first: a load that fails at once clears it through the callback.
+        self.loading.set(url.starts_with("https://"));
         let shown = load(url, pixels(self.side.get()), move |t| {
             if want.borrow().as_deref() != Some(asked.as_str()) {
                 return;
             }
             loading.set(false);
-            if let (Some(p), Some(ph)) = (picture.upgrade(), placeholder.upgrade()) {
+            if let (Some(t), Some(p), Some(ph)) = (t, picture.upgrade(), placeholder.upgrade()) {
                 p.set_paintable(Some(t));
                 p.set_visible(true);
                 ph.set_visible(false);
             }
         });
-        match shown {
-            Some(t) => {
-                self.picture.set_paintable(Some(&t));
-                self.picture.set_visible(true);
-                self.placeholder.set_visible(false);
-            }
-            None => self.loading.set(url.starts_with("https://")),
+        if let Some(t) = shown {
+            self.loading.set(false);
+            self.picture.set_paintable(Some(&t));
+            self.picture.set_visible(true);
+            self.placeholder.set_visible(false);
         }
     }
 
@@ -476,5 +584,58 @@ impl Cover {
     /// Its artwork was asked for and has not arrived.
     pub fn is_loading(&self) -> bool {
         self.loading.get()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_backlog_gives_up_its_oldest_when_full() {
+        let mut b = Backlog::new(3);
+        assert_eq!(b.park(1), None);
+        assert_eq!(b.park(2), None);
+        assert_eq!(b.park(3), None);
+        assert_eq!(b.park(4), Some(1));
+        assert_eq!(b.park(5), Some(2));
+        assert_eq!(b.take(10), [3, 4, 5]);
+        assert!(b.is_empty());
+    }
+
+    #[test]
+    fn a_backlog_hands_out_the_newest_oldest_first() {
+        let mut b = Backlog::new(10);
+        for n in 1..=6 {
+            b.park(n);
+        }
+        assert_eq!(b.take(3), [4, 5, 6]);
+        assert!(!b.is_empty());
+        assert_eq!(b.take(3), [1, 2, 3]);
+        assert!(b.is_empty());
+        assert!(b.take(3).is_empty());
+    }
+
+    #[test]
+    fn a_refilled_queue_pops_the_backlogs_newest_first() {
+        let mut b = Backlog::new(10);
+        for n in 1..=5 {
+            b.park(n);
+        }
+        let mut lane = Queue::new(3);
+        for n in b.take(3) {
+            assert_eq!(lane.push(n), None);
+        }
+        assert_eq!(lane.pop(), Some(5));
+        assert_eq!(lane.pop(), Some(4));
+        assert_eq!(lane.pop(), Some(3));
+        assert_eq!(b.take(3), [1, 2]);
+    }
+
+    #[test]
+    fn a_zero_limit_still_holds_one() {
+        let mut b = Backlog::new(0);
+        assert_eq!(b.park(1), None);
+        assert_eq!(b.park(2), Some(1));
     }
 }

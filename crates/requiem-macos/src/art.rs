@@ -167,6 +167,10 @@ impl<T> Queue<T> {
         }
     }
 
+    pub fn is_empty(&self) -> bool {
+        self.keys.is_empty()
+    }
+
     /// The newest key.
     pub fn pop(&mut self) -> Option<T> {
         self.keys.pop_front()
@@ -214,6 +218,11 @@ impl<W> Book<W> {
         }
         self.waiting.insert(key.to_owned(), vec![waiter]);
         Want::Fetch
+    }
+
+    /// `key` failed earlier, so `want` would not fetch it.
+    pub fn has_failed(&self, key: &str) -> bool {
+        self.failed.contains(key)
     }
 
     /// The fetch of `key` ended; returns its waiters. A failure is remembered.
