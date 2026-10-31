@@ -35,6 +35,31 @@ fn live_search() {
     }
 }
 
+#[test]
+#[ignore]
+fn live_radio() {
+    let p = provider(false, IpFamily::Any);
+    let seed = p.search(QUERY, 5).unwrap().tracks.remove(0);
+    let radio = p.radio(&seed.id).unwrap();
+    println!(
+        "radio of {} ({}): {} tracks",
+        seed.title,
+        seed.id.id,
+        radio.len()
+    );
+    assert!(radio.len() >= 20);
+    assert!(radio.iter().all(|t| t.id != seed.id));
+    for t in &radio {
+        assert!(
+            !t.id.id.is_empty()
+                && !t.title.is_empty()
+                && !t.artists.is_empty()
+                && t.duration.is_some(),
+            "{t:?}"
+        );
+    }
+}
+
 fn stream(prefer_aac: bool, hint: FormatHint) {
     for family in FAMILIES {
         let p = provider(prefer_aac, family);

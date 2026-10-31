@@ -25,6 +25,10 @@ use crate::wire::{
 pub trait Backend: Send + Sync + 'static {
     fn search(&self, q: &str, limit: usize) -> Result<Vec<Track>, ProviderError>;
     fn browse(&self, page: &Page) -> Result<Browsed, ProviderError>;
+    /// Tracks like track `seed`'s, without it.
+    fn radio(&self, _seed: &str) -> Result<Vec<Track>, ProviderError> {
+        Ok(Vec::new())
+    }
     /// Gets ready to stream `track` without opening a CDN connection; returns a stream id.
     fn prepare(&self, track: &str) -> Result<String, ProviderError>;
     /// Opens a stream `prepare` returned. Each id opens once.
@@ -143,6 +147,9 @@ fn handle(conn: UnixStream, backend: &dyn Backend) -> io::Result<()> {
             &mut w,
             backend.search(&q, limit).map(|tracks| Tracks { tracks }),
         ),
+        Request::Radio { seed } => {
+            reply(&mut w, backend.radio(&seed).map(|tracks| Tracks { tracks }))
+        }
         Request::Browse { page } => reply(
             &mut w,
             backend
@@ -367,6 +374,15 @@ pub(crate) mod tests {
             wire::read_reply::<_, Tracks>(&mut r),
             Err(ReplyError::Provider(ProviderError::SignInRequired(_)))
         ));
+        // A backend without radios answers with none.
+        let (mut r, _w) = request(
+            &path,
+            &Request::Radio {
+                seed: "seed".into(),
+            },
+        );
+        let t: Tracks = wire::read_reply(&mut r).unwrap();
+        assert!(t.tracks.is_empty());
         let (mut r, _w) = request(
             &path,
             &Request::Prepare {

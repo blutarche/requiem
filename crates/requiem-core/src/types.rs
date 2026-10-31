@@ -195,6 +195,12 @@ pub trait Provider: Send + Sync {
     fn search(&self, query: &str, limit: usize) -> Result<SearchResults, ProviderError>;
     fn resolve(&self, track: &TrackId) -> Result<AudioSource, ProviderError>;
 
+    /// Tracks like `seed`'s, for a radio of it, without `seed` itself. Blocking; called on a
+    /// worker thread.
+    fn radio(&self, _seed: &TrackId) -> Result<Vec<Track>, ProviderError> {
+        Ok(Vec::new())
+    }
+
     /// Blocking; called on a worker thread.
     fn browse(&self, _page: &Page) -> Result<Browsed, ProviderError> {
         Ok(Browsed::default())
@@ -352,6 +358,11 @@ pub enum Command {
         mode: EnqueueMode,
     },
     PlayIndex(usize),
+    /// Replaces the queue with `seed` and plays it, then appends its provider's radio of it
+    /// once fetched, unless the queue changed in the meantime.
+    PlayRadio {
+        seed: Track,
+    },
     /// 0-based queue index.
     Remove(usize),
     /// 0-based; `to` is the track's index after the move.

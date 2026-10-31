@@ -320,7 +320,7 @@ impl SearchLead {
         lead
     }
 
-    /// The top song: a press on the card or its Play plays the results from it.
+    /// The top song: a press on the card or its Play plays its radio.
     fn top_song(
         mtm: MainThreadMarker,
         view: &NSView,

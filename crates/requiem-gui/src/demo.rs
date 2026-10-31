@@ -259,6 +259,8 @@ const SEARCH_ARTIST_ART: usize = SEARCH_PLAYLIST_ART + SEARCH_PLAYLISTS.len();
 const ARTIST_RELEASE_ART: usize = SEARCH_ARTIST_ART + SEARCH_ARTISTS.len();
 const ART_END: usize = ARTIST_RELEASE_ART + ARTIST_ALBUMS.len() + ARTIST_SINGLES.len();
 const COLLECTION_LEN: usize = 15;
+/// The tracks a demo radio adds after its seed.
+const RADIO_LEN: usize = 8;
 
 fn demo_url(i: usize) -> String {
     format!("demo:{i:02}")
@@ -889,6 +891,20 @@ impl Daemon {
                 vec![self.queue_changed()]
             }
             Command::PlayIndex(i) => self.start(i),
+            // As the session: the seed plays alone, then its radio follows it.
+            Command::PlayRadio { seed } => {
+                let radio: Vec<Track> = collection_tracks(&seed.id.provider)
+                    .into_iter()
+                    .filter(|t| t.id != seed.id)
+                    .take(RADIO_LEN)
+                    .collect();
+                self.queue = vec![seed];
+                self.current = None;
+                let mut evs = self.start(0);
+                self.queue.extend(radio);
+                evs.push(self.queue_changed());
+                evs
+            }
             Command::Next => match self.current.map_or(0, |c| c + 1) {
                 n if n < self.queue.len() => self.start(n),
                 _ => self.stop(),
@@ -1565,7 +1581,7 @@ mod tests {
     }
 
     #[test]
-    fn play_result_replaces_queue_and_plays() {
+    fn play_result_plays_its_radio() {
         let (mut vm, mut d) = start();
         run(
             &mut vm,
@@ -1576,7 +1592,9 @@ mod tests {
             },
         );
         let ui = vm.ui();
-        assert_eq!(ui.queue.len(), 5);
+        assert_eq!(ui.queue.len(), 1 + RADIO_LEN);
+        assert_eq!(ui.queue[0].title, "Highway Psalm");
+        assert!(ui.queue[1..].iter().all(|t| t.id != ui.queue[0].id));
         assert_eq!(ui.current, Some(0));
         assert_eq!(ui.now_playing.as_ref().unwrap().title, "Highway Psalm");
         assert_eq!(ui.elapsed_text(), "0:00");

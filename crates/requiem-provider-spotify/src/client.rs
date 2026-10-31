@@ -11,7 +11,7 @@ use std::time::{Duration, Instant};
 
 use requiem_core::{
     AccountState, AudioSource, Browsed, FormatHint, Page, PageSink, Provider, ProviderError,
-    ProviderId, SearchResults, TrackId,
+    ProviderId, SearchResults, Track, TrackId,
 };
 use serde::de::DeserializeOwned;
 
@@ -269,6 +269,13 @@ impl Provider for SpotifyProvider {
             bytes: Box::new(HelperSource::new(socket, p.stream)),
             hint: FormatHint::OggVorbis,
         })
+    }
+
+    fn radio(&self, seed: &TrackId) -> Result<Vec<Track>, ProviderError> {
+        self.call::<Tracks>(&Request::Radio {
+            seed: seed.id.clone(),
+        })
+        .map(|t| t.tracks)
     }
 
     fn browse(&self, page: &Page) -> Result<Browsed, ProviderError> {

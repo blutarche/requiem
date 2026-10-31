@@ -11,11 +11,13 @@ use serde::Deserialize;
 use serde_json::Value;
 
 mod browse;
+mod radio;
 
 pub(crate) use browse::{
     ArtistReleases, BROWSE_PREFIX, collection_kind, parse_artist_releases, parse_collection,
     parse_home, parse_library_playlists, parse_page,
 };
+pub(crate) use radio::parse_radio;
 
 pub(crate) const PROVIDER: &str = "ytmusic";
 

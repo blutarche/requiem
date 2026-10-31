@@ -77,6 +77,22 @@ impl Backend for Fake {
         Ok(Browsed::default())
     }
 
+    /// One track, named for the seed.
+    fn radio(&self, seed: &str) -> Result<Vec<Track>, ProviderError> {
+        Ok(vec![Track {
+            id: TrackId {
+                provider: ProviderId("spotify".into()),
+                id: format!("like-{seed}"),
+            },
+            title: format!("Like {seed}"),
+            artists: Vec::new(),
+            artist_ids: Vec::new(),
+            album: None,
+            duration: None,
+            artwork_url: None,
+        }])
+    }
+
     fn prepare(&self, track: &str) -> Result<String, ProviderError> {
         Ok(track.to_owned())
     }
@@ -197,6 +213,15 @@ fn run(tmp: &Path) {
     assert_eq!(mode, 0o600);
     // The running helper is reused.
     assert_eq!(helper_pid(&p), first);
+    // A radio is the helper's.
+    let radio = p
+        .radio(&TrackId {
+            provider: ProviderId("spotify".into()),
+            id: "seed".into(),
+        })
+        .unwrap();
+    let radio: Vec<_> = radio.iter().map(|t| t.id.id.as_str()).collect();
+    assert_eq!(radio, ["like-seed"]);
     // What the helper says has changed reaches the session.
     assert_eq!(changed.recv_timeout(WAIT), Ok(Page::Library));
 

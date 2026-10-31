@@ -3635,3 +3635,88 @@ fn a_tracks_artist_pages_pair_names_with_the_ids_known() {
     t.artist_ids.clear();
     assert_eq!(t.artist_pages().count(), 0);
 }
+
+fn queue_ids(ev: &Event) -> Vec<String> {
+    match ev {
+        Event::QueueChanged { tracks, .. } => tracks.iter().map(|t| t.id.id.clone()).collect(),
+        _ => panic!("not a QueueChanged: {ev:?}"),
+    }
+}
+
+#[test]
+fn play_radio_plays_the_seed_then_appends_its_radio_without_it() {
+    let r = rig(config());
+    r.enqueue(&["old1", "old2"]);
+    let gate = Gate::new();
+    r.provider.script_radio(
+        "seed",
+        vec![Step::ok(tracks(&["seed", "r1", "r2"])).gated(&gate)],
+    );
+    r.send(Command::PlayRadio {
+        seed: track("seed"),
+    });
+    let ev = r.wait_event(
+        |e| matches!(e, Event::QueueChanged { tracks, current: Some(0) } if tracks.len() == 1),
+    );
+    assert_eq!(queue_ids(&ev), ["seed"]);
+    assert_eq!(r.engine.wait_load(1).1, "seed");
+    r.provider.wait_radio_calls(1);
+
+    gate.release();
+    let ev = r.wait_event(|e| matches!(e, Event::QueueChanged { tracks, .. } if tracks.len() > 1));
+    assert_eq!(queue_ids(&ev), ["seed", "r1", "r2"]);
+    assert!(matches!(
+        ev,
+        Event::QueueChanged {
+            current: Some(0),
+            ..
+        }
+    ));
+    r.settle();
+    assert_eq!(r.loads(), ["seed"]);
+}
+
+#[test]
+fn play_radio_drops_a_radio_that_arrives_after_the_queue_changed() {
+    let r = rig(config());
+    let gate = Gate::new();
+    r.provider
+        .script_radio("seed", vec![Step::ok(tracks(&["r1", "r2"])).gated(&gate)]);
+    r.send(Command::PlayRadio {
+        seed: track("seed"),
+    });
+    r.provider.wait_radio_calls(1);
+    r.send(Command::Enqueue {
+        tracks: tracks(&["mine"]),
+        mode: EnqueueMode::Append,
+    });
+    r.wait_event(|e| matches!(e, Event::QueueChanged { tracks, .. } if tracks.len() == 2));
+
+    gate.release();
+    let seen = r.settle_seen();
+    assert!(
+        !seen.iter().any(|e| matches!(e, Event::QueueChanged { .. })),
+        "the radio changed the queue: {seen:?}"
+    );
+}
+
+#[test]
+fn a_failed_radio_leaves_the_seed_alone_in_the_queue() {
+    let r = rig(config());
+    r.provider.script_radio(
+        "seed",
+        vec![Step::err(ProviderError::Network("offline".into()))],
+    );
+    r.send(Command::PlayRadio {
+        seed: track("seed"),
+    });
+    r.provider.wait_radio_calls(1);
+    let seen = r.settle_seen();
+    let queues: Vec<_> = seen
+        .iter()
+        .filter(|e| matches!(e, Event::QueueChanged { .. }))
+        .map(queue_ids)
+        .collect();
+    assert!(queues.iter().all(|q| q == &["seed"]), "{queues:?}");
+    assert_eq!(r.engine.wait_load(1).1, "seed");
+}

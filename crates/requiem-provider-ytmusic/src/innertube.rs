@@ -13,7 +13,7 @@ use crate::clients::*;
 use crate::log::debug;
 use crate::parse::{
     ArtistReleases, BROWSE_PREFIX, PlayerOutcome, StreamFormat, classify_player, merge_collections,
-    parse_artist_releases, parse_search, parse_search_collections, parse_top_artist,
+    parse_artist_releases, parse_radio, parse_search, parse_search_collections, parse_top_artist,
     structure_summary, visitor_data,
 };
 use crate::range::{FetchError, RangeFetcher, RangeResponse, Refresher};
@@ -21,6 +21,7 @@ use crate::transport::{HttpResponse, Transport};
 
 const SEARCH_URL: &str = "https://music.youtube.com/youtubei/v1/search?prettyPrint=false";
 const BROWSE_URL: &str = "https://music.youtube.com/youtubei/v1/browse?prettyPrint=false";
+const NEXT_URL: &str = "https://music.youtube.com/youtubei/v1/next?prettyPrint=false";
 // Smallest WEB_REMIX call that returns `responseContext.visitorData`: measured 2026-10-10
 // at 609 bytes, against ~198 KB for a songs search.
 const SUGGESTIONS_URL: &str =
@@ -308,6 +309,19 @@ impl InnertubeClient {
         Ok(self
             .post_music(self.family(), "browse", BROWSE_URL, &body)?
             .body)
+    }
+
+    /// The songs of `video_id`'s radio, anonymously, without `video_id`.
+    pub(crate) fn radio(&self, video_id: &str) -> Result<Vec<Track>, ProviderError> {
+        let body = json!({
+            "context": Self::music_context(),
+            "videoId": video_id,
+            "playlistId": format!("RDAMVM{video_id}"),
+            "isAudioOnly": true,
+            "enablePersistentPlaylistPanel": true,
+        });
+        let resp = self.post_music(self.family(), "radio", NEXT_URL, &body)?;
+        parse_radio(&resp.body, video_id)
     }
 
     /// Forgets the cached visitorData and the connection pool, so the next resolve
@@ -651,6 +665,23 @@ mod tests {
         let reqs = t.requests.lock().unwrap();
         assert!(reqs[0].body.contains(r#""browseId":"VLPLx""#));
         assert!(reqs[0].body.contains(r#""clientName":"WEB_REMIX""#));
+    }
+
+    #[test]
+    fn radio_asks_next_for_the_songs_radio_as_web_remix() {
+        const RADIO: &str = include_str!("../tests/fixtures/next_radio.json");
+        let t = FakeTransport::with(vec![(200, RADIO)]);
+        let tracks = client(&t).radio("Jb6gcoR266U").unwrap();
+        assert_eq!(tracks.len(), 4);
+        assert!(tracks.iter().all(|t| t.id.id != "Jb6gcoR266U"));
+        assert_eq!(t.urls(), vec!["next"]);
+        let reqs = t.requests.lock().unwrap();
+        let body: Value = serde_json::from_str(&reqs[0].body).unwrap();
+        assert_eq!(body["videoId"], "Jb6gcoR266U");
+        assert_eq!(body["playlistId"], "RDAMVMJb6gcoR266U");
+        assert_eq!(body["isAudioOnly"], true);
+        assert_eq!(body["enablePersistentPlaylistPanel"], true);
+        assert_eq!(body["context"]["client"]["clientName"], "WEB_REMIX");
     }
 
     #[test]

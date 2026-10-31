@@ -19,6 +19,7 @@ use librespot_core::audio_key::AudioKey;
 use librespot_core::authentication::Credentials;
 use librespot_core::cache::Cache;
 use librespot_core::error::ErrorKind;
+use librespot_core::spclient::SpClientResult;
 use librespot_core::{Error, FileId, Session, SessionConfig, SpotifyId, SpotifyUri};
 use librespot_metadata::album::AlbumType;
 use librespot_metadata::artist::Artists;
@@ -77,6 +78,8 @@ const HOME_LIKED: usize = 20;
 const LISTEN_AGAIN: usize = 10;
 /// Tracks on Home's Quick picks.
 const QUICK_PICKS: usize = 20;
+/// Tracks in a radio of a track the user played, as many as Spotify gives by default.
+const RADIO_TRACKS: usize = 50;
 /// How long Home waits for Listen again and Quick picks; whatever isn't in by then is left out.
 const RECENT_BUDGET: Duration = Duration::from_secs(5);
 /// What the desktop client asks for; contexts only, each with the track of it played last.
@@ -243,6 +246,16 @@ impl Librespot {
         let mut ids = context_tracks(&ctx.pages);
         ids.truncate(limit);
         tracks(&session, ids).await
+    }
+
+    async fn radio_async(&self, seed: &str) -> Result<Vec<Track>, ProviderError> {
+        let id = SpotifyId::from_base62(seed)
+            .map_err(|_| ProviderError::Unplayable(format!("{seed} is not a Spotify track id")))?;
+        let session = self.session().await?;
+        let bytes = station_request(&session, id, RADIO_TRACKS)
+            .await
+            .map_err(|e| api_error("radio", &e))?;
+        station_tracks(&bytes, id, RADIO_TRACKS)
     }
 
     async fn library(&self) -> Result<Vec<Shelf>, ProviderError> {
@@ -455,6 +468,10 @@ impl Librespot {
 impl Backend for Librespot {
     fn search(&self, q: &str, limit: usize) -> Result<Vec<Track>, ProviderError> {
         self.rt.block_on(self.search_async(q, limit))
+    }
+
+    fn radio(&self, seed: &str) -> Result<Vec<Track>, ProviderError> {
+        self.rt.block_on(self.radio_async(seed))
     }
 
     fn browse(&self, page: &Page) -> Result<Browsed, ProviderError> {
@@ -1343,6 +1360,27 @@ pub(crate) fn parse_station(bytes: &[u8]) -> Result<Vec<Track>, ProviderError> {
     Ok(tracks.iter().filter_map(station_track).collect())
 }
 
+/// Asks Spotify for a station of track `seed`, `limit` long.
+async fn station_request(session: &Session, seed: SpotifyId, limit: usize) -> SpClientResult {
+    let uri = SpotifyUri::Track { id: seed }.to_uri();
+    session
+        .spclient()
+        .get_apollo_station("tracks", &uri, Some(limit), vec![seed], true)
+        .await
+}
+
+/// A station answer's tracks without `seed`, at most `limit`.
+fn station_tracks(
+    bytes: &[u8],
+    seed: SpotifyId,
+    limit: usize,
+) -> Result<Vec<Track>, ProviderError> {
+    let mut tracks = parse_station(bytes)?;
+    tracks.retain(|t| t.id.id != seed.to_base62());
+    tracks.truncate(limit);
+    Ok(tracks)
+}
+
 fn station_track(t: &Value) -> Option<Track> {
     let id = track_id(t.get("uri")?.as_str()?)?;
     let text = |v: Option<&Value>, key: &str| {
@@ -1601,19 +1639,12 @@ async fn quick_picks(
     if let Some(tracks) = kept {
         return tracks;
     }
-    let uri = SpotifyUri::Track { id: seed }.to_uri();
-    let station =
-        session
-            .spclient()
-            .get_apollo_station("tracks", &uri, Some(QUICK_PICKS), vec![seed], true);
     let tracks = asked
-        .ask("radio", until, station)
+        .ask("radio", until, station_request(session, seed, QUICK_PICKS))
         .await
-        .and_then(|b| parse_station(&b).map_err(|e| e.to_string()));
+        .and_then(|b| station_tracks(&b, seed, QUICK_PICKS).map_err(|e| e.to_string()));
     match tracks {
-        Ok(mut tracks) => {
-            tracks.retain(|t| t.id.id != seed.to_base62());
-            tracks.truncate(QUICK_PICKS);
+        Ok(tracks) => {
             lock(cache).keep_radio(seed, tracks.clone(), Instant::now());
             tracks
         }
@@ -2366,6 +2397,17 @@ mod tests {
         );
         assert_eq!(shelves[1].title, requiem_core::HOME_LISTEN_AGAIN);
         assert_eq!(shelves[2].title, requiem_core::HOME_QUICK_PICKS);
+    }
+
+    #[test]
+    fn a_station_leaves_out_its_seed_and_keeps_to_its_length() {
+        let titles = |tracks: &[Track]| tracks.iter().map(|t| t.title.clone()).collect::<Vec<_>>();
+        let seed = b62("0FakeRadio100000000000");
+        let tracks = station_tracks(RADIO.as_bytes(), seed, usize::MAX).unwrap();
+        assert_eq!(titles(&tracks), ["Second Song", "Bare Song"]);
+        let other = b62("0FakeRadio900000000000");
+        let tracks = station_tracks(RADIO.as_bytes(), other, 2).unwrap();
+        assert_eq!(titles(&tracks), ["First Song", "Second Song"]);
     }
 
     const RECENTLY_PLAYED_FIXTURE: &str = include_str!("../tests/fixtures/recently_played.json");

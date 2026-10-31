@@ -287,6 +287,7 @@ fn frame_round_trip() {
             tracks: tracks(&["a", "b"]),
             mode: EnqueueMode::Append,
         }),
+        ClientMsg::Command(Command::PlayRadio { seed: track("s") }),
         ClientMsg::Ping(u64::MAX),
         ClientMsg::CheckForUpdates,
         ClientMsg::InstallUpdate,

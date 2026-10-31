@@ -202,6 +202,12 @@ enum Msg {
         purpose: Purpose,
         result: Result<AudioSource, ProviderError>,
     },
+    /// A radio of `seed` asked for when the queue was at `version`.
+    Radio {
+        version: u64,
+        seed: TrackId,
+        result: Result<Vec<Track>, ProviderError>,
+    },
 }
 
 pub struct Session {
@@ -703,6 +709,11 @@ impl Actor {
                     }),
                 },
                 Msg::Resolved { purpose, result } => self.on_resolved(purpose, result),
+                Msg::Radio {
+                    version,
+                    seed,
+                    result,
+                } => self.on_radio(version, &seed, result),
                 Msg::Browsed {
                     req,
                     page,
@@ -845,27 +856,13 @@ impl Actor {
     fn on_command(&mut self, cmd: Command) {
         match cmd {
             Command::Search { req, query } => self.search(req, query),
-            Command::Enqueue { tracks, mode } => {
-                match mode {
-                    EnqueueMode::Replace => {
-                        self.queue = tracks;
-                        self.current = None;
-                        self.cued = false;
-                    }
-                    EnqueueMode::Append => self.queue.extend(tracks),
-                }
-                self.queue_version += 1;
-                self.drop_pre();
-                self.emit_queue();
-                if self.started {
-                    self.ensure_pre_resolve();
-                }
-            }
+            Command::Enqueue { tracks, mode } => self.enqueue(tracks, mode),
             Command::PlayIndex(i) => {
                 if i < self.queue.len() {
                     self.play(i);
                 }
             }
+            Command::PlayRadio { seed } => self.play_radio(seed),
             Command::Cue(i) => {
                 if self.state == PlayState::Stopped
                     && self.playing.is_none()
@@ -931,6 +928,64 @@ impl Actor {
             Command::SignOut { provider } => self.sign_out(provider),
             Command::ImportSignInClient { provider, json } => self.import_client(provider, json.0),
             Command::Shutdown => unreachable!("handled in run"),
+        }
+    }
+
+    fn enqueue(&mut self, tracks: Vec<Track>, mode: EnqueueMode) {
+        match mode {
+            EnqueueMode::Replace => {
+                self.queue = tracks;
+                self.current = None;
+                self.cued = false;
+            }
+            EnqueueMode::Append => self.queue.extend(tracks),
+        }
+        self.queue_version += 1;
+        self.drop_pre();
+        self.emit_queue();
+        if self.started {
+            self.ensure_pre_resolve();
+        }
+    }
+
+    fn play_radio(&mut self, seed: Track) {
+        self.enqueue(vec![seed.clone()], EnqueueMode::Replace);
+        self.play(0);
+        let Some(provider) = self.provider(&seed.id.provider) else {
+            return;
+        };
+        // Every change to the queue bumps its version, so the radio is appended only to the
+        // queue it was asked for.
+        let version = self.queue_version;
+        let tx = self.tx.clone();
+        thread::spawn(move || {
+            let result = provider.radio(&seed.id);
+            let _ = tx.send(Msg::Radio {
+                version,
+                seed: seed.id,
+                result,
+            });
+        });
+    }
+
+    fn on_radio(
+        &mut self,
+        version: u64,
+        seed: &TrackId,
+        result: Result<Vec<Track>, ProviderError>,
+    ) {
+        match result {
+            Ok(mut tracks) if version == self.queue_version => {
+                tracks.retain(|t| t.id != *seed);
+                if !tracks.is_empty() {
+                    self.enqueue(tracks, EnqueueMode::Append);
+                }
+            }
+            Ok(_) => {}
+            Err(e) => eprintln!(
+                "requiem: radio of {} on {} failed: {e}",
+                seed.id, seed.provider.0
+            ),
         }
     }
 

@@ -1553,6 +1553,9 @@ struct Undo {
     /// The session has answered with `after`. Until then, the queue as it was is news sent
     /// before the change, not a change.
     landed: bool,
+    /// `after` is a radio's seed: once it has landed, the session's one queue that appends
+    /// the radio to it becomes `after`.
+    radio: bool,
     tracks: Vec<Track>,
     /// The playing index and position, when a track was loaded.
     playing: Option<(usize, Duration)>,
@@ -1717,6 +1720,13 @@ impl Vm {
                     let ids = || tracks.iter().map(|t| &t.id);
                     if u.after.iter().eq(ids()) {
                         u.landed = true;
+                    } else if u.radio
+                        && u.landed
+                        && tracks.len() > u.after.len()
+                        && u.after.iter().eq(ids().take(u.after.len()))
+                    {
+                        u.after = ids().cloned().collect();
+                        u.radio = false;
                     } else if u.landed || !u.tracks.iter().map(|t| &t.id).eq(ids()) {
                         self.withdraw_undo();
                     }
@@ -2193,14 +2203,28 @@ impl Vm {
         self.outbox.extend(cmds);
     }
 
+    /// A search result plays its radio: it alone, then tracks like it once the session has
+    /// them. Any other list plays from `from` to its end.
     fn play_from(&mut self, list: List, from: usize) -> Vec<Command> {
-        let rest = self.ui.list_tracks(list, from);
+        let mut rest = self.ui.list_tracks(list, from);
         if rest.is_empty() {
             return Vec::new();
+        }
+        let radio = list == List::Results;
+        if radio {
+            rest.truncate(1);
         }
         if !self.ui.queue.is_empty() {
             let after = rest.iter().map(|t| t.id.clone()).collect();
             self.offer_undo("Queue replaced", "Undo Replace Queue", after);
+            if let Some(u) = &mut self.undo {
+                u.radio = radio;
+            }
+        }
+        if radio {
+            return vec![Command::PlayRadio {
+                seed: rest.remove(0),
+            }];
         }
         vec![
             Command::Enqueue {
@@ -2567,6 +2591,7 @@ impl Vm {
             title,
             after,
             landed: false,
+            radio: false,
             tracks,
             playing,
             paused: self.ui.state == PlayState::Paused,
@@ -3555,7 +3580,7 @@ mod tests {
     }
 
     #[test]
-    fn play_result_replaces_queue_from_row_and_plays_first() {
+    fn play_result_plays_the_rows_radio() {
         let mut vm = with_results(5);
         let cmds = vm.intent(Intent::PlayFrom {
             list: List::Results,
@@ -3563,13 +3588,9 @@ mod tests {
         });
         assert_eq!(
             cmds,
-            vec![
-                Command::Enqueue {
-                    tracks: vm.ui().results[2..].to_vec(),
-                    mode: EnqueueMode::Replace
-                },
-                Command::PlayIndex(0)
-            ]
+            vec![Command::PlayRadio {
+                seed: vm.ui().results[2].clone()
+            }]
         );
         assert!(
             vm.intent(Intent::PlayFrom {
@@ -4541,22 +4562,28 @@ mod tests {
     #[test]
     fn undo_offer_ends_when_the_queue_changes_again() {
         let (mut vm, old) = replaced();
-        let new = tracks(4)[1..].to_vec();
-        // News sent before the session had the replace, its answer, and the first track
-        // starting keep it.
+        let seed = vec![tracks(4)[1].clone()];
+        let mut new = seed.clone();
+        new.extend([track("r1", 101), track("r2", 102)]);
+        // News sent before the session had the replace, its answer, and the seed starting
+        // keep it.
         vm.apply(Event::QueueChanged {
             tracks: old.clone(),
             current: Some(2),
         });
         vm.apply(Event::QueueChanged {
-            tracks: new.clone(),
+            tracks: seed.clone(),
             current: None,
         });
+        vm.apply(Event::QueueChanged {
+            tracks: seed.clone(),
+            current: Some(0),
+        });
+        // So do the seed's radio landing after it, and the next track starting on its own.
         vm.apply(Event::QueueChanged {
             tracks: new.clone(),
             current: Some(0),
         });
-        // So does the next track starting on its own.
         vm.apply(Event::QueueChanged {
             tracks: new.clone(),
             current: Some(1),
@@ -4565,7 +4592,7 @@ mod tests {
         // Once it has landed, the old queue is a change too.
         let mut back = replaced().0;
         back.apply(Event::QueueChanged {
-            tracks: new.clone(),
+            tracks: seed.clone(),
             current: None,
         });
         back.apply(Event::QueueChanged {
@@ -7602,7 +7629,7 @@ mod tests {
             (top_song(top).as_deref(), ids(&songs)),
             (Some("0"), vec!["2", "4"])
         );
-        let queued = |from: usize| {
+        let seed = |from: usize| {
             let mut vm = searched();
             vm.intent(Intent::SetFilter(ONLY_SPOTIFY));
             match &vm.intent(Intent::PlayFrom {
@@ -7610,20 +7637,18 @@ mod tests {
                 from,
             })[..]
             {
-                [Command::Enqueue { tracks, .. }, Command::PlayIndex(0)] => {
-                    tracks.iter().map(|t| t.id.id.clone()).collect::<Vec<_>>()
-                }
-                other => panic!("expected a replace and a play, got {other:?}"),
+                [Command::PlayRadio { seed }] => seed.id.id.clone(),
+                other => panic!("expected a radio, got {other:?}"),
             }
         };
-        // The top result plays the whole list; a song beside it plays from its own place.
-        assert_eq!(queued(0), ["0", "2", "4"]);
-        assert_eq!(queued(1), ["2", "4"]);
-        assert_eq!(queued(2), ["4"]);
+        // The top result plays its radio; a song beside it plays its own.
+        assert_eq!(seed(0), "0");
+        assert_eq!(seed(1), "2");
+        assert_eq!(seed(2), "4");
     }
 
     #[test]
-    fn playing_from_a_filtered_list_queues_the_visible_tracks_from_the_clicked_one() {
+    fn playing_from_a_filtered_list_plays_the_clicked_ones_radio() {
         let mut vm = both_signed_in();
         search_lands(&mut vm, alternating());
         vm.intent(Intent::SetFilter(ONLY_SPOTIFY));
@@ -7634,13 +7659,9 @@ mod tests {
         });
         assert_eq!(
             cmds,
-            vec![
-                Command::Enqueue {
-                    tracks: vec![from(&spotify(), "2"), from(&spotify(), "4")],
-                    mode: EnqueueMode::Replace
-                },
-                Command::PlayIndex(0)
-            ]
+            vec![Command::PlayRadio {
+                seed: from(&spotify(), "2")
+            }]
         );
         assert_eq!(
             vm.intent(Intent::Append {

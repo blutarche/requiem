@@ -1,7 +1,7 @@
 use requiem_core::{Command, Event};
 use serde::{Deserialize, Serialize};
 
-pub const PROTOCOL: u32 = 8;
+pub const PROTOCOL: u32 = 9;
 
 pub(crate) const VERSION: &str = env!("CARGO_PKG_VERSION");
 

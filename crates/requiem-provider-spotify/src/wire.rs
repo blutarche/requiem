@@ -20,6 +20,7 @@ pub(crate) const MAX_READ: usize = 64 * 1024;
 #[serde(tag = "op", rename_all = "snake_case")]
 pub(crate) enum Request {
     Search { q: String, limit: usize },
+    Radio { seed: String },
     Browse { page: Page },
     Prepare { track: String },
     Attach { stream: String },
@@ -226,6 +227,12 @@ mod tests {
                 limit: 5
             }),
             r#"{"op":"search","q":"a b","limit":5}"#
+        );
+        assert_eq!(
+            json(&Request::Radio {
+                seed: "4uLU6hMCjMI75M1A2tKUQC".into()
+            }),
+            r#"{"op":"radio","seed":"4uLU6hMCjMI75M1A2tKUQC"}"#
         );
         assert_eq!(
             json(&Request::Read { offset: 7, len: 9 }),

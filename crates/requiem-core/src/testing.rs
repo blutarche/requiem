@@ -127,6 +127,7 @@ struct ProviderState {
     resolve_scripts: HashMap<String, VecDeque<Step<()>>>,
     search_scripts: HashMap<String, VecDeque<Step<SearchResults>>>,
     browse_scripts: HashMap<Page, VecDeque<Step<Browsed>>>,
+    radio_scripts: HashMap<String, VecDeque<Step<Vec<Track>>>>,
     sign_in_scripts: VecDeque<SignInScript>,
     sign_out_gate: Option<Gate>,
     sign_out_error: Option<ProviderError>,
@@ -136,6 +137,7 @@ struct ProviderState {
     resolve_calls: HashMap<String, usize>,
     search_calls: usize,
     browse_calls: Vec<Page>,
+    radio_calls: usize,
     sign_in_calls: usize,
     sign_out_calls: usize,
     account: AccountState,
@@ -150,6 +152,7 @@ impl Default for ProviderState {
             resolve_scripts: HashMap::new(),
             search_scripts: HashMap::new(),
             browse_scripts: HashMap::new(),
+            radio_scripts: HashMap::new(),
             sign_in_scripts: VecDeque::new(),
             sign_out_gate: None,
             sign_out_error: None,
@@ -159,6 +162,7 @@ impl Default for ProviderState {
             resolve_calls: HashMap::new(),
             search_calls: 0,
             browse_calls: Vec::new(),
+            radio_calls: 0,
             sign_in_calls: 0,
             sign_out_calls: 0,
             account: AccountState::SignedOut,
@@ -170,7 +174,7 @@ impl Default for ProviderState {
 }
 
 /// Unscripted resolves succeed with a source whose bytes are the track id; unscripted browses
-/// return no shelves; the account starts `SignedOut`.
+/// return no shelves and unscripted radios no tracks; the account starts `SignedOut`.
 pub struct FakeProvider {
     id: ProviderId,
     state: Mutex<ProviderState>,
@@ -237,6 +241,15 @@ impl FakeProvider {
             .unwrap()
             .browse_scripts
             .insert(page, steps.into());
+    }
+
+    /// Radios of the track `seed_id`, one step per call.
+    pub fn script_radio(&self, seed_id: &str, steps: Vec<Step<Vec<Track>>>) {
+        self.state
+            .lock()
+            .unwrap()
+            .radio_scripts
+            .insert(seed_id.into(), steps.into());
     }
 
     /// Scripts are consumed one per `sign_in`; unscripted sign-ins fail.
@@ -348,6 +361,16 @@ impl FakeProvider {
         assert!(!res.timed_out(), "timed out waiting for {n} browse calls");
     }
 
+    /// Counts calls on entry, so it also fires for a radio still held in a step.
+    pub fn wait_radio_calls(&self, n: usize) {
+        let st = self.state.lock().unwrap();
+        let (_st, res) = self
+            .called
+            .wait_timeout_while(st, WAIT, |s| s.radio_calls < n)
+            .unwrap();
+        assert!(!res.timed_out(), "timed out waiting for {n} radio calls");
+    }
+
     /// Counts calls on entry, so it also fires for a sign-out still held by its gate.
     pub fn wait_sign_out_calls(&self, n: usize) {
         let st = self.state.lock().unwrap();
@@ -401,6 +424,21 @@ impl Provider for FakeProvider {
         match step {
             Some(s) => s.run(),
             None => Ok(Browsed::default()),
+        }
+    }
+
+    fn radio(&self, seed: &TrackId) -> Result<Vec<Track>, ProviderError> {
+        let step = {
+            let mut st = self.state.lock().unwrap();
+            st.radio_calls += 1;
+            self.called.notify_all();
+            st.radio_scripts
+                .get_mut(&seed.id)
+                .and_then(VecDeque::pop_front)
+        };
+        match step {
+            Some(s) => s.run(),
+            None => Ok(Vec::new()),
         }
     }
 

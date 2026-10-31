@@ -23,7 +23,7 @@ use std::sync::Arc;
 
 use requiem_core::{
     AccountState, AudioSource, Browsed, Page, Provider, ProviderError, ProviderId, SearchResults,
-    Shelf, TrackId,
+    Shelf, Track, TrackId,
 };
 
 use innertube::{ClientRefresher, InnertubeClient};
@@ -208,6 +208,10 @@ impl Provider for YtMusicProvider {
             bytes: Box::new(source),
             hint: format.hint,
         })
+    }
+
+    fn radio(&self, seed: &TrackId) -> Result<Vec<Track>, ProviderError> {
+        self.client.radio(&seed.id)
     }
 
     fn browse(&self, page: &Page) -> Result<Browsed, ProviderError> {
