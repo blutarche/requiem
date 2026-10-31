@@ -978,7 +978,14 @@ impl Actor {
             Ok(mut tracks) if version == self.queue_version => {
                 tracks.retain(|t| t.id != *seed);
                 if !tracks.is_empty() {
+                    // Stopped with nothing playing: the seed failed or ended first, and the
+                    // queue ran out before the radio came.
+                    let ran_out = self.state == PlayState::Stopped && self.playing.is_none();
+                    let first = self.queue.len();
                     self.enqueue(tracks, EnqueueMode::Append);
+                    if ran_out {
+                        self.start(first);
+                    }
                 }
             }
             Ok(_) => {}

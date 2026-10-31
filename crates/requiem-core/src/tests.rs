@@ -3701,6 +3701,52 @@ fn play_radio_drops_a_radio_that_arrives_after_the_queue_changed() {
 }
 
 #[test]
+fn a_radio_arriving_after_the_seed_ended_plays_its_first_track() {
+    let r = rig(config());
+    let gate = Gate::new();
+    r.provider.script_radio(
+        "seed",
+        vec![Step::ok(tracks(&["seed", "r1", "r2"])).gated(&gate)],
+    );
+    r.send(Command::PlayRadio {
+        seed: track("seed"),
+    });
+    let (r#gen, id) = r.engine.wait_load(1);
+    assert_eq!(id, "seed");
+    r.start(r#gen, Some(SECS(100)));
+    r.provider.wait_radio_calls(1);
+    r.engine.emit(EngineEvent::Ended { r#gen });
+    r.wait_event(|e| *e == Event::State(PlayState::Stopped));
+
+    gate.release();
+    assert_eq!(r.engine.wait_load(2).1, "r1");
+    let ev = r.wait_event(|e| matches!(e, Event::QueueChanged { tracks, .. } if tracks.len() == 3));
+    assert_eq!(queue_ids(&ev), ["seed", "r1", "r2"]);
+}
+
+#[test]
+fn a_radio_arriving_while_paused_is_only_appended() {
+    let r = rig(config());
+    let gate = Gate::new();
+    r.provider
+        .script_radio("seed", vec![Step::ok(tracks(&["seed", "r1"])).gated(&gate)]);
+    r.send(Command::PlayRadio {
+        seed: track("seed"),
+    });
+    let (r#gen, _) = r.engine.wait_load(1);
+    r.start(r#gen, Some(SECS(100)));
+    r.provider.wait_radio_calls(1);
+    r.send(Command::Pause);
+    r.wait_event(|e| *e == Event::State(PlayState::Paused));
+
+    gate.release();
+    let ev = r.wait_event(|e| matches!(e, Event::QueueChanged { tracks, .. } if tracks.len() == 2));
+    assert_eq!(queue_ids(&ev), ["seed", "r1"]);
+    r.settle();
+    assert_eq!(r.loads(), ["seed"]);
+}
+
+#[test]
 fn a_failed_radio_leaves_the_seed_alone_in_the_queue() {
     let r = rig(config());
     r.provider.script_radio(
