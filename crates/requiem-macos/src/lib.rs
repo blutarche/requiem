@@ -14,6 +14,7 @@ use requiem_core::PlayState;
 pub mod art;
 #[cfg(target_os = "macos")]
 mod macos;
+mod region;
 mod view;
 
 /// Artwork loading and the cover view.
@@ -22,6 +23,7 @@ pub use macos::art as artwork;
 #[cfg(target_os = "macos")]
 #[doc(hidden)]
 pub use macos::mini_player_snapshot;
+pub use region::region;
 pub use view::ViewTracker;
 
 /// What the status item, the mini player and Now Playing show. `artists` is joined for
