@@ -648,7 +648,7 @@ impl Badge {
 /// `service`'s disc `d` across at (`x`, `y`), with or without its ring.
 pub fn draw_badge(cr: &cairo::Context, service: Service, x: f64, y: f64, d: f64, ring: bool) {
     let inset = if ring {
-        let (r, g, b) = theme::rgb(theme::BG);
+        let (r, g, b) = theme::rgb(theme::bg());
         cr.set_source_rgb(r, g, b);
         cr.new_sub_path();
         cr.arc(x + d / 2.0, y + d / 2.0, d / 2.0, 0.0, 2.0 * PI);
@@ -665,7 +665,7 @@ pub fn draw_badge(cr: &cairo::Context, service: Service, x: f64, y: f64, d: f64,
 pub fn draw_pair(cr: &cairo::Context, side: f64) {
     let step = side - side / 3.0;
     disc(cr, Service::Spotify, 0.0, RING, side);
-    let (r, g, b) = theme::rgb(theme::BG);
+    let (r, g, b) = theme::rgb(theme::bg());
     cr.set_source_rgb(r, g, b);
     cr.new_sub_path();
     cr.arc(

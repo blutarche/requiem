@@ -1,6 +1,9 @@
 //! The AppKit app. Everything here runs on the main thread; the IPC threads in `backend` hand
 //! their messages over through the main dispatch queue.
 
+#[doc(hidden)]
+pub mod appearance;
+mod appearance_switch;
 mod backend;
 mod badge;
 mod bar;
@@ -31,11 +34,11 @@ use objc2::rc::Retained;
 use objc2::runtime::{AnyObject, NSObject, NSObjectProtocol, ProtocolObject, Sel};
 use objc2::{ClassType, MainThreadOnly, define_class, msg_send, sel};
 use objc2_app_kit::{
-    NSAppearance, NSAppearanceNameDarkAqua, NSApplication, NSApplicationActivationPolicy,
-    NSApplicationDelegate, NSBackingStoreType, NSButton, NSControl, NSControlStateValueOff,
-    NSControlStateValueOn, NSControlTextEditingDelegate, NSEvent, NSEventMask,
-    NSEventModifierFlags, NSMenu, NSMenuItem, NSPopUpButton, NSResponder, NSText,
-    NSTextFieldDelegate, NSTextView, NSWindow, NSWindowDelegate, NSWindowStyleMask,
+    NSApplication, NSApplicationActivationPolicy, NSApplicationDelegate, NSBackingStoreType,
+    NSButton, NSControl, NSControlStateValueOff, NSControlStateValueOn,
+    NSControlTextEditingDelegate, NSEvent, NSEventMask, NSEventModifierFlags, NSMenu, NSMenuItem,
+    NSPopUpButton, NSResponder, NSText, NSTextFieldDelegate, NSTextView, NSWindow,
+    NSWindowDelegate, NSWindowStyleMask,
 };
 use objc2_foundation::{MainThreadMarker, NSNotification, NSRect, NSSize, NSString};
 
@@ -45,7 +48,8 @@ use crate::args::{Args, View};
 use crate::demo;
 use crate::search_keys::{Dir, Spot};
 use crate::vm::{
-    Intent, LibrarySort, PaletteAction, QueueEdit, SEEK_STEP_SECS, Service, VOLUME_STEP, Vm,
+    Appearance, Intent, LibrarySort, PaletteAction, QueueEdit, SEEK_STEP_SECS, Service,
+    VOLUME_STEP, Vm,
 };
 use backend::{Backend, Live};
 use ui::{AppView, Ui};
@@ -1031,9 +1035,16 @@ pub fn run(args: Args) {
     let mtm = MainThreadMarker::new().expect("requiem-gui must start on the main thread");
     let app = NSApplication::sharedApplication(mtm);
     app.setActivationPolicy(NSApplicationActivationPolicy::Regular);
-    // SAFETY: the appearance-name static is an immutable framework constant.
-    let dark = NSAppearance::appearanceNamed(unsafe { NSAppearanceNameDarkAqua });
-    app.setAppearance(dark.as_deref());
+    // Demo runs leave the saved choice alone, as they do the service filter.
+    let chosen = args.appearance.unwrap_or_else(|| {
+        if args.uses_demo_data() {
+            Appearance::System
+        } else {
+            prefs::appearance()
+        }
+    });
+    appearance::apply(mtm, chosen);
+    appearance::observe(mtm);
     theme::register_fonts();
 
     let delegate = Delegate::new(mtm);

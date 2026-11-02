@@ -1,4 +1,4 @@
-//! Settings: each account, its state, and what can be done about it there.
+//! Settings: the appearance, and each account, its state, and what can be done about it there.
 
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
@@ -11,10 +11,12 @@ use objc2_app_kit::{
     NSScrollView, NSTextField, NSView,
 };
 use objc2_core_foundation::CGFloat;
-use objc2_foundation::{MainThreadMarker, NSRect, NSSize};
+use objc2_foundation::{MainThreadMarker, NSPoint, NSRect, NSSize};
 use requiem_core::ProviderId;
 
 use super::Delegate;
+use super::appearance;
+use super::appearance_switch::AppearanceSwitch;
 use super::badge::Badge;
 use super::shelves::FlippedView;
 use super::theme::{self, Icon, Weight};
@@ -131,6 +133,8 @@ pub struct SettingsPage {
     pub view: Retained<NSView>,
     scroll: Retained<NSScrollView>,
     doc: Retained<FlippedView>,
+    appearance_heading: Retained<NSTextField>,
+    pub appearance: AppearanceSwitch,
     heading: Retained<NSTextField>,
     /// Closes the last row.
     end: Retained<NSView>,
@@ -168,13 +172,20 @@ impl SettingsPage {
         let doc = flipped(mtm, FLEX_W);
         doc.setFrame(rect(0.0, 0.0, w, 0.0));
         scroll.setDocumentView(Some(&doc));
-        let heading = widgets::label(
-            mtm,
-            "Accounts",
-            &theme::font(17.0, Weight::SemiBold),
-            &theme::ink(),
-        );
+        let section = |title| {
+            widgets::label(
+                mtm,
+                title,
+                &theme::font(17.0, Weight::SemiBold),
+                &theme::ink(),
+            )
+        };
+        let appearance_heading = section("Appearance");
+        let appearance = AppearanceSwitch::new(mtm, appearance::chosen());
+        let heading = section("Accounts");
         let end = widgets::panel(mtm, NSRect::ZERO, FLEX_W, &theme::line());
+        doc.addSubview(&appearance_heading);
+        doc.addSubview(&appearance.view);
         doc.addSubview(&heading);
         doc.addSubview(&end);
         view.addSubview(&head);
@@ -184,6 +195,8 @@ impl SettingsPage {
             view,
             scroll,
             doc,
+            appearance_heading,
+            appearance,
             heading,
             end,
             rows: RefCell::new(Vec::new()),
@@ -220,6 +233,9 @@ impl SettingsPage {
     pub fn layout(&self) {
         let w = self.scroll.contentSize().width;
         let mut y = GAP;
+        y = line_at(&self.appearance_heading, PAD, y, w - 2.0 * PAD) + GAP;
+        self.appearance.view.setFrameOrigin(NSPoint::new(PAD, y));
+        y += AppearanceSwitch::H + PAD;
         y = line_at(&self.heading, PAD, y, w - 2.0 * PAD) + GAP;
         let shown = self.shown.borrow().clone();
         for (v, row) in self.views().iter().zip(shown.iter()) {

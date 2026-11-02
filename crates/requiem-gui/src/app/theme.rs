@@ -1,17 +1,19 @@
-//! Blutarche Studio design tokens (dark), embedded Inter, and Lucide icons.
+//! Blutarche Studio design tokens (dark and light), embedded Inter, and Lucide icons.
 
 use std::cell::RefCell;
 use std::collections::HashMap;
-use std::ptr;
+use std::ptr::{self, NonNull};
 use std::sync::atomic::{AtomicBool, Ordering};
 
+use block2::RcBlock;
 use objc2::AnyThread;
 use objc2::rc::Retained;
 use objc2::runtime::AnyObject;
 use objc2_app_kit::{
-    NSColor, NSFont, NSFontDescriptor, NSFontFeatureSelectorIdentifierKey,
-    NSFontFeatureSettingsAttribute, NSFontFeatureTypeIdentifierKey, NSFontWeightMedium,
-    NSFontWeightRegular, NSFontWeightSemibold, NSImage,
+    NSAppearance, NSAppearanceNameAqua, NSAppearanceNameDarkAqua, NSColor, NSFont,
+    NSFontDescriptor, NSFontFeatureSelectorIdentifierKey, NSFontFeatureSettingsAttribute,
+    NSFontFeatureTypeIdentifierKey, NSFontWeightMedium, NSFontWeightRegular, NSFontWeightSemibold,
+    NSImage,
 };
 use objc2_core_foundation::{CFData, CGFloat};
 use objc2_core_graphics::{CGDataProvider, CGFont};
@@ -26,137 +28,170 @@ fn rgba(hex: u32, alpha: CGFloat) -> Retained<NSColor> {
     NSColor::colorWithSRGBRed_green_blue_alpha(c(16), c(8), c(0), alpha)
 }
 
+/// A colour's 0xRRGGBB value in the dark appearance and in the light one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Tone {
+    pub dark: u32,
+    pub light: u32,
+}
+
+const fn tone(dark: u32, light: u32) -> Tone {
+    Tone { dark, light }
+}
+
+/// An opacity in the dark appearance and in the light one.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Alpha {
+    pub dark: CGFloat,
+    pub light: CGFloat,
+}
+
+impl Alpha {
+    pub const NONE: Alpha = Alpha::both(0.0);
+
+    pub const fn both(a: CGFloat) -> Alpha {
+        Alpha { dark: a, light: a }
+    }
+
+    /// The opacity of `self` laid over `under`, as one layer.
+    pub fn over(self, under: Alpha) -> Alpha {
+        Alpha {
+            dark: 1.0 - (1.0 - self.dark) * (1.0 - under.dark),
+            light: 1.0 - (1.0 - self.light) * (1.0 - under.light),
+        }
+    }
+}
+
+/// Whether `appearance` is a dark one, high-contrast dark included.
+pub fn is_dark(appearance: &NSAppearance) -> bool {
+    // SAFETY: the appearance-name statics are immutable framework constants.
+    let (aqua, dark) = unsafe { (NSAppearanceNameAqua, NSAppearanceNameDarkAqua) };
+    appearance
+        .bestMatchFromAppearancesWithNames(&NSArray::from_slice(&[aqua, dark]))
+        .is_some_and(|name| &*name == dark)
+}
+
+/// A colour that is `dark` in a dark appearance and `light` otherwise, resolved wherever it
+/// is drawn.
+fn dynamic(dark: Retained<NSColor>, light: Retained<NSColor>) -> Retained<NSColor> {
+    let provider = RcBlock::new(
+        move |appearance: NonNull<NSAppearance>| -> NonNull<NSColor> {
+            // SAFETY: AppKit passes an appearance that is valid for the duration of the call.
+            let c = if is_dark(unsafe { appearance.as_ref() }) {
+                &dark
+            } else {
+                &light
+            };
+            NonNull::from(&**c)
+        },
+    );
+    // SAFETY: the provider returns, for any appearance, a colour the block itself keeps alive.
+    unsafe { NSColor::colorWithName_dynamicProvider(None, &provider) }
+}
+
+fn shade(t: Tone, a: Alpha) -> Retained<NSColor> {
+    dynamic(rgba(t.dark, a.dark), rgba(t.light, a.light))
+}
+
 /// `top` at `alpha` over the opaque `base`, as one opaque colour, for surfaces that can hold
 /// only one background.
-pub fn mix(base: u32, top: u32, alpha: CGFloat) -> Retained<NSColor> {
-    let c = |hex: u32, shift: u32| CGFloat::from(((hex >> shift) & 0xff) as u8) / 255.0;
-    let m = |shift| c(base, shift) * (1.0 - alpha) + c(top, shift) * alpha;
-    NSColor::colorWithSRGBRed_green_blue_alpha(m(16), m(8), m(0), 1.0)
+pub fn mix(base: Tone, top: Tone, alpha: Alpha) -> Retained<NSColor> {
+    fn one(base: u32, top: u32, alpha: CGFloat) -> Retained<NSColor> {
+        let c = |hex: u32, shift: u32| CGFloat::from(((hex >> shift) & 0xff) as u8) / 255.0;
+        let m = |shift| c(base, shift) * (1.0 - alpha) + c(top, shift) * alpha;
+        NSColor::colorWithSRGBRed_green_blue_alpha(m(16), m(8), m(0), 1.0)
+    }
+    dynamic(
+        one(base.dark, top.dark, alpha.dark),
+        one(base.light, top.light, alpha.light),
+    )
 }
 
-pub const BG: u32 = 0x0A0A0C;
-pub const BG_2: u32 = 0x121216;
-pub const BG_3: u32 = 0x1A1A20;
-pub const LINE_2: u32 = 0x34343F;
+/// Colour functions, each returning one shared colour, so that two calls give the same
+/// object and compare equal.
+macro_rules! colors {
+    ($($(#[$doc:meta])* $name:ident = $make:expr;)*) => {
+        $(
+            $(#[$doc])*
+            pub fn $name() -> Retained<NSColor> {
+                thread_local! {
+                    static COLOR: Retained<NSColor> = $make;
+                }
+                COLOR.with(Retained::clone)
+            }
+        )*
+    };
+}
+
+pub const BG: Tone = tone(0x0A0A0C, 0xFAF9F6);
+pub const BG_2: Tone = tone(0x121216, 0xF1EFEA);
+pub const BG_3: Tone = tone(0x1A1A20, 0xE8E6E0);
+pub const LINE_2: Tone = tone(0x34343F, 0xCFCBC2);
 /// A hovered table row: BG_3 30% toward LINE_2. BG_3 itself is 1.08:1 against a BG_2 stripe.
-pub const ROW_HOVER: u32 = 0x22222A;
-pub const ACCENT: u32 = 0x7C70F5;
-const ACCENT_DEEP: u32 = 0x5A4FC0;
-/// Alphas of `accent_soft` and `selection`.
-pub const SOFT: CGFloat = 0.10;
-pub const SELECTED: CGFloat = 0.32;
+pub const ROW_HOVER: Tone = tone(0x22222A, 0xE9E7E1);
+pub const ACCENT: Tone = tone(0x7C70F5, 0x5A4DDB);
+const ACCENT_DEEP: Tone = tone(0x5A4FC0, 0x4136A8);
+/// Alphas of `accent_soft` and `selection`. The lighter selection in the light appearance
+/// keeps muted text on it at 4.56:1.
+pub const SOFT: Alpha = Alpha::both(0.10);
+pub const SELECTED: Alpha = Alpha {
+    dark: 0.32,
+    light: 0.18,
+};
+const WHITE: Tone = tone(0xFFFFFF, 0xFFFFFF);
 
-pub fn bg() -> Retained<NSColor> {
-    rgb(BG)
+colors! {
+    bg = shade(BG, Alpha::both(1.0));
+    bg_2 = shade(BG_2, Alpha::both(1.0));
+    bg_3 = shade(BG_3, Alpha::both(1.0));
+    /// The fill of a hovered row or card.
+    row_hover = shade(ROW_HOVER, Alpha::both(1.0));
+    bg_4 = shade(tone(0x24242C, 0xE3E0D9), Alpha::both(1.0));
+    line = shade(tone(0x24242C, 0xE3E0D9), Alpha::both(1.0));
+    line_2 = shade(LINE_2, Alpha::both(1.0));
+    line_hi = shade(tone(0x43434F, 0xB8B4AA), Alpha::both(1.0));
+    ink = shade(tone(0xF2EFEA, 0x17171C), Alpha::both(1.0));
+    ink_2 = shade(tone(0xC8C5BD, 0x45454D), Alpha::both(1.0));
+    muted = shade(tone(0x8C8C94, 0x606068), Alpha::both(1.0));
+    muted_2 = shade(tone(0x5A5A63, 0x8E8E96), Alpha::both(1.0));
+    chrome_bg = shade(tone(0x07070A, 0xF0EEE9), Alpha::both(1.0));
+    chrome_bg_2 = shade(tone(0x0E0E14, 0xE8E6E0), Alpha::both(1.0));
+    chrome_bg_hover = shade(tone(0x14141A, 0xE0DDD6), Alpha::both(1.0));
+    chrome_border = shade(tone(0x18181E, 0xDDDAD3), Alpha::both(1.0));
+    chrome_ink = shade(tone(0xE8E5DE, 0x1A1A1F), Alpha::both(1.0));
+    chrome_muted = shade(tone(0x8A8A92, 0x6A6A72), Alpha::both(1.0));
+    accent = shade(ACCENT, Alpha::both(1.0));
+    /// The accent with more contrast: lighter in the dark appearance, darker in the light.
+    accent_hi = shade(tone(0x9088F8, 0x4B3FC4), Alpha::both(1.0));
+    /// A primary button's fill: the accent darkened 40% toward accent-deep, so the white label
+    /// keeps 4.64:1 (7.02:1 light), where on the dark accent itself it would have 3.82:1.
+    primary = mix(ACCENT, ACCENT_DEEP, Alpha::both(0.4));
+    /// A primary button's hover, darker still: 6.34:1 (9.06:1 light) under the white label.
+    /// Lightening it to the dark accent-hi would leave 2.97:1.
+    accent_deep = shade(ACCENT_DEEP, Alpha::both(1.0));
+    accent_soft = shade(ACCENT, SOFT);
+    accent_ring = shade(ACCENT, Alpha::both(0.25));
+    selection = shade(ACCENT, SELECTED);
+    bad = shade(tone(0xE26F5C, 0xB83A27), Alpha::both(1.0));
+    warn = shade(tone(0xE0B85D, 0x8A6000), Alpha::both(1.0));
+    /// Palette backdrop: bg at 60%, or black at 35% in the light appearance.
+    scrim = shade(tone(0x0A0A0C, 0x000000), Alpha { dark: 0.60, light: 0.35 });
+    /// Text on primary buttons.
+    white = shade(WHITE, Alpha::both(1.0));
+    /// The icon on the accent play button.
+    on_accent = shade(tone(0x0A0A0C, 0xFFFFFF), Alpha::both(1.0));
+    /// The service badges' fills, the services' own colours.
+    spotify_green = rgb(0x1ED760);
+    youtube_red = rgb(0xFF0033);
 }
-pub fn bg_2() -> Retained<NSColor> {
-    rgb(BG_2)
-}
-pub fn bg_3() -> Retained<NSColor> {
-    rgb(BG_3)
-}
-/// The fill of a hovered row or card.
-pub fn row_hover() -> Retained<NSColor> {
-    rgb(ROW_HOVER)
-}
-pub fn bg_4() -> Retained<NSColor> {
-    rgb(0x24242C)
-}
-pub fn line() -> Retained<NSColor> {
-    rgb(0x24242C)
-}
-pub fn line_2() -> Retained<NSColor> {
-    rgb(LINE_2)
-}
-pub fn line_hi() -> Retained<NSColor> {
-    rgb(0x43434F)
-}
-pub fn ink() -> Retained<NSColor> {
-    rgb(0xF2EFEA)
-}
-pub fn ink_2() -> Retained<NSColor> {
-    rgb(0xC8C5BD)
-}
-pub fn muted() -> Retained<NSColor> {
-    rgb(0x8C8C94)
-}
-pub fn muted_2() -> Retained<NSColor> {
-    rgb(0x5A5A63)
-}
-pub fn chrome_bg() -> Retained<NSColor> {
-    rgb(0x07070A)
-}
-pub fn chrome_bg_2() -> Retained<NSColor> {
-    rgb(0x0E0E14)
-}
-pub fn chrome_bg_hover() -> Retained<NSColor> {
-    rgb(0x14141A)
-}
-pub fn chrome_border() -> Retained<NSColor> {
-    rgb(0x18181E)
-}
-pub fn chrome_ink() -> Retained<NSColor> {
-    rgb(0xE8E5DE)
-}
-pub fn chrome_muted() -> Retained<NSColor> {
-    rgb(0x8A8A92)
-}
-pub fn accent() -> Retained<NSColor> {
-    rgb(ACCENT)
-}
-/// The volume bar's colour at `t` along its track, 0 to 1: accent, then pink, then orange.
+
+/// The volume bar's colour at `t` along its track, 0 to 1: accent, then pink, then orange;
+/// in the light appearance each dark enough for 3:1 against the track.
 pub fn heat(t: CGFloat) -> Retained<NSColor> {
-    const STOPS: [u32; 3] = [ACCENT, 0xE86FD8, 0xFF8A5B];
+    const STOPS: [Tone; 3] = [ACCENT, tone(0xE86FD8, 0xB8358F), tone(0xFF8A5B, 0xB84E1A)];
     let t = t.clamp(0.0, 1.0) * 2.0;
     let i = (t as usize).min(1);
-    mix(STOPS[i], STOPS[i + 1], t - i as CGFloat)
-}
-pub fn accent_hi() -> Retained<NSColor> {
-    rgb(0x9088F8)
-}
-/// A primary button's fill: the accent darkened 40% toward accent-deep, so the white label
-/// keeps 4.64:1, where on the accent itself it would have 3.82:1.
-pub fn primary() -> Retained<NSColor> {
-    mix(ACCENT, ACCENT_DEEP, 0.4)
-}
-/// A primary button's hover, darker still: 6.34:1 under the white label. Lightening it to
-/// accent-hi would leave 2.97:1.
-pub fn accent_deep() -> Retained<NSColor> {
-    rgb(ACCENT_DEEP)
-}
-pub fn accent_soft() -> Retained<NSColor> {
-    rgba(ACCENT, SOFT)
-}
-pub fn accent_ring() -> Retained<NSColor> {
-    rgba(0x7C70F5, 0.25)
-}
-pub fn selection() -> Retained<NSColor> {
-    rgba(ACCENT, SELECTED)
-}
-pub fn bad() -> Retained<NSColor> {
-    rgb(0xE26F5C)
-}
-pub fn warn() -> Retained<NSColor> {
-    rgb(0xE0B85D)
-}
-/// Palette backdrop: bg at 60%.
-pub fn scrim() -> Retained<NSColor> {
-    rgba(0x0A0A0C, 0.60)
-}
-/// Text on primary buttons.
-pub fn white() -> Retained<NSColor> {
-    rgb(0xFFFFFF)
-}
-/// The icon on the accent play button.
-pub fn on_accent() -> Retained<NSColor> {
-    rgb(0x0A0A0C)
-}
-/// The service badges' fills, the services' own colours.
-pub fn spotify_green() -> Retained<NSColor> {
-    rgb(0x1ED760)
-}
-pub fn youtube_red() -> Retained<NSColor> {
-    rgb(0xFF0033)
+    mix(STOPS[i], STOPS[i + 1], Alpha::both(t - i as CGFloat))
 }
 
 pub const RADIUS: CGFloat = 6.0;
@@ -356,6 +391,58 @@ impl Icon {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use objc2_app_kit::NSAppearanceName;
+    use objc2_core_graphics::CGColor;
+    use objc2_foundation::NSObjectProtocol;
+
+    /// `color` as the appearance `name` shows it, as 0xRRGGBB and alpha.
+    fn shown(color: &NSColor, name: &NSAppearanceName) -> (u32, CGFloat) {
+        let appearance = NSAppearance::appearanceNamed(name).unwrap();
+        let out = RefCell::new(Vec::new());
+        appearance.performAsCurrentDrawingAppearance(&block2::StackBlock::new(|| {
+            let cg = color.CGColor();
+            let n = CGColor::number_of_components(Some(&cg));
+            let c = CGColor::components(Some(&cg));
+            // SAFETY: a CGColor has as many components as it reports.
+            *out.borrow_mut() = unsafe { std::slice::from_raw_parts(c, n) }.to_vec();
+        }));
+        let c = out.into_inner();
+        let byte = |v: CGFloat| (v * 255.0).round() as u32;
+        ((byte(c[0]) << 16) | (byte(c[1]) << 8) | byte(c[2]), c[3])
+    }
+
+    #[test]
+    fn colours_resolve_for_the_appearance_they_are_shown_in() {
+        // SAFETY: the appearance-name statics are immutable framework constants.
+        let (dark, light) = unsafe { (NSAppearanceNameDarkAqua, NSAppearanceNameAqua) };
+        assert_eq!(shown(&bg(), dark), (0x0A0A0C, 1.0));
+        assert_eq!(shown(&bg(), light), (0xFAF9F6, 1.0));
+        assert_eq!(shown(&ink(), light), (0x17171C, 1.0));
+        assert_eq!(shown(&selection(), dark).1, 0.32);
+        assert_eq!(shown(&selection(), light).1, 0.18);
+        let selected = mix(BG, ACCENT, SELECTED);
+        assert_eq!(shown(&selected, dark), (0x2E2B57, 1.0));
+        assert_eq!(shown(&selected, light), (0xDDDAF1, 1.0));
+        for fixed in [spotify_green(), youtube_red(), white()] {
+            assert_eq!(shown(&fixed, dark), shown(&fixed, light));
+        }
+    }
+
+    #[test]
+    fn a_colour_is_one_shared_object() {
+        assert!(ptr::eq(&*accent(), &*accent()));
+        assert!(accent().isEqual(Some(&accent())));
+        assert!(!accent().isEqual(Some(&accent_hi())));
+    }
+
+    #[test]
+    fn layered_alphas_combine() {
+        let both = SELECTED.over(SOFT);
+        assert_eq!(both.dark, 1.0 - (1.0 - 0.32) * (1.0 - 0.10));
+        assert_eq!(both.light, 1.0 - (1.0 - 0.18) * (1.0 - 0.10));
+        let soft = Alpha::NONE.over(SOFT);
+        assert!((soft.dark - SOFT.dark).abs() < 1e-12 && (soft.light - SOFT.light).abs() < 1e-12);
+    }
 
     #[test]
     fn every_icon_decodes() {

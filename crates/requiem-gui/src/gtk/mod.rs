@@ -4,6 +4,7 @@ mod art;
 mod grid;
 mod icons;
 mod pages;
+mod portal;
 mod prefs;
 mod shelves;
 mod songs;
@@ -24,7 +25,7 @@ use crate::backend::{Backend, Hooks, Live, Msg};
 use crate::demo;
 use crate::search_keys::{Dir, Spot};
 use crate::view::{AppView, SnapshotState};
-use crate::vm::{Intent, Vm};
+use crate::vm::{Appearance, Intent, Vm};
 use ui::Ui;
 
 pub const APP_ID: &str = "io.github.blutarche.Requiem";
@@ -73,7 +74,13 @@ pub fn run(args: Args) -> i32 {
 }
 
 fn start(app: &gtk::Application, args: &Args) {
-    theme::install();
+    // Demo runs leave the saved choices alone, as they do the service filter.
+    let saved = if args.uses_demo_data() {
+        Appearance::System
+    } else {
+        prefs::appearance()
+    };
+    theme::install(args.appearance.unwrap_or(saved));
     let (vm, backend) = if args.uses_demo_data() {
         art::seed_demo(demo::covers());
         let (vm, daemon) = demo::start_in(args.view);
@@ -303,13 +310,9 @@ fn write_snapshot(root: &impl IsA<gtk::Widget>, path: &Path) -> Result<(), Strin
     let paintable = gtk::WidgetPaintable::new(Some(root));
     let snap = gtk::Snapshot::new();
     // The window's background, which the root draws through.
+    let (r, g, b) = theme::rgb(theme::bg());
     snap.append_color(
-        &gdk::RGBA::new(
-            theme::rgb(theme::BG).0 as f32,
-            theme::rgb(theme::BG).1 as f32,
-            theme::rgb(theme::BG).2 as f32,
-            1.0,
-        ),
+        &gdk::RGBA::new(r as f32, g as f32, b as f32, 1.0),
         &graphene::Rect::new(0.0, 0.0, w as f32, h as f32),
     );
     paintable.snapshot(&snap, f64::from(w), f64::from(h));

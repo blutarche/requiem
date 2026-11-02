@@ -27,6 +27,7 @@ requiem-macos.workspace = true
 ureq.workspace = true
 # GTK 4.8 is the floor: Debian 12, where the release tarballs are built, has 4.8.
 gtk = { package = "gtk4", version = "0.10", features = ["v4_8"] }
+zbus.workspace = true
 
 [target.'cfg(target_os = "macos")'.dependencies]
 requiem-macos.workspace = true
@@ -57,6 +58,7 @@ objc2-foundation = { version = "0.3.2", default-features = false, features = [
     "NSDictionary",
     "NSGeometry",
     "NSIndexSet",
+    "NSKeyValueObserving",
     "NSNotification",
     "NSObject",
     "NSRange",
@@ -87,6 +89,7 @@ objc2-app-kit = { version = "0.3.2", default-features = false, features = [
     "NSCell",
     "NSClipView",
     "NSColor",
+    "NSColorList",
     "NSControl",
     "NSCursor",
     "NSEvent",

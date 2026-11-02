@@ -33,6 +33,7 @@ use objc2_quartz_core::{
 };
 use requiem_macos::artwork::{Cover, Placeholder};
 
+use super::appearance;
 use super::theme::{self, Icon, Weight};
 use super::ui::{self, AppView};
 use crate::vm::{Intent, SEEK_STEP_SECS, VOLUME_STEP};
@@ -244,11 +245,9 @@ pub fn panel(
     v
 }
 
+/// Fills `v`'s layer with `color`, or clears it; the fill follows the app's appearance.
 pub fn fill(v: &NSView, color: Option<&NSColor>) {
-    v.setWantsLayer(true);
-    if let Some(layer) = v.layer() {
-        layer.setBackgroundColor(color.map(|c| c.CGColor()).as_deref());
-    }
+    appearance::set_background(v, color);
 }
 
 pub fn round(v: &NSView, radius: CGFloat) {
@@ -259,12 +258,9 @@ pub fn round(v: &NSView, radius: CGFloat) {
     }
 }
 
+/// A border on `v`'s layer whose colour follows the app's appearance.
 pub fn border(v: &NSView, color: &NSColor, width: CGFloat) {
-    v.setWantsLayer(true);
-    if let Some(layer) = v.layer() {
-        layer.setBorderColor(Some(&color.CGColor()));
-        layer.setBorderWidth(width);
-    }
+    appearance::set_border(v, color, width);
 }
 
 pub fn label(

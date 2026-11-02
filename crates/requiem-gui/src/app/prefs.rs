@@ -2,10 +2,11 @@
 
 use objc2_foundation::{NSString, NSUserDefaults};
 
-use crate::vm::{LibrarySort, ServiceFilter};
+use crate::vm::{Appearance, LibrarySort, ServiceFilter};
 
 const SERVICE_FILTER: &str = "serviceFilter";
 const LIBRARY_SORT: &str = "librarySort";
+const APPEARANCE: &str = "appearance";
 
 /// The saved service filter; All when none is saved or the value is unknown.
 pub fn service_filter() -> ServiceFilter {
@@ -40,5 +41,21 @@ pub fn save_library_sort(sort: LibrarySort) {
     unsafe {
         NSUserDefaults::standardUserDefaults()
             .setObject_forKey(Some(&value), &NSString::from_str(LIBRARY_SORT));
+    }
+}
+
+/// The saved appearance; System when none is saved or the value is unknown.
+pub fn appearance() -> Appearance {
+    NSUserDefaults::standardUserDefaults()
+        .stringForKey(&NSString::from_str(APPEARANCE))
+        .map_or(Appearance::System, |v| Appearance::from_key(&v.to_string()))
+}
+
+pub fn save_appearance(appearance: Appearance) {
+    let value = NSString::from_str(appearance.key());
+    // SAFETY: the value is an NSString, which user defaults can hold.
+    unsafe {
+        NSUserDefaults::standardUserDefaults()
+            .setObject_forKey(Some(&value), &NSString::from_str(APPEARANCE));
     }
 }

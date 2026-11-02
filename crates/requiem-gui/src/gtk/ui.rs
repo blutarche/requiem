@@ -30,9 +30,10 @@ use crate::view::{
     rows, unix_now,
 };
 use crate::vm::{
-    self, AccountRow, AccountRowState, Banner, CollectionPage, Controls, Dirty, HomeView, Intent,
-    LibraryChip, LibrarySort, LibraryView, List, PageView, PaletteAction, Place, QueueEdit,
-    SearchBody, SearchChip, SearchView, Selection, Service, ServiceFilter, Toast, UiState, Vm,
+    self, AccountRow, AccountRowState, Appearance, Banner, CollectionPage, Controls, Dirty,
+    HomeView, Intent, LibraryChip, LibrarySort, LibraryView, List, PageView, PaletteAction, Place,
+    QueueEdit, SearchBody, SearchChip, SearchView, Selection, Service, ServiceFilter, Toast,
+    UiState, Vm,
 };
 
 thread_local! {
@@ -827,6 +828,17 @@ impl Ui {
         self.run(Intent::SetFilter(filter));
         if !self.demo() {
             prefs::save_service_filter(filter);
+        }
+    }
+
+    /// The user's appearance: shown at once, and kept for the next launch unless a demo.
+    pub fn choose_appearance(&self, appearance: Appearance) {
+        if theme::appearance() == appearance {
+            return;
+        }
+        theme::set_appearance(appearance);
+        if !self.demo() {
+            prefs::save_appearance(appearance);
         }
     }
 

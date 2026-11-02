@@ -774,10 +774,10 @@ impl RowView {
         };
         let accent = match (selected && iv.focused.get(), iv.current.get()) {
             // Selection over the current row's accent-soft tint, so the row stays marked.
-            (true, true) => 1.0 - (1.0 - theme::SELECTED) * (1.0 - theme::SOFT),
+            (true, true) => theme::SELECTED.over(theme::SOFT),
             (true, false) => theme::SELECTED,
             (false, true) => theme::SOFT,
-            (false, false) => 0.0,
+            (false, false) => theme::Alpha::NONE,
         };
         widgets::fill(self, Some(&theme::mix(base, theme::ACCENT, accent)));
         let outline = if iv.outlined.get() { FOCUS_RING } else { 0.0 };

@@ -1220,7 +1220,49 @@ impl AccountView {
     }
 }
 
-/// Settings: the accounts.
+/// Settings' choice of System, Light or Dark: chips of which one is on.
+struct AppearanceChoice {
+    root: gtk::Box,
+    chips: Vec<(vm::Appearance, gtk::ToggleButton)>,
+}
+
+impl AppearanceChoice {
+    fn new() -> AppearanceChoice {
+        let root = gtk::Box::builder()
+            .orientation(gtk::Orientation::Horizontal)
+            .spacing(8)
+            .accessible_role(gtk::AccessibleRole::Group)
+            .build();
+        root.update_property(&[gtk::accessible::Property::Label("Appearance")]);
+        let mut chips: Vec<(vm::Appearance, gtk::ToggleButton)> = Vec::new();
+        for a in vm::Appearance::CHOICES {
+            let b = gtk::ToggleButton::with_label(a.label());
+            b.add_css_class("chip");
+            b.set_focus_on_click(false);
+            b.set_group(chips.first().map(|(_, first)| first));
+            b.connect_toggled(move |b| {
+                theme::toggle_class(b, "on", b.is_active());
+                if b.is_active() {
+                    ui::with(|ui| ui.choose_appearance(a));
+                }
+            });
+            root.append(&b);
+            chips.push((a, b));
+        }
+        AppearanceChoice { root, chips }
+    }
+
+    fn set(&self, chosen: vm::Appearance) {
+        for (a, b) in &self.chips {
+            if *a == chosen {
+                b.set_active(true);
+            }
+            theme::toggle_class(b, "on", *a == chosen);
+        }
+    }
+}
+
+/// Settings: the appearance and the accounts.
 pub struct SettingsPage {
     pub root: gtk::ScrolledWindow,
     list: gtk::Box,
@@ -1236,11 +1278,18 @@ impl SettingsPage {
         page.set_margin_top(28);
         page.set_margin_bottom(24);
         let title = widgets::page_title("Settings");
+        let appearance = theme::label("Appearance", &["section-title"]);
+        appearance.set_margin_top(24);
+        appearance.set_margin_bottom(12);
+        let choice = AppearanceChoice::new();
+        choice.set(theme::appearance());
         let accounts = theme::label("Accounts", &["section-title"]);
-        accounts.set_margin_top(24);
+        accounts.set_margin_top(28);
         accounts.set_margin_bottom(12);
         let list = gtk::Box::new(gtk::Orientation::Vertical, 0);
         page.append(&title);
+        page.append(&appearance);
+        page.append(&choice.root);
         page.append(&accounts);
         page.append(&list);
         let root = widgets::vscroll(&page);

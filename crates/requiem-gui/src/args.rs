@@ -2,8 +2,11 @@
 
 use std::path::PathBuf;
 
+use crate::vm::Appearance;
+
 pub const USAGE: &str = "\
 usage: requiem-gui [--demo] [--smoke] [--snapshot <png>] [--view <view>] [--size <w>x<h>]
+                   [--appearance <system|light|dark>]
 
   --demo             fill the window with fixed fake data; no player daemon
   --smoke            like --demo, then exit 0 after 2 s
@@ -18,7 +21,10 @@ usage: requiem-gui [--demo] [--smoke] [--snapshot <png>] [--view <view>] [--size
                      update-ready, update-failed, not-updatable, up-to-date, search-albums,
                      search-songs, search-artists, search-song-selected,
                      search-card-selected, artist or album
-  --size <w>x<h>     the window's content size in points, at least 800x500";
+  --size <w>x<h>     the window's content size in points, at least 800x500
+  --appearance <system|light|dark>
+                     the window's appearance for this run, in place of the one chosen in
+                     Settings, which it leaves as it is";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum View {
@@ -154,6 +160,8 @@ pub struct Args {
     pub view: View,
     /// The window's content size, in points.
     pub size: Option<(u32, u32)>,
+    /// Overrides the saved appearance for this run.
+    pub appearance: Option<Appearance>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -198,6 +206,17 @@ pub fn parse(args: impl IntoIterator<Item = String>) -> Result<Args, ArgsError> 
                 out.size = Some(parse_size(&size).ok_or_else(|| {
                     ArgsError::Bad(format!(
                         "bad size {size:?}; expected <w>x<h>, at least {MIN_W}x{MIN_H}"
+                    ))
+                })?);
+            }
+            "--appearance" => {
+                let key = it
+                    .next()
+                    .ok_or_else(|| ArgsError::Bad("--appearance needs a value".into()))?;
+                let found = Appearance::CHOICES.into_iter().find(|a| a.key() == key);
+                out.appearance = Some(found.ok_or_else(|| {
+                    ArgsError::Bad(format!(
+                        "unknown appearance {key:?}; expected system, light or dark"
                     ))
                 })?);
             }
@@ -286,6 +305,26 @@ mod tests {
             );
         }
         assert!(matches!(p(&["--size"]), Err(ArgsError::Bad(_))));
+    }
+
+    #[test]
+    fn an_appearance_overrides_the_saved_one() {
+        assert_eq!(p(&[]).unwrap().appearance, None);
+        for (key, a) in [
+            ("system", Appearance::System),
+            ("light", Appearance::Light),
+            ("dark", Appearance::Dark),
+        ] {
+            let args = p(&["--demo", "--appearance", key]).unwrap();
+            assert_eq!(args.appearance, Some(a));
+        }
+        for bad in [
+            &["--appearance"][..],
+            &["--appearance", "Light"],
+            &["--appearance", "sepia"],
+        ] {
+            assert!(matches!(p(bad), Err(ArgsError::Bad(_))), "{bad:?}");
+        }
     }
 
     #[test]

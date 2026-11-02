@@ -20,6 +20,8 @@ The bundle embeds Homebrew's libopus. Its minimum macOS version is whatever that
 
 `requiem-gui --demo --snapshot out.png --view <view>` renders a view from fixed fake data without showing a window (on Linux it draws an undecorated window, so run it under `xvfb-run` or a headless compositor); `requiem-gui --help` lists the views (`home`, `search`, `album`, `palette` and more). For `home` and `library`, `--snapshot` also works without `--demo`: it asks the running player (starting one if needed), waits up to 20 s for the page and its covers, then writes the PNG, exiting 1 if the page fails to load.
 
+`--appearance <system|light|dark>` sets the window's appearance for one run, in place of the one chosen in Settings, which it leaves as it is; add it to a snapshot command to render the light or dark palette.
+
 ## Footprint
 
 Measured on an Apple Silicon Mac while playing (physical footprint):

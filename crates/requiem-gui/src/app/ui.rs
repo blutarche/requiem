@@ -29,6 +29,7 @@ use requiem_core::{Collection, CollectionId, CollectionKind, Item, Shelf, Track}
 use requiem_ipc::UpdateRequest;
 use requiem_macos::artwork::Cover;
 
+use super::appearance;
 use super::backend::{Backend, Msg};
 use super::badge;
 use super::bar::PlayerBar;
@@ -54,9 +55,10 @@ pub(super) use crate::view::unix_now;
 pub use crate::view::{AppView, SnapshotState};
 use crate::view::{back_to, collection_shelves, queue_count_text};
 use crate::vm::{
-    self, AccountRow, AccountRowState, Banner, CollectionPage, Controls, Dirty, HomeView, Intent,
-    LibraryChip, LibrarySort, LibraryView, List, PageView, PaletteAction, Place, QueueEdit,
-    SearchBody, SearchChip, SearchView, Selection, Service, ServiceFilter, Toast, UiState, Vm,
+    self, AccountRow, AccountRowState, Appearance, Banner, CollectionPage, Controls, Dirty,
+    HomeView, Intent, LibraryChip, LibrarySort, LibraryView, List, PageView, PaletteAction, Place,
+    QueueEdit, SearchBody, SearchChip, SearchView, Selection, Service, ServiceFilter, Toast,
+    UiState, Vm,
 };
 
 /// `text`, numbered steps a line each, with a line that wraps indented under the text after
@@ -1386,6 +1388,16 @@ impl Ui {
         self.run(Intent::SetFilter(filter));
         if !matches!(self.backend, Backend::Demo(_)) {
             prefs::save_service_filter(filter);
+        }
+    }
+
+    /// The user's choice of appearance: every view follows at once, and it is kept for the
+    /// next launch. Demo runs leave the saved choice alone.
+    pub fn choose_appearance(&self, chosen: Appearance) {
+        appearance::apply(self.mtm, chosen);
+        self.settings.appearance.set(chosen);
+        if !matches!(self.backend, Backend::Demo(_)) {
+            prefs::save_appearance(chosen);
         }
     }
 

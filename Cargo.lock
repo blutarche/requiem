@@ -2869,7 +2869,7 @@ checksum = "d6f6ff9a378485b298a5286656da665ba74413d36db0979633275d2e708145d4"
 
 [[package]]
 name = "requiem-audio"
-version = "0.3.10"
+version = "0.3.11"
 dependencies = [
  "cpal",
  "requiem-core",
@@ -2881,7 +2881,7 @@ dependencies = [
 
 [[package]]
 name = "requiem-cli"
-version = "0.3.10"
+version = "0.3.11"
 dependencies = [
  "crossbeam-channel",
  "requiem-audio",
@@ -2894,7 +2894,7 @@ dependencies = [
 
 [[package]]
 name = "requiem-core"
-version = "0.3.10"
+version = "0.3.11"
 dependencies = [
  "crossbeam-channel",
  "serde",
@@ -2902,7 +2902,7 @@ dependencies = [
 
 [[package]]
 name = "requiem-daemon"
-version = "0.3.10"
+version = "0.3.11"
 dependencies = [
  "crossbeam-channel",
  "libc",
@@ -2921,7 +2921,7 @@ dependencies = [
 
 [[package]]
 name = "requiem-gui"
-version = "0.3.10"
+version = "0.3.11"
 dependencies = [
  "block2",
  "crossbeam-channel",
@@ -2939,11 +2939,12 @@ dependencies = [
  "requiem-macos",
  "serde_json",
  "ureq",
+ "zbus",
 ]
 
 [[package]]
 name = "requiem-ipc"
-version = "0.3.10"
+version = "0.3.11"
 dependencies = [
  "crossbeam-channel",
  "libc",
@@ -2954,7 +2955,7 @@ dependencies = [
 
 [[package]]
 name = "requiem-linux"
-version = "0.3.10"
+version = "0.3.11"
 dependencies = [
  "crossbeam-channel",
  "ksni",
@@ -2964,7 +2965,7 @@ dependencies = [
 
 [[package]]
 name = "requiem-macos"
-version = "0.3.10"
+version = "0.3.11"
 dependencies = [
  "block2",
  "crossbeam-channel",
@@ -2984,7 +2985,7 @@ dependencies = [
 
 [[package]]
 name = "requiem-provider-spotify"
-version = "0.3.10"
+version = "0.3.11"
 dependencies = [
  "futures-util",
  "libc",
@@ -3004,7 +3005,7 @@ dependencies = [
 
 [[package]]
 name = "requiem-provider-ytmusic"
-version = "0.3.10"
+version = "0.3.11"
 dependencies = [
  "libc",
  "requiem-core",
@@ -3016,7 +3017,7 @@ dependencies = [
 
 [[package]]
 name = "requiem-update"
-version = "0.3.10"
+version = "0.3.11"
 dependencies = [
  "libc",
  "objc2",

@@ -3,10 +3,11 @@
 
 use std::path::PathBuf;
 
-use crate::vm::{LibrarySort, ServiceFilter};
+use crate::vm::{Appearance, LibrarySort, ServiceFilter};
 
 const SERVICE_FILTER: &str = "serviceFilter";
 const LIBRARY_SORT: &str = "librarySort";
+const APPEARANCE: &str = "appearance";
 
 fn path() -> Option<PathBuf> {
     let base = std::env::var_os("XDG_CONFIG_HOME")
@@ -35,6 +36,10 @@ fn parse(text: &str) -> Vec<(String, String)> {
         .collect()
 }
 
+fn render(pairs: &[(String, String)]) -> String {
+    pairs.iter().map(|(k, v)| format!("{k}={v}\n")).collect()
+}
+
 fn get(key: &str) -> Option<String> {
     read().into_iter().find(|(k, _)| k == key).map(|(_, v)| v)
 }
@@ -46,7 +51,7 @@ fn set(key: &str, value: &str) {
         Some(pair) => pair.1 = value.to_owned(),
         None => pairs.push((key.to_owned(), value.to_owned())),
     }
-    let text: String = pairs.iter().map(|(k, v)| format!("{k}={v}\n")).collect();
+    let text = render(&pairs);
     let saved = path
         .parent()
         .map_or(Ok(()), std::fs::create_dir_all)
@@ -74,6 +79,15 @@ pub fn save_library_sort(sort: LibrarySort) {
     set(LIBRARY_SORT, sort.key());
 }
 
+/// The saved appearance; System when none is saved or the value is unknown.
+pub fn appearance() -> Appearance {
+    get(APPEARANCE).map_or(Appearance::System, |v| Appearance::from_key(&v))
+}
+
+pub fn save_appearance(appearance: Appearance) {
+    set(APPEARANCE, appearance.key());
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -84,5 +98,20 @@ mod tests {
             parse("a=1\nnoise\n b = two \n"),
             vec![("a".into(), "1".into()), ("b".into(), "two".into())]
         );
+    }
+
+    #[test]
+    fn an_appearance_reads_back_as_saved_beside_the_other_keys() {
+        for a in Appearance::CHOICES {
+            let pairs = vec![
+                (SERVICE_FILTER.to_owned(), "spotify".to_owned()),
+                (APPEARANCE.to_owned(), a.key().to_owned()),
+            ];
+            let read = parse(&render(&pairs));
+            assert_eq!(read, pairs);
+            let value = read.iter().find(|(k, _)| k == APPEARANCE).map(|(_, v)| v);
+            assert_eq!(value.map(|v| Appearance::from_key(v)), Some(a));
+        }
+        assert_eq!(Appearance::from_key("sepia"), Appearance::System);
     }
 }

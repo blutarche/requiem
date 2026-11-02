@@ -15,6 +15,7 @@ fn main() {
         eprintln!("shelves: timed out");
         std::process::exit(1);
     });
+    mac::appearance_changes_repaint_existing_layers(mtm);
     mac::a_refresh_keeps_the_views_of_what_did_not_change(mtm);
     mac::a_mouse_drags_a_shelf_sideways(mtm);
 }
@@ -34,6 +35,27 @@ mod mac {
     use objc2_foundation::{MainThreadMarker, NSPoint, NSRect, NSSize};
     use requiem_core::{Collection, CollectionId, CollectionKind, Item, ProviderId, Shelf};
     use requiem_gui::app::shelves::{RowViews, Shelves};
+
+    pub fn appearance_changes_repaint_existing_layers(mtm: MainThreadMarker) {
+        use requiem_gui::app::{appearance, theme};
+        use requiem_gui::vm::Appearance;
+        appearance::apply(mtm, Appearance::Dark);
+        appearance::observe(mtm);
+        let view = NSView::initWithFrame(NSView::alloc(mtm), page_frame());
+        appearance::set_background(&view, Some(&theme::bg()));
+        let dark = view.layer().unwrap().backgroundColor().unwrap();
+        appearance::apply(mtm, Appearance::Light);
+        let light = view.layer().unwrap().backgroundColor().unwrap();
+        assert_ne!(
+            dark, light,
+            "an existing layer must repaint after choosing Light"
+        );
+        appearance::apply(mtm, Appearance::Dark);
+        assert_eq!(view.layer().unwrap().backgroundColor().unwrap(), dark);
+        appearance::apply(mtm, Appearance::System);
+        assert!(NSApplication::sharedApplication(mtm).appearance().is_none());
+        println!("appearance: existing layers follow Light, Dark and System");
+    }
 
     type Views = Vec<RowViews>;
 

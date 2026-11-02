@@ -188,9 +188,22 @@ pub fn field(placeholder: &str, name: &str, icon: Option<Icon>) -> gtk::Entry {
     e.set_placeholder_text(Some(placeholder));
     e.update_property(&[gtk::accessible::Property::Label(name)]);
     if let Some(i) = icon {
-        e.set_primary_icon_paintable(icons::paintable(i, 16, theme::MUTED).as_ref());
+        e.set_primary_icon_paintable(icons::paintable(i, 16, theme::muted()).as_ref());
+        attach(&e, FIELD_ICON, i);
     }
     e
+}
+
+const FIELD_ICON: &str = "requiem-field-icon";
+
+/// Draws `widget`'s icon again in the palette's colour, if it is a `field` with one.
+pub fn recolor_field(widget: &gtk::Widget) {
+    let Some(e) = widget.downcast_ref::<gtk::Entry>() else {
+        return;
+    };
+    if let Some(&i) = attached::<Icon>(e, FIELD_ICON) {
+        e.set_primary_icon_paintable(icons::paintable(i, 16, theme::muted()).as_ref());
+    }
 }
 
 /// Watches `entry`'s keys before its text does; `f` returns true for a key it handled.
