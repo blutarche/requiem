@@ -1,11 +1,13 @@
+use block2::RcBlock;
 use objc2::rc::Retained;
-use objc2::runtime::{AnyObject, ProtocolObject, Sel};
+use objc2::runtime::{AnyObject, Bool, ProtocolObject, Sel};
 use objc2::{MainThreadMarker, MainThreadOnly};
 use objc2_app_kit::{
-    NSCellImagePosition, NSEventMask, NSFont, NSImage, NSMenu, NSMenuDelegate, NSMenuItem,
-    NSStatusBar, NSStatusBarButton, NSStatusItem, NSVariableStatusItemLength,
+    NSBezierPath, NSCellImagePosition, NSColor, NSEventMask, NSFont, NSImage, NSMenu,
+    NSMenuDelegate, NSMenuItem, NSStatusBar, NSStatusBarButton, NSStatusItem,
+    NSVariableStatusItemLength,
 };
-use objc2_foundation::{NSString, ns_string};
+use objc2_foundation::{NSPoint, NSRect, NSSize, NSString, ns_string};
 use requiem_core::PlayState;
 
 use super::is_active;
@@ -46,6 +48,33 @@ fn symbol(name: &NSString, description: &NSString) -> Option<Retained<NSImage>> 
         NSImage::imageWithSystemSymbolName_accessibilityDescription(name, Some(description))?;
     image.setTemplate(true);
     Some(image)
+}
+
+/// The four bars of `docs/media/logo.svg` as `(x, height)` in its 256-unit square, each 24 wide.
+const LOGO_BARS: [(f64, f64); 4] = [(56.0, 56.0), (96.0, 100.0), (136.0, 124.0), (176.0, 76.0)];
+
+/// The logo's bars without its tile, as a template image so the menu bar tints it.
+fn logo() -> Retained<NSImage> {
+    const HEIGHT: f64 = 16.0;
+    const SPAN: f64 = 144.0;
+    let scale = HEIGHT / 124.0;
+    let size = NSSize::new(SPAN * scale, HEIGHT);
+    let draw = RcBlock::new(move |_: NSRect| -> Bool {
+        NSColor::blackColor().setFill();
+        for (x, height) in LOGO_BARS {
+            let (w, h) = (24.0 * scale, height * scale);
+            let bar = NSRect::new(
+                NSPoint::new((x - 56.0) * scale, (HEIGHT - h) / 2.0),
+                NSSize::new(w, h),
+            );
+            NSBezierPath::bezierPathWithRoundedRect_xRadius_yRadius(bar, w / 2.0, w / 2.0).fill();
+        }
+        Bool::YES
+    });
+    let image = NSImage::imageWithSize_flipped_drawingHandler(size, false, &draw);
+    image.setTemplate(true);
+    image.setAccessibilityDescription(Some(ns_string!("Requiem")));
+    image
 }
 
 /// The status item, its menu and the items that change with the view. A click sends the
@@ -140,7 +169,7 @@ impl StatusMenu {
             icons: Icons {
                 playing: symbol(ns_string!("waveform"), ns_string!("Requiem: playing")),
                 paused: symbol(ns_string!("pause.fill"), ns_string!("Requiem: paused")),
-                idle: symbol(ns_string!("music.note"), ns_string!("Requiem")),
+                idle: Some(logo()),
             },
         };
         status.show(None, false);
