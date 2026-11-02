@@ -37,12 +37,17 @@ macro_rules! debug {
 }
 
 mod idle;
+#[cfg(target_os = "linux")]
+mod linux_platform;
 mod pages;
 mod persist;
 mod ui;
 #[cfg(target_os = "macos")]
 mod update;
-#[cfg(not(target_os = "macos"))]
+#[cfg(target_os = "linux")]
+#[path = "update_linux.rs"]
+mod update;
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
 #[path = "update_unsupported.rs"]
 mod update;
 
@@ -55,6 +60,10 @@ fn idle_limit() -> Duration {
 }
 
 fn main() -> ExitCode {
+    if std::env::args().nth(1).as_deref() == Some("--version") {
+        println!("requiemd {}", env!("CARGO_PKG_VERSION"));
+        return ExitCode::SUCCESS;
+    }
     let reexeced = std::env::var_os(REEXECED_ENV).is_some();
     // SAFETY: no other thread has started yet. Removed so players this one starts still check.
     unsafe { std::env::remove_var(REEXECED_ENV) };
@@ -82,6 +91,11 @@ fn main() -> ExitCode {
     {
         eprintln!("requiemd: REQUIEM_TEST_FAIL_START_VERSION is this version; not starting");
         return ExitCode::from(1);
+    }
+    #[cfg(target_os = "linux")]
+    if let Err(e) = requiem_update::linux::startup() {
+        eprintln!("requiemd: update recovery: {e}");
+        return ExitCode::FAILURE;
     }
     let mut prefer_aac = false;
     for a in std::env::args().skip(1) {
@@ -277,7 +291,7 @@ fn shut_down(server: Server, writers: [Option<JoinHandle<()>>; 3], updater: &Upd
             let _ = writer.join();
         }
     };
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
     match updater.finish() {
         Some(update::Install::Restart(ready)) => {
             let gui = server.clients().gui > 0;
@@ -285,15 +299,24 @@ fn shut_down(server: Server, writers: [Option<JoinHandle<()>>; 3], updater: &Upd
             join(writers);
             updater.restart(ready, instance, gui);
         }
+        #[cfg(target_os = "linux")]
+        Some(update::Install::AtExit(ready)) => {
+            let instance = server.shutdown_keeping_lock();
+            join(writers);
+            updater.restart(ready, instance, false);
+        }
         finished => {
+            #[cfg(target_os = "linux")]
+            let _ = finished;
             server.shutdown();
             join(writers);
+            #[cfg(target_os = "macos")]
             if let Some(update::Install::AtExit(ready)) = finished {
                 updater.install_at_exit(ready);
             }
         }
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
     {
         let _ = updater;
         server.shutdown();

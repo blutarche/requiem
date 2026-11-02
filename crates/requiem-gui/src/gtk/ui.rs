@@ -737,6 +737,16 @@ impl Ui {
         self.vm.borrow().ui().can_stop_player()
     }
 
+    pub fn check_for_updates(&self) {
+        if self.vm.borrow_mut().check_for_updates() {
+            self.backend.request_update(UpdateRequest::Check);
+        }
+    }
+
+    pub fn set_auto_update(&self, auto: bool) {
+        self.backend.request_update(UpdateRequest::SetAuto(auto));
+    }
+
     /// The banner's Restart to Update.
     pub fn restart_to_update(&self) {
         self.backend.request_update(UpdateRequest::Install);
@@ -1442,6 +1452,13 @@ impl Ui {
     }
 
     pub fn render_now(&self) {
+        {
+            let vm = self.vm.borrow();
+            let state = vm.ui();
+            self.settings
+                .set_update(state.update.as_ref(), state.can_check_for_updates());
+        }
+
         let (patch, select) = {
             let mut vm = self.vm.borrow_mut();
             let dirty = vm.take_dirty();

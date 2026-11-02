@@ -1268,6 +1268,10 @@ pub struct SettingsPage {
     list: gtk::Box,
     views: RefCell<Vec<AccountView>>,
     pub rows: RefCell<Vec<AccountRow>>,
+    update_status: gtk::Label,
+    check_update: gtk::Button,
+    auto_update: gtk::CheckButton,
+    syncing_update: Rc<Cell<bool>>,
 }
 
 impl SettingsPage {
@@ -1290,6 +1294,31 @@ impl SettingsPage {
         page.append(&title);
         page.append(&appearance);
         page.append(&choice.root);
+        let updates = theme::label("Updates", &["section-title"]);
+        updates.set_margin_top(28);
+        updates.set_margin_bottom(12);
+        let update_status = theme::label("Connecting to player…", &["muted"]);
+        let check_update = gtk::Button::with_label("Check for Updates");
+        check_update.set_halign(gtk::Align::Start);
+        check_update.set_margin_top(12);
+        check_update.set_sensitive(false);
+        check_update.connect_clicked(|_| {
+            ui::with(|ui| ui.check_for_updates());
+        });
+        let auto_update = gtk::CheckButton::with_label("Check for updates automatically");
+        auto_update.set_margin_top(12);
+        auto_update.set_sensitive(false);
+        let syncing_update = Rc::new(Cell::new(false));
+        let syncing = syncing_update.clone();
+        auto_update.connect_toggled(move |button| {
+            if !syncing.get() {
+                ui::with(|ui| ui.set_auto_update(button.is_active()));
+            }
+        });
+        page.append(&updates);
+        page.append(&update_status);
+        page.append(&check_update);
+        page.append(&auto_update);
         page.append(&accounts);
         page.append(&list);
         let root = widgets::vscroll(&page);
@@ -1299,7 +1328,36 @@ impl SettingsPage {
             list,
             views: RefCell::new(Vec::new()),
             rows: RefCell::new(Vec::new()),
+            update_status,
+            check_update,
+            auto_update,
+            syncing_update,
         }
+    }
+
+    pub fn set_update(&self, status: Option<&requiem_ipc::UpdateStatus>, enabled: bool) {
+        use requiem_ipc::UpdateState;
+        self.check_update.set_sensitive(enabled);
+        self.auto_update.set_sensitive(enabled);
+        self.syncing_update.set(true);
+        self.auto_update.set_active(status.is_some_and(|s| s.auto));
+        self.syncing_update.set(false);
+        let text = status
+            .map(|s| match &s.state {
+                UpdateState::Idle => format!("Requiem {}", s.current),
+                UpdateState::Checking => "Checking for updates…".into(),
+                UpdateState::UpToDate => format!("Requiem {} is up to date", s.current),
+                UpdateState::Downloading { version } => format!("Downloading Requiem {version}…"),
+                UpdateState::Ready { version } => {
+                    format!("Requiem {version} is ready. Use Restart to Update above.")
+                }
+                UpdateState::Failed { reason, .. }
+                | UpdateState::Error { reason }
+                | UpdateState::NotUpdatable { reason } => reason.clone(),
+                UpdateState::Unsupported => "Updates are unavailable for this installation".into(),
+            })
+            .unwrap_or_else(|| "Connecting to player…".into());
+        theme::set_text(&self.update_status, &text);
     }
 
     /// Shows `rows`; true when one shows a sign-in code, whose expiry needs ticking.

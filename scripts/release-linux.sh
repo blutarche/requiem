@@ -160,6 +160,18 @@ EOF
   built+=("$tarball")
 done
 
+# Sign only after both archives have passed their smoke checks.
+"$CARGO_BIN" build --locked -p requiem-update --bin requiem-release
+release_tool="${CARGO_TARGET_DIR:-target}/debug/requiem-release"
+key="${REQUIEM_UPDATE_KEY:-$HOME/.config/requiem/update-key}"
+[ -f "$key" ] || die "missing update signing key: $key"
+for arch in aarch64 x86_64; do
+  archive="$dir/requiem-$version-linux-$arch.tar.gz"
+  "$release_tool" linux-manifest --archive "$archive" --version "$version" --arch "$arch"
+  "$release_tool" sign --key "$key" --in "$dir/requiem-update-linux-$arch.json"
+  "$release_tool" linux-verify --dir "$dir" --arch "$arch"
+done
+
 sums="$dir/SHA256SUMS"
 {
   if [ -f "$sums" ]; then

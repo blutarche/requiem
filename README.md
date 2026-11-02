@@ -72,7 +72,7 @@ sed "s|^Exec=.*|Exec=$HOME/.local/bin/requiem-gui|" io.github.blutarche.Requiem.
 cp -r icons ~/.local/share/
 ```
 
-Then open Requiem from the applications menu, or run `requiem-gui`. The `sed` line points the menu entry at the full path, because desktops such as KDE Plasma don't put `~/.local/bin` on the `PATH` they launch apps with. If the shell can't find it, open a new terminal: most distributions add `~/.local/bin` to `PATH` once it exists. The window and `requiem --connect` start `requiemd` when it isn't running; closing the window leaves the music playing, and the tray icon's Show Window brings it back. Requiem doesn't update itself on Linux: install a newer tarball the same way.
+Then open Requiem from the applications menu, or run `requiem-gui`. The `sed` line points the menu entry at the full path, because desktops such as KDE Plasma don't put `~/.local/bin` on the `PATH` they launch apps with. If the shell can't find it, open a new terminal: most distributions add `~/.local/bin` to `PATH` once it exists. The window and `requiem --connect` start `requiemd` when it isn't running; closing the window leaves the music playing, and the tray icon's Show Window brings it back. Requiem checks for signed updates on Linux when its three executables are together in a user-owned writable directory. Use Settings → Updates to check or change automatic checks; Restart to Update installs a ready release. Older releases without this updater need one manual installation.
 
 ### From source
 

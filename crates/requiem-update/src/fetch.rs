@@ -147,6 +147,56 @@ pub fn evaluate(
     })
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LinuxFound {
+    UpToDate(Version),
+    Update(crate::linux_manifest::Manifest, Version),
+}
+
+/// Uses the separate Linux endpoint; macOS format-1 clients retain their endpoint.
+pub fn check_linux(cfg: &Config, state: &mut State, now: u64) -> Result<LinuxFound, String> {
+    let name = crate::linux_manifest::manifest_name(std::env::consts::ARCH)?;
+    let url = format!("{}/latest/download/{name}", cfg.base);
+    let agent = cfg.agent(CHECK_TIMEOUT);
+    let bytes = get_capped(&agent, &url)?;
+    let sig = String::from_utf8(get_capped(&agent, &format!("{url}.sig"))?)
+        .map_err(|_| "the signature file is not text".to_owned())?;
+    let (m, version) =
+        crate::linux_manifest::verify(&bytes, &sig, &cfg.public_key, std::env::consts::ARCH)?;
+    let decision = decide(&version, &cfg.running, state.highest_seen().as_ref())?;
+    state.saw(&version);
+    state.last_check = Some(now);
+    Ok(match decision {
+        Decision::UpToDate => LinuxFound::UpToDate(version),
+        Decision::Update => LinuxFound::Update(m, version),
+    })
+}
+
+pub fn download_linux(
+    cfg: &Config,
+    m: &crate::linux_manifest::Manifest,
+    dest: &Path,
+) -> Result<(), Failure> {
+    crate::linux_manifest::parse(
+        &serde_json::to_vec(m)
+            .map_err(|e| Failure::new(Reason::DownloadMismatch, e.to_string()))?,
+        std::env::consts::ARCH,
+    )
+    .map_err(|e| Failure::new(Reason::DownloadMismatch, e))?;
+    let url = format!("{}/download/v{}/{}", cfg.base, m.version, m.file);
+    let response = cfg
+        .agent(DOWNLOAD_TIMEOUT)
+        .get(&url)
+        .call()
+        .map_err(|e| Failure::new(Reason::DownloadMismatch, format!("{url}: {e}")))?;
+    let body = response
+        .into_body()
+        .into_with_config()
+        .limit(m.size + 1)
+        .reader();
+    save_payload(body, &url, m.size, &m.sha256, dest)
+}
+
 fn get_capped(agent: &Agent, url: &str) -> Result<Vec<u8>, String> {
     let response = agent.get(url).call().map_err(|e| format!("{url}: {e}"))?;
     let mut bytes = Vec::new();
@@ -205,10 +255,15 @@ pub fn copy_checked(zip: &Path, m: &Manifest, dest: &Path) -> Result<(), Failure
     save_checked(file, &source, m, dest)
 }
 
-fn save_checked(
+fn save_checked(body: impl Read, source: &str, m: &Manifest, dest: &Path) -> Result<(), Failure> {
+    save_payload(body, source, m.size, &m.sha256, dest)
+}
+
+fn save_payload(
     mut body: impl Read,
     source: &str,
-    m: &Manifest,
+    size: u64,
+    sha256: &str,
     dest: &Path,
 ) -> Result<(), Failure> {
     let fail = |detail: String| Failure::new(Reason::DownloadMismatch, detail);
@@ -229,18 +284,18 @@ fn save_checked(
             Err(e) => return Err(fail(format!("{source}: {e}"))),
         };
         got += n as u64;
-        if got > m.size {
+        if got > size {
             return Err(fail(format!(
                 "{source}: more than the manifest's {} bytes",
-                m.size
+                size
             )));
         }
         digest.update(&buf[..n]);
         file.write_all(&buf[..n])
             .map_err(|e| fail(format!("{}: {e}", dest.display())))?;
     }
-    if got != m.size {
-        return Err(fail(format!("{source}: {got} bytes, not {}", m.size)));
+    if got != size {
+        return Err(fail(format!("{source}: {got} bytes, not {}", size)));
     }
     file.sync_all()
         .map_err(|e| fail(format!("{}: {e}", dest.display())))?;
@@ -250,8 +305,8 @@ fn save_checked(
         .iter()
         .map(|b| format!("{b:02x}"))
         .collect();
-    if sha != m.sha256 {
-        return Err(fail(format!("{source}: SHA-256 {sha}, not {}", m.sha256)));
+    if sha != sha256 {
+        return Err(fail(format!("{source}: SHA-256 {sha}, not {}", sha256)));
     }
     Ok(())
 }
@@ -264,6 +319,63 @@ mod tests {
     use crate::test_support::{Key, Reply, Server, TempDir, manifest_json};
 
     const NOW: u64 = 1_800_000_000;
+
+    #[test]
+    fn linux_check_uses_signed_architecture_endpoint_and_checked_download() {
+        let server = Server::start();
+        let key = Key::new();
+        let cfg = server.config(&key, "0.1.0");
+        let arch = std::env::consts::ARCH;
+        let payload = b"archive";
+        let digest = ring::digest::digest(&SHA256, payload);
+        let m = crate::linux_manifest::Manifest {
+            format: 1,
+            platform: "linux".into(),
+            architecture: arch.into(),
+            bundle_identifier: crate::manifest::BUNDLE_ID.into(),
+            version: "0.2.0".into(),
+            file: crate::linux_manifest::archive_name("0.2.0", arch),
+            size: payload.len() as u64,
+            sha256: digest.as_ref().iter().map(|b| format!("{b:02x}")).collect(),
+        };
+        let bytes = serde_json::to_vec(&m).unwrap();
+        let endpoint = format!(
+            "/latest/download/{}",
+            crate::linux_manifest::manifest_name(arch).unwrap()
+        );
+        server.route(&endpoint, Reply::ok(bytes.clone()));
+        server.route(
+            &format!("{endpoint}.sig"),
+            Reply::ok(key.sign(&bytes).into_bytes()),
+        );
+        server.route(
+            &format!("/download/v0.2.0/{}", m.file),
+            Reply::ok(payload.to_vec()),
+        );
+        let mut state = State::default();
+        assert!(matches!(
+            check_linux(&cfg, &mut state, NOW),
+            Ok(LinuxFound::Update(..))
+        ));
+        assert_eq!(state.last_check, Some(NOW));
+        let dir = TempDir::new();
+        let dest = dir.path().join("archive");
+        download_linux(&cfg, &m, &dest).unwrap();
+        assert_eq!(fs::read(dest).unwrap(), payload);
+        state.highest_seen = Some("0.3.0".into());
+        state.last_check = None;
+        assert!(
+            check_linux(&cfg, &mut state, NOW)
+                .unwrap_err()
+                .contains("went backwards")
+        );
+        assert_eq!(state.last_check, None);
+        server.route(
+            &format!("{endpoint}.sig"),
+            Reply::ok(Key::new().sign(&bytes).into_bytes()),
+        );
+        assert!(check_linux(&cfg, &mut State::default(), NOW).is_err());
+    }
 
     #[test]
     fn finds_an_update_and_remembers_the_check() {

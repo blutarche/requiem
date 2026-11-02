@@ -19,6 +19,7 @@ harness = false
 requiem-core.workspace = true
 requiem-ipc.workspace = true
 serde_json.workspace = true
+requiem-update.workspace = true
 crossbeam-channel.workspace = true
 
 [target.'cfg(target_os = "linux")'.dependencies]

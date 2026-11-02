@@ -202,11 +202,11 @@ fn in_bundle(exe: &Path) -> bool {
         && app.and_then(Path::extension).is_some_and(|e| e == "app")
 }
 
-/// Whether this window runs from an app, and so shows self-update. Dev builds, and Linux,
-/// where Requiem does not update itself, show nothing.
+/// Linux windows display the daemon’s update status; macOS requires an app bundle.
 pub fn shows_updates() -> bool {
     static IN_APP: OnceLock<bool> = OnceLock::new();
-    *IN_APP.get_or_init(|| std::env::current_exe().is_ok_and(|exe| in_bundle(&exe)))
+    cfg!(target_os = "linux")
+        || *IN_APP.get_or_init(|| std::env::current_exe().is_ok_and(|exe| in_bundle(&exe)))
 }
 
 fn connection(daemon: PathBuf, slot: Slot, hooks: Hooks) {
@@ -326,6 +326,12 @@ mod tests {
                 "/Applications/Requiem.app/Contents/Helpers/requiemd.app/Contents/MacOS/requiemd"
             ))
         );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_windows_receive_update_status() {
+        assert!(shows_updates());
     }
 
     #[test]

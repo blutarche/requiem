@@ -1,5 +1,9 @@
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 fn main() {
+    if std::env::args().nth(1).as_deref() == Some("--version") {
+        println!("requiem-gui {}", env!("CARGO_PKG_VERSION"));
+        return;
+    }
     use requiem_gui::args::{self, ArgsError};
 
     // Run by an updating player on a staged copy: loading this far proves the binary and its
@@ -18,6 +22,13 @@ fn main() {
             std::process::exit(2);
         }
     };
+    #[cfg(target_os = "linux")]
+    if !args.uses_demo_data() {
+        if let Err(e) = requiem_update::linux::startup() {
+            eprintln!("requiem-gui: update recovery: {e}");
+            std::process::exit(1);
+        }
+    }
     #[cfg(target_os = "macos")]
     requiem_gui::app::run(args);
     #[cfg(target_os = "linux")]

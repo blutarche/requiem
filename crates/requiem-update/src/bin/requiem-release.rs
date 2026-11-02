@@ -17,6 +17,8 @@ use ring::signature::{Ed25519KeyPair, KeyPair};
 use semver::Version;
 
 const USAGE: &str = "usage:
+  requiem-release linux-manifest --archive <tar.gz> --version <version> --arch <aarch64|x86_64>
+  requiem-release linux-verify --dir <release folder> --arch <arch> [--pubkey <base64>]
   requiem-release keygen --out <key file>
       make an update key; prints its public key for crates/requiem-update/src/key.rs
   requiem-release manifest --zip <dir>/Requiem-<version>.zip --version <version> --min-macos <version>
@@ -68,6 +70,22 @@ fn run(cmd: &str, rest: &[String]) -> Result<(), Error> {
         "keygen" => {
             let o = Options::parse(rest, &["--out"], &[])?;
             keygen(Path::new(o.get("--out")))
+        }
+        "linux-manifest" => {
+            let o = Options::parse(rest, &["--archive", "--version", "--arch"], &[])?;
+            make_linux_manifest(
+                Path::new(o.get("--archive")),
+                o.get("--version"),
+                o.get("--arch"),
+            )
+        }
+        "linux-verify" => {
+            let o = Options::parse(rest, &["--dir", "--arch"], &["--pubkey"])?;
+            verify_linux(
+                Path::new(o.get("--dir")),
+                o.get("--arch"),
+                o.0.get("--pubkey").map(String::as_str),
+            )
         }
         "manifest" => {
             let o = Options::parse(rest, &["--zip", "--version", "--min-macos"], &[])?;
@@ -243,14 +261,21 @@ fn sign(key: &Path, manifest_path: &Path) -> Result<(), Error> {
     let pair = Ed25519KeyPair::from_seed_unchecked(&seed)
         .map_err(|_| format!("{} is not a key", key.display()))?;
     let bytes = read_capped(manifest_path, MAX_MANIFEST_BYTES)?;
-    let m: Manifest = serde_json::from_slice(&bytes)
-        .map_err(|e| format!("{} is not a manifest: {e}", manifest_path.display()))?;
-    if m.format != FORMAT {
-        return Err(Error::Failed(format!(
-            "{} has format {}, not {FORMAT}",
-            manifest_path.display(),
-            m.format
-        )));
+    let probe: serde_json::Value = serde_json::from_slice(&bytes).map_err(|e| e.to_string())?;
+    if probe.get("platform").and_then(|v| v.as_str()) == Some("linux") {
+        let arch = probe
+            .get("architecture")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| "missing architecture".to_owned())?;
+        requiem_update::linux_manifest::parse(&bytes, arch)?;
+    } else {
+        let m: Manifest = serde_json::from_slice(&bytes).map_err(|e| e.to_string())?;
+        if m.format != FORMAT {
+            return Err(Error::Failed(format!(
+                "manifest has format {}, not {FORMAT}",
+                m.format
+            )));
+        }
     }
     let sig = pair.sign(&bytes);
     let mut out = manifest_path.as_os_str().to_owned();
@@ -260,7 +285,10 @@ fn sign(key: &Path, manifest_path: &Path) -> Result<(), Error> {
         .map_err(|e| format!("{}: {e}", out.display()))?;
     eprintln!(
         "signed {} {} with public key {}",
-        m.version,
+        probe
+            .get("version")
+            .and_then(|v| v.as_str())
+            .unwrap_or("unknown"),
         manifest_path.display(),
         b64::encode(pair.public_key().as_ref())
     );
@@ -315,4 +343,56 @@ fn stage(dir: &Path, m: &Manifest) -> Result<(), Error> {
 #[cfg(not(target_os = "macos"))]
 fn stage(_dir: &Path, _m: &Manifest) -> Result<(), Error> {
     Err(Error::Failed(requiem_update::UNSUPPORTED.to_owned()))
+}
+
+fn make_linux_manifest(archive: &Path, version: &str, arch: &str) -> Result<(), Error> {
+    use requiem_update::linux_manifest as linux;
+    let name = linux::manifest_name(arch)?;
+    let (size, sha256) = digest(archive)?;
+    let m = linux::Manifest {
+        format: 1,
+        platform: "linux".into(),
+        architecture: arch.into(),
+        bundle_identifier: BUNDLE_ID.into(),
+        version: version.into(),
+        file: archive
+            .file_name()
+            .and_then(|s| s.to_str())
+            .ok_or_else(|| "invalid archive name".to_owned())?
+            .into(),
+        size,
+        sha256,
+    };
+    let mut bytes = serde_json::to_vec_pretty(&m).map_err(|e| e.to_string())?;
+    bytes.push(b'\n');
+    linux::parse(&bytes, arch)?;
+    let out = archive.with_file_name(name);
+    fs::write(&out, bytes).map_err(|e| e.to_string())?;
+    println!("{}", out.display());
+    Ok(())
+}
+
+fn verify_linux(dir: &Path, arch: &str, key: Option<&str>) -> Result<(), Error> {
+    use requiem_update::linux_manifest as linux;
+    let path = dir.join(linux::manifest_name(arch)?);
+    let bytes = read_capped(&path, MAX_MANIFEST_BYTES)?;
+    let sig = read_capped(&path.with_extension("json.sig"), MAX_MANIFEST_BYTES)?;
+    let sig = std::str::from_utf8(&sig).map_err(|e| e.to_string())?;
+    let (m, _) = linux::verify(
+        &bytes,
+        sig,
+        key.unwrap_or(requiem_update::key::PUBLIC_KEY),
+        arch,
+    )?;
+    let (size, sha) = digest(&dir.join(&m.file))?;
+    if size != m.size || sha != m.sha256 {
+        return Err(Error::Failed(
+            "Linux archive does not match signed manifest".into(),
+        ));
+    }
+    println!(
+        "verified Linux {arch} {} archive signature and digest",
+        m.version
+    );
+    Ok(())
 }

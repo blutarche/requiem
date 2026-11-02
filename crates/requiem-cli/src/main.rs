@@ -92,6 +92,19 @@ fn parse_args() -> Result<Option<Args>, String> {
 }
 
 fn main() -> ExitCode {
+    if std::env::args().nth(1).as_deref() == Some("--update-self-test") {
+        return ExitCode::SUCCESS;
+    }
+    #[cfg(target_os = "linux")]
+    if !std::env::args()
+        .skip(1)
+        .any(|a| matches!(a.as_str(), "--version" | "--help" | "-h"))
+    {
+        if let Err(e) = requiem_update::linux::startup() {
+            eprintln!("requiem: update recovery: {e}");
+            return ExitCode::FAILURE;
+        }
+    }
     let mut args = match parse_args() {
         Ok(Some(a)) => a,
         Ok(None) => {
