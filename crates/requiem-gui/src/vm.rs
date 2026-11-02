@@ -3019,6 +3019,45 @@ impl ServiceFilter {
     }
 }
 
+/// Whether the window is light, dark, or follows the system.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Appearance {
+    #[default]
+    System,
+    Light,
+    Dark,
+}
+
+impl Appearance {
+    /// The segments of Settings' control, in order.
+    pub const CHOICES: [Appearance; 3] = [Appearance::System, Appearance::Light, Appearance::Dark];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Appearance::System => "System",
+            Appearance::Light => "Light",
+            Appearance::Dark => "Dark",
+        }
+    }
+
+    /// The value saved between launches.
+    pub fn key(self) -> &'static str {
+        match self {
+            Appearance::System => "system",
+            Appearance::Light => "light",
+            Appearance::Dark => "dark",
+        }
+    }
+
+    /// The appearance a saved `key` names; any other value is System.
+    pub fn from_key(key: &str) -> Appearance {
+        Self::CHOICES
+            .into_iter()
+            .find(|a| a.key() == key)
+            .unwrap_or_default()
+    }
+}
+
 /// What the sign-in panel adds under the code for `provider`.
 pub fn sign_in_notice(provider: &ProviderId) -> Option<&'static str> {
     (provider.0 == "spotify").then_some(
