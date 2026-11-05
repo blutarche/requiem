@@ -1400,7 +1400,7 @@ impl Table {
 
     /// Moves the playing marker to `current` without reloading the rows, so the scroll
     /// position and the hover stay. The selection stays too, unless it sat on the playing
-    /// row, which it follows.
+    /// row, which it follows without scrolling.
     pub fn set_current(&self, current: Vec<usize>) {
         let new = current.first().copied();
         let was = self.controller.ivars().current.replace(current.clone());
@@ -1426,7 +1426,7 @@ impl Table {
         if self.controller.ivars().kind != Kind::Queue
             && let Some(to) = follow_target(self.selected_row(), old, self.auto_selected.get(), new)
         {
-            self.auto_select(to);
+            self.auto_select(to, false);
         }
     }
 
@@ -1521,7 +1521,7 @@ impl Table {
     pub fn select_current(&self) {
         if self.table.selectedRow() < 0 {
             let playing = self.controller.ivars().current.borrow().first().copied();
-            self.auto_select(playing.unwrap_or(0));
+            self.auto_select(playing.unwrap_or(0), true);
         }
     }
 
@@ -1532,13 +1532,13 @@ impl Table {
         if let Some(row) = playing
             && self.table.selectedRow() < 0
         {
-            self.auto_select(row);
+            self.auto_select(row, true);
         }
     }
 
-    /// Selects `row` as the table's own choice, not the user's.
-    fn auto_select(&self, row: usize) {
-        self.select(row);
+    /// Selects `row` as the table's own choice, not the user's, scrolling to it if `scroll`.
+    fn auto_select(&self, row: usize, scroll: bool) {
+        self.select_row(row, scroll);
         if self.selected_row() == Some(row) {
             self.auto_selected.set(Some(row));
         }
@@ -1550,13 +1550,19 @@ impl Table {
     }
 
     pub fn select(&self, row: usize) {
+        self.select_row(row, true);
+    }
+
+    fn select_row(&self, row: usize, scroll: bool) {
         let Ok(i) = NSInteger::try_from(row) else {
             return;
         };
         if i < self.table.numberOfRows() {
             self.table
                 .selectRowIndexes_byExtendingSelection(&NSIndexSet::indexSetWithIndex(row), false);
-            self.table.scrollRowToVisible(i);
+            if scroll {
+                self.table.scrollRowToVisible(i);
+            }
         }
     }
 }

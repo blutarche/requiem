@@ -101,8 +101,8 @@ pub fn lists_album(kind: CollectionKind) -> bool {
 
 /// Where a table's selection goes when its playing marker moves to row `new`: there, if the
 /// selection `sel` sat on the row `old` the marker left or on the row `auto` that opening or
-/// following selected, and so was not moved by the user. A stopped player (`new` is none) and
-/// a table with nothing selected leave things as they are.
+/// following selected, and so was not moved by the user. A stopped player (`new` is none), a
+/// table with nothing selected, and a selection already on `new` leave things as they are.
 pub fn follow_target(
     sel: Option<usize>,
     old: Option<usize>,
@@ -111,6 +111,9 @@ pub fn follow_target(
 ) -> Option<usize> {
     let sel = sel?;
     let new = new?;
+    if sel == new {
+        return None;
+    }
     (Some(sel) == old || Some(sel) == auto).then_some(new)
 }
 
@@ -250,6 +253,13 @@ mod tests {
     #[test]
     fn a_stopped_player_leaves_the_selection() {
         assert_eq!(follow_target(Some(2), Some(2), Some(2), None), None);
+    }
+
+    #[test]
+    fn a_selection_already_on_the_marker_stays() {
+        assert_eq!(follow_target(Some(5), Some(5), None, Some(5)), None);
+        assert_eq!(follow_target(Some(5), Some(5), Some(5), Some(5)), None);
+        assert_eq!(follow_target(Some(5), None, Some(5), Some(5)), None);
     }
 
     #[test]
