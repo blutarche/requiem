@@ -1087,9 +1087,11 @@ pub fn run(args: Args) {
         View::Library | View::LibrarySignedOut | View::LibraryUnavailable | View::SignIn => {
             ui.show(AppView::Library)
         }
-        View::Collection | View::Artist | View::ArtistSpotify | View::Album => {
-            ui.show(AppView::Collection)
-        }
+        View::Collection
+        | View::CollectionPlaying
+        | View::Artist
+        | View::ArtistSpotify
+        | View::Album => ui.show(AppView::Collection),
         View::Queue => ui.show(AppView::Queue),
         View::Settings | View::SettingsSession => ui.show(AppView::Settings),
         View::NowPlaying | View::NowPlayingEmpty | View::NowPlayingLast => ui.show_now_playing(),

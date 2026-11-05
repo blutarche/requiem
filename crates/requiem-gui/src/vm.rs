@@ -967,6 +967,17 @@ impl UiState {
         }
     }
 
+    /// The rows of the results table that are the playing track.
+    pub fn results_playing(&self) -> Vec<usize> {
+        playing_rows(&self.shown_results(), self.now_playing.as_ref())
+    }
+
+    /// The rows of the open collection's table that are the playing track.
+    pub fn collection_playing(&self) -> Vec<usize> {
+        let tracks = self.collection.as_ref().map(|c| c.tracks.as_slice());
+        playing_rows(tracks.unwrap_or_default(), self.now_playing.as_ref())
+    }
+
     /// The artists the filter keeps.
     pub fn shown_artists(&self) -> Cow<'_, [Collection]> {
         self.shown_collections(&self.artists)
@@ -2885,6 +2896,17 @@ pub fn back_label(previous: Option<&str>, from: Place) -> String {
         Place::Home | Place::Collection => "Home",
     };
     previous.unwrap_or(page).to_owned()
+}
+
+/// The rows of `tracks` that are `playing`, whole track id and all: a list may hold a track
+/// twice.
+pub fn playing_rows(tracks: &[Track], playing: Option<&Track>) -> Vec<usize> {
+    let Some(playing) = playing else {
+        return Vec::new();
+    };
+    (0..tracks.len())
+        .filter(|&i| tracks[i].id == playing.id)
+        .collect()
 }
 
 /// Whether the queue's row `row` has played: it comes before the current one.
@@ -5713,6 +5735,98 @@ mod tests {
         ));
         assert!(!vm.take_dirty().contains(Dirty::COLLECTION));
         assert_eq!(vm.ui().collection.as_ref().unwrap().tracks, tracks(3));
+    }
+
+    fn plays(vm: &mut Vm, track: Track) {
+        vm.apply(Event::NowPlaying {
+            track,
+            duration: Some(Duration::from_secs(200)),
+        });
+        vm.apply(Event::State(PlayState::Playing));
+    }
+
+    /// A vm showing a playlist of tracks "0", "1", "2" and "1" again.
+    fn with_playlist() -> Vm {
+        let mut vm = connected();
+        let cmds = vm.intent(Intent::OpenCollection {
+            collection: collection("a"),
+            from: Place::Library,
+        });
+        let fetches = browses(&cmds);
+        let [(req, page)] = fetches.as_slice() else {
+            panic!("expected the collection fetch, got {cmds:?}");
+        };
+        let mut listed = tracks(3);
+        listed.push(listed[1].clone());
+        let items = listed.into_iter().map(Item::Track).collect();
+        vm.apply(results(*req, page.clone(), vec![shelf("", items)]));
+        vm.take_dirty();
+        vm
+    }
+
+    #[test]
+    fn the_open_collection_marks_every_row_of_the_playing_track() {
+        let mut vm = with_playlist();
+        assert_eq!(vm.ui().collection_playing(), Vec::<usize>::new());
+        plays(&mut vm, track("1", 200));
+        assert_eq!(vm.ui().collection_playing(), [1, 3]);
+        plays(&mut vm, track("2", 200));
+        assert_eq!(vm.ui().collection_playing(), [2]);
+        // The whole id counts: another service's track of the same id is another track.
+        let mut other = track("2", 200);
+        other.id.provider = ProviderId("elsewhere".into());
+        plays(&mut vm, other);
+        assert_eq!(vm.ui().collection_playing(), Vec::<usize>::new());
+    }
+
+    #[test]
+    fn the_results_table_marks_the_playing_track() {
+        let mut vm = with_results(4);
+        assert_eq!(vm.ui().results_playing(), Vec::<usize>::new());
+        plays(&mut vm, track("2", 200));
+        assert_eq!(vm.ui().results_playing(), [2]);
+        // The collection table has no such track, and an unlisted track marks nothing.
+        assert_eq!(vm.ui().collection_playing(), Vec::<usize>::new());
+        plays(&mut vm, track("elsewhere", 200));
+        assert_eq!(vm.ui().results_playing(), Vec::<usize>::new());
+    }
+
+    #[test]
+    fn stopping_unmarks_the_playing_track() {
+        let mut vm = with_playlist();
+        plays(&mut vm, track("1", 200));
+        assert_eq!(vm.ui().collection_playing(), [1, 3]);
+        vm.apply(Event::State(PlayState::Paused));
+        assert_eq!(
+            vm.ui().collection_playing(),
+            [1, 3],
+            "paused is still playing"
+        );
+        vm.apply(Event::State(PlayState::Stopped));
+        assert_eq!(vm.ui().collection_playing(), Vec::<usize>::new());
+        assert_eq!(vm.ui().now_playing, None);
+    }
+
+    #[test]
+    fn the_marker_moves_with_the_track_without_rebuilding_the_rows() {
+        let mut vm = with_playlist();
+        plays(&mut vm, track("0", 200));
+        vm.take_dirty();
+        vm.apply(Event::NowPlaying {
+            track: track("2", 200),
+            duration: None,
+        });
+        let d = vm.take_dirty();
+        assert!(d.contains(Dirty::NOW_PLAYING), "{d:?}");
+        assert!(
+            !d.intersects(Dirty::COLLECTION | Dirty::RESULTS),
+            "the rows stay: {d:?}"
+        );
+        assert_eq!(vm.ui().collection_playing(), [2]);
+
+        vm.apply(Event::State(PlayState::Stopped));
+        assert!(vm.take_dirty().contains(Dirty::NOW_PLAYING));
+        assert_eq!(vm.ui().collection_playing(), Vec::<usize>::new());
     }
 
     #[test]

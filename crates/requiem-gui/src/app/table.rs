@@ -20,7 +20,7 @@ use objc2_app_kit::{
 use objc2_core_foundation::CGFloat;
 use objc2_foundation::{
     MainThreadMarker, NSAttributedString, NSEdgeInsets, NSIndexSet, NSInteger, NSNotification,
-    NSNotificationCenter, NSObjectProtocol, NSPoint, NSRect, NSSize, NSString,
+    NSNotificationCenter, NSObjectProtocol, NSPoint, NSRange, NSRect, NSSize, NSString,
 };
 use requiem_core::Collection;
 use requiem_macos::artwork::Cover;
@@ -109,7 +109,9 @@ fn reselect(rows: &[RowText], was: &RowText, at: usize) -> Option<usize> {
 pub struct ControllerIvars {
     kind: Kind,
     rows: RefCell<Vec<RowText>>,
-    current: Cell<Option<usize>>,
+    /// The rows marked as playing: the queue's current row, or each row that lists the
+    /// playing track.
+    current: RefCell<Vec<usize>>,
     /// Whether the rows' "+" buttons take clicks.
     enabled: Cell<bool>,
     table: OnceCell<Weak<NSTableView>>,
@@ -191,7 +193,9 @@ define_class!(
             if let Some(rv) = row_view.downcast_ref::<RowView>() {
                 let iv = rv.ivars();
                 iv.odd.set(row % 2 == 1);
-                iv.current.set(usize::try_from(row).ok() == self.ivars().current.get());
+                iv.current.set(
+                    usize::try_from(row).is_ok_and(|r| self.ivars().current.borrow().contains(&r)),
+                );
                 iv.selected.set(table.selectedRow() == row);
                 iv.focused.set(table.downcast_ref::<KeyTable>().is_some_and(KeyTable::focused));
                 rv.paint();
@@ -406,9 +410,17 @@ impl Controller {
         .unwrap_or(false)
     }
 
-    pub fn set_rows(&self, rows: Vec<RowText>, current: Option<usize>) {
+    pub fn set_rows(&self, rows: Vec<RowText>, current: Vec<usize>) {
         *self.ivars().rows.borrow_mut() = rows;
-        self.ivars().current.set(current);
+        *self.ivars().current.borrow_mut() = current;
+    }
+
+    /// The queue's current row, which the rows before it have played.
+    fn queue_current(&self) -> Option<usize> {
+        match self.ivars().kind {
+            Kind::Queue => self.ivars().current.borrow().first().copied(),
+            Kind::Results | Kind::Collection => None,
+        }
     }
 
     fn cell(&self, table: &NSTableView, col: Col, row: usize) -> Option<Retained<NSView>> {
@@ -441,9 +453,8 @@ impl Controller {
             Col::Duration => &r.duration,
             Col::Add => unreachable!(),
         };
-        let current = self.ivars().current.get() == Some(row);
-        let played =
-            self.ivars().kind == Kind::Queue && vm::played(row, self.ivars().current.get());
+        let current = self.ivars().current.borrow().contains(&row);
+        let played = self.ivars().kind == Kind::Queue && vm::played(row, self.queue_current());
         cell.set_played(played);
         let iv = cell.ivars();
         if let Some(l) = iv.label.get() {
@@ -1262,7 +1273,7 @@ impl Table {
         let controller = Controller::alloc(mtm).set_ivars(ControllerIvars {
             kind,
             rows: RefCell::new(Vec::new()),
-            current: Cell::new(None),
+            current: RefCell::new(Vec::new()),
             enabled: Cell::new(true),
             table: OnceCell::new(),
             menu_row: Cell::new(None),
@@ -1351,7 +1362,10 @@ impl Table {
         }
     }
 
-    pub fn set_rows(&self, rows: Vec<RowText>, current: Option<usize>) {
+    /// Lists `rows`, those in `current` marked as playing. `current` is a row or none for the
+    /// queue, and each row of the playing track for the others.
+    pub fn set_rows(&self, rows: Vec<RowText>, current: impl IntoIterator<Item = usize>) {
+        let current: Vec<usize> = current.into_iter().collect();
         let selected = usize::try_from(self.table.selectedRow()).ok();
         let was = selected.and_then(|i| self.controller.ivars().rows.borrow().get(i).cloned());
         self.controller.set_rows(rows, current);
@@ -1376,6 +1390,30 @@ impl Table {
         }
         // Column widths settle when the table tiles.
         self.header.setNeedsDisplay(true);
+    }
+
+    /// Moves the playing marker to `current` without reloading the rows, so the selection,
+    /// the scroll position and the hover stay.
+    pub fn set_current(&self, current: Vec<usize>) {
+        let was = self.controller.ivars().current.replace(current.clone());
+        let rows = usize::try_from(self.table.numberOfRows()).unwrap_or(0);
+        let columns = self.table.tableColumns().len();
+        for row in was.iter().chain(&current).copied() {
+            if was.contains(&row) == current.contains(&row) || row >= rows {
+                continue;
+            }
+            let at = row as NSInteger;
+            if let Some(rv) = self.table.rowViewAtRow_makeIfNecessary(at, false)
+                && let Some(rv) = rv.downcast_ref::<RowView>()
+            {
+                rv.ivars().current.set(current.contains(&row));
+                rv.paint();
+            }
+            self.table.reloadDataForRowIndexes_columnIndexes(
+                &NSIndexSet::indexSetWithIndex(row),
+                &NSIndexSet::indexSetWithIndexesInRange(NSRange::new(0, columns)),
+            );
+        }
     }
 
     /// Dims and disables the rows' "+" buttons; playing rows goes through the view model,
@@ -1468,7 +1506,7 @@ impl Table {
     /// Selects the current row, else the first, unless a row is already selected.
     pub fn select_current(&self) {
         if self.table.selectedRow() < 0 {
-            self.select(self.controller.ivars().current.get().unwrap_or(0));
+            self.select(self.controller.queue_current().unwrap_or(0));
         }
     }
 

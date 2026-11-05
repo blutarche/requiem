@@ -2179,6 +2179,10 @@ impl Ui {
         if let Some(c) = p.collection {
             self.show_collection(c);
         }
+        if let Some((results, collection)) = p.marks {
+            self.results.set_current(results);
+            self.collection_table.set_current(collection);
+        }
         if let Some(badge) = p.queue_badge {
             self.nav_queue.set_count(badge.as_deref());
         }
@@ -2248,7 +2252,11 @@ impl Ui {
     /// Lists the search results: under the chips once there are some, as the chip in force
     /// lists them.
     fn show_results(&self, r: ResultsPatch) {
-        let ResultsPatch { rows, view } = r;
+        let ResultsPatch {
+            rows,
+            playing,
+            view,
+        } = r;
         let SearchView { chips, body } = view;
         let chips_shown = !chips.is_empty();
         self.search_chips_bar.setHidden(!chips_shown);
@@ -2262,7 +2270,7 @@ impl Ui {
         match body {
             SearchBody::Empty(e) => empty = Some(e),
             SearchBody::Songs => {
-                self.results.set_rows(rows, None);
+                self.results.set_rows(rows, playing);
                 self.results.deselect();
                 songs = true;
             }
@@ -2550,7 +2558,7 @@ impl Ui {
         self.place_collection_table(shelved && songs > 0, songs);
         self.collection_table.view.setHidden(!ready || songs == 0);
         self.collection_table
-            .set_rows(if ready { c.rows } else { Vec::new() }, None);
+            .set_rows(if ready { c.rows } else { Vec::new() }, c.playing);
         if shelved {
             let id = Some(c.collection.id.clone());
             let same = *self.artist_shown.borrow() == id;
@@ -3064,6 +3072,8 @@ struct CollectionPatch {
     back: Option<String>,
     view: PageView,
     rows: Vec<table::RowText>,
+    /// The rows that are the playing track.
+    playing: Vec<usize>,
     /// The shelves of collections on the page, which an artist's lists after its top songs.
     shelves: Vec<Shelf>,
 }
@@ -3131,6 +3141,8 @@ fn localized_cmp(a: &str, b: &str) -> Ordering {
 struct ResultsPatch {
     /// The table's rows, while the Songs chip lists them.
     rows: Vec<table::RowText>,
+    /// The rows that are the playing track.
+    playing: Vec<usize>,
     view: SearchView,
 }
 
@@ -3138,6 +3150,9 @@ struct ResultsPatch {
 /// runs.
 struct Patch {
     results: Option<ResultsPatch>,
+    /// The results table's and the collection table's rows of the playing track, which move
+    /// with it.
+    marks: Option<(Vec<usize>, Vec<usize>)>,
     /// Whether the top artist's Play has songs to play.
     top_play: Option<bool>,
     search_status: Option<Option<(String, bool)>>,
@@ -3176,9 +3191,15 @@ impl Patch {
                     } else {
                         Vec::new()
                     },
+                    playing: if songs {
+                        s.results_playing()
+                    } else {
+                        Vec::new()
+                    },
                     view,
                 }
             }),
+            marks: any(Dirty::NOW_PLAYING).then(|| (s.results_playing(), s.collection_playing())),
             top_play: any(Dirty::TOP_ARTIST).then(|| s.top_artist_playable()),
             search_status: any(Dirty::SEARCH_STATUS).then(|| s.search_status_text()),
             queue: any(Dirty::QUEUE).then(|| (table::rows(&s.queue), s.current)),
@@ -3213,6 +3234,7 @@ impl Patch {
                     back: c.previous.as_ref().map(|p| p.collection.title.clone()),
                     view: c.browse.view(),
                     rows: table::rows(&c.tracks),
+                    playing: s.collection_playing(),
                     shelves: collection_shelves(&c.browse.shelves),
                 })
             }),

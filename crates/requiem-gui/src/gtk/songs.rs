@@ -73,13 +73,25 @@ struct Parts {
 
 struct State {
     kind: Kind,
-    current: Cell<Option<usize>>,
+    /// The rows marked as playing: the queue's current row, or each row that lists the
+    /// playing track.
+    current: RefCell<Vec<usize>>,
     numbered: Cell<bool>,
     album: Cell<bool>,
     enabled: Cell<bool>,
     /// The row whose "+" shows its check.
     added: Cell<Option<usize>>,
     added_serial: Cell<u64>,
+}
+
+impl State {
+    /// The queue's current row, which the rows before it have played.
+    fn queue_current(&self) -> Option<usize> {
+        match self.kind {
+            Kind::Queue => self.current.borrow().first().copied(),
+            Kind::Results | Kind::Collection => None,
+        }
+    }
 }
 
 pub struct Songs {
@@ -96,7 +108,7 @@ impl Songs {
     pub fn new(kind: Kind) -> Songs {
         let state = Rc::new(State {
             kind,
-            current: Cell::new(None),
+            current: RefCell::new(Vec::new()),
             numbered: Cell::new(false),
             album: Cell::new(true),
             enabled: Cell::new(true),
@@ -178,9 +190,11 @@ impl Songs {
         }
     }
 
-    /// Lists `rows`, `current` marked as playing; the selection is cleared.
-    pub fn set_rows(&self, rows: Vec<RowText>, current: Option<usize>) {
-        self.state.current.set(current);
+    /// Lists `rows`, those in `current` marked as playing; the selection is cleared.
+    /// `current` is a row or none for the queue, and each row of the playing track for the
+    /// others.
+    pub fn set_rows(&self, rows: Vec<RowText>, current: impl IntoIterator<Item = usize>) {
+        *self.state.current.borrow_mut() = current.into_iter().collect();
         let items: Vec<glib::Object> = rows
             .into_iter()
             .enumerate()
@@ -188,6 +202,18 @@ impl Songs {
             .collect();
         let n = self.store.n_items();
         self.store.splice(0, n, &items);
+    }
+
+    /// Moves the playing marker to `current` without replacing the rows, so the selection and
+    /// the scroll position stay.
+    pub fn set_current(&self, current: Vec<usize>) {
+        let was = self.state.current.replace(current.clone());
+        let n = self.store.n_items();
+        for row in was.iter().chain(&current).copied() {
+            if was.contains(&row) != current.contains(&row) && (row as u32) < n {
+                self.store.items_changed(row as u32, 1, 1);
+            }
+        }
     }
 
     pub fn len(&self) -> usize {
@@ -248,7 +274,7 @@ impl Songs {
     pub fn select_current(&self) {
         match self.selected_row() {
             Some(i) => self.focus_row(i),
-            None => self.select(self.state.current.get().unwrap_or(0)),
+            None => self.select(self.state.queue_current().unwrap_or(0)),
         }
     }
 
@@ -393,8 +419,8 @@ fn bind(p: &Parts, row: &Row, s: &State) {
     theme::set_text(&p.time, &r.duration);
     p.title
         .set_tooltip_text((!r.title.is_empty()).then_some(r.title.as_str()));
-    let current = s.kind == Kind::Queue && s.current.get() == Some(i);
-    let played = s.kind == Kind::Queue && vm::played(i, s.current.get());
+    let current = s.current.borrow().contains(&i);
+    let played = vm::played(i, s.queue_current());
     theme::toggle_class(&p.columns, "current", current);
     theme::toggle_class(&p.columns, "played", played);
     p.cover.set_dim(played);

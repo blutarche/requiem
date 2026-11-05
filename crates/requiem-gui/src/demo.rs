@@ -12,7 +12,7 @@ use requiem_ipc::{UpdateState, UpdateStatus};
 
 use crate::args::View;
 use crate::vm::{
-    BANNER_GRACE, Intent, Link, LinkError, Place, SearchChip, Service, ServiceFilter, Vm,
+    BANNER_GRACE, Intent, Link, LinkError, List, Place, SearchChip, Service, ServiceFilter, Vm,
 };
 
 pub const QUERY: &str = "night drive";
@@ -1139,7 +1139,8 @@ fn run_intent(vm: &mut Vm, daemon: &mut Daemon, intent: Intent) {
 /// `start`, staged for a demo-only `view`: `Empty` skips the search; `Disconnected`,
 /// `OutOfDate`, `Toast` and the update views add their banner or toast; the Library views and
 /// `HomeSignedOut` set the account; `HomeSpotify` filters Home to Spotify; `SettingsSession`
-/// opens YouTube Music's session form in Settings; `NowPlayingEmpty` stops playback;
+/// opens YouTube Music's session form in Settings; `CollectionPlaying` plays the playlist's
+/// ninth track; `NowPlayingEmpty` stops playback;
 /// `NowPlayingLast` plays the queue's last track; `SearchAlbums`, `SearchSongs` and
 /// `SearchArtists` pick that chip of the results; `Artist` opens the top artist's page;
 /// `ArtistSpotify` opens the playing Spotify track's artist from Now Playing; `Album` opens
@@ -1220,13 +1221,20 @@ pub fn start_in(view: View) -> (Vm, Daemon) {
             run_intent(&mut vm, &mut daemon, Intent::Visit(Place::Settings));
             run_intent(&mut vm, &mut daemon, Intent::SignIn(ytmusic()));
         }
-        View::Collection => {
+        View::Collection | View::CollectionPlaying => {
             run_intent(&mut vm, &mut daemon, Intent::Visit(Place::Library));
             let open = Intent::OpenCollection {
                 collection: collection(),
                 from: Place::Library,
             };
             run_intent(&mut vm, &mut daemon, open);
+            if view == View::CollectionPlaying {
+                let ninth = Intent::PlayFrom {
+                    list: List::Collection,
+                    from: 8,
+                };
+                run_intent(&mut vm, &mut daemon, ninth);
+            }
         }
         View::NowPlayingEmpty => {
             // Skipping past the last track stops playback.

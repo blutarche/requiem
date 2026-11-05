@@ -46,6 +46,8 @@ pub enum View {
     HomeSignedOut,
     /// Demo only: a playlist's tracks, opened from the Library.
     Collection,
+    /// Demo only: a playlist's tracks with its ninth playing.
+    CollectionPlaying,
     /// Demo only: the playing track's page.
     NowPlaying,
     /// Demo only: the playing track's page with nothing playing.
@@ -96,7 +98,7 @@ pub enum View {
 }
 
 impl View {
-    const NAMES: [(&str, View); 34] = [
+    const NAMES: [(&str, View); 35] = [
         ("home", View::Home),
         ("search", View::Search),
         ("library", View::Library),
@@ -108,6 +110,7 @@ impl View {
         ("home-spotify", View::HomeSpotify),
         ("home-signed-out", View::HomeSignedOut),
         ("collection", View::Collection),
+        ("collection-playing", View::CollectionPlaying),
         ("now-playing", View::NowPlaying),
         ("now-playing-empty", View::NowPlayingEmpty),
         ("now-playing-last", View::NowPlayingLast),
@@ -366,6 +369,7 @@ mod tests {
             ("home-spotify", View::HomeSpotify),
             ("home-signed-out", View::HomeSignedOut),
             ("collection", View::Collection),
+            ("collection-playing", View::CollectionPlaying),
             ("now-playing", View::NowPlaying),
             ("now-playing-empty", View::NowPlayingEmpty),
             ("now-playing-last", View::NowPlayingLast),

@@ -1536,6 +1536,10 @@ impl Ui {
         if let Some(c) = p.collection {
             self.show_collection(c);
         }
+        if let Some((results, collection)) = p.marks {
+            self.results.set_current(results);
+            self.collection_table.set_current(collection);
+        }
         if let Some(badge) = p.queue_badge {
             self.sidebar.queue.set_count(badge.as_deref());
         }
@@ -1589,7 +1593,11 @@ impl Ui {
     }
 
     fn show_results(&self, r: ResultsPatch) {
-        let ResultsPatch { rows, view } = r;
+        let ResultsPatch {
+            rows,
+            playing,
+            view,
+        } = r;
         let SearchView { chips, body } = view;
         let chips_shown = !chips.is_empty();
         self.search_chips.root.set_visible(chips_shown);
@@ -1600,7 +1608,7 @@ impl Ui {
         match body {
             SearchBody::Empty(e) => empty = Some(e),
             SearchBody::Songs => {
-                self.results.set_rows(rows, None);
+                self.results.set_rows(rows, playing);
                 self.results.deselect();
                 songs = true;
             }
@@ -1844,7 +1852,7 @@ impl Ui {
         self.place_collection_table(shelved && songs > 0, songs);
         self.collection_table.root.set_visible(ready && songs > 0);
         self.collection_table
-            .set_rows(if ready { c.rows } else { Vec::new() }, None);
+            .set_rows(if ready { c.rows } else { Vec::new() }, c.playing);
         if shelved {
             let id = Some(c.collection.id.clone());
             let same = *self.artist_shown.borrow() == id;
@@ -2184,6 +2192,8 @@ struct CollectionPatch {
     back: Option<String>,
     view: PageView,
     rows: Vec<RowText>,
+    /// The rows that are the playing track.
+    playing: Vec<usize>,
     shelves: Vec<Shelf>,
 }
 
@@ -2211,12 +2221,17 @@ fn localized_cmp(a: &str, b: &str) -> Ordering {
 
 struct ResultsPatch {
     rows: Vec<RowText>,
+    /// The rows that are the playing track.
+    playing: Vec<usize>,
     view: SearchView,
 }
 
 /// Owned copies of the dirty regions, taken so the view-model borrow ends before GTK runs.
 struct Patch {
     results: Option<ResultsPatch>,
+    /// The results table's and the collection table's rows of the playing track, which move
+    /// with it.
+    marks: Option<(Vec<usize>, Vec<usize>)>,
     top_play: Option<bool>,
     search_status: Option<Option<(String, bool)>>,
     queue: Option<(Vec<RowText>, Option<usize>)>,
@@ -2250,9 +2265,15 @@ impl Patch {
                     } else {
                         Vec::new()
                     },
+                    playing: if songs {
+                        s.results_playing()
+                    } else {
+                        Vec::new()
+                    },
                     view,
                 }
             }),
+            marks: any(Dirty::NOW_PLAYING).then(|| (s.results_playing(), s.collection_playing())),
             top_play: any(Dirty::TOP_ARTIST).then(|| s.top_artist_playable()),
             search_status: any(Dirty::SEARCH_STATUS).then(|| s.search_status_text()),
             queue: any(Dirty::QUEUE).then(|| (rows(&s.queue), s.current)),
@@ -2287,6 +2308,7 @@ impl Patch {
                     back: c.previous.as_ref().map(|p| p.collection.title.clone()),
                     view: c.browse.view(),
                     rows: rows(&c.tracks),
+                    playing: s.collection_playing(),
                     shelves: collection_shelves(&c.browse.shelves),
                 })
             }),
