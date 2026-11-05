@@ -1503,10 +1503,11 @@ impl Table {
         }
     }
 
-    /// Selects the current row, else the first, unless a row is already selected.
+    /// Selects the first playing row, else the first, unless a row is already selected.
     pub fn select_current(&self) {
         if self.table.selectedRow() < 0 {
-            self.select(self.controller.queue_current().unwrap_or(0));
+            let playing = self.controller.ivars().current.borrow().first().copied();
+            self.select(playing.unwrap_or(0));
         }
     }
 

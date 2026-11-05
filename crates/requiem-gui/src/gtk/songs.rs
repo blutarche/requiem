@@ -274,7 +274,10 @@ impl Songs {
     pub fn select_current(&self) {
         match self.selected_row() {
             Some(i) => self.focus_row(i),
-            None => self.select(self.state.queue_current().unwrap_or(0)),
+            None => {
+                let playing = self.state.current.borrow().first().copied();
+                self.select(playing.unwrap_or(0));
+            }
         }
     }
 
