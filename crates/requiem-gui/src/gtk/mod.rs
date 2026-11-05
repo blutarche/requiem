@@ -143,7 +143,11 @@ fn show_view(ui: &Ui, view: View) {
         View::Library | View::LibrarySignedOut | View::LibraryUnavailable | View::SignIn => {
             ui.show(AppView::Library);
         }
-        View::Collection | View::Artist | View::ArtistSpotify | View::Album => {
+        View::Collection
+        | View::CollectionPlaying
+        | View::Artist
+        | View::ArtistSpotify
+        | View::Album => {
             ui.show(AppView::Collection);
         }
         View::Queue => ui.show(AppView::Queue),
