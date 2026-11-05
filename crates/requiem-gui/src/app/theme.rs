@@ -123,16 +123,16 @@ macro_rules! colors {
     };
 }
 
-pub const BG: Tone = tone(0x0A0A0C, 0xFAF9F6);
-pub const BG_2: Tone = tone(0x121216, 0xF1EFEA);
-pub const BG_3: Tone = tone(0x1A1A20, 0xE8E6E0);
-pub const LINE_2: Tone = tone(0x34343F, 0xCFCBC2);
+pub const BG: Tone = tone(0x0A0A0C, 0xF4F4F6);
+pub const BG_2: Tone = tone(0x121216, 0xFFFFFF);
+pub const BG_3: Tone = tone(0x1A1A20, 0xEAEAED);
+pub const LINE_2: Tone = tone(0x34343F, 0xBFBFC6);
 /// A hovered table row: BG_3 30% toward LINE_2. BG_3 itself is 1.08:1 against a BG_2 stripe.
-pub const ROW_HOVER: Tone = tone(0x22222A, 0xE9E7E1);
-pub const ACCENT: Tone = tone(0x7C70F5, 0x5A4DDB);
-const ACCENT_DEEP: Tone = tone(0x5A4FC0, 0x4136A8);
+pub const ROW_HOVER: Tone = tone(0x22222A, 0xEAEAED);
+pub const ACCENT: Tone = tone(0x7C70F5, 0x5C51D0);
+const ACCENT_DEEP: Tone = tone(0x5A4FC0, 0x3F356E);
 /// Alphas of `accent_soft` and `selection`. The lighter selection in the light appearance
-/// keeps muted text on it at 4.56:1.
+/// keeps muted text on it at 6.23:1.
 pub const SOFT: Alpha = Alpha::both(0.10);
 pub const SELECTED: Alpha = Alpha {
     dark: 0.32,
@@ -146,27 +146,27 @@ colors! {
     bg_3 = shade(BG_3, Alpha::both(1.0));
     /// The fill of a hovered row or card.
     row_hover = shade(ROW_HOVER, Alpha::both(1.0));
-    bg_4 = shade(tone(0x24242C, 0xE3E0D9), Alpha::both(1.0));
-    line = shade(tone(0x24242C, 0xE3E0D9), Alpha::both(1.0));
+    bg_4 = shade(tone(0x24242C, 0xDCDCE0), Alpha::both(1.0));
+    line = shade(tone(0x24242C, 0xDDDDE2), Alpha::both(1.0));
     line_2 = shade(LINE_2, Alpha::both(1.0));
-    line_hi = shade(tone(0x43434F, 0xB8B4AA), Alpha::both(1.0));
-    ink = shade(tone(0xF2EFEA, 0x17171C), Alpha::both(1.0));
-    ink_2 = shade(tone(0xC8C5BD, 0x45454D), Alpha::both(1.0));
-    muted = shade(tone(0x8C8C94, 0x606068), Alpha::both(1.0));
-    muted_2 = shade(tone(0x5A5A63, 0x8E8E96), Alpha::both(1.0));
-    chrome_bg = shade(tone(0x07070A, 0xF0EEE9), Alpha::both(1.0));
-    chrome_bg_2 = shade(tone(0x0E0E14, 0xE8E6E0), Alpha::both(1.0));
-    chrome_bg_hover = shade(tone(0x14141A, 0xE0DDD6), Alpha::both(1.0));
-    chrome_border = shade(tone(0x18181E, 0xDDDAD3), Alpha::both(1.0));
-    chrome_ink = shade(tone(0xE8E5DE, 0x1A1A1F), Alpha::both(1.0));
-    chrome_muted = shade(tone(0x8A8A92, 0x6A6A72), Alpha::both(1.0));
+    line_hi = shade(tone(0x43434F, 0x8E8E96), Alpha::both(1.0));
+    ink = shade(tone(0xF2EFEA, 0x0A0A0C), Alpha::both(1.0));
+    ink_2 = shade(tone(0xC8C5BD, 0x18181D), Alpha::both(1.0));
+    muted = shade(tone(0x8C8C94, 0x4A4A52), Alpha::both(1.0));
+    muted_2 = shade(tone(0x5A5A63, 0x6C6C74), Alpha::both(1.0));
+    chrome_bg = shade(tone(0x07070A, 0xEDEDF0), Alpha::both(1.0));
+    chrome_bg_2 = shade(tone(0x0E0E14, 0xE4E4E8), Alpha::both(1.0));
+    chrome_bg_hover = shade(tone(0x14141A, 0xDDDDE2), Alpha::both(1.0));
+    chrome_border = shade(tone(0x18181E, 0xD4D4D9), Alpha::both(1.0));
+    chrome_ink = shade(tone(0xE8E5DE, 0x0A0A0C), Alpha::both(1.0));
+    chrome_muted = shade(tone(0x8A8A92, 0x5E5E66), Alpha::both(1.0));
     accent = shade(ACCENT, Alpha::both(1.0));
     /// The accent with more contrast: lighter in the dark appearance, darker in the light.
-    accent_hi = shade(tone(0x9088F8, 0x4B3FC4), Alpha::both(1.0));
+    accent_hi = shade(tone(0x9088F8, 0x5047B8), Alpha::both(1.0));
     /// A primary button's fill: the accent darkened 40% toward accent-deep, so the white label
-    /// keeps 4.64:1 (7.02:1 light), where on the dark accent itself it would have 3.82:1.
+    /// keeps 4.64:1 (7.53:1 light), where on the dark accent itself it would have 3.82:1.
     primary = mix(ACCENT, ACCENT_DEEP, Alpha::both(0.4));
-    /// A primary button's hover, darker still: 6.34:1 (9.06:1 light) under the white label.
+    /// A primary button's hover, darker still: 6.34:1 (10.79:1 light) under the white label.
     /// Lightening it to the dark accent-hi would leave 2.97:1.
     accent_deep = shade(ACCENT_DEEP, Alpha::both(1.0));
     accent_soft = shade(ACCENT, SOFT);
@@ -416,13 +416,13 @@ mod tests {
         // SAFETY: the appearance-name statics are immutable framework constants.
         let (dark, light) = unsafe { (NSAppearanceNameDarkAqua, NSAppearanceNameAqua) };
         assert_eq!(shown(&bg(), dark), (0x0A0A0C, 1.0));
-        assert_eq!(shown(&bg(), light), (0xFAF9F6, 1.0));
-        assert_eq!(shown(&ink(), light), (0x17171C, 1.0));
+        assert_eq!(shown(&bg(), light), (0xF4F4F6, 1.0));
+        assert_eq!(shown(&ink(), light), (0x0A0A0C, 1.0));
         assert_eq!(shown(&selection(), dark).1, 0.32);
         assert_eq!(shown(&selection(), light).1, 0.18);
         let selected = mix(BG, ACCENT, SELECTED);
         assert_eq!(shown(&selected, dark), (0x2E2B57, 1.0));
-        assert_eq!(shown(&selected, light), (0xDDDAF1, 1.0));
+        assert_eq!(shown(&selected, light), (0xD9D7EF, 1.0));
         for fixed in [spotify_green(), youtube_red(), white()] {
             assert_eq!(shown(&fixed, dark), shown(&fixed, light));
         }
