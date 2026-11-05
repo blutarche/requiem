@@ -1853,6 +1853,10 @@ impl Ui {
         self.collection_table.root.set_visible(ready && songs > 0);
         self.collection_table
             .set_rows(if ready { c.rows } else { Vec::new() }, c.playing);
+        // Rows that arrive after the page opened find no selection for `show` to have placed.
+        if self.view.get() == AppView::Collection {
+            self.collection_table.select_playing();
+        }
         if shelved {
             let id = Some(c.collection.id.clone());
             let same = *self.artist_shown.borrow() == id;

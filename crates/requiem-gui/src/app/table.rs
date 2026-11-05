@@ -31,7 +31,7 @@ use super::ui;
 use super::widgets::{self, FLEX_H, FLEX_W, HoverButton, PIN_BOTTOM, PIN_LEFT, PIN_TOP, rect};
 #[cfg(test)]
 use crate::view::ALBUM_MIN_W;
-use crate::view::{ADD_W, DURATION_W, column_widths, track_number};
+use crate::view::{ADD_W, DURATION_W, column_widths, follow_target, track_number};
 pub use crate::view::{RowText, lists_album, rows};
 use crate::vm::{self, GoToArtist, Intent, List, Place, QueueEdit, Service};
 
@@ -1219,6 +1219,10 @@ pub struct Table {
     header: Retained<ColumnHeader>,
     pub table: Retained<NSTableView>,
     pub controller: Retained<Controller>,
+    /// The row the table last selected itself, to open on the playing track or to follow it;
+    /// the playing marker takes the selection along only while it sits on this row or the one
+    /// the marker left.
+    auto_selected: Cell<Option<usize>>,
 }
 
 impl Table {
@@ -1359,6 +1363,7 @@ impl Table {
             header,
             table,
             controller,
+            auto_selected: Cell::new(None),
         }
     }
 
@@ -1366,6 +1371,7 @@ impl Table {
     /// queue, and each row of the playing track for the others.
     pub fn set_rows(&self, rows: Vec<RowText>, current: impl IntoIterator<Item = usize>) {
         let current: Vec<usize> = current.into_iter().collect();
+        self.auto_selected.set(None);
         let selected = usize::try_from(self.table.selectedRow()).ok();
         let was = selected.and_then(|i| self.controller.ivars().rows.borrow().get(i).cloned());
         self.controller.set_rows(rows, current);
@@ -1392,10 +1398,13 @@ impl Table {
         self.header.setNeedsDisplay(true);
     }
 
-    /// Moves the playing marker to `current` without reloading the rows, so the selection,
-    /// the scroll position and the hover stay.
+    /// Moves the playing marker to `current` without reloading the rows, so the scroll
+    /// position and the hover stay. The selection stays too, unless it sat on the playing
+    /// row, which it follows.
     pub fn set_current(&self, current: Vec<usize>) {
+        let new = current.first().copied();
         let was = self.controller.ivars().current.replace(current.clone());
+        let old = was.first().copied();
         let rows = usize::try_from(self.table.numberOfRows()).unwrap_or(0);
         let columns = self.table.tableColumns().len();
         for row in was.iter().chain(&current).copied() {
@@ -1413,6 +1422,11 @@ impl Table {
                 &NSIndexSet::indexSetWithIndex(row),
                 &NSIndexSet::indexSetWithIndexesInRange(NSRange::new(0, columns)),
             );
+        }
+        if self.controller.ivars().kind != Kind::Queue
+            && let Some(to) = follow_target(self.selected_row(), old, self.auto_selected.get(), new)
+        {
+            self.auto_select(to);
         }
     }
 
@@ -1507,7 +1521,26 @@ impl Table {
     pub fn select_current(&self) {
         if self.table.selectedRow() < 0 {
             let playing = self.controller.ivars().current.borrow().first().copied();
-            self.select(playing.unwrap_or(0));
+            self.auto_select(playing.unwrap_or(0));
+        }
+    }
+
+    /// Selects the first playing row, if there is one and no row is selected: rows that arrive
+    /// after the page opened.
+    pub fn select_playing(&self) {
+        let playing = self.controller.ivars().current.borrow().first().copied();
+        if let Some(row) = playing
+            && self.table.selectedRow() < 0
+        {
+            self.auto_select(row);
+        }
+    }
+
+    /// Selects `row` as the table's own choice, not the user's.
+    fn auto_select(&self, row: usize) {
+        self.select(row);
+        if self.selected_row() == Some(row) {
+            self.auto_selected.set(Some(row));
         }
     }
 

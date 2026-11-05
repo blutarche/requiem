@@ -99,6 +99,21 @@ pub fn lists_album(kind: CollectionKind) -> bool {
     kind != CollectionKind::Album
 }
 
+/// Where a table's selection goes when its playing marker moves to row `new`: there, if the
+/// selection `sel` sat on the row `old` the marker left or on the row `auto` that opening or
+/// following selected, and so was not moved by the user. A stopped player (`new` is none) and
+/// a table with nothing selected leave things as they are.
+pub fn follow_target(
+    sel: Option<usize>,
+    old: Option<usize>,
+    auto: Option<usize>,
+    new: Option<usize>,
+) -> Option<usize> {
+    let sel = sel?;
+    let new = new?;
+    (Some(sel) == old || Some(sel) == auto).then_some(new)
+}
+
 /// A row's number in an album's list.
 pub fn track_number(row: usize) -> String {
     (row + 1).to_string()
@@ -214,6 +229,33 @@ pub fn unix_now() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_selection_follows_the_marker_it_sat_on() {
+        assert_eq!(follow_target(Some(2), Some(2), None, Some(5)), Some(5));
+    }
+
+    #[test]
+    fn the_selection_follows_when_the_table_selected_it() {
+        assert_eq!(follow_target(Some(0), None, Some(0), Some(5)), Some(5));
+        assert_eq!(follow_target(Some(3), Some(1), Some(3), Some(5)), Some(5));
+    }
+
+    #[test]
+    fn a_selection_the_user_moved_stays() {
+        assert_eq!(follow_target(Some(4), Some(2), Some(2), Some(5)), None);
+        assert_eq!(follow_target(Some(4), None, None, Some(5)), None);
+    }
+
+    #[test]
+    fn a_stopped_player_leaves_the_selection() {
+        assert_eq!(follow_target(Some(2), Some(2), Some(2), None), None);
+    }
+
+    #[test]
+    fn nothing_selected_stays_so() {
+        assert_eq!(follow_target(None, Some(2), Some(2), Some(5)), None);
+    }
 
     #[test]
     fn back_from_settings_skips_a_collection_that_would_come_back() {

@@ -60,6 +60,8 @@ const BAR_FLOOR: f64 = 0.35;
 const BAR_PERIODS: [f64; 4] = [1.7, 1.3, 2.1, 1.5];
 const BAR_PHASES: [f64; 4] = [0.0, 1.9, 3.7, 5.1];
 const FRAME_INTERVAL: f64 = 0.1;
+/// How far a frame may slip, in seconds, so macOS can batch the timer's wakeups.
+const FRAME_TOLERANCE: f64 = 0.05;
 /// Opacity of the bars while paused.
 const PAUSED_ALPHA: f64 = 0.45;
 
@@ -335,6 +337,7 @@ impl StatusMenu {
         // SAFETY: the timer runs on the main run loop, the thread the block was made on.
         let timer =
             unsafe { NSTimer::timerWithTimeInterval_repeats_block(FRAME_INTERVAL, true, &tick) };
+        timer.setTolerance(FRAME_TOLERANCE);
         // SAFETY: `NSRunLoopCommonModes` is a valid mode; it keeps the timer firing while the
         // menu tracks events.
         unsafe { NSRunLoop::mainRunLoop().addTimer_forMode(&timer, NSRunLoopCommonModes) };

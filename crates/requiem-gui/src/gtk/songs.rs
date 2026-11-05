@@ -13,7 +13,7 @@ use super::icons::{self, Icon};
 use super::theme;
 use super::ui;
 use super::widgets::{self, Columns, attach, attached};
-use crate::view::{RowText, track_number};
+use crate::view::{RowText, follow_target, track_number};
 use crate::vm::{self, GoToArtist, Intent, List, Place, QueueEdit};
 
 pub const ROW_H: i32 = 36;
@@ -76,6 +76,10 @@ struct State {
     /// The rows marked as playing: the queue's current row, or each row that lists the
     /// playing track.
     current: RefCell<Vec<usize>>,
+    /// The row the table last selected itself, to open on the playing track or to follow it;
+    /// the playing marker takes the selection along only while it sits on this row or the one
+    /// the marker left.
+    auto_selected: Cell<Option<usize>>,
     numbered: Cell<bool>,
     album: Cell<bool>,
     enabled: Cell<bool>,
@@ -109,6 +113,7 @@ impl Songs {
         let state = Rc::new(State {
             kind,
             current: RefCell::new(Vec::new()),
+            auto_selected: Cell::new(None),
             numbered: Cell::new(false),
             album: Cell::new(true),
             enabled: Cell::new(true),
@@ -195,6 +200,7 @@ impl Songs {
     /// others.
     pub fn set_rows(&self, rows: Vec<RowText>, current: impl IntoIterator<Item = usize>) {
         *self.state.current.borrow_mut() = current.into_iter().collect();
+        self.state.auto_selected.set(None);
         let items: Vec<glib::Object> = rows
             .into_iter()
             .enumerate()
@@ -204,15 +210,35 @@ impl Songs {
         self.store.splice(0, n, &items);
     }
 
-    /// Moves the playing marker to `current` without replacing the rows, so the selection and
-    /// the scroll position stay.
+    /// Moves the playing marker to `current` without replacing the rows, so the scroll
+    /// position stays. The selection stays too, unless it sat on the playing row, which it
+    /// follows.
     pub fn set_current(&self, current: Vec<usize>) {
+        let new = current.first().copied();
         let was = self.state.current.replace(current.clone());
+        let old = was.first().copied();
         let n = self.store.n_items();
         for row in was.iter().chain(&current).copied() {
             if was.contains(&row) != current.contains(&row) && (row as u32) < n {
                 self.store.items_changed(row as u32, 1, 1);
             }
+        }
+        if self.state.kind != Kind::Queue
+            && let Some(to) = follow_target(
+                self.selected_row(),
+                old,
+                self.state.auto_selected.get(),
+                new,
+            )
+            && to < self.len()
+        {
+            // The keyboard follows only if it is in the table already.
+            if self.focused() {
+                self.select(to);
+            } else {
+                self.selection.set_selected(to as u32);
+            }
+            self.state.auto_selected.set(Some(to));
         }
     }
 
@@ -276,8 +302,27 @@ impl Songs {
             Some(i) => self.focus_row(i),
             None => {
                 let playing = self.state.current.borrow().first().copied();
-                self.select(playing.unwrap_or(0));
+                self.auto_select(playing.unwrap_or(0));
             }
+        }
+    }
+
+    /// Selects the first playing row, if there is one and no row is selected: rows that arrive
+    /// after the page opened.
+    pub fn select_playing(&self) {
+        let playing = self.state.current.borrow().first().copied();
+        if let Some(row) = playing
+            && self.selected_row().is_none()
+        {
+            self.auto_select(row);
+        }
+    }
+
+    /// Selects `row` as the table's own choice, not the user's.
+    fn auto_select(&self, row: usize) {
+        self.select(row);
+        if self.selected_row() == Some(row) {
+            self.state.auto_selected.set(Some(row));
         }
     }
 
