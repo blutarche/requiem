@@ -41,6 +41,7 @@ objc2-quartz-core = { version = "0.3.2", default-features = false, features = [
 ] }
 objc2-foundation = { workspace = true, features = [
     "std",
+    "block2",
     "NSArray",
     "NSBundle",
     "NSData",
@@ -52,7 +53,9 @@ objc2-foundation = { workspace = true, features = [
     "NSNotification",
     "NSObjCRuntime",
     "NSObject",
+    "NSRunLoop",
     "NSString",
+    "NSTimer",
     "NSValue",
 ] }
 objc2-app-kit = { workspace = true, features = [
