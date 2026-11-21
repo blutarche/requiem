@@ -432,9 +432,23 @@ fn artist_releases(root: &Value, artist: &str) -> ArtistReleases {
     let mut found = ArtistReleases::default();
     let mut discographies = 0;
     for carousel in carousels {
+        let cards = || {
+            carousel
+                .get("contents")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter_map(|entry| entry.get("musicTwoRowItemRenderer"))
+        };
+        // A small artist's Albums and Singles & EPs link nowhere, as "Featured on" does; their
+        // album cards tell them apart.
+        let releases = match carousel_link(carousel) {
+            Some(l) => link_page_type(l) == Some(DISCOGRAPHY_PAGE),
+            None => !collections_of(cards(), CollectionKind::Album, artist).is_empty(),
+        };
         let link = carousel_link(carousel);
         let (kind, into) = match link {
-            Some(l) if link_page_type(l) == Some(DISCOGRAPHY_PAGE) => {
+            _ if releases => {
                 discographies += 1;
                 let into = if discographies == 1 {
                     &mut found.albums
@@ -446,13 +460,7 @@ fn artist_releases(root: &Value, artist: &str) -> ArtistReleases {
             None => (CollectionKind::Playlist, &mut found.playlists),
             Some(_) => continue,
         };
-        let cards = carousel
-            .get("contents")
-            .and_then(Value::as_array)
-            .into_iter()
-            .flatten()
-            .filter_map(|entry| entry.get("musicTwoRowItemRenderer"));
-        into.extend(collections_of(cards, kind, artist));
+        into.extend(collections_of(cards(), kind, artist));
     }
     found
 }
@@ -1294,6 +1302,20 @@ mod tests {
                 .playlists
                 .iter()
                 .all(|p| p.kind == CollectionKind::Playlist)
+        );
+    }
+
+    #[test]
+    fn a_small_artists_unlinked_releases_still_list_as_albums_and_singles() {
+        let body = include_str!("../../tests/fixtures/browse_artist_unlinked.json");
+        let shelves = parse_artist_page(body.as_bytes()).unwrap();
+        let summary: Vec<(&str, usize)> = shelves
+            .iter()
+            .map(|s| (s.title.as_str(), s.items.len()))
+            .collect();
+        assert_eq!(
+            summary,
+            [("Top songs", 5), ("Albums", 3), ("Singles & EPs", 2)]
         );
     }
 
