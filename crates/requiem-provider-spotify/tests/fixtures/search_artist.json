@@ -1,0 +1,629 @@
+{
+ "data": {
+  "searchV2": {
+   "albums": {
+    "totalCount": 168,
+    "items": [
+     {
+      "data": {
+       "__typename": "Album",
+       "uri": "spotify:album:6uSg0duv6MyOjNrfyEfyjZ",
+       "name": "III: Lost Chapter",
+       "artists": {
+        "items": [
+         {
+          "uri": "spotify:artist:2qcGTB5s2t9o2w9SrI719s",
+          "profile": {
+           "name": "Pentakill"
+          }
+         }
+        ]
+       },
+       "coverArt": {
+        "sources": [
+         {
+          "url": "https://i.scdn.co/image/ab67616d00001e02fad44bd9b8db05fb92268804",
+          "width": 300,
+          "height": 300
+         },
+         {
+          "url": "https://i.scdn.co/image/ab67616d00004851fad44bd9b8db05fb92268804",
+          "width": 64,
+          "height": 64
+         },
+         {
+          "url": "https://i.scdn.co/image/ab67616d0000b273fad44bd9b8db05fb92268804",
+          "width": 640,
+          "height": 640
+         }
+        ]
+       },
+       "date": {
+        "year": 2021
+       }
+      }
+     },
+     {
+      "data": {
+       "__typename": "Album",
+       "uri": "spotify:album:6O2cCVLTmfSBJwvcMmka1X",
+       "name": "Smite and Ignite",
+       "artists": {
+        "items": [
+         {
+          "uri": "spotify:artist:2qcGTB5s2t9o2w9SrI719s",
+          "profile": {
+           "name": "Pentakill"
+          }
+         }
+        ]
+       },
+       "coverArt": {
+        "sources": [
+         {
+          "url": "https://i.scdn.co/image/ab67616d00001e020fbf1fffa552125a8da9cea7",
+          "width": 300,
+          "height": 300
+         },
+         {
+          "url": "https://i.scdn.co/image/ab67616d000048510fbf1fffa552125a8da9cea7",
+          "width": 64,
+          "height": 64
+         },
+         {
+          "url": "https://i.scdn.co/image/ab67616d0000b2730fbf1fffa552125a8da9cea7",
+          "width": 640,
+          "height": 640
+         }
+        ]
+       },
+       "date": {
+        "year": 2014
+       }
+      }
+     },
+     {
+      "data": {
+       "__typename": "Album",
+       "uri": "spotify:album:5kQZiIJ1NOBNyU57V6d2RL",
+       "name": "II: Grasp of the Undying",
+       "artists": {
+        "items": [
+         {
+          "uri": "spotify:artist:2qcGTB5s2t9o2w9SrI719s",
+          "profile": {
+           "name": "Pentakill"
+          }
+         },
+         {
+          "uri": "spotify:artist:5SaDyTQkjAAdrsmhPzrmw2",
+          "profile": {
+           "name": "Jorn"
+          }
+         }
+        ]
+       },
+       "coverArt": {
+        "sources": [
+         {
+          "url": "https://i.scdn.co/image/ab67616d00001e0278fd95c3aabcadd34d4ffe21",
+          "width": 300,
+          "height": 300
+         },
+         {
+          "url": "https://i.scdn.co/image/ab67616d0000485178fd95c3aabcadd34d4ffe21",
+          "width": 64,
+          "height": 64
+         },
+         {
+          "url": "https://i.scdn.co/image/ab67616d0000b27378fd95c3aabcadd34d4ffe21",
+          "width": 640,
+          "height": 640
+         }
+        ]
+       },
+       "date": {
+        "year": 2017
+       }
+      }
+     },
+     {
+      "data": {
+       "__typename": "Album",
+       "uri": "spotify:album:2tDEHN74AFwiWwgvrfdYeO",
+       "name": "Pentakill",
+       "artists": {
+        "items": [
+         {
+          "uri": "spotify:artist:0pCGA9tdtbWwo1pKIs0CFx",
+          "profile": {
+           "name": "Different Heaven"
+          }
+         },
+         {
+          "uri": "spotify:artist:6QP0cAD9pBaOCVMsaygV0z",
+          "profile": {
+           "name": "ReesaLunn"
+          }
+         }
+        ]
+       },
+       "coverArt": {
+        "sources": [
+         {
+          "url": "https://i.scdn.co/image/ab67616d00001e028e276caa01f863f72d993645",
+          "width": 300,
+          "height": 300
+         },
+         {
+          "url": "https://i.scdn.co/image/ab67616d000048518e276caa01f863f72d993645",
+          "width": 64,
+          "height": 64
+         },
+         {
+          "url": "https://i.scdn.co/image/ab67616d0000b2738e276caa01f863f72d993645",
+          "width": 640,
+          "height": 640
+         }
+        ]
+       },
+       "date": {
+        "year": 2014
+       }
+      }
+     },
+     {
+      "data": {
+       "__typename": "Album",
+       "uri": "spotify:album:63lvFInmmRuiisUHxNfJKO",
+       "name": "PENTAKILL",
+       "artists": {
+        "items": [
+         {
+          "uri": "spotify:artist:258O12vApWppL528cs0gQf",
+          "profile": {
+           "name": "KyozeH"
+          }
+         },
+         {
+          "uri": "spotify:artist:2PtvkW4yAtLBL516oUDKIb",
+          "profile": {
+           "name": "NIXXY"
+          }
+         }
+        ]
+       },
+       "coverArt": {
+        "sources": [
+         {
+          "url": "https://i.scdn.co/image/ab67616d00001e0270b8c391926ac059cc972397",
+          "width": 300,
+          "height": 300
+         },
+         {
+          "url": "https://i.scdn.co/image/ab67616d0000485170b8c391926ac059cc972397",
+          "width": 64,
+          "height": 64
+         },
+         {
+          "url": "https://i.scdn.co/image/ab67616d0000b27370b8c391926ac059cc972397",
+          "width": 640,
+          "height": 640
+         }
+        ]
+       },
+       "date": {
+        "year": 2026
+       }
+      }
+     }
+    ]
+   },
+   "artists": {
+    "totalCount": 103,
+    "items": [
+     {
+      "data": {
+       "__typename": "Artist",
+       "uri": "spotify:artist:2qcGTB5s2t9o2w9SrI719s",
+       "profile": {
+        "name": "Pentakill"
+       },
+       "visuals": {
+        "avatarImage": {
+         "sources": [
+          {
+           "url": "https://i.scdn.co/image/ab6761610000e5ebd20cdeefce618685212cb98f",
+           "width": 640,
+           "height": 640
+          },
+          {
+           "url": "https://i.scdn.co/image/ab6761610000f178d20cdeefce618685212cb98f",
+           "width": 160,
+           "height": 160
+          },
+          {
+           "url": "https://i.scdn.co/image/ab67616100005174d20cdeefce618685212cb98f",
+           "width": 320,
+           "height": 320
+          }
+         ]
+        }
+       }
+      }
+     },
+     {
+      "data": {
+       "__typename": "Artist",
+       "uri": "spotify:artist:4gOc8TsQed9eqnqJct2c5v",
+       "profile": {
+        "name": "K/DA"
+       },
+       "visuals": {
+        "avatarImage": {
+         "sources": [
+          {
+           "url": "https://i.scdn.co/image/ab6761610000e5eb9aff567ffc367b9851e272f9",
+           "width": 640,
+           "height": 640
+          },
+          {
+           "url": "https://i.scdn.co/image/ab6761610000f1789aff567ffc367b9851e272f9",
+           "width": 160,
+           "height": 160
+          },
+          {
+           "url": "https://i.scdn.co/image/ab676161000051749aff567ffc367b9851e272f9",
+           "width": 320,
+           "height": 320
+          }
+         ]
+        }
+       }
+      }
+     },
+     {
+      "data": {
+       "__typename": "Artist",
+       "uri": "spotify:artist:073BDqlrtkYMkxM5ngwgq5",
+       "profile": {
+        "name": "Pentakill"
+       },
+       "visuals": {
+        "avatarImage": null
+       }
+      }
+     },
+     {
+      "data": {
+       "__typename": "Artist",
+       "uri": "spotify:artist:2HeUpcpduOQFZYVz3ul3Cr",
+       "profile": {
+        "name": "劉潘潘Pentakill"
+       },
+       "visuals": {
+        "avatarImage": {
+         "sources": [
+          {
+           "url": "https://i.scdn.co/image/ab67616d0000b273e1afec835b6dea2935ecd78c",
+           "width": 640,
+           "height": 640
+          },
+          {
+           "url": "https://i.scdn.co/image/ab67616d00004851e1afec835b6dea2935ecd78c",
+           "width": 64,
+           "height": 64
+          },
+          {
+           "url": "https://i.scdn.co/image/ab67616d00001e02e1afec835b6dea2935ecd78c",
+           "width": 300,
+           "height": 300
+          }
+         ]
+        }
+       }
+      }
+     },
+     {
+      "data": {
+       "__typename": "Artist",
+       "uri": "spotify:artist:0GsileCtd1UjaVh4OpW7Qv",
+       "profile": {
+        "name": "Big Ass"
+       },
+       "visuals": {
+        "avatarImage": {
+         "sources": [
+          {
+           "url": "https://i.scdn.co/image/ab6761610000e5eb5280b964a9bc960525efa4c0",
+           "width": 640,
+           "height": 640
+          },
+          {
+           "url": "https://i.scdn.co/image/ab6761610000f1785280b964a9bc960525efa4c0",
+           "width": 160,
+           "height": 160
+          },
+          {
+           "url": "https://i.scdn.co/image/ab676161000051745280b964a9bc960525efa4c0",
+           "width": 320,
+           "height": 320
+          }
+         ]
+        }
+       }
+      }
+     }
+    ]
+   },
+   "playlists": {
+    "totalCount": 200,
+    "items": [
+     {
+      "data": {
+       "__typename": "Playlist",
+       "uri": "spotify:playlist:37i9dQZF1DZ06evO1nTTY4",
+       "name": "This Is Pentakill",
+       "images": {
+        "items": [
+         {
+          "sources": [
+           {
+            "url": "https://pickasso.spotifycdn.com/image/ab67c0de0000deef/dt/v1/img/thisisv3/2qcGTB5s2t9o2w9SrI719s/en",
+            "width": null,
+            "height": null
+           }
+          ]
+         }
+        ]
+       },
+       "ownerV2": {
+        "data": {
+         "__typename": "User",
+         "name": "Spotify"
+        }
+       }
+      }
+     },
+     {
+      "data": {
+       "__typename": "Playlist",
+       "uri": "spotify:playlist:2b60MCm2a2mz0lvsiLpVWX",
+       "name": "Pentakill all Songs",
+       "images": {
+        "items": [
+         {
+          "sources": [
+           {
+            "url": "https://i.scdn.co/image/ab67616d00001e020fbf1fffa552125a8da9cea7",
+            "width": null,
+            "height": null
+           }
+          ]
+         }
+        ]
+       },
+       "ownerV2": {
+        "data": {
+         "__typename": "User",
+         "name": "Listener"
+        }
+       }
+      }
+     },
+     {
+      "data": {
+       "__typename": "Playlist",
+       "uri": "spotify:playlist:4wrjRiuQdr4DdxoSANR4GY",
+       "name": "Pentakill",
+       "images": {
+        "items": [
+         {
+          "sources": [
+           {
+            "url": "https://image-cdn-ak.spotifycdn.com/image/ab67706c0000da84ed2e38675aa185a0762aa261",
+            "width": null,
+            "height": null
+           }
+          ]
+         }
+        ]
+       },
+       "ownerV2": {
+        "data": {
+         "__typename": "User",
+         "name": "Listener"
+        }
+       }
+      }
+     },
+     {
+      "data": {
+       "__typename": "Playlist",
+       "uri": "spotify:playlist:3INPg0mTYm6mkSkFJ8tfbl",
+       "name": "Pentakill",
+       "images": {
+        "items": [
+         {
+          "sources": [
+           {
+            "url": "https://mosaic.scdn.co/640/ab67616d00001e0276c60d2128c8e4649b85f2b2ab67616d00001e0278fd95c3aabcadd34d4ffe21ab67616d00001e02c1a13209dfe146aef3296e34ab67616d00001e02fad44bd9b8db05fb92268804",
+            "width": 640,
+            "height": 640
+           },
+           {
+            "url": "https://mosaic.scdn.co/300/ab67616d00001e0276c60d2128c8e4649b85f2b2ab67616d00001e0278fd95c3aabcadd34d4ffe21ab67616d00001e02c1a13209dfe146aef3296e34ab67616d00001e02fad44bd9b8db05fb92268804",
+            "width": 300,
+            "height": 300
+           },
+           {
+            "url": "https://mosaic.scdn.co/60/ab67616d00001e0276c60d2128c8e4649b85f2b2ab67616d00001e0278fd95c3aabcadd34d4ffe21ab67616d00001e02c1a13209dfe146aef3296e34ab67616d00001e02fad44bd9b8db05fb92268804",
+            "width": 60,
+            "height": 60
+           }
+          ]
+         }
+        ]
+       },
+       "ownerV2": {
+        "data": {
+         "__typename": "User",
+         "name": "Listener"
+        }
+       }
+      }
+     },
+     {
+      "data": {
+       "__typename": "Playlist",
+       "uri": "spotify:playlist:6DE44EphOQYbNAwdUvFP2v",
+       "name": "KDA, True Damage, and Heartsteel ⭐️",
+       "images": {
+        "items": [
+         {
+          "sources": [
+           {
+            "url": "https://image-cdn-ak.spotifycdn.com/image/ab67706c0000da84bef2f93c0ac4724f53ea426a",
+            "width": null,
+            "height": null
+           }
+          ]
+         }
+        ]
+       },
+       "ownerV2": {
+        "data": {
+         "__typename": "User",
+         "name": "Listener"
+        }
+       }
+      }
+     }
+    ]
+   },
+   "topResults": {
+    "itemsV2": [
+     {
+      "item": {
+       "data": {
+        "__typename": "Artist",
+        "uri": "spotify:artist:2qcGTB5s2t9o2w9SrI719s",
+        "profile": {
+         "name": "Pentakill"
+        },
+        "visuals": {
+         "avatarImage": {
+          "sources": [
+           {
+            "url": "https://i.scdn.co/image/ab6761610000e5ebd20cdeefce618685212cb98f",
+            "width": 640,
+            "height": 640
+           },
+           {
+            "url": "https://i.scdn.co/image/ab6761610000f178d20cdeefce618685212cb98f",
+            "width": 160,
+            "height": 160
+           },
+           {
+            "url": "https://i.scdn.co/image/ab67616100005174d20cdeefce618685212cb98f",
+            "width": 320,
+            "height": 320
+           }
+          ]
+         }
+        }
+       }
+      }
+     },
+     {
+      "item": {
+       "data": {
+        "__typename": "Playlist",
+        "uri": "spotify:playlist:37i9dQZF1DZ06evO1nTTY4",
+        "name": "This Is Pentakill",
+        "images": {
+         "items": [
+          {
+           "sources": [
+            {
+             "url": "https://pickasso.spotifycdn.com/image/ab67c0de0000deef/dt/v1/img/thisisv3/2qcGTB5s2t9o2w9SrI719s/en",
+             "width": null,
+             "height": null
+            }
+           ]
+          }
+         ]
+        },
+        "ownerV2": {
+         "data": {
+          "__typename": "User",
+          "name": "Spotify"
+         }
+        }
+       }
+      }
+     },
+     {
+      "item": {
+       "data": {
+        "__typename": "Track",
+        "uri": "spotify:track:3XbO8GaXekuwBWVCzH8xqq",
+        "name": "Lightbringer"
+       }
+      }
+     },
+     {
+      "item": {
+       "data": {
+        "__typename": "Album",
+        "uri": "spotify:album:6uSg0duv6MyOjNrfyEfyjZ",
+        "name": "III: Lost Chapter",
+        "artists": {
+         "items": [
+          {
+           "uri": "spotify:artist:2qcGTB5s2t9o2w9SrI719s",
+           "profile": {
+            "name": "Pentakill"
+           }
+          }
+         ]
+        },
+        "coverArt": {
+         "sources": [
+          {
+           "url": "https://i.scdn.co/image/ab67616d00001e02fad44bd9b8db05fb92268804",
+           "width": 300,
+           "height": 300
+          },
+          {
+           "url": "https://i.scdn.co/image/ab67616d00004851fad44bd9b8db05fb92268804",
+           "width": 64,
+           "height": 64
+          },
+          {
+           "url": "https://i.scdn.co/image/ab67616d0000b273fad44bd9b8db05fb92268804",
+           "width": 640,
+           "height": 640
+          }
+         ]
+        },
+        "date": {
+         "year": 2021
+        }
+       }
+      }
+     },
+     {
+      "item": {
+       "data": {
+        "__typename": "Track",
+        "uri": "spotify:track:54qasQPZbBTQcN5gic7E6U",
+        "name": "Mortal Reminder"
+       }
+      }
+     }
+    ]
+   }
+  }
+ }
+}

@@ -20,6 +20,8 @@ protobuf.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread", "sync", "time", "macros"] }
 futures-util = { workspace = true, features = ["alloc"] }
 log.workspace = true
+http.workspace = true
+bytes.workspace = true
 
 [dev-dependencies]
 symphonia.workspace = true
