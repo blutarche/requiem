@@ -600,10 +600,12 @@ impl Shelves {
         let adj = root.vadjustment();
         let watch = {
             let sections = Rc::downgrade(&sections);
-            let scroll = root.downgrade();
+            let (scroll, content) = (root.downgrade(), content.downgrade());
             move || {
-                if let (Some(s), Some(scroll)) = (sections.upgrade(), scroll.upgrade()) {
-                    mark_near(&s.borrow(), &scroll);
+                if let (Some(s), Some(scroll), Some(content)) =
+                    (sections.upgrade(), scroll.upgrade(), content.upgrade())
+                {
+                    mark_near(&s.borrow(), &scroll, &content);
                 }
             }
         };
@@ -674,10 +676,12 @@ impl Shelves {
             None => adj.set_value(0.0),
         }
         let sections = Rc::downgrade(&self.sections);
-        let scroll = self.root.downgrade();
+        let (scroll, content) = (self.root.downgrade(), self.content.downgrade());
         theme::later(move || {
-            if let (Some(s), Some(scroll)) = (sections.upgrade(), scroll.upgrade()) {
-                mark_near(&s.borrow(), &scroll);
+            if let (Some(s), Some(scroll), Some(content)) =
+                (sections.upgrade(), scroll.upgrade(), content.upgrade())
+            {
+                mark_near(&s.borrow(), &scroll, &content);
             }
         });
         // Before the first allocation nothing is placed yet; strips start near.
@@ -752,14 +756,13 @@ impl Shelves {
 }
 
 /// Marks the strips within a screen of the visible part of `scroll` near, and the rest not.
-fn mark_near(sections: &[Section], scroll: &gtk::ScrolledWindow) {
+/// Spans are measured in `content`, the box `scroll` shows: the viewport around it moves it
+/// by the scroll, and only after this runs.
+fn mark_near(sections: &[Section], scroll: &gtk::ScrolledWindow, content: &gtk::Box) {
     let adj = scroll.vadjustment();
     let (top, page) = (adj.value(), adj.page_size().max(1.0));
-    let Some(content) = scroll.child() else {
-        return;
-    };
     for s in sections {
-        let near = match widgets::span_in(&s.strip, &content) {
+        let near = match widgets::span_in(&s.strip, content) {
             Some((y, h)) => y + h >= top - page && y <= top + 2.0 * page,
             None => true,
         };
