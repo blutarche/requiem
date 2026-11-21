@@ -212,6 +212,8 @@ pub enum Intent {
     },
     /// Back from a collection opened off another collection's page: that page again, as it was.
     CollectionBack,
+    /// An artist's page's Show all songs / Show less: lists every song, or the first few again.
+    ToggleSongs,
     /// Fetches the current page again, if it is a browse page.
     Refresh,
     /// Starts a sign-in; for a provider that signs in with a browser session, opens its form.
@@ -313,11 +315,43 @@ pub struct CollectionPage {
     pub browse: Browse,
     /// The tracks of the shelves, which the page lists: an artist's top songs.
     pub tracks: Vec<Track>,
+    /// Whether an artist's page lists all its songs rather than the first
+    /// `ARTIST_SONGS_SHOWN`. Kept as the page's rows are refreshed; a page opened anew starts
+    /// collapsed.
+    pub songs_expanded: bool,
     /// The collection's page it was opened from, when `from` is `Place::Collection`.
     pub previous: Option<Box<CollectionPage>>,
 }
 
+/// How many of an artist's songs its page lists before Show all.
+pub const ARTIST_SONGS_SHOWN: usize = 10;
+
 impl CollectionPage {
+    /// The tracks the page's table lists: all of them, but for an artist's collapsed songs.
+    /// Play and Add act on `tracks`, whatever this lists.
+    pub fn listed(&self) -> &[Track] {
+        let all = &self.tracks;
+        if self.collection.kind == CollectionKind::Artist && !self.songs_expanded {
+            &all[..all.len().min(ARTIST_SONGS_SHOWN)]
+        } else {
+            all
+        }
+    }
+
+    /// The text of the button that expands or collapses an artist's songs; none when they
+    /// all fit.
+    pub fn songs_toggle(&self) -> Option<String> {
+        let n = self.tracks.len();
+        if self.collection.kind != CollectionKind::Artist || n <= ARTIST_SONGS_SHOWN {
+            return None;
+        }
+        Some(if self.songs_expanded {
+            "Show less".to_owned()
+        } else {
+            format!("Show all {n} songs")
+        })
+    }
+
     /// Where the first of the collections Back runs through was opened from.
     pub fn origin(&self) -> Place {
         let mut page = self;
@@ -974,7 +1008,7 @@ impl UiState {
 
     /// The rows of the open collection's table that are the playing track.
     pub fn collection_playing(&self) -> Vec<usize> {
-        let tracks = self.collection.as_ref().map(|c| c.tracks.as_slice());
+        let tracks = self.collection.as_ref().map(CollectionPage::listed);
         playing_rows(tracks.unwrap_or_default(), self.now_playing.as_ref())
     }
 
@@ -2137,12 +2171,22 @@ impl Vm {
                     from,
                     browse: Browse::default(),
                     tracks: Vec::new(),
+                    songs_expanded: false,
                     previous,
                 });
                 self.pending_browse[Slot::Collection as usize] = None;
                 self.dirty |= Dirty::COLLECTION;
                 self.ui.place = Place::Collection;
                 self.fetch_place()
+            }
+            Intent::ToggleSongs => {
+                if let Some(page) = &mut self.ui.collection
+                    && page.songs_toggle().is_some()
+                {
+                    page.songs_expanded = !page.songs_expanded;
+                    self.dirty |= Dirty::COLLECTION;
+                }
+                Vec::new()
             }
             Intent::CollectionBack => {
                 let Some(previous) = self.ui.collection.as_mut().and_then(|c| c.previous.take())
@@ -7222,6 +7266,137 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    /// Opens artist `id`'s page from a search and lands it with `songs` top songs; returns the
+    /// req of its fetch.
+    fn open_artist(vm: &mut Vm, id: &str, songs: usize) -> u64 {
+        let cmds = browses(&vm.intent(Intent::OpenCollection {
+            collection: artist(id),
+            from: Place::Search,
+        }));
+        let [(req, page)] = cmds.as_slice() else {
+            panic!("expected the artist's fetch, got {cmds:?}");
+        };
+        vm.apply(results(*req, page.clone(), artist_page(songs)));
+        *req
+    }
+
+    fn listed_ids(vm: &Vm) -> Vec<String> {
+        let page = vm.ui().collection.as_ref().expect("an open page");
+        ids(page.listed()).into_iter().map(str::to_owned).collect()
+    }
+
+    fn toggle(vm: &Vm) -> Option<String> {
+        vm.ui().collection.as_ref().and_then(|c| c.songs_toggle())
+    }
+
+    #[test]
+    fn an_artist_page_lists_its_first_songs_and_expands_to_all_of_them() {
+        let (mut vm, _) = found_artists(&["ar0"], true);
+        open_artist(&mut vm, "ar0", 25);
+        assert_eq!(listed_ids(&vm).len(), ARTIST_SONGS_SHOWN);
+        assert_eq!(listed_ids(&vm)[9], "top9");
+        assert_eq!(toggle(&vm).as_deref(), Some("Show all 25 songs"));
+
+        vm.take_dirty();
+        assert!(vm.intent(Intent::ToggleSongs).is_empty());
+        assert!(vm.take_dirty().contains(Dirty::COLLECTION));
+        assert_eq!(listed_ids(&vm).len(), 25);
+        assert_eq!(toggle(&vm).as_deref(), Some("Show less"));
+
+        vm.intent(Intent::ToggleSongs);
+        assert_eq!(listed_ids(&vm).len(), ARTIST_SONGS_SHOWN);
+        assert_eq!(toggle(&vm).as_deref(), Some("Show all 25 songs"));
+    }
+
+    #[test]
+    fn an_artist_page_of_ten_songs_or_fewer_has_no_button() {
+        let (mut vm, _) = found_artists(&["ar0"], true);
+        open_artist(&mut vm, "ar0", ARTIST_SONGS_SHOWN);
+        assert_eq!(toggle(&vm), None);
+        assert_eq!(listed_ids(&vm).len(), ARTIST_SONGS_SHOWN);
+        vm.take_dirty();
+        vm.intent(Intent::ToggleSongs);
+        assert!(!vm.take_dirty().contains(Dirty::COLLECTION));
+        assert_eq!(listed_ids(&vm).len(), ARTIST_SONGS_SHOWN);
+    }
+
+    #[test]
+    fn expanded_songs_survive_a_refresh_and_collapse_for_another_artist() {
+        let (mut vm, _) = found_artists(&["ar0", "ar1"], true);
+        open_artist(&mut vm, "ar0", 25);
+        vm.intent(Intent::ToggleSongs);
+        let page = Page::Collection(artist("ar0").id);
+        let refresh = |vm: &mut Vm, songs| {
+            let req = browses(&vm.intent(Intent::Refresh))[0].0;
+            vm.apply(results(req, page.clone(), artist_page(songs)));
+        };
+        // The page pushed again with more rows keeps its state, and the button's count follows.
+        refresh(&mut vm, 30);
+        assert_eq!(listed_ids(&vm).len(), 30);
+        assert_eq!(toggle(&vm).as_deref(), Some("Show less"));
+        vm.intent(Intent::ToggleSongs);
+        refresh(&mut vm, 40);
+        assert_eq!(listed_ids(&vm).len(), ARTIST_SONGS_SHOWN);
+        assert_eq!(toggle(&vm).as_deref(), Some("Show all 40 songs"));
+
+        vm.intent(Intent::ToggleSongs);
+        open_artist(&mut vm, "ar1", 25);
+        assert_eq!(listed_ids(&vm).len(), ARTIST_SONGS_SHOWN);
+        assert_eq!(toggle(&vm).as_deref(), Some("Show all 25 songs"));
+    }
+
+    #[test]
+    fn playing_from_a_collapsed_artist_page_queues_every_song() {
+        let (mut vm, _) = found_artists(&["ar0"], true);
+        open_artist(&mut vm, "ar0", 25);
+        let cmds = vm.intent(Intent::PlayFrom {
+            list: List::Collection,
+            from: 3,
+        });
+        let [Command::Enqueue { tracks, .. }, Command::PlayIndex(0)] = &cmds[..] else {
+            panic!("expected a replace and a play, got {cmds:?}");
+        };
+        assert_eq!(tracks.len(), 22);
+        assert_eq!(tracks[0].id.id, "top3");
+        let Command::Enqueue { tracks, .. } = &vm.intent(Intent::AppendAll(List::Collection))[0]
+        else {
+            panic!("expected an enqueue");
+        };
+        assert_eq!(tracks.len(), 25);
+    }
+
+    #[test]
+    fn a_playing_song_on_a_hidden_row_marks_nothing_and_leaves_the_page_collapsed() {
+        let (mut vm, _) = found_artists(&["ar0"], true);
+        open_artist(&mut vm, "ar0", 25);
+        plays(&mut vm, track("top15", 200));
+        assert!(vm.ui().collection_playing().is_empty());
+        assert_eq!(listed_ids(&vm).len(), ARTIST_SONGS_SHOWN);
+        plays(&mut vm, track("top4", 200));
+        assert_eq!(vm.ui().collection_playing(), [4]);
+        vm.intent(Intent::ToggleSongs);
+        plays(&mut vm, track("top15", 200));
+        assert_eq!(vm.ui().collection_playing(), [15]);
+    }
+
+    #[test]
+    fn the_top_result_artist_plays_all_its_songs() {
+        let (mut vm, req) = found_artists(&["ar0"], true);
+        vm.apply(results(
+            req.expect("a fetch"),
+            Page::Collection(artist("ar0").id),
+            artist_page(25),
+        ));
+        let cmds = vm.intent(Intent::PlayFrom {
+            list: List::TopArtist,
+            from: 0,
+        });
+        let [Command::Enqueue { tracks, .. }, Command::PlayIndex(0)] = &cmds[..] else {
+            panic!("expected a replace and a play, got {cmds:?}");
+        };
+        assert_eq!(tracks.len(), 25);
     }
 
     #[test]

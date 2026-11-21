@@ -168,8 +168,10 @@ pub struct Ui {
     table_holder: gtk::Box,
     collection_state: EmptyState,
     artist_shelves: Shelves,
-    /// "Top songs" and the table, above an artist's shelves.
+    /// "Top songs", the table and the button under it, above an artist's shelves.
     artist_lead: gtk::Box,
+    /// Show all songs / Show less, under the table.
+    songs_more: gtk::Button,
     artist_shown: RefCell<Option<CollectionId>>,
 
     now_playing: NowPlayingPage,
@@ -349,6 +351,16 @@ impl Ui {
         let artist_lead = gtk::Box::new(gtk::Orientation::Vertical, 10);
         margins(&artist_lead, PAD, PAD);
         artist_lead.append(&theme::label("Top songs", &["shelf-title"]));
+        let songs_more = gtk::Button::new();
+        songs_more.add_css_class("btn");
+        songs_more.add_css_class("small");
+        songs_more.set_halign(gtk::Align::Start);
+        songs_more.set_focus_on_click(false);
+        songs_more.set_visible(false);
+        songs_more.connect_clicked(|_| {
+            with(|ui| ui.intent(Intent::ToggleSongs));
+        });
+        artist_lead.append(&songs_more);
         let collection_stack = stack();
         collection_stack.add_named(&table_holder, Some("table"));
         collection_stack.add_named(&artist_shelves.root, Some("artist"));
@@ -438,6 +450,7 @@ impl Ui {
             collection_state,
             artist_shelves,
             artist_lead,
+            songs_more,
             artist_shown: RefCell::new(None),
             now_playing,
             now_playing_from: Cell::new(AppView::Home),
@@ -1850,6 +1863,10 @@ impl Ui {
         self.collection_table
             .set_album(lists_album(c.collection.kind));
         self.place_collection_table(shelved && songs > 0, songs);
+        if let Some(text) = &c.songs_toggle {
+            self.songs_more.set_label(text);
+        }
+        self.songs_more.set_visible(c.songs_toggle.is_some());
         self.collection_table.root.set_visible(ready && songs > 0);
         self.collection_table
             .set_rows(if ready { c.rows } else { Vec::new() }, c.playing);
@@ -1888,7 +1905,9 @@ impl Ui {
         if in_lead {
             if parent.as_ref() != Some(self.artist_lead.upcast_ref()) {
                 remove_from_parent(&t.root);
-                self.artist_lead.append(&t.root);
+                // Under the title, above the button.
+                let title = self.artist_lead.first_child();
+                self.artist_lead.insert_child_after(&t.root, title.as_ref());
                 t.scroll.set_vscrollbar_policy(gtk::PolicyType::Never);
             }
             t.root.set_size_request(-1, Songs::height_for(songs));
@@ -2199,6 +2218,8 @@ struct CollectionPatch {
     /// The rows that are the playing track.
     playing: Vec<usize>,
     shelves: Vec<Shelf>,
+    /// The words of the button that lists all of an artist's songs, if it has one.
+    songs_toggle: Option<String>,
 }
 
 struct NowPlaying {
@@ -2311,9 +2332,10 @@ impl Patch {
                     from: c.from,
                     back: c.previous.as_ref().map(|p| p.collection.title.clone()),
                     view: c.browse.view(),
-                    rows: rows(&c.tracks),
+                    rows: rows(c.listed()),
                     playing: s.collection_playing(),
                     shelves: collection_shelves(&c.browse.shelves),
+                    songs_toggle: c.songs_toggle(),
                 })
             }),
             now_playing: d

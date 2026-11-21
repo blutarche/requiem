@@ -713,12 +713,20 @@ pub fn search_artists() -> Vec<Collection> {
         .collect()
 }
 
+/// How many top songs a demo artist has.
+const ARTIST_SONGS: usize = 40;
+
 /// The page of artist `name` on `provider`: its top songs, its albums, its singles and EPs,
 /// and on YouTube Music the playlists it is featured on, in that service's order.
 fn artist_page(name: &str, provider: &ProviderId) -> Vec<Shelf> {
     let mut songs = results();
     songs.sort_by_key(|t| !t.artists.iter().any(|a| a == name));
-    let top = songs.into_iter().take(5).map(|mut t| {
+    // More songs than the page lists at first, so it offers to show them all.
+    let top = (0..ARTIST_SONGS).map(|k| {
+        let mut t = songs[k % songs.len()].clone();
+        if k >= songs.len() {
+            t.id.id = format!("{}-{}", t.id.id, k / songs.len());
+        }
         move_to(&mut t, provider);
         Item::Track(t)
     });
@@ -1142,7 +1150,7 @@ fn run_intent(vm: &mut Vm, daemon: &mut Daemon, intent: Intent) {
 /// opens YouTube Music's session form in Settings; `CollectionPlaying` plays the playlist's
 /// ninth track; `NowPlayingEmpty` stops playback;
 /// `NowPlayingLast` plays the queue's last track; `SearchAlbums`, `SearchSongs` and
-/// `SearchArtists` pick that chip of the results; `Artist` opens the top artist's page;
+/// `SearchArtists` pick that chip of the results; `Artist` opens the top artist's page, `ArtistExpanded` with all its songs listed;
 /// `ArtistSpotify` opens the playing Spotify track's artist from Now Playing; `Album` opens
 /// the first album the search finds. Other views get the plain start.
 pub fn start_in(view: View) -> (Vm, Daemon) {
@@ -1255,12 +1263,15 @@ pub fn start_in(view: View) -> (Vm, Daemon) {
         View::SearchArtists => {
             vm.intent(Intent::SetSearchChip(SearchChip::Artists));
         }
-        View::Artist => {
+        View::Artist | View::ArtistExpanded => {
             let open = Intent::OpenCollection {
                 collection: search_artists().remove(0),
                 from: Place::Search,
             };
             run_intent(&mut vm, &mut daemon, open);
+            if view == View::ArtistExpanded {
+                run_intent(&mut vm, &mut daemon, Intent::ToggleSongs);
+            }
         }
         View::Album => {
             let open = Intent::OpenCollection {
@@ -1476,7 +1487,7 @@ mod tests {
         assert_eq!(page.collection.id.provider, spotify());
         assert_eq!(page.from, Place::NowPlaying);
         assert_eq!(page.browse.load, vm::Load::Done);
-        assert_eq!(page.tracks.len(), 5);
+        assert_eq!(page.tracks.len(), ARTIST_SONGS);
         assert!(page.tracks.iter().all(|t| t.id.provider == spotify()));
     }
 

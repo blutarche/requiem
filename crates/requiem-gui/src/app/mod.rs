@@ -170,6 +170,11 @@ define_class!(
             ui::with(|ui| ui.refresh());
         }
 
+        #[unsafe(method(toggleSongs:))]
+        fn toggle_songs(&self, _sender: Option<&AnyObject>) {
+            ui::with(|ui| ui.intent(Intent::ToggleSongs));
+        }
+
         #[unsafe(method(goBack:))]
         fn go_back(&self, _sender: Option<&AnyObject>) {
             ui::with(|ui| ui.go_back());
@@ -1090,6 +1095,7 @@ pub fn run(args: Args) {
         View::Collection
         | View::CollectionPlaying
         | View::Artist
+        | View::ArtistExpanded
         | View::ArtistSpotify
         | View::Album => ui.show(AppView::Collection),
         View::Queue => ui.show(AppView::Queue),
