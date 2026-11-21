@@ -3,7 +3,6 @@
 use std::collections::VecDeque;
 use std::io::{self, Read, Seek, SeekFrom};
 use std::sync::Arc;
-use std::thread;
 use std::time::{Duration, Instant};
 
 use requiem_core::{ByteSource, ProviderError};
@@ -11,10 +10,14 @@ use requiem_core::{ByteSource, ProviderError};
 use crate::log::{debug, host_of};
 
 pub(crate) const CHUNK_SIZE: u64 = 512 * 1024;
+/// The first range alone, so playback starts after this much rather than a whole chunk. The
+/// decoder starts on its first ~8 KiB (measured: Opus ~2 KiB, AAC ~7 KiB) and 128 KiB holds
+/// ~6 s of Opus at 160 kbps, more than the 3 s ring, so the next range is fetched while
+/// that much is buffered. Also all a source resolved ahead fetches before it plays.
+pub(crate) const HEAD_SIZE: u64 = 128 * 1024;
 const LRU_CHUNKS: usize = 2;
 const MAX_REFRESHES: u32 = 3;
 const MIN_REFRESH_INTERVAL: Duration = Duration::from_secs(10);
-const TRANSIENT_RETRY_DELAY: Duration = Duration::from_secs(1);
 
 pub(crate) struct RangeResponse {
     pub status: u16,
@@ -23,7 +26,9 @@ pub(crate) struct RangeResponse {
 }
 
 pub(crate) enum FetchError {
-    /// Connect failure, timeout or reset.
+    /// No connection: DNS, connect or TLS handshake failure or timeout.
+    Connect(String),
+    /// A timeout or reset after connecting.
     Transient(String),
 }
 
@@ -34,25 +39,38 @@ pub(crate) trait RangeFetcher: Send + Sync {
 }
 
 pub(crate) trait Refresher: Send + Sync {
-    /// Re-resolves the same video; returns a fresh (url, itag, content_length).
-    fn refresh(&self) -> Result<(String, u32, u64), ProviderError>;
+    /// Re-resolves the same video for a fresh URL in place of `url`, which the CDN refused;
+    /// returns (url, itag, content_length).
+    fn refresh(&self, url: &str) -> Result<(String, u32, u64), ProviderError>;
+
+    /// Re-resolves the same video for a URL served elsewhere than `url`, whose host could not
+    /// be reached: on the other IP family where that is allowed.
+    fn fallback(&self, url: &str) -> Result<(String, u32, u64), ProviderError>;
 }
 
 #[derive(Clone, Copy)]
 pub(crate) struct RangeConfig {
     pub chunk_size: u64,
+    /// The first range's size; at least `chunk_size` means none apart.
+    pub head_size: u64,
     pub min_refresh_interval: Duration,
-    pub retry_delay: Duration,
 }
 
 impl Default for RangeConfig {
     fn default() -> Self {
         Self {
             chunk_size: CHUNK_SIZE,
+            head_size: HEAD_SIZE,
             min_refresh_interval: MIN_REFRESH_INTERVAL,
-            retry_delay: TRANSIENT_RETRY_DELAY,
         }
     }
+}
+
+/// Why both attempts at a range failed.
+struct Unfetched {
+    /// Neither reached the host.
+    connect: bool,
+    detail: String,
 }
 
 pub(crate) struct HttpRangeSource {
@@ -63,7 +81,7 @@ pub(crate) struct HttpRangeSource {
     fetcher: Arc<dyn RangeFetcher>,
     refresher: Arc<dyn Refresher>,
     cfg: RangeConfig,
-    /// Container header, kept for the life of the source.
+    /// The first range, which holds the container header: kept for the life of the source.
     chunk0: Option<Vec<u8>>,
     /// Most recently used first.
     lru: VecDeque<(u64, Vec<u8>)>,
@@ -71,6 +89,8 @@ pub(crate) struct HttpRangeSource {
     last_refresh: Option<Instant>,
     /// Highest byte offset the current URL has served since the latest refresh.
     served_end: Option<u64>,
+    /// Whether the URL was swapped for one served elsewhere, which happens once.
+    fell_back: bool,
 }
 
 fn other(msg: impl Into<String>) -> io::Error {
@@ -99,6 +119,33 @@ impl HttpRangeSource {
             refreshes: 0,
             last_refresh: None,
             served_end: None,
+            fell_back: false,
+        }
+    }
+
+    fn split(&self) -> bool {
+        self.cfg.head_size < self.cfg.chunk_size
+    }
+
+    /// The chunk holding `pos`. Split, the first range is chunk 0 and the rest of the first
+    /// `chunk_size` bytes chunk 1; the grid of `chunk_size` stays aligned after that.
+    fn index(&self, pos: u64) -> u64 {
+        let grid = pos / self.cfg.chunk_size;
+        match (self.split(), grid) {
+            (false, g) => g,
+            (true, 0) => u64::from(pos >= self.cfg.head_size),
+            (true, g) => g + 1,
+        }
+    }
+
+    /// Where chunk `idx` starts, and where it ends, exclusive, before the end of the stream.
+    fn span(&self, idx: u64) -> (u64, u64) {
+        let (c, h) = (self.cfg.chunk_size, self.cfg.head_size);
+        match (self.split(), idx) {
+            (false, i) => (i * c, (i + 1) * c),
+            (true, 0) => (0, h),
+            (true, 1) => (h, c),
+            (true, i) => ((i - 1) * c, i * c),
         }
     }
 
@@ -121,22 +168,36 @@ impl HttpRangeSource {
         }
     }
 
-    fn fetch_once(&self, start: u64, end: u64) -> io::Result<RangeResponse> {
-        let mut transient = String::new();
+    /// Two attempts, the second at once: a connection that hung is better replaced than
+    /// waited on.
+    fn fetch_once(&self, start: u64, end: u64) -> Result<RangeResponse, Unfetched> {
+        let mut failed = Unfetched {
+            connect: true,
+            detail: String::new(),
+        };
         for attempt in 0..2 {
-            if attempt > 0 {
-                thread::sleep(self.cfg.retry_delay);
-            }
-            match self.fetcher.fetch(&self.url, start, end) {
-                Ok(r) if r.status >= 500 => transient = format!("http {}", r.status),
+            let connect = match self.fetcher.fetch(&self.url, start, end) {
+                Ok(r) if r.status >= 500 => {
+                    failed.detail = format!("http {}", r.status);
+                    false
+                }
                 Ok(r) => return Ok(r),
-                Err(FetchError::Transient(e)) => transient = e,
-            }
-            debug!("transient fetch failure ({transient}), attempt {attempt}");
+                Err(FetchError::Connect(e)) => {
+                    failed.detail = e;
+                    true
+                }
+                Err(FetchError::Transient(e)) => {
+                    failed.detail = e;
+                    false
+                }
+            };
+            failed.connect &= connect;
+            debug!(
+                "transient fetch failure ({}), attempt {attempt}",
+                failed.detail
+            );
         }
-        Err(other(format!(
-            "range fetch failed after retry: {transient}"
-        )))
+        Err(failed)
     }
 
     fn validate(&self, r: &RangeResponse, start: u64, end: u64) -> io::Result<()> {
@@ -179,26 +240,54 @@ impl HttpRangeSource {
         self.refreshes += 1;
         self.served_end = None;
         self.last_refresh = Some(Instant::now());
-        let (url, itag, len) = self
+        let fresh = self
             .refresher
-            .refresh()
+            .refresh(&self.url)
             .map_err(|e| other(format!("stream URL refresh failed: {e}")))?;
+        self.adopt(fresh, "refreshed")
+    }
+
+    /// Swaps in a URL served elsewhere, once, after two attempts found no connection.
+    fn fall_back(&mut self, detail: &str) -> io::Result<()> {
+        self.fell_back = true;
+        let fresh = self.refresher.fallback(&self.url).map_err(|e| {
+            other(format!(
+                "range fetch failed after retry: {detail}; re-resolving failed: {e}"
+            ))
+        })?;
+        self.served_end = None;
+        self.adopt(fresh, "fell back to")
+    }
+
+    fn adopt(&mut self, (url, itag, len): (String, u32, u64), how: &str) -> io::Result<()> {
         if itag != self.itag || len != self.len {
             return Err(other(format!(
                 "refreshed format differs (itag {itag}, {len} bytes; was itag {}, {} bytes)",
                 self.itag, self.len
             )));
         }
-        debug!("refreshed url for itag {itag}, host {}", host_of(&url));
+        debug!("{how} url for itag {itag}, host {}", host_of(&url));
         self.url = url;
         Ok(())
     }
 
     fn load_chunk(&mut self, idx: u64) -> io::Result<Vec<u8>> {
-        let start = idx * self.cfg.chunk_size;
-        let end = (start + self.cfg.chunk_size).min(self.len) - 1;
+        let (start, end) = self.span(idx);
+        let end = end.min(self.len) - 1;
         loop {
-            let resp = self.fetch_once(start, end)?;
+            let resp = match self.fetch_once(start, end) {
+                Ok(r) => r,
+                Err(f) if f.connect && !self.fell_back => {
+                    self.fall_back(&f.detail)?;
+                    continue;
+                }
+                Err(f) => {
+                    return Err(other(format!(
+                        "range fetch failed after retry: {}",
+                        f.detail
+                    )));
+                }
+            };
             match resp.status {
                 403 | 410 => self.refresh(start)?,
                 _ => {
@@ -224,8 +313,8 @@ impl Read for HttpRangeSource {
         if buf.is_empty() || self.pos >= self.len {
             return Ok(0);
         }
-        let idx = self.pos / self.cfg.chunk_size;
-        let offset = (self.pos - idx * self.cfg.chunk_size) as usize;
+        let idx = self.index(self.pos);
+        let offset = (self.pos - self.span(idx).0) as usize;
         self.ensure_chunk(idx)?;
         let chunk = self.cached(idx).expect("chunk was just ensured");
         let n = buf.len().min(chunk.len() - offset);
@@ -258,6 +347,7 @@ impl ByteSource for HttpRangeSource {
 #[cfg(test)]
 mod tests {
     use std::sync::Mutex;
+    use std::thread;
 
     use super::*;
 
@@ -277,6 +367,7 @@ mod tests {
         Short,
         Long,
         Transient,
+        Connect,
     }
 
     /// Scripted fetcher: pops a step per call (default `Ok`), records (url, start, end).
@@ -332,6 +423,7 @@ mod tests {
                     resp(206, range, b)
                 }
                 Step::Transient => return Err(FetchError::Transient("timeout".into())),
+                Step::Connect => return Err(FetchError::Connect("timeout: connect".into())),
             })
         }
     }
@@ -341,6 +433,9 @@ mod tests {
     struct FakeRefresher {
         results: Mutex<VecDeque<Refreshed>>,
         count: Mutex<u32>,
+        /// The URL each `fallback` was given; it answers "elsewhere" unless scripted.
+        fallbacks: Mutex<Vec<String>>,
+        fallback_results: Mutex<VecDeque<Refreshed>>,
     }
 
     impl FakeRefresher {
@@ -348,15 +443,20 @@ mod tests {
             Arc::new(Self {
                 results: Mutex::new(results.into()),
                 count: Mutex::new(0),
+                fallbacks: Mutex::default(),
+                fallback_results: Mutex::default(),
             })
         }
         fn count(&self) -> u32 {
             *self.count.lock().unwrap()
         }
+        fn fallbacks(&self) -> Vec<String> {
+            self.fallbacks.lock().unwrap().clone()
+        }
     }
 
     impl Refresher for FakeRefresher {
-        fn refresh(&self) -> Result<(String, u32, u64), ProviderError> {
+        fn refresh(&self, _: &str) -> Result<(String, u32, u64), ProviderError> {
             *self.count.lock().unwrap() += 1;
             self.results
                 .lock()
@@ -364,13 +464,22 @@ mod tests {
                 .pop_front()
                 .unwrap_or_else(|| Ok(("fresh".into(), 251, LEN)))
         }
+
+        fn fallback(&self, url: &str) -> Result<(String, u32, u64), ProviderError> {
+            self.fallbacks.lock().unwrap().push(url.to_owned());
+            self.fallback_results
+                .lock()
+                .unwrap()
+                .pop_front()
+                .unwrap_or_else(|| Ok(("elsewhere".into(), 251, LEN)))
+        }
     }
 
     fn cfg(min_refresh_interval: Duration) -> RangeConfig {
         RangeConfig {
             chunk_size: CHUNK,
+            head_size: CHUNK,
             min_refresh_interval,
-            retry_delay: Duration::ZERO,
         }
     }
 
@@ -645,5 +754,160 @@ mod tests {
         s.seek(SeekFrom::Start(64)).unwrap();
         s.read_exact(&mut [0u8; 4]).unwrap();
         assert_eq!(r.count(), 2);
+    }
+
+    fn headed(f: &Arc<Fake>, r: &Arc<FakeRefresher>) -> HttpRangeSource {
+        let cfg = RangeConfig {
+            head_size: 4,
+            ..cfg(Duration::ZERO)
+        };
+        HttpRangeSource::new("old".into(), 251, LEN, f.clone(), r.clone(), cfg)
+    }
+
+    #[test]
+    fn the_first_range_is_the_head_then_the_grid_resumes() {
+        let f = Fake::new(vec![]);
+        let mut s = headed(&f, &FakeRefresher::new(vec![]));
+        s.read_exact(&mut [0u8; 1]).unwrap();
+        assert_eq!(*f.calls.lock().unwrap(), [("old".to_owned(), 0, 3)]);
+        s.seek(SeekFrom::Start(0)).unwrap();
+        let mut out = Vec::new();
+        s.read_to_end(&mut out).unwrap();
+        assert_eq!(out, data());
+        let spans: Vec<(u64, u64)> = f.calls.lock().unwrap().iter().map(|c| (c.1, c.2)).collect();
+        assert_eq!(
+            spans,
+            [
+                (0, 3),
+                (4, 15),
+                (16, 31),
+                (32, 47),
+                (48, 63),
+                (64, 79),
+                (80, 95),
+                (96, 99)
+            ]
+        );
+    }
+
+    #[test]
+    fn the_head_stays_while_other_chunks_come_and_go() {
+        let f = Fake::new(vec![]);
+        let mut s = headed(&f, &FakeRefresher::new(vec![]));
+        for pos in [0, 5, 20, 40, 60, 2] {
+            read_chunk_at(&mut s, pos);
+        }
+        assert_eq!(f.starts(), [0, 4, 16, 32, 48]);
+        let mut b = [0u8; 3];
+        s.seek(SeekFrom::Start(14)).unwrap();
+        s.read_exact(&mut b).unwrap();
+        assert_eq!(&b, &data()[14..17]);
+    }
+
+    #[test]
+    fn a_stream_shorter_than_the_head_is_one_range() {
+        let f = Fake::new(vec![]);
+        let r = FakeRefresher::new(vec![]);
+        let cfg = RangeConfig {
+            head_size: 200,
+            chunk_size: 400,
+            ..cfg(Duration::ZERO)
+        };
+        let mut s = HttpRangeSource::new("old".into(), 251, LEN, f.clone(), r, cfg);
+        let mut out = Vec::new();
+        s.read_to_end(&mut out).unwrap();
+        assert_eq!(out, data());
+        assert_eq!(*f.calls.lock().unwrap(), [("old".to_owned(), 0, LEN - 1)]);
+    }
+
+    #[test]
+    fn the_default_split_keeps_the_grid_aligned_to_the_chunk_size() {
+        let f = Fake::new(vec![]);
+        let s = HttpRangeSource::new(
+            "old".into(),
+            251,
+            LEN,
+            f,
+            FakeRefresher::new(vec![]),
+            RangeConfig::default(),
+        );
+        assert_eq!(s.span(0), (0, HEAD_SIZE));
+        assert_eq!(s.span(1), (HEAD_SIZE, CHUNK_SIZE));
+        assert_eq!(s.span(3), (2 * CHUNK_SIZE, 3 * CHUNK_SIZE));
+        assert_eq!(s.index(HEAD_SIZE - 1), 0);
+        assert_eq!(s.index(HEAD_SIZE), 1);
+        assert_eq!(s.index(2 * CHUNK_SIZE), 3);
+    }
+
+    #[test]
+    fn a_retry_goes_at_once() {
+        let f = Fake::new(vec![Step::Transient]);
+        let r = FakeRefresher::new(vec![]);
+        let mut s =
+            HttpRangeSource::new("old".into(), 251, LEN, f.clone(), r, RangeConfig::default());
+        let t = Instant::now();
+        s.read_exact(&mut [0u8; 4]).unwrap();
+        assert!(
+            t.elapsed() < Duration::from_millis(200),
+            "{:?}",
+            t.elapsed()
+        );
+        assert_eq!(f.starts(), [0, 0]);
+    }
+
+    #[test]
+    fn two_connect_failures_fall_back_to_a_url_served_elsewhere() {
+        let f = Fake::new(vec![Step::Connect, Step::Connect]);
+        let r = FakeRefresher::new(vec![]);
+        let mut s = source(&f, &r, Duration::ZERO);
+        let mut out = Vec::new();
+        s.read_to_end(&mut out).unwrap();
+        assert_eq!(out, data());
+        assert_eq!(r.fallbacks(), ["old"]);
+        assert_eq!(r.count(), 0);
+        let calls = f.calls.lock().unwrap();
+        assert_eq!(calls[2], ("elsewhere".into(), 0, CHUNK - 1));
+        assert!(calls[2..].iter().all(|c| c.0 == "elsewhere"));
+    }
+
+    #[test]
+    fn the_fallback_happens_once() {
+        let f = Fake::new(vec![Step::Connect; 4]);
+        let r = FakeRefresher::new(vec![]);
+        let mut s = source(&f, &r, Duration::ZERO);
+        let e = s.read(&mut [0u8; 4]).unwrap_err();
+        assert!(e.to_string().contains("connect"), "{e}");
+        assert_eq!(r.fallbacks().len(), 1);
+        assert_eq!(f.starts().len(), 4);
+    }
+
+    #[test]
+    fn a_failure_after_connecting_does_not_fall_back() {
+        for script in [
+            vec![Step::Transient, Step::Transient],
+            vec![Step::Connect, Step::Transient],
+            vec![Step::Status(503), Step::Connect],
+        ] {
+            let f = Fake::new(script);
+            let r = FakeRefresher::new(vec![]);
+            let mut s = source(&f, &r, Duration::ZERO);
+            assert!(s.read(&mut [0u8; 4]).is_err());
+            assert!(r.fallbacks().is_empty());
+        }
+    }
+
+    #[test]
+    fn a_fallback_that_fails_or_differs_errors() {
+        for result in [
+            Err(ProviderError::Network("down".into())),
+            Ok(("elsewhere".to_string(), 140, LEN)),
+        ] {
+            let f = Fake::new(vec![Step::Connect, Step::Connect]);
+            let r = FakeRefresher::new(vec![]);
+            r.fallback_results.lock().unwrap().push_back(result);
+            let mut s = source(&f, &r, Duration::ZERO);
+            assert!(s.read(&mut [0u8; 4]).is_err());
+            assert_eq!(f.starts().len(), 2);
+        }
     }
 }

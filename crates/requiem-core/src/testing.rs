@@ -2,6 +2,7 @@
 
 use std::collections::{HashMap, VecDeque};
 use std::io::{self, Cursor, Read, Seek, SeekFrom};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
 use std::time::Duration;
@@ -14,16 +15,24 @@ use crate::{
 
 const WAIT: Duration = Duration::from_secs(5);
 
-pub struct CursorSource(Cursor<Vec<u8>>);
+pub struct CursorSource(Cursor<Vec<u8>>, Option<Arc<AtomicUsize>>);
 
 impl CursorSource {
     pub fn new(bytes: Vec<u8>) -> Self {
-        Self(Cursor::new(bytes))
+        Self(Cursor::new(bytes), None)
+    }
+
+    /// Counts its reads in `reads`.
+    fn counted(bytes: Vec<u8>, reads: Arc<AtomicUsize>) -> Self {
+        Self(Cursor::new(bytes), Some(reads))
     }
 }
 
 impl Read for CursorSource {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        if let Some(r) = &self.1 {
+            r.fetch_add(1, Ordering::Relaxed);
+        }
         self.0.read(buf)
     }
 }
@@ -135,6 +144,8 @@ struct ProviderState {
     import_error: Option<ProviderError>,
     imported: Vec<String>,
     resolve_calls: HashMap<String, usize>,
+    /// Reads of the sources resolved for each track, by any reader.
+    source_reads: HashMap<String, Arc<AtomicUsize>>,
     search_calls: usize,
     browse_calls: Vec<Page>,
     radio_calls: usize,
@@ -160,6 +171,7 @@ impl Default for ProviderState {
             import_error: None,
             imported: Vec::new(),
             resolve_calls: HashMap::new(),
+            source_reads: HashMap::new(),
             search_calls: 0,
             browse_calls: Vec::new(),
             radio_calls: 0,
@@ -321,6 +333,16 @@ impl FakeProvider {
             .get(track_id)
             .copied()
             .unwrap_or(0)
+    }
+
+    /// Reads of every source resolved for `track_id` so far.
+    pub fn source_reads(&self, track_id: &str) -> usize {
+        self.state
+            .lock()
+            .unwrap()
+            .source_reads
+            .get(track_id)
+            .map_or(0, |r| r.load(Ordering::Relaxed))
     }
 
     pub fn search_calls(&self) -> usize {
@@ -530,19 +552,22 @@ impl Provider for FakeProvider {
     }
 
     fn resolve(&self, track: &TrackId) -> Result<AudioSource, ProviderError> {
-        let step = {
+        let (step, reads) = {
             let mut st = self.state.lock().unwrap();
             *st.resolve_calls.entry(track.id.clone()).or_default() += 1;
             self.called.notify_all();
-            st.resolve_scripts
+            let reads = st.source_reads.entry(track.id.clone()).or_default().clone();
+            let step = st
+                .resolve_scripts
                 .get_mut(&track.id)
-                .and_then(VecDeque::pop_front)
+                .and_then(VecDeque::pop_front);
+            (step, reads)
         };
         if let Some(s) = step {
             s.run()?;
         }
         Ok(AudioSource::Encoded {
-            bytes: Box::new(CursorSource::new(track.id.clone().into_bytes())),
+            bytes: Box::new(CursorSource::counted(track.id.clone().into_bytes(), reads)),
             hint: FormatHint::WebmOpus,
         })
     }
