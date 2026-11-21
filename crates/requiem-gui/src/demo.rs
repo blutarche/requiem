@@ -12,7 +12,8 @@ use requiem_ipc::{UpdateState, UpdateStatus};
 
 use crate::args::View;
 use crate::vm::{
-    BANNER_GRACE, Intent, Link, LinkError, List, Place, SearchChip, Service, ServiceFilter, Vm,
+    BANNER_GRACE, BUFFERING_DELAY, Intent, Link, LinkError, List, Place, SearchChip, Service,
+    ServiceFilter, Vm,
 };
 
 pub const QUERY: &str = "night drive";
@@ -1151,7 +1152,7 @@ fn run_intent(vm: &mut Vm, daemon: &mut Daemon, intent: Intent) {
 /// ninth track; `NowPlayingEmpty` stops playback;
 /// `NowPlayingLast` plays the queue's last track; `SearchAlbums`, `SearchSongs` and
 /// `SearchArtists` pick that chip of the results; `Artist` opens the top artist's page, `ArtistExpanded` with all its songs listed;
-/// `ArtistSpotify` opens the playing Spotify track's artist from Now Playing; `Album` opens
+/// `Buffering` holds playback buffering; `ArtistSpotify` opens the playing Spotify track's artist from Now Playing; `Album` opens
 /// the first album the search finds. Other views get the plain start.
 pub fn start_in(view: View) -> (Vm, Daemon) {
     let t0 = Instant::now();
@@ -1288,6 +1289,11 @@ pub fn start_in(view: View) -> (Vm, Daemon) {
                 };
                 run_intent(&mut vm, &mut daemon, open);
             }
+        }
+        View::Buffering => {
+            // Held past the delay, as a slow load would be by the time the effect shows.
+            vm.apply_at(Event::State(PlayState::Buffering), t0);
+            vm.tick_at(t0 + BUFFERING_DELAY);
         }
         View::Search
         | View::SearchSongSelected

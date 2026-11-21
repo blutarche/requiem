@@ -27,6 +27,8 @@ const SEEK_AGREES: Duration = Duration::from_secs(1);
 pub const BANNER_GRACE: Duration = Duration::from_millis(800);
 /// After this long without a connection, the banner adds the reason and what to do.
 pub const STUCK_AFTER: Duration = Duration::from_secs(30);
+/// How long buffering lasts before the player bar shows it; instant starts never flash.
+pub const BUFFERING_DELAY: Duration = Duration::from_millis(150);
 
 // The old player's menu item may still be named "Quit requiem", so this names none.
 const OUT_OF_DATE: &str = "An older Requiem player is still running. Quit it from its \
@@ -784,6 +786,8 @@ pub struct UiState {
     pub duration: Option<Duration>,
     pub position: Duration,
     pub state: PlayState,
+    /// Buffering has lasted `BUFFERING_DELAY`: the bar shows its spinner and shimmer.
+    pub buffering_effect: bool,
     pub volume: u8,
     /// At most one at a time; a new toast replaces the shown one.
     pub toast: Option<Toast>,
@@ -825,6 +829,7 @@ impl Default for UiState {
             duration: None,
             position: Duration::ZERO,
             state: PlayState::Stopped,
+            buffering_effect: false,
             volume: 100,
             toast: None,
             place: Place::Search,
@@ -1584,6 +1589,8 @@ pub struct Vm {
     checking_by_hand: bool,
     /// Until when the answer to Check for Updates… says there is nothing new.
     up_to_date_until: Option<Instant>,
+    /// When the current spell of buffering began; `None` in any other state.
+    buffering_since: Option<Instant>,
     /// A pasted session was taken; the view clears the pasteboard it came from, once.
     session_saved: bool,
 }
@@ -1701,7 +1708,15 @@ impl Vm {
                 None
             }
         });
-        offline.into_iter().chain(self.up_to_date_until).min()
+        let buffering = self
+            .buffering_since
+            .filter(|_| !self.ui.buffering_effect)
+            .map(|since| since + BUFFERING_DELAY);
+        offline
+            .into_iter()
+            .chain(self.up_to_date_until)
+            .chain(buffering)
+            .min()
     }
 
     pub fn tick(&mut self) {
@@ -1711,6 +1726,7 @@ impl Vm {
     /// `tick` with the clock passed in.
     pub fn tick_at(&mut self, now: Instant) {
         self.refresh_banner(now);
+        self.refresh_buffering(now);
     }
 
     pub fn apply(&mut self, ev: Event) {
@@ -1804,7 +1820,7 @@ impl Vm {
                 if state == PlayState::Stopped {
                     self.amend_failure(failed, "Playback stopped.");
                 }
-                self.set_state(state);
+                self.set_state(state, now);
                 self.show_current();
             }
             Event::Volume(v) => {
@@ -2814,11 +2830,13 @@ impl Vm {
         self.dirty |= Dirty::SEEK;
     }
 
-    fn set_state(&mut self, state: PlayState) {
+    fn set_state(&mut self, state: PlayState, now: Instant) {
         if state == self.ui.state {
             return;
         }
         self.ui.state = state;
+        self.buffering_since = (state == PlayState::Buffering).then_some(now);
+        self.ui.buffering_effect = false;
         self.dirty |= Dirty::STATE | Dirty::ELAPSED;
         // The session forgets the track on stop and never says so with an event.
         if state == PlayState::Stopped && self.ui.now_playing.is_some() {
@@ -2826,6 +2844,17 @@ impl Vm {
             self.ui.duration = None;
             self.set_position(Duration::ZERO);
             self.dirty |= Dirty::NOW_PLAYING | Dirty::SEEK;
+        }
+    }
+
+    /// Turns the buffering effect on once buffering has lasted `BUFFERING_DELAY`.
+    fn refresh_buffering(&mut self, now: Instant) {
+        let due = self
+            .buffering_since
+            .is_some_and(|since| now >= since + BUFFERING_DELAY);
+        if due && !self.ui.buffering_effect {
+            self.ui.buffering_effect = true;
+            self.dirty |= Dirty::STATE;
         }
     }
 
@@ -2874,6 +2903,8 @@ impl Vm {
         self.ui.duration = None;
         self.ui.position = Duration::ZERO;
         self.ui.state = PlayState::Stopped;
+        self.buffering_since = None;
+        self.ui.buffering_effect = false;
         self.dirty |=
             Dirty::QUEUE | Dirty::NOW_PLAYING | Dirty::ELAPSED | Dirty::SEEK | Dirty::STATE;
     }
@@ -3618,6 +3649,64 @@ mod tests {
         assert_eq!(vm.take_dirty(), Dirty::STATE | Dirty::ELAPSED);
         vm.apply(Event::State(PlayState::Paused));
         assert!(vm.take_dirty().is_empty());
+    }
+
+    #[test]
+    fn buffering_effect_waits_out_the_delay() {
+        let t0 = Instant::now();
+        let mut vm = playing(225);
+        vm.apply_at(Event::State(PlayState::Buffering), t0);
+        assert!(!vm.ui().buffering_effect);
+        assert_eq!(vm.next_tick(), Some(t0 + BUFFERING_DELAY));
+        vm.tick_at(t0 + BUFFERING_DELAY - Duration::from_millis(1));
+        assert!(!vm.ui().buffering_effect);
+        vm.take_dirty();
+        vm.tick_at(t0 + BUFFERING_DELAY);
+        assert!(vm.ui().buffering_effect);
+        assert!(vm.take_dirty().contains(Dirty::STATE));
+        assert_eq!(vm.next_tick(), None);
+    }
+
+    #[test]
+    fn instant_starts_never_show_the_buffering_effect() {
+        let t0 = Instant::now();
+        let mut vm = playing(225);
+        vm.apply_at(Event::State(PlayState::Buffering), t0);
+        vm.apply_at(
+            Event::State(PlayState::Playing),
+            t0 + Duration::from_millis(40),
+        );
+        vm.tick_at(t0 + BUFFERING_DELAY * 2);
+        assert!(!vm.ui().buffering_effect);
+        assert_eq!(vm.next_tick(), None);
+    }
+
+    #[test]
+    fn the_buffering_effect_ends_with_buffering() {
+        for next in [PlayState::Playing, PlayState::Paused, PlayState::Stopped] {
+            let t0 = Instant::now();
+            let mut vm = playing(225);
+            vm.apply_at(Event::State(PlayState::Buffering), t0);
+            vm.tick_at(t0 + BUFFERING_DELAY);
+            assert!(vm.ui().buffering_effect);
+            vm.take_dirty();
+            vm.apply_at(Event::State(next), t0 + BUFFERING_DELAY * 2);
+            assert!(!vm.ui().buffering_effect, "{next:?}");
+            assert!(vm.take_dirty().contains(Dirty::STATE));
+        }
+    }
+
+    #[test]
+    fn buffering_again_restarts_the_delay() {
+        let t0 = Instant::now();
+        let mut vm = playing(225);
+        vm.apply_at(Event::State(PlayState::Buffering), t0);
+        vm.apply_at(Event::State(PlayState::Playing), t0 + BUFFERING_DELAY / 2);
+        let t1 = t0 + BUFFERING_DELAY;
+        vm.apply_at(Event::State(PlayState::Buffering), t1);
+        vm.tick_at(t1 + BUFFERING_DELAY / 2);
+        assert!(!vm.ui().buffering_effect);
+        assert_eq!(vm.next_tick(), Some(t1 + BUFFERING_DELAY));
     }
 
     #[test]

@@ -7,6 +7,7 @@ mod appearance_switch;
 mod backend;
 mod badge;
 mod bar;
+mod buffering;
 mod chips;
 mod cover_grid;
 mod library_bar;
@@ -1113,7 +1114,8 @@ pub fn run(args: Args) {
         | View::UpToDate
         | View::SearchAlbums
         | View::SearchSongs
-        | View::SearchArtists => ui.show(AppView::Search),
+        | View::SearchArtists
+        | View::Buffering => ui.show(AppView::Search),
         View::SearchSongSelected => {
             let _ = ui.results_move_down();
             ui.move_all_selection(Dir::Down);

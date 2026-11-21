@@ -34,6 +34,7 @@ use objc2_quartz_core::{
 use requiem_macos::artwork::{Cover, Placeholder};
 
 use super::appearance;
+use super::buffering::Shimmer;
 use super::theme::{self, Icon, Weight};
 use super::ui::{self, AppView};
 use crate::vm::{Intent, SEEK_STEP_SECS, VOLUME_STEP};
@@ -143,7 +144,7 @@ fn post_announcement(mtm: MainThreadMarker, text: &str, level: NSAccessibilityPr
 }
 
 /// Whether changes to `view` would be seen animating. A snapshot's window is never shown.
-fn on_screen(view: &NSView) -> bool {
+pub fn on_screen(view: &NSView) -> bool {
     !STILL.with(Cell::get) && view.window().is_some_and(|w| window_on_screen(&w))
 }
 
@@ -1374,6 +1375,9 @@ pub struct SliderIvars {
     dragging: Cell<bool>,
     hovered: Cell<bool>,
     enabled: Cell<bool>,
+    /// The track is loading: no fill or knob, and the shimmer sweeps it.
+    buffering: Cell<bool>,
+    shimmer: Shimmer,
 }
 
 define_class!(
@@ -1394,6 +1398,9 @@ define_class!(
             theme::line_2().setFill();
             NSBezierPath::bezierPathWithRoundedRect_xRadius_yRadius(rect(x0, mid - 2.0, w, 4.0), 2.0, 2.0)
                 .fill();
+            if self.ivars().buffering.get() {
+                return;
+            }
             let heat = self.ivars().kind == SliderKind::Volume;
             let fill = if heat { theme::heat(v) } else { theme::accent() };
             if heat && v > 0.0 {
@@ -1428,6 +1435,13 @@ define_class!(
                 NSBezierPath::bezierPathWithOvalInRect(rect(x0 + w * v - 6.0, mid - 6.0, 12.0, 12.0))
                     .fill();
             }
+        }
+
+        #[unsafe(method(layout))]
+        fn layout(&self) {
+            // SAFETY: NSView's own `layout`.
+            let _: () = unsafe { msg_send![super(self), layout] };
+            self.ivars().shimmer.place(self.track_rect());
         }
 
         #[unsafe(method(mouseDown:))]
@@ -1501,10 +1515,19 @@ impl Slider {
             dragging: Cell::new(false),
             hovered: Cell::new(false),
             enabled: Cell::new(true),
+            buffering: Cell::new(false),
+            shimmer: Shimmer::new(),
         });
         // SAFETY: `initWithFrame:` is NSView's designated initializer.
         let this: Retained<Self> = unsafe { msg_send![super(this), initWithFrame: frame] };
         this.setAutoresizingMask(mask);
+        if kind == SliderKind::Seek {
+            this.setWantsLayer(true);
+            if let Some(layer) = this.layer() {
+                this.ivars().shimmer.attach(&layer);
+            }
+            this.ivars().shimmer.place(this.track_rect());
+        }
         track_hover(&this, NSTrackingAreaOptions::EnabledDuringMouseDrag);
         this.setAccessibilityElement(true);
         // SAFETY: the role static is an immutable framework constant.
@@ -1559,6 +1582,21 @@ impl Slider {
             self.setAlphaValue(if enabled { 1.0 } else { DIMMED });
             self.setNeedsDisplay(true);
         }
+    }
+
+    /// Hides the fill and knob and sweeps a light band along the track, or stops.
+    pub fn set_buffering(&self, on: bool) {
+        let iv = self.ivars();
+        if iv.buffering.replace(on) != on {
+            iv.shimmer.set(on, self);
+            self.setNeedsDisplay(true);
+        }
+    }
+
+    /// The 4 pt track.
+    fn track_rect(&self) -> NSRect {
+        let (x0, w, mid) = self.track();
+        rect(x0, mid - 2.0, w, 4.0)
     }
 
     /// Track start x, width and centre y.

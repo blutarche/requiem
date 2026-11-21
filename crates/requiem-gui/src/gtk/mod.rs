@@ -170,7 +170,8 @@ fn show_view(ui: &Ui, view: View) {
         | View::UpToDate
         | View::SearchAlbums
         | View::SearchSongs
-        | View::SearchArtists => ui.show(AppView::Search),
+        | View::SearchArtists
+        | View::Buffering => ui.show(AppView::Search),
         View::SearchSongSelected => {
             let _ = ui.results_move_down();
             ui.move_all_selection(Dir::Down);

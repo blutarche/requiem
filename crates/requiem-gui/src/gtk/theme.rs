@@ -203,6 +203,13 @@ scale.seek highlight { background-color: $accent; border-radius: 2px; border: no
 scale.volume highlight { background-image: linear-gradient(to right, $accent, $grad2, $grad3); border-radius: 2px; border: none; }
 scale.seek slider, scale.volume slider { min-width: 10px; min-height: 10px; margin: -4px; background-color: $ink; border: none; box-shadow: none; opacity: 0; }
 scale.seek:hover slider, scale.volume:hover slider { opacity: 1; }
+/* Buffering: a spinner round the play button, and a light sweep along the seek track. */
+spinner.buffering-ring { color: $accent; opacity: 0; transition: opacity 150ms linear; }
+spinner.buffering-ring.on { opacity: 1; }
+@keyframes shimmer { from { background-position: -40% 0; } to { background-position: 140% 0; } }
+scale.seek.buffering trough { background-image: linear-gradient(to right, transparent, alpha($ink, 0.3), transparent); background-repeat: no-repeat; background-size: 40% 100%; animation: shimmer 1.2s linear infinite; }
+scale.seek.buffering highlight { opacity: 0; }
+scale.seek.buffering slider { opacity: 0; }
 scale { padding: 6px 0; }
 /* The default theme's negative margins leave a sliver of fill at zero. */
 scale.seek highlight, scale.volume highlight { margin: 0; min-width: 0; min-height: 0; }

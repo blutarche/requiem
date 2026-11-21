@@ -12,6 +12,7 @@ use objc2_foundation::{MainThreadMarker, NSPoint, NSRect};
 use requiem_macos::artwork::Cover;
 
 use super::badge::{self, Badge};
+use super::buffering::Ring;
 use super::theme::{self, Icon, Weight};
 use super::ui;
 use super::widgets::{
@@ -36,6 +37,8 @@ pub struct PlayerBar {
     total: Retained<NSTextField>,
     volume: Retained<Slider>,
     volume_icon: Retained<NSView>,
+    /// Round the play button while a track buffers.
+    ring: Ring,
     playing: Cell<bool>,
 }
 
@@ -151,6 +154,16 @@ impl PlayerBar {
         let mid = cw / 2.0;
         let row_y = 46.0;
         let centred = PIN_LEFT | PIN_RIGHT;
+
+        // Below everything else in the transport, so it never takes a click.
+        let ring_gap = 4.0;
+        let ring_d = Self::PLAY + 2.0 * ring_gap;
+        let ring = Ring::new(
+            mtm,
+            rect(mid - ring_d / 2.0, row_y - ring_d / 2.0, ring_d, ring_d),
+            centred,
+        );
+        center.addSubview(&ring.view);
 
         let seek_y = 19.0;
         let tw = Self::TIME_W;
@@ -273,6 +286,7 @@ impl PlayerBar {
             total,
             volume,
             volume_icon: vicon,
+            ring,
             playing: Cell::new(false),
         }
     }
@@ -345,6 +359,12 @@ impl PlayerBar {
             self.play.set_icon(icon, Self::ICON);
             widgets::describe(&self.play, tip, Some(name));
         }
+    }
+
+    /// Shows or stops the spinner round the play button and the seek track's shimmer.
+    pub fn set_buffering(&self, on: bool) {
+        self.ring.set(on);
+        self.seek.set_buffering(on);
     }
 
     pub fn set_volume(&self, volume: u8) {

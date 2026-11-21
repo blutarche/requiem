@@ -177,6 +177,8 @@ pub struct Bar {
     prev: gtk::Button,
     play: gtk::Button,
     play_icon: gtk::DrawingArea,
+    /// Around the play button while a track buffers.
+    spinner: gtk::Spinner,
     next: gtk::Button,
     elapsed: gtk::Label,
     total: gtk::Label,
@@ -265,8 +267,18 @@ impl Bar {
         next.connect_clicked(|_| {
             ui::with(|ui| ui.intent(Intent::Next));
         });
+        let spinner = gtk::Spinner::new();
+        spinner.add_css_class("buffering-ring");
+        spinner.set_size_request(44, 44);
+        spinner.set_halign(gtk::Align::Center);
+        spinner.set_valign(gtk::Align::Center);
+        spinner.set_can_target(false);
+        let play_slot = gtk::Overlay::new();
+        play_slot.set_child(Some(&play));
+        play_slot.add_overlay(&spinner);
+        play_slot.set_valign(gtk::Align::Center);
         buttons.append(&prev);
-        buttons.append(&play);
+        buttons.append(&play_slot);
         buttons.append(&next);
         let seek_row = gtk::Box::new(gtk::Orientation::Horizontal, 12);
         let elapsed = theme::label("0:00", &["time"]);
@@ -372,6 +384,7 @@ impl Bar {
             prev,
             play,
             play_icon,
+            spinner,
             next,
             elapsed,
             total,
@@ -441,6 +454,26 @@ impl Bar {
             self.play
                 .update_property(&[gtk::accessible::Property::Label(name)]);
         }
+    }
+
+    /// Shows or hides the spinner round the play button and the seek bar's shimmer. Their CSS
+    /// fades; GTK stops the animations itself when `gtk-enable-animations` is off.
+    pub fn set_buffering(&self, on: bool) {
+        theme::toggle_class(&self.spinner, "on", on);
+        theme::toggle_class(&self.seek, "buffering", on);
+        if on {
+            self.spinner.set_spinning(true);
+            return;
+        }
+        // Let the fade finish before the spinner stops, so it does not freeze mid-fade.
+        let spinner = self.spinner.downgrade();
+        glib::timeout_add_local_once(std::time::Duration::from_millis(150), move || {
+            if let Some(s) = spinner.upgrade()
+                && !s.has_css_class("on")
+            {
+                s.set_spinning(false);
+            }
+        });
     }
 
     pub fn set_volume(&self, volume: u8) {

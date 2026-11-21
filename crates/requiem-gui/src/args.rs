@@ -20,7 +20,7 @@ usage: requiem-gui [--demo] [--smoke] [--snapshot <png>] [--view <view>] [--size
                      settings-session, empty, disconnected, toast, out-of-date,
                      update-ready, update-failed, not-updatable, up-to-date, search-albums,
                      search-songs, search-artists, search-song-selected,
-                     search-card-selected, artist, artist-expanded or album
+                     search-card-selected, artist, artist-expanded, album or buffering
   --size <w>x<h>     the window's content size in points, at least 800x500
   --appearance <system|light|dark>
                      the window's appearance for this run, in place of the one chosen in
@@ -97,10 +97,12 @@ pub enum View {
     /// Demo only: the All view of the search results with an album's card selected by the
     /// keyboard.
     SearchCardSelected,
+    /// Demo only: the player bar while a track buffers.
+    Buffering,
 }
 
 impl View {
-    const NAMES: [(&str, View); 36] = [
+    const NAMES: [(&str, View); 37] = [
         ("home", View::Home),
         ("search", View::Search),
         ("library", View::Library),
@@ -137,6 +139,7 @@ impl View {
         ("album", View::Album),
         ("search-song-selected", View::SearchSongSelected),
         ("search-card-selected", View::SearchCardSelected),
+        ("buffering", View::Buffering),
     ];
 
     /// Whether the view is a staged demo state rather than a place in the app.
@@ -397,6 +400,7 @@ mod tests {
             ("album", View::Album),
             ("search-song-selected", View::SearchSongSelected),
             ("search-card-selected", View::SearchCardSelected),
+            ("buffering", View::Buffering),
         ] {
             assert_eq!(p(&["--demo", "--view", name]).unwrap().view, view);
             assert_eq!(p(&["--smoke", "--view", name]).unwrap().view, view);

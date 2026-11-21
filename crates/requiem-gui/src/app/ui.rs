@@ -2231,6 +2231,9 @@ impl Ui {
         if let Some(playing) = p.playing {
             self.bar.set_playing(playing);
         }
+        if let Some(on) = p.buffering {
+            self.bar.set_buffering(on);
+        }
         if let Some(v) = p.volume {
             self.bar.set_volume(v);
         }
@@ -3212,6 +3215,7 @@ struct Patch {
     seek_spoken: Option<String>,
     progress: Option<f64>,
     playing: Option<bool>,
+    buffering: Option<bool>,
     volume: Option<u8>,
     controls: Option<Controls>,
     toast: Option<Option<Toast>>,
@@ -3305,6 +3309,7 @@ impl Patch {
             progress: (any(Dirty::SEEK) || any(Dirty::NOW_PLAYING) || any(Dirty::STATE))
                 .then(|| s.progress()),
             playing: any(Dirty::STATE).then(|| s.is_playing()),
+            buffering: any(Dirty::STATE).then_some(s.buffering_effect),
             volume: any(Dirty::VOLUME).then_some(s.volume),
             controls: d
                 .intersects(Dirty::CONNECTION | Dirty::QUEUE | Dirty::NOW_PLAYING | Dirty::STATE)
