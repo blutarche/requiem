@@ -114,6 +114,9 @@ const METADATA_BATCH: usize = 100;
 const BATCHES_IN_FLIGHT: usize = 4;
 /// Artists whose whole song lists are kept.
 const ARTIST_SONGS_KEPT: usize = 32;
+/// The most release songs an artist page looks up, as YouTube Music's artist page bounds its
+/// own; a catalogue like Bach's otherwise runs past ten thousand.
+const ARTIST_SONGS_MAX: usize = 2000;
 /// A kept song list older than this is served while a newer one is fetched.
 const ARTIST_SONGS_FRESH: Duration = Duration::from_secs(60 * 60);
 /// The shelves of an artist's page, named as YouTube Music's provider names them.
@@ -1027,6 +1030,7 @@ fn release_songs(top: &[SpotifyId], releases: &[(SpotifyId, Album)]) -> Vec<Spot
             _ => None,
         })
         .filter(|id| seen.insert(*id))
+        .take(ARTIST_SONGS_MAX)
         .collect()
 }
 
