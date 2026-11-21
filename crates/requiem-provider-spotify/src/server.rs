@@ -11,7 +11,7 @@ use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
 
-use requiem_core::{Browsed, Page, ProviderError, Track};
+use requiem_core::{Browsed, Page, ProviderError, SearchResults, Track};
 use serde::Serialize;
 
 use crate::logger::redact;
@@ -23,7 +23,7 @@ use crate::wire::{
 
 /// What the helper serves. Every method blocks.
 pub trait Backend: Send + Sync + 'static {
-    fn search(&self, q: &str, limit: usize) -> Result<Vec<Track>, ProviderError>;
+    fn search(&self, q: &str, limit: usize) -> Result<SearchResults, ProviderError>;
     fn browse(&self, page: &Page) -> Result<Browsed, ProviderError>;
     /// Tracks like track `seed`'s, without it.
     fn radio(&self, _seed: &str) -> Result<Vec<Track>, ProviderError> {
@@ -143,10 +143,7 @@ fn handle(conn: UnixStream, backend: &dyn Backend) -> io::Result<()> {
         return reply::<Done>(&mut w, Err(ProviderError::Parse("unknown request".into())));
     };
     match req {
-        Request::Search { q, limit } => reply(
-            &mut w,
-            backend.search(&q, limit).map(|tracks| Tracks { tracks }),
-        ),
+        Request::Search { q, limit } => reply(&mut w, backend.search(&q, limit)),
         Request::Radio { seed } => {
             reply(&mut w, backend.radio(&seed).map(|tracks| Tracks { tracks }))
         }
@@ -284,10 +281,10 @@ pub(crate) mod tests {
     }
 
     impl Backend for FakeBackend {
-        fn search(&self, q: &str, _limit: usize) -> Result<Vec<Track>, ProviderError> {
+        fn search(&self, q: &str, _limit: usize) -> Result<SearchResults, ProviderError> {
             match q {
                 "fail" => Err(ProviderError::SignInRequired("sign in".into())),
-                _ => Ok(Vec::new()),
+                _ => Ok(SearchResults::default()),
             }
         }
 
@@ -371,7 +368,7 @@ pub(crate) mod tests {
             },
         );
         assert!(matches!(
-            wire::read_reply::<_, Tracks>(&mut r),
+            wire::read_reply::<_, SearchResults>(&mut r),
             Err(ReplyError::Provider(ProviderError::SignInRequired(_)))
         ));
         // A backend without radios answers with none.

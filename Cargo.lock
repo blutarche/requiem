@@ -2999,7 +2999,9 @@ dependencies = [
 name = "requiem-provider-spotify"
 version = "0.3.14"
 dependencies = [
+ "bytes",
  "futures-util",
+ "http",
  "libc",
  "librespot-audio",
  "librespot-core",

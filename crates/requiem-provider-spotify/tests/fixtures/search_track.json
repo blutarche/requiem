@@ -1,0 +1,661 @@
+{
+ "data": {
+  "searchV2": {
+   "albums": {
+    "totalCount": 102,
+    "items": [
+     {
+      "data": {
+       "__typename": "Album",
+       "uri": "spotify:album:4TaKGJaappn4hWMuLdwUEF",
+       "name": "Around the World",
+       "artists": {
+        "items": [
+         {
+          "uri": "spotify:artist:4tZwfgrHOc3mvqYlEYSvVi",
+          "profile": {
+           "name": "Daft Punk"
+          }
+         }
+        ]
+       },
+       "coverArt": {
+        "sources": [
+         {
+          "url": "https://i.scdn.co/image/ab67616d00001e0244d9e117d2a21880f06f57b7",
+          "width": 300,
+          "height": 300
+         },
+         {
+          "url": "https://i.scdn.co/image/ab67616d0000485144d9e117d2a21880f06f57b7",
+          "width": 64,
+          "height": 64
+         },
+         {
+          "url": "https://i.scdn.co/image/ab67616d0000b27344d9e117d2a21880f06f57b7",
+          "width": 640,
+          "height": 640
+         }
+        ]
+       },
+       "date": {
+        "year": 1997
+       }
+      }
+     },
+     {
+      "data": {
+       "__typename": "Album",
+       "uri": "spotify:album:1jikxvcdJqAdLwKODgCFLW",
+       "name": "Daft Punk Around the World Remix 2 0",
+       "artists": {
+        "items": [
+         {
+          "uri": "spotify:artist:6WBM1XFwIGem4Q4vsnfRjy",
+          "profile": {
+           "name": "DJ Alchemist"
+          }
+         }
+        ]
+       },
+       "coverArt": {
+        "sources": [
+         {
+          "url": "https://i.scdn.co/image/ab67616d00001e026c328b9ed2e21ef51dd18e75",
+          "width": 300,
+          "height": 300
+         },
+         {
+          "url": "https://i.scdn.co/image/ab67616d000048516c328b9ed2e21ef51dd18e75",
+          "width": 64,
+          "height": 64
+         },
+         {
+          "url": "https://i.scdn.co/image/ab67616d0000b2736c328b9ed2e21ef51dd18e75",
+          "width": 640,
+          "height": 640
+         }
+        ]
+       },
+       "date": {
+        "year": 2021
+       }
+      }
+     },
+     {
+      "data": {
+       "__typename": "Album",
+       "uri": "spotify:album:5JhFgmealywfu8MlBWp7AU",
+       "name": "Around The World (Koło Remix daft punk)",
+       "artists": {
+        "items": [
+         {
+          "uri": "spotify:artist:5z1ELp4Wd23PuFHEgVjHLz",
+          "profile": {
+           "name": "ASK SQUAD"
+          }
+         },
+         {
+          "uri": "spotify:artist:6I5HqCW3pT6bYGXQoIifkm",
+          "profile": {
+           "name": "Koło"
+          }
+         }
+        ]
+       },
+       "coverArt": {
+        "sources": [
+         {
+          "url": "https://i.scdn.co/image/ab67616d00001e02ebcffc1450875b29affa0a63",
+          "width": 300,
+          "height": 300
+         },
+         {
+          "url": "https://i.scdn.co/image/ab67616d00004851ebcffc1450875b29affa0a63",
+          "width": 64,
+          "height": 64
+         },
+         {
+          "url": "https://i.scdn.co/image/ab67616d0000b273ebcffc1450875b29affa0a63",
+          "width": 640,
+          "height": 640
+         }
+        ]
+       },
+       "date": {
+        "year": 2026
+       }
+      }
+     },
+     {
+      "data": {
+       "__typename": "Album",
+       "uri": "spotify:album:28oMP65afF1KxehN1Dw216",
+       "name": "AROUND THE WORLD (FROM \"POKÉMON THAILAND\")",
+       "artists": {
+        "items": [
+         {
+          "uri": "spotify:artist:7LYn3e8PuJ2My1aoHUnSna",
+          "profile": {
+           "name": "Bright Wichawet"
+          }
+         }
+        ]
+       },
+       "coverArt": {
+        "sources": [
+         {
+          "url": "https://i.scdn.co/image/ab67616d00001e02781e1b267545dd767e16a006",
+          "width": 300,
+          "height": 300
+         },
+         {
+          "url": "https://i.scdn.co/image/ab67616d00004851781e1b267545dd767e16a006",
+          "width": 64,
+          "height": 64
+         },
+         {
+          "url": "https://i.scdn.co/image/ab67616d0000b273781e1b267545dd767e16a006",
+          "width": 640,
+          "height": 640
+         }
+        ]
+       },
+       "date": {
+        "year": 2014
+       }
+      }
+     },
+     {
+      "data": {
+       "__typename": "Album",
+       "uri": "spotify:album:1wIGhvH1W3UQmWG2CW56Yx",
+       "name": "Around The Clock",
+       "artists": {
+        "items": [
+         {
+          "uri": "spotify:artist:4yjLXYfqCgdg2ExgnZREot",
+          "profile": {
+           "name": "Katreeya English"
+          }
+         }
+        ]
+       },
+       "coverArt": {
+        "sources": [
+         {
+          "url": "https://i.scdn.co/image/ab67616d00001e02d46a6f8835b2a92d375a9ae1",
+          "width": 300,
+          "height": 300
+         },
+         {
+          "url": "https://i.scdn.co/image/ab67616d00004851d46a6f8835b2a92d375a9ae1",
+          "width": 64,
+          "height": 64
+         },
+         {
+          "url": "https://i.scdn.co/image/ab67616d0000b273d46a6f8835b2a92d375a9ae1",
+          "width": 640,
+          "height": 640
+         }
+        ]
+       },
+       "date": {
+        "year": 2001
+       }
+      }
+     }
+    ]
+   },
+   "artists": {
+    "totalCount": 100,
+    "items": [
+     {
+      "data": {
+       "__typename": "Artist",
+       "uri": "spotify:artist:4tZwfgrHOc3mvqYlEYSvVi",
+       "profile": {
+        "name": "Daft Punk"
+       },
+       "visuals": {
+        "avatarImage": {
+         "sources": [
+          {
+           "url": "https://i.scdn.co/image/ab6761610000e5ebd3aa7cc0e419b6c459b08e8e",
+           "width": 640,
+           "height": 640
+          },
+          {
+           "url": "https://i.scdn.co/image/ab6761610000f178d3aa7cc0e419b6c459b08e8e",
+           "width": 160,
+           "height": 160
+          },
+          {
+           "url": "https://i.scdn.co/image/ab67616100005174d3aa7cc0e419b6c459b08e8e",
+           "width": 320,
+           "height": 320
+          }
+         ]
+        }
+       }
+      }
+     },
+     {
+      "data": {
+       "__typename": "Artist",
+       "uri": "spotify:artist:6HEMZkIMQAPnd36iLsUlTx",
+       "profile": {
+        "name": "PUN"
+       },
+       "visuals": {
+        "avatarImage": {
+         "sources": [
+          {
+           "url": "https://i.scdn.co/image/ab6761610000e5eb2edd54d999fe4363e292c7c7",
+           "width": 640,
+           "height": 640
+          },
+          {
+           "url": "https://i.scdn.co/image/ab6761610000f1782edd54d999fe4363e292c7c7",
+           "width": 160,
+           "height": 160
+          },
+          {
+           "url": "https://i.scdn.co/image/ab676161000051742edd54d999fe4363e292c7c7",
+           "width": 320,
+           "height": 320
+          }
+         ]
+        }
+       }
+      }
+     },
+     {
+      "data": {
+       "__typename": "Artist",
+       "uri": "spotify:artist:1Twi7NfmUzbXF7lEMaGCqF",
+       "profile": {
+        "name": "Ink Waruntorn"
+       },
+       "visuals": {
+        "avatarImage": {
+         "sources": [
+          {
+           "url": "https://i.scdn.co/image/ab6761610000e5eb08d2aca11e29068543556484",
+           "width": 640,
+           "height": 640
+          },
+          {
+           "url": "https://i.scdn.co/image/ab6761610000f17808d2aca11e29068543556484",
+           "width": 160,
+           "height": 160
+          },
+          {
+           "url": "https://i.scdn.co/image/ab6761610000517408d2aca11e29068543556484",
+           "width": 320,
+           "height": 320
+          }
+         ]
+        }
+       }
+      }
+     },
+     {
+      "data": {
+       "__typename": "Artist",
+       "uri": "spotify:artist:2SWWw5uB9cO5m7zJQZqwmr",
+       "profile": {
+        "name": "BOWKYLION"
+       },
+       "visuals": {
+        "avatarImage": {
+         "sources": [
+          {
+           "url": "https://i.scdn.co/image/ab6761610000e5ebc85c2ce8de5aa3b0a9fa014a",
+           "width": 640,
+           "height": 640
+          },
+          {
+           "url": "https://i.scdn.co/image/ab6761610000f178c85c2ce8de5aa3b0a9fa014a",
+           "width": 160,
+           "height": 160
+          },
+          {
+           "url": "https://i.scdn.co/image/ab67616100005174c85c2ce8de5aa3b0a9fa014a",
+           "width": 320,
+           "height": 320
+          }
+         ]
+        }
+       }
+      }
+     },
+     {
+      "data": {
+       "__typename": "Artist",
+       "uri": "spotify:artist:1ssEwBiz4ZKrbgR6o8vOeg",
+       "profile": {
+        "name": "Polycat"
+       },
+       "visuals": {
+        "avatarImage": {
+         "sources": [
+          {
+           "url": "https://i.scdn.co/image/ab6761610000e5eb7238898ccab1a6631b8b0ed9",
+           "width": 640,
+           "height": 640
+          },
+          {
+           "url": "https://i.scdn.co/image/ab6761610000f1787238898ccab1a6631b8b0ed9",
+           "width": 160,
+           "height": 160
+          },
+          {
+           "url": "https://i.scdn.co/image/ab676161000051747238898ccab1a6631b8b0ed9",
+           "width": 320,
+           "height": 320
+          }
+         ]
+        }
+       }
+      }
+     }
+    ]
+   },
+   "playlists": {
+    "totalCount": 128,
+    "items": [
+     {
+      "data": {
+       "__typename": "Playlist",
+       "uri": "spotify:playlist:5FPvD2X2jBM782H8zGgjT3",
+       "name": "Daft Punk Essentials",
+       "images": {
+        "items": [
+         {
+          "sources": [
+           {
+            "url": "https://image-cdn-ak.spotifycdn.com/image/ab67706c0000d72c1a9e1881b6ed0e9930899cfe",
+            "width": null,
+            "height": null
+           }
+          ]
+         }
+        ]
+       },
+       "ownerV2": {
+        "data": {
+         "__typename": "User",
+         "name": "Listener"
+        }
+       }
+      }
+     },
+     {
+      "data": {
+       "__typename": "Playlist",
+       "uri": "spotify:playlist:0UaQyqQfjwO4wyowoEMclR",
+       "name": "Around The World – Daft Punk",
+       "images": {
+        "items": [
+         {
+          "sources": [
+           {
+            "url": "https://mosaic.scdn.co/640/ab67616d00001e021cd65e046a28cef435feff21ab67616d00001e0263d5a6f7b79c5b7d75d2ace9ab67616d00001e028ac778cc7d88779f74d33311ab67616d00001e028d897b8994ce008298200408",
+            "width": 640,
+            "height": 640
+           },
+           {
+            "url": "https://mosaic.scdn.co/300/ab67616d00001e021cd65e046a28cef435feff21ab67616d00001e0263d5a6f7b79c5b7d75d2ace9ab67616d00001e028ac778cc7d88779f74d33311ab67616d00001e028d897b8994ce008298200408",
+            "width": 300,
+            "height": 300
+           },
+           {
+            "url": "https://mosaic.scdn.co/60/ab67616d00001e021cd65e046a28cef435feff21ab67616d00001e0263d5a6f7b79c5b7d75d2ace9ab67616d00001e028ac778cc7d88779f74d33311ab67616d00001e028d897b8994ce008298200408",
+            "width": 60,
+            "height": 60
+           }
+          ]
+         }
+        ]
+       },
+       "ownerV2": {
+        "data": {
+         "__typename": "User",
+         "name": "Listener"
+        }
+       }
+      }
+     },
+     {
+      "data": {
+       "__typename": "Playlist",
+       "uri": "spotify:playlist:3MlcU6zPyTHpbZte8Tuyr8",
+       "name": "Around The World – Daft Punk",
+       "images": {
+        "items": [
+         {
+          "sources": [
+           {
+            "url": "https://mosaic.scdn.co/640/ab67616d00001e021e81bff9807a9e629fce5adeab67616d00001e02622aefd794f6fe4d8e714358ab67616d00001e028ac778cc7d88779f74d33311ab67616d00001e02f6c46838e4425ea96e2562fe",
+            "width": 640,
+            "height": 640
+           },
+           {
+            "url": "https://mosaic.scdn.co/300/ab67616d00001e021e81bff9807a9e629fce5adeab67616d00001e02622aefd794f6fe4d8e714358ab67616d00001e028ac778cc7d88779f74d33311ab67616d00001e02f6c46838e4425ea96e2562fe",
+            "width": 300,
+            "height": 300
+           },
+           {
+            "url": "https://mosaic.scdn.co/60/ab67616d00001e021e81bff9807a9e629fce5adeab67616d00001e02622aefd794f6fe4d8e714358ab67616d00001e028ac778cc7d88779f74d33311ab67616d00001e02f6c46838e4425ea96e2562fe",
+            "width": 60,
+            "height": 60
+           }
+          ]
+         }
+        ]
+       },
+       "ownerV2": {
+        "data": {
+         "__typename": "User",
+         "name": "Listener"
+        }
+       }
+      }
+     },
+     {
+      "data": {
+       "__typename": "Playlist",
+       "uri": "spotify:playlist:1eD2JgwbL8ptCudpNir1cy",
+       "name": "around the world (la la la la la) 1 hour",
+       "images": {
+        "items": [
+         {
+          "sources": [
+           {
+            "url": "https://image-cdn-ak.spotifycdn.com/image/ab67706c0000d72c907af5be7505080206c20d6c",
+            "width": null,
+            "height": null
+           }
+          ]
+         }
+        ]
+       },
+       "ownerV2": {
+        "data": {
+         "__typename": "User",
+         "name": "Listener"
+        }
+       }
+      }
+     },
+     {
+      "data": {
+       "__typename": "Playlist",
+       "uri": "spotify:playlist:6iIowNg94oNPlpkGpthkZB",
+       "name": "Around the World",
+       "images": {
+        "items": [
+         {
+          "sources": [
+           {
+            "url": "https://mosaic.scdn.co/640/ab67616d00001e02318f971d63a3a534ee237c9fab67616d00001e026cfc57e5358c5e39e79bccbdab67616d00001e02aada9f071eb7bb5cb8f47b81ab67616d00001e02d46caefb22d460eb8ca14db0",
+            "width": 640,
+            "height": 640
+           },
+           {
+            "url": "https://mosaic.scdn.co/300/ab67616d00001e02318f971d63a3a534ee237c9fab67616d00001e026cfc57e5358c5e39e79bccbdab67616d00001e02aada9f071eb7bb5cb8f47b81ab67616d00001e02d46caefb22d460eb8ca14db0",
+            "width": 300,
+            "height": 300
+           },
+           {
+            "url": "https://mosaic.scdn.co/60/ab67616d00001e02318f971d63a3a534ee237c9fab67616d00001e026cfc57e5358c5e39e79bccbdab67616d00001e02aada9f071eb7bb5cb8f47b81ab67616d00001e02d46caefb22d460eb8ca14db0",
+            "width": 60,
+            "height": 60
+           }
+          ]
+         }
+        ]
+       },
+       "ownerV2": {
+        "data": {
+         "__typename": "User",
+         "name": "Listener"
+        }
+       }
+      }
+     }
+    ]
+   },
+   "topResults": {
+    "itemsV2": [
+     {
+      "item": {
+       "data": {
+        "__typename": "Track",
+        "uri": "spotify:track:1pKYYY0dkg23sQQXi0Q5zN",
+        "name": "Around the World"
+       }
+      }
+     },
+     {
+      "item": {
+       "data": {
+        "__typename": "Album",
+        "uri": "spotify:album:4TaKGJaappn4hWMuLdwUEF",
+        "name": "Around the World",
+        "artists": {
+         "items": [
+          {
+           "uri": "spotify:artist:4tZwfgrHOc3mvqYlEYSvVi",
+           "profile": {
+            "name": "Daft Punk"
+           }
+          }
+         ]
+        },
+        "coverArt": {
+         "sources": [
+          {
+           "url": "https://i.scdn.co/image/ab67616d00001e0244d9e117d2a21880f06f57b7",
+           "width": 300,
+           "height": 300
+          },
+          {
+           "url": "https://i.scdn.co/image/ab67616d0000485144d9e117d2a21880f06f57b7",
+           "width": 64,
+           "height": 64
+          },
+          {
+           "url": "https://i.scdn.co/image/ab67616d0000b27344d9e117d2a21880f06f57b7",
+           "width": 640,
+           "height": 640
+          }
+         ]
+        },
+        "date": {
+         "year": 1997
+        }
+       }
+      }
+     },
+     {
+      "item": {
+       "data": {
+        "__typename": "Playlist",
+        "uri": "spotify:playlist:5FPvD2X2jBM782H8zGgjT3",
+        "name": "Daft Punk Essentials",
+        "images": {
+         "items": [
+          {
+           "sources": [
+            {
+             "url": "https://image-cdn-ak.spotifycdn.com/image/ab67706c0000d72c1a9e1881b6ed0e9930899cfe",
+             "width": null,
+             "height": null
+            }
+           ]
+          }
+         ]
+        },
+        "ownerV2": {
+         "data": {
+          "__typename": "User",
+          "name": "Listener"
+         }
+        }
+       }
+      }
+     },
+     {
+      "item": {
+       "data": {
+        "__typename": "Track",
+        "uri": "spotify:track:62zFEHfAYl5kdHYOivj4BC",
+        "name": "International Love (feat. Chris Brown)"
+       }
+      }
+     },
+     {
+      "item": {
+       "data": {
+        "__typename": "Playlist",
+        "uri": "spotify:playlist:3MlcU6zPyTHpbZte8Tuyr8",
+        "name": "Around The World – Daft Punk",
+        "images": {
+         "items": [
+          {
+           "sources": [
+            {
+             "url": "https://mosaic.scdn.co/640/ab67616d00001e021e81bff9807a9e629fce5adeab67616d00001e02622aefd794f6fe4d8e714358ab67616d00001e028ac778cc7d88779f74d33311ab67616d00001e02f6c46838e4425ea96e2562fe",
+             "width": 640,
+             "height": 640
+            },
+            {
+             "url": "https://mosaic.scdn.co/300/ab67616d00001e021e81bff9807a9e629fce5adeab67616d00001e02622aefd794f6fe4d8e714358ab67616d00001e028ac778cc7d88779f74d33311ab67616d00001e02f6c46838e4425ea96e2562fe",
+             "width": 300,
+             "height": 300
+            },
+            {
+             "url": "https://mosaic.scdn.co/60/ab67616d00001e021e81bff9807a9e629fce5adeab67616d00001e02622aefd794f6fe4d8e714358ab67616d00001e028ac778cc7d88779f74d33311ab67616d00001e02f6c46838e4425ea96e2562fe",
+             "width": 60,
+             "height": 60
+            }
+           ]
+          }
+         ]
+        },
+        "ownerV2": {
+         "data": {
+          "__typename": "User",
+          "name": "Listener"
+         }
+        }
+       }
+      }
+     }
+    ]
+   }
+  }
+ }
+}

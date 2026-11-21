@@ -295,3 +295,103 @@ fn live_covers() {
     println!("  loaded again in {second:?}");
     assert_eq!(again, cards);
 }
+
+/// Run with `cargo test -p requiem-provider-spotify live_artist -- --ignored --nocapture`.
+/// Searches for an artist, opens its page, waits for the helper to tell of its other songs,
+/// then opens it again; prints counts and times only.
+#[test]
+#[ignore = "talks to Spotify with the real sign-in; run by hand"]
+fn live_artist() {
+    use std::io::BufReader;
+    use std::os::unix::net::UnixStream;
+    use std::sync::mpsc;
+    use std::time::Duration;
+
+    use crate::wire::{self, Changed, Request};
+
+    let tmp = TempDir::new();
+    let p = live_provider(&tmp);
+    let spotify = ProviderId(PROVIDER_ID.into());
+    // As the daemon does once the helper is up: hear of every page that changes.
+    let (tx, changes) = mpsc::channel();
+    let watch = UnixStream::connect(tmp.path().join("spotify.sock")).unwrap();
+    wire::write_line(&mut &watch, &Request::Watch).unwrap();
+    thread::spawn(move || {
+        let mut r = BufReader::new(watch);
+        while let Ok(Changed { changed }) = wire::read_reply::<_, Changed>(&mut r) {
+            if tx.send((changed, Instant::now())).is_err() {
+                return;
+            }
+        }
+    });
+
+    println!("1. search \"pentakill\"");
+    let t = Instant::now();
+    let found = p.search("pentakill", 10).unwrap();
+    println!(
+        "  in {:?}: {} tracks, {} artists, {} albums, {} playlists, top artist {}",
+        t.elapsed(),
+        found.tracks.len(),
+        found.artists.len(),
+        found.albums.len(),
+        found.playlists.len(),
+        found.top_artist
+    );
+    for c in found
+        .artists
+        .iter()
+        .chain(&found.albums)
+        .chain(&found.playlists)
+    {
+        println!(
+            "  {:?} {} | {}",
+            c.kind,
+            c.title,
+            c.subtitle.as_deref().unwrap_or("-")
+        );
+    }
+    assert!(found.top_artist);
+    assert!(!found.tracks.is_empty() && !found.albums.is_empty() && !found.playlists.is_empty());
+    let pentakill = found.artists[0].clone();
+    assert_eq!(pentakill.title, "Pentakill");
+    assert_eq!(pentakill.id.provider, spotify);
+
+    let daft_punk = CollectionId {
+        provider: spotify.clone(),
+        id: "spotify:artist:4tZwfgrHOc3mvqYlEYSvVi".into(),
+    };
+    for (n, id) in [(2, pentakill.id.clone()), (3, daft_punk)] {
+        println!("{n}. open {}", id.id);
+        let page = Page::Collection(id.clone());
+        let counts = |shelves: &[Shelf]| {
+            shelves
+                .iter()
+                .map(|s| format!("{}: {}", s.title, s.items.len()))
+                .collect::<Vec<_>>()
+                .join(", ")
+        };
+        let opened = Instant::now();
+        let first = p.browse(&page).unwrap().shelves;
+        println!("  opened in {:?}: {}", opened.elapsed(), counts(&first));
+        let titles: Vec<_> = first.iter().map(|s| s.title.as_str()).collect();
+        assert_eq!(titles, ["Top songs", "Albums", "Singles & EPs"]);
+        let told = loop {
+            let (changed, at) = changes
+                .recv_timeout(Duration::from_secs(60))
+                .expect("told of no other songs");
+            if changed == page {
+                break at;
+            }
+        };
+        println!(
+            "  told of its other songs {:?} after opening",
+            told - opened
+        );
+        let t = Instant::now();
+        let full = p.browse(&page).unwrap().shelves;
+        println!("  opened again in {:?}: {}", t.elapsed(), counts(&full));
+        assert!(full[0].items.len() > first[0].items.len());
+        assert_eq!(full[0].items[..first[0].items.len()], first[0].items[..]);
+        assert_eq!(full[1..], first[1..]);
+    }
+}

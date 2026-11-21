@@ -13,6 +13,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use bytes::Bytes;
 use futures_util::StreamExt;
 use librespot_audio::{AudioDecrypt, AudioFile};
 use librespot_core::audio_key::AudioKey;
@@ -29,11 +30,15 @@ use librespot_metadata::{Album, Artist, Metadata, Track as SpotifyTrack};
 use librespot_oauth::DeviceAuthClientBuilder;
 use librespot_protocol::context_page::ContextPage;
 use librespot_protocol::context_track::ContextTrack;
+use librespot_protocol::extended_metadata::{
+    BatchedEntityRequest, BatchedExtensionResponse, EntityRequest, ExtensionQuery,
+};
+use librespot_protocol::extension_kind::ExtensionKind;
 use librespot_protocol::playlist4_external::{ListAttributes, SelectedListContent};
-use protobuf::Message;
+use protobuf::{EnumOrUnknown, Message};
 use requiem_core::{
     Browsed, Collection, CollectionId, CollectionKind, Item, Page, ProviderError, ProviderId,
-    Shelf, Track, TrackId,
+    SEARCH_COLLECTIONS, SearchResults, Shelf, Track, TrackId,
 };
 use serde_json::Value;
 use tokio::runtime::Runtime;
@@ -96,11 +101,19 @@ const LIKED_ARTWORK: &str = "https://misc.scdn.co/liked-songs/liked-songs-640.pn
 const PLAYLIST_PREFIX: &str = "playlist:";
 const ALBUM_PREFIX: &str = "album:";
 const ARTIST_PREFIX: &str = "spotify:artist:";
-/// An artist page's top songs, at most.
-const ARTIST_TOP_SONGS: usize = 10;
-/// An artist page's albums, and its singles and EPs, at most each; as many as YouTube Music's
-/// artist page shows.
-const ARTIST_RELEASES: usize = 10;
+/// The web player's GraphQL endpoint.
+const PATHFINDER: &str = "https://api-partner.spotify.com/pathfinder/v1/query";
+/// The web player's search query, which Spotify knows by this hash; it may retire it, and
+/// then searches find songs only.
+const SEARCH_QUERY_HASH: &str = "21969b655b795601fb2d2204a4243188e75fdc6d3520e7b9cd3f4db2aff9591e";
+/// Entities asked of extended metadata in one request.
+const METADATA_BATCH: usize = 100;
+/// Extended metadata requests in flight at a time.
+const BATCHES_IN_FLIGHT: usize = 4;
+/// Artists whose whole song lists are kept.
+const ARTIST_SONGS_KEPT: usize = 32;
+/// A kept song list older than this is served while a newer one is fetched.
+const ARTIST_SONGS_FRESH: Duration = Duration::from_secs(60 * 60);
 /// The shelves of an artist's page, named as YouTube Music's provider names them.
 const ARTIST_TOP: &str = "Top songs";
 const ARTIST_ALBUMS: &str = "Albums";
@@ -117,6 +130,7 @@ pub(crate) struct Librespot {
     flow: SignInFlow,
     covers: Arc<Covers>,
     recent: Mutex<RecentCache>,
+    songs: Arc<ArtistSongs>,
 }
 
 /// `AudioKey` prints itself in `Debug`, so this has none.
@@ -193,6 +207,7 @@ impl Librespot {
             flow: SignInFlow::default(),
             covers: Arc::new(Covers::new()),
             recent: Mutex::new(RecentCache::default()),
+            songs: Arc::new(ArtistSongs::new()),
         }
     }
 
@@ -232,20 +247,41 @@ impl Librespot {
         Ok(session)
     }
 
-    async fn search_async(&self, q: &str, limit: usize) -> Result<Vec<Track>, ProviderError> {
+    /// Songs from the search context; artists, albums and playlists from the web player's
+    /// search, left empty when that fails.
+    async fn search_async(&self, q: &str, limit: usize) -> Result<SearchResults, ProviderError> {
         let q = q.trim();
-        if q.is_empty() || limit == 0 {
-            return Ok(Vec::new());
+        if q.is_empty() {
+            return Ok(SearchResults::default());
         }
         let session = self.session().await?;
-        let ctx = session
-            .spclient()
-            .get_context(&format!("spotify:search:{}", search_term(q)))
-            .await
-            .map_err(|e| api_error("search", &e))?;
-        let mut ids = context_tracks(&ctx.pages);
-        ids.truncate(limit);
-        tracks(&session, ids).await
+        let session = &session;
+        let songs = async {
+            if limit == 0 {
+                return Ok(Vec::new());
+            }
+            let ctx = session
+                .spclient()
+                .get_context(&format!("spotify:search:{}", search_term(q)))
+                .await
+                .map_err(|e| api_error("search", &e))?;
+            let mut ids = context_tracks(&ctx.pages);
+            ids.truncate(limit);
+            tracks(session, ids).await
+        };
+        let (songs, collections) = tokio::join!(songs, search_collections(session, q));
+        let mut found = match collections
+            .map_err(|e| shown(&e))
+            .and_then(|b| parse_search(&b).map_err(|e| e.to_string()))
+        {
+            Ok(found) => found,
+            Err(e) => {
+                eprintln!("[spotify] search found no artists, albums or playlists: {e}");
+                SearchResults::default()
+            }
+        };
+        found.tracks = songs?;
+        Ok(found)
     }
 
     async fn radio_async(&self, seed: &str) -> Result<Vec<Track>, ProviderError> {
@@ -322,8 +358,10 @@ impl Librespot {
         })
     }
 
-    /// Artist `id`'s page: its top songs where the account is, then its albums, and its singles
-    /// and EPs, each in its latest release; about the artist, with its portrait.
+    /// Artist `id`'s page: its top songs where the account is, then the rest of the songs of
+    /// its albums and singles once they are kept; then its albums, and its singles and EPs,
+    /// each in its latest release; about the artist, with its portrait. Songs not kept, or kept
+    /// too long, are fetched in the background, and the page told of when they change.
     async fn artist(&self, id: SpotifyId) -> Result<Browsed, ProviderError> {
         let session = self.session().await?;
         let artist = Artist::get(&session, &SpotifyUri::Artist { id })
@@ -331,13 +369,50 @@ impl Librespot {
             .map_err(|e| api_error("artist", &e))?;
         let wants = ArtistWants::of(&artist, &session.country());
         let releases = wants.albums.iter().chain(&wants.singles).copied().collect();
-        let (top, releases) = tokio::join!(tracks(&session, wants.top), albums(&session, releases));
-        let (albums, singles) = releases?
+        let (top, releases) = tokio::join!(
+            batched::<SpotifyTrack>(
+                &session,
+                wants.top.clone(),
+                |id| SpotifyUri::Track { id },
+                ExtensionKind::TRACK_V4,
+            ),
+            batched::<Album>(
+                &session,
+                releases,
+                |id| SpotifyUri::Album { id },
+                ExtensionKind::ALBUM_V4,
+            ),
+        );
+        let top = top.map_err(|e| api_error("track details", &e))?;
+        let releases = releases.map_err(|e| api_error("album details", &e))?;
+        let (kept, fetch) = self.songs.get(id, Instant::now());
+        if fetch {
+            let (session, songs) = (session.clone(), self.songs.clone());
+            let (top, releases) = (wants.top.clone(), releases.clone());
+            tokio::spawn(async move {
+                let t = Instant::now();
+                let found = artist_songs(&session, id, &top, &releases).await;
+                match &found {
+                    Ok(s) => debug(format_args!(
+                        "an artist's {} other songs took {:?}",
+                        s.len(),
+                        t.elapsed()
+                    )),
+                    Err(e) => eprintln!("[spotify] an artist's page left out its other songs: {e}"),
+                }
+                songs.found(id, found.ok(), Instant::now());
+            });
+        }
+        let top = with_songs(
+            top.into_iter().map(|(id, t)| to_track(id, t)).collect(),
+            kept.unwrap_or_default(),
+        );
+        let (albums, singles) = releases
             .into_iter()
             .partition(|(id, _)| wants.albums.contains(id));
         Ok(Browsed {
             about: Some(artist_about(id, &artist.name, &portraits(&artist))),
-            shelves: artist_shelves(top?, albums, singles),
+            shelves: artist_shelves(top, albums, singles),
         })
     }
 
@@ -466,7 +541,7 @@ impl Librespot {
 }
 
 impl Backend for Librespot {
-    fn search(&self, q: &str, limit: usize) -> Result<Vec<Track>, ProviderError> {
+    fn search(&self, q: &str, limit: usize) -> Result<SearchResults, ProviderError> {
         self.rt.block_on(self.search_async(q, limit))
     }
 
@@ -506,13 +581,28 @@ impl Backend for Librespot {
         self.rt.block_on(self.sign_in_async(&path, r#gen, pending))
     }
 
-    /// Home and Library show covers and playlists that background lookups find.
+    /// Home and Library show covers and playlists that background lookups find, and an
+    /// artist's page the songs they find.
     fn watch(&self, changed: &mut dyn FnMut(Page) -> bool) {
-        let mut changes = self.covers.subscribe();
+        let mut covers = self.covers.subscribe();
+        let mut songs = self.songs.subscribe();
         self.rt.block_on(async {
-            while changes.changed().await.is_ok() {
-                if !changed(Page::Home) || !changed(Page::Library) {
-                    return;
+            loop {
+                tokio::select! {
+                    c = covers.changed() => {
+                        if c.is_err() || !changed(Page::Home) || !changed(Page::Library) {
+                            return;
+                        }
+                    }
+                    s = songs.recv() => match s {
+                        Ok(id) => {
+                            if !changed(Page::Collection(artist_page(id))) {
+                                return;
+                            }
+                        }
+                        Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
+                        Err(tokio::sync::broadcast::error::RecvError::Closed) => return,
+                    },
                 }
             }
         });
@@ -527,6 +617,7 @@ impl Backend for Librespot {
         }
         // The next account must not see this one's listening.
         *lock(&self.recent) = RecentCache::default();
+        self.songs.clear();
         match &self.creds {
             Some(path) => creds::forget(path).map_err(ProviderError::ClientBroken),
             None => Ok(()),
@@ -842,24 +933,6 @@ fn artist_about(id: SpotifyId, name: &str, portraits: &[Image]) -> Collection {
     }
 }
 
-/// Album details for `ids`, in order and at most [`METADATA_IN_FLIGHT`] requests at a time.
-async fn albums(
-    session: &Session,
-    ids: Vec<SpotifyId>,
-) -> Result<Vec<(SpotifyId, Album)>, ProviderError> {
-    all_found(
-        "album details",
-        futures_util::stream::iter(ids)
-            .map(|id| async move {
-                Album::get(session, &SpotifyUri::Album { id })
-                    .await
-                    .map(|a| (id, a))
-            })
-            .buffered(METADATA_IN_FLIGHT),
-    )
-    .await
-}
-
 /// What an artist's page needs looked up.
 #[derive(Debug, PartialEq)]
 struct ArtistWants {
@@ -884,7 +957,6 @@ impl ArtistWants {
                 SpotifyUri::Track { id } => Some(*id),
                 _ => None,
             })
-            .take(ARTIST_TOP_SONGS)
             .collect();
         Self {
             top,
@@ -899,8 +971,206 @@ fn releases<'a>(uris: impl Iterator<Item = &'a SpotifyUri>) -> Vec<SpotifyId> {
         SpotifyUri::Album { id } => Some(*id),
         _ => None,
     })
-    .take(ARTIST_RELEASES)
     .collect()
+}
+
+/// `top`, then those of `songs` not among them.
+fn with_songs(mut top: Vec<Track>, songs: Vec<Track>) -> Vec<Track> {
+    let seen: HashSet<String> = top.iter().map(|t| t.id.id.clone()).collect();
+    top.extend(songs.into_iter().filter(|t| !seen.contains(&t.id.id)));
+    top
+}
+
+/// The songs of `releases` that credit `artist`, but `top`, as [`release_songs`] orders them.
+async fn artist_songs(
+    session: &Session,
+    artist: SpotifyId,
+    top: &[SpotifyId],
+    releases: &[(SpotifyId, Album)],
+) -> Result<Vec<Track>, ProviderError> {
+    let found = batched::<SpotifyTrack>(
+        session,
+        release_songs(top, releases),
+        |id| SpotifyUri::Track { id },
+        ExtensionKind::TRACK_V4,
+    )
+    .await
+    .map_err(|e| api_error("track details", &e))?;
+    Ok(found
+        .into_iter()
+        .filter(|(_, t)| credits(t, artist))
+        .map(|(id, t)| to_track(id, t))
+        .collect())
+}
+
+fn credits(t: &SpotifyTrack, artist: SpotifyId) -> bool {
+    t.artists
+        .iter()
+        .any(|a| matches!(a.id, SpotifyUri::Artist { id } if id == artist))
+}
+
+/// The tracks of `releases`, the newest release first and each in its own order; each once,
+/// and none of `top`.
+fn release_songs(top: &[SpotifyId], releases: &[(SpotifyId, Album)]) -> Vec<SpotifyId> {
+    let mut newest: Vec<&Album> = releases.iter().map(|(_, a)| a).collect();
+    newest.sort_by_key(|a| std::cmp::Reverse(a.date));
+    let mut seen: HashSet<SpotifyId> = top.iter().copied().collect();
+    newest
+        .into_iter()
+        .flat_map(|a| a.tracks())
+        .filter_map(|uri| match uri {
+            SpotifyUri::Track { id } => Some(*id),
+            _ => None,
+        })
+        .filter(|id| seen.insert(*id))
+        .collect()
+}
+
+/// Details of `ids` in order, [`METADATA_BATCH`] to a request and [`BATCHES_IN_FLIGHT`]
+/// requests at a time; those Spotify sends none for are left out. A failed request fails all.
+async fn batched<T: Metadata>(
+    session: &Session,
+    ids: Vec<SpotifyId>,
+    uri: fn(SpotifyId) -> SpotifyUri,
+    kind: ExtensionKind,
+) -> Result<Vec<(SpotifyId, T)>, Error> {
+    let chunks: Vec<Vec<SpotifyId>> = ids.chunks(METADATA_BATCH).map(<[_]>::to_vec).collect();
+    let mut answers = futures_util::stream::iter(chunks)
+        .map(|chunk| async move {
+            let uris: Vec<SpotifyUri> = chunk.into_iter().map(uri).collect();
+            let res = session
+                .spclient()
+                .get_extended_metadata(batch_request(&uris, kind))
+                .await?;
+            Ok::<_, Error>(matched::<T>(&uris, &res))
+        })
+        .buffered(BATCHES_IN_FLIGHT);
+    let mut out = Vec::new();
+    while let Some(answer) = answers.next().await {
+        out.extend(answer?);
+    }
+    Ok(out)
+}
+
+fn batch_request(uris: &[SpotifyUri], kind: ExtensionKind) -> BatchedEntityRequest {
+    BatchedEntityRequest {
+        entity_request: uris
+            .iter()
+            .map(|u| EntityRequest {
+                entity_uri: u.to_uri(),
+                query: vec![ExtensionQuery {
+                    extension_kind: EnumOrUnknown::new(kind),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            })
+            .collect(),
+        ..Default::default()
+    }
+}
+
+/// The details `res` holds for `uris`, in their order: matched by URI, since an answer need
+/// not keep the order asked in. An entity with an error status or no data is left out.
+fn matched<T: Metadata>(
+    uris: &[SpotifyUri],
+    res: &BatchedExtensionResponse,
+) -> Vec<(SpotifyId, T)> {
+    let mut by_uri: HashMap<&str, &[u8]> = HashMap::new();
+    for d in res.extended_metadata.iter().flat_map(|a| &a.extension_data) {
+        let status = d.header.as_ref().map_or(0, |h| h.status_code);
+        if let Some(any) = d.extension_data.as_ref()
+            && matches!(status, 0 | 200)
+            && !any.value.is_empty()
+        {
+            by_uri.insert(&d.entity_uri, &any.value);
+        }
+    }
+    uris.iter()
+        .filter_map(|uri| {
+            let bytes = by_uri.get(uri.to_uri().as_str())?;
+            let msg = T::Message::parse_from_bytes(bytes).ok()?;
+            let t = T::parse(&msg, uri).ok()?;
+            let id = match uri {
+                SpotifyUri::Track { id } | SpotifyUri::Album { id } => *id,
+                _ => return None,
+            };
+            Some((id, t))
+        })
+        .collect()
+}
+
+/// The whole song lists of artists' pages, which background fetches find; watchers hear of
+/// an artist whose list changed.
+pub(crate) struct ArtistSongs {
+    state: Mutex<SongsState>,
+    changed: tokio::sync::broadcast::Sender<SpotifyId>,
+}
+
+#[derive(Default)]
+struct SongsState {
+    kept: HashMap<SpotifyId, (Instant, Vec<Track>)>,
+    fetching: HashSet<SpotifyId>,
+}
+
+impl ArtistSongs {
+    pub(crate) fn new() -> Self {
+        Self {
+            state: Mutex::default(),
+            changed: tokio::sync::broadcast::channel(ARTIST_SONGS_KEPT).0,
+        }
+    }
+
+    fn lock(&self) -> std::sync::MutexGuard<'_, SongsState> {
+        self.state.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// The songs kept for artist `id`, and whether the caller is to fetch them: none are kept
+    /// or they are older than [`ARTIST_SONGS_FRESH`], and no fetch of them runs.
+    pub(crate) fn get(&self, id: SpotifyId, now: Instant) -> (Option<Vec<Track>>, bool) {
+        let mut state = self.lock();
+        let kept = state.kept.get(&id);
+        let fresh =
+            kept.is_some_and(|(at, _)| now.saturating_duration_since(*at) < ARTIST_SONGS_FRESH);
+        let kept = kept.map(|(_, songs)| songs.clone());
+        let fetch = !fresh && state.fetching.insert(id);
+        (kept, fetch)
+    }
+
+    /// Ends the fetch for artist `id`, keeping the `songs` it found, if it did, and telling
+    /// watchers when they differ from those kept.
+    pub(crate) fn found(&self, id: SpotifyId, songs: Option<Vec<Track>>, now: Instant) {
+        let mut state = self.lock();
+        state.fetching.remove(&id);
+        let Some(songs) = songs else {
+            return;
+        };
+        let changed = state.kept.get(&id).is_none_or(|(_, old)| *old != songs);
+        state.kept.insert(id, (now, songs));
+        while state.kept.len() > ARTIST_SONGS_KEPT {
+            let oldest = state
+                .kept
+                .iter()
+                .min_by_key(|(_, (at, _))| *at)
+                .map(|(id, _)| *id);
+            if let Some(oldest) = oldest {
+                state.kept.remove(&oldest);
+            }
+        }
+        drop(state);
+        if changed {
+            // None listening is no error: the next open shows them.
+            let _ = self.changed.send(id);
+        }
+    }
+
+    pub(crate) fn subscribe(&self) -> tokio::sync::broadcast::Receiver<SpotifyId> {
+        self.changed.subscribe()
+    }
+
+    /// Fetches running now still end, and keep what they find.
+    fn clear(&self) {
+        self.lock().kept.clear();
+    }
 }
 
 /// An artist's page, each shelf left out when empty. The release cards leave out the artist,
@@ -1850,6 +2120,157 @@ async fn playlist_name(session: &Session, id: &SpotifyId) -> Option<String> {
     (!name.is_empty()).then(|| name.to_owned())
 }
 
+/// Asks Spotify's web player search for the artists, albums and playlists `q` finds.
+async fn search_collections(session: &Session, q: &str) -> Result<Bytes, Error> {
+    let variables = serde_json::json!({
+        "searchTerm": q,
+        "offset": 0,
+        "limit": SEARCH_COLLECTIONS,
+        "numberOfTopResults": 5,
+        "includeAudiobooks": false,
+    });
+    let extensions = serde_json::json!({
+        "persistedQuery": { "version": 1, "sha256Hash": SEARCH_QUERY_HASH },
+    });
+    let url = format!(
+        "{PATHFINDER}?operationName=searchDesktop&variables={}&extensions={}",
+        search_term(&variables.to_string()),
+        search_term(&extensions.to_string()),
+    );
+    let token = session.login5().auth_token().await?;
+    let request = http::Request::builder()
+        .uri(url)
+        .header(
+            http::header::AUTHORIZATION,
+            format!("{} {}", token.token_type, token.access_token),
+        )
+        .body(Bytes::new())?;
+    session.http_client().request_body(request).await
+}
+
+/// A web player search's artists, albums and playlists, at most [`SEARCH_COLLECTIONS`] each.
+/// The search is about its top result when that is an artist, which then comes first.
+pub(crate) fn parse_search(bytes: &[u8]) -> Result<SearchResults, ProviderError> {
+    let v: Value = serde_json::from_slice(bytes)
+        .map_err(|e| ProviderError::Parse(format!("Spotify search: {e}")))?;
+    let found = v.pointer("/data/searchV2");
+    let items = |kind: &str| -> Vec<&Value> {
+        found
+            .and_then(|f| f.get(kind)?.get("items")?.as_array())
+            .into_iter()
+            .flatten()
+            .filter_map(|i| i.get("data"))
+            .collect()
+    };
+    let cards = |kind: &str, card: fn(&Value) -> Option<Collection>| -> Vec<Collection> {
+        items(kind)
+            .into_iter()
+            .filter_map(card)
+            .take(SEARCH_COLLECTIONS)
+            .collect()
+    };
+    let mut artists = cards("artists", artist_card);
+    let top = found
+        .and_then(|f| f.pointer("/topResults/itemsV2/0/item/data"))
+        .and_then(artist_card);
+    let top_artist = top.is_some();
+    if let Some(top) = top {
+        artists.retain(|a| a.id != top.id);
+        artists.insert(0, top);
+        artists.truncate(SEARCH_COLLECTIONS);
+    }
+    Ok(SearchResults {
+        tracks: Vec::new(),
+        artists,
+        albums: cards("albums", found_album_card),
+        playlists: cards("playlists", found_playlist_card),
+        top_artist,
+    })
+}
+
+/// The widest of a web player answer's `sources`, by declared width.
+fn widest_source(sources: Option<&Value>) -> Option<String> {
+    sources?
+        .as_array()?
+        .iter()
+        .filter_map(|s| {
+            Some((
+                s.get("width").and_then(Value::as_u64),
+                s.get("url")?.as_str()?,
+            ))
+        })
+        .filter(|(_, url)| !url.is_empty())
+        .max_by_key(|(width, _)| *width)
+        .map(|(_, url)| url.to_owned())
+}
+
+fn str_at<'a>(v: &'a Value, path: &str) -> Option<&'a str> {
+    v.pointer(path)?.as_str().filter(|s| !s.is_empty())
+}
+
+fn typed<'a>(v: &'a Value, name: &str) -> Option<&'a Value> {
+    (v.get("__typename")?.as_str()? == name).then_some(v)
+}
+
+fn artist_card(v: &Value) -> Option<Collection> {
+    let v = typed(v, "Artist")?;
+    let id = artist_of(str_at(v, "/uri")?)?;
+    Some(Collection {
+        id: artist_page(id),
+        kind: CollectionKind::Artist,
+        title: str_at(v, "/profile/name")?.to_owned(),
+        subtitle: Some("Artist".into()),
+        artwork_url: widest_source(v.pointer("/visuals/avatarImage/sources")),
+    })
+}
+
+/// "Daft Punk • 2001": the web player's search names no album's kind.
+fn found_album_card(v: &Value) -> Option<Collection> {
+    let v = typed(v, "Album")?;
+    let SpotifyUri::Album { id } = SpotifyUri::from_uri(str_at(v, "/uri")?).ok()? else {
+        return None;
+    };
+    let artists: Vec<&str> = v
+        .pointer("/artists/items")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|a| str_at(a, "/profile/name"))
+        .collect();
+    let year = v
+        .pointer("/date/year")
+        .and_then(Value::as_i64)
+        .filter(|y| *y > 0)
+        .map(|y| y.to_string());
+    let subtitle = [Some(artists.join(", ")).filter(|a| !a.is_empty()), year]
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>()
+        .join(" \u{2022} ");
+    Some(Collection {
+        id: Opens::Album(id).id(),
+        kind: CollectionKind::Album,
+        title: str_at(v, "/name")?.to_owned(),
+        subtitle: Some(subtitle).filter(|s| !s.is_empty()),
+        artwork_url: widest_source(v.pointer("/coverArt/sources")),
+    })
+}
+
+/// Subtitled with whose it is.
+fn found_playlist_card(v: &Value) -> Option<Collection> {
+    let v = typed(v, "Playlist")?;
+    let SpotifyUri::Playlist { id, .. } = SpotifyUri::from_uri(str_at(v, "/uri")?).ok()? else {
+        return None;
+    };
+    Some(Collection {
+        id: Opens::Playlist(id).id(),
+        kind: CollectionKind::Playlist,
+        title: str_at(v, "/name")?.to_owned(),
+        subtitle: str_at(v, "/ownerV2/data/name").map(str::to_owned),
+        artwork_url: widest_source(v.pointer("/images/items/0/sources")),
+    })
+}
+
 /// `spotify:search:` takes the query form-encoded: spaces as `+`.
 pub(crate) fn search_term(q: &str) -> String {
     let mut out = String::with_capacity(q.len());
@@ -2412,6 +2833,70 @@ mod tests {
 
     const RECENTLY_PLAYED_FIXTURE: &str = include_str!("../tests/fixtures/recently_played.json");
     const RADIO: &str = include_str!("../tests/fixtures/radio_tracks.json");
+    /// A search Spotify matched to an artist, and one it matched to a track.
+    const SEARCH_ARTIST: &str = include_str!("../tests/fixtures/search_artist.json");
+    const SEARCH_TRACK: &str = include_str!("../tests/fixtures/search_track.json");
+
+    #[test]
+    fn a_search_finds_artists_albums_and_playlists_that_open_their_pages() {
+        let found = parse_search(SEARCH_ARTIST.as_bytes()).unwrap();
+        assert!(
+            found.tracks.is_empty(),
+            "tracks come from the search context"
+        );
+        assert!(found.top_artist, "Spotify's top result is the artist");
+        let names = |cs: &[Collection]| cs.iter().map(|c| c.title.clone()).collect::<Vec<_>>();
+        assert_eq!(
+            names(&found.artists),
+            [
+                "Pentakill",
+                "K/DA",
+                "Pentakill",
+                "劉潘潘Pentakill",
+                "Big Ass"
+            ]
+        );
+        let lead = &found.artists[0];
+        let pentakill = b62("2qcGTB5s2t9o2w9SrI719s");
+        assert_eq!(lead.id, artist_page(pentakill));
+        assert_eq!(artist_of(&lead.id.id), Some(pentakill));
+        assert_eq!(lead.kind, CollectionKind::Artist);
+        assert_eq!(lead.subtitle.as_deref(), Some("Artist"));
+        assert_eq!(
+            lead.artwork_url.as_deref(),
+            Some("https://i.scdn.co/image/ab6761610000e5ebd20cdeefce618685212cb98f"),
+            "the widest picture"
+        );
+
+        assert_eq!(found.albums.len(), 5);
+        let album = &found.albums[0];
+        assert_eq!(album.title, "III: Lost Chapter");
+        assert_eq!(album.kind, CollectionKind::Album);
+        assert_eq!(album.id, Opens::Album(b62("6uSg0duv6MyOjNrfyEfyjZ")).id());
+        assert_eq!(album.subtitle.as_deref(), Some("Pentakill \u{2022} 2021"));
+        assert!(album.artwork_url.as_deref().unwrap().contains("b273"));
+
+        assert_eq!(found.playlists.len(), 5);
+        let list = &found.playlists[0];
+        assert_eq!(list.title, "This Is Pentakill");
+        assert_eq!(list.kind, CollectionKind::Playlist);
+        assert_eq!(list.id, Opens::Playlist(b62("37i9dQZF1DZ06evO1nTTY4")).id());
+        assert_eq!(list.subtitle.as_deref(), Some("Spotify"));
+        assert!(list.artwork_url.is_some());
+    }
+
+    #[test]
+    fn a_search_whose_top_result_is_no_artist_has_no_top_artist() {
+        let found = parse_search(SEARCH_TRACK.as_bytes()).unwrap();
+        assert!(!found.top_artist);
+        assert_eq!(found.artists[0].title, "Daft Punk");
+        assert!(!found.albums.is_empty() && !found.playlists.is_empty());
+        assert!(parse_search(b"{}").unwrap() == SearchResults::default());
+        assert!(matches!(
+            parse_search(b"not json"),
+            Err(ProviderError::Parse(_))
+        ));
+    }
 
     fn b62(s: &str) -> SpotifyId {
         SpotifyId::from_base62(s).unwrap()
@@ -2536,15 +3021,12 @@ mod tests {
     fn an_artists_page_wants_its_top_songs_where_the_account_is_and_its_latest_releases() {
         let artist = Artist::try_from(&proto_artist(vec![("SE", 3), ("US", 12)], 11)).unwrap();
         let wants = ArtistWants::of(&artist, "US");
-        let top: Vec<SpotifyId> = (0..10).map(|i| b62(&format!("0TopUS{i:016}"))).collect();
-        assert_eq!(wants.top, top, "the account's country, at most 10");
-        let albums: Vec<SpotifyId> = (0..10)
+        let top: Vec<SpotifyId> = (0..12).map(|i| b62(&format!("0TopUS{i:016}"))).collect();
+        assert_eq!(wants.top, top, "all of the account's country's");
+        let albums: Vec<SpotifyId> = (0..11)
             .map(|i| b62(&format!("0FakeAlbum0{i:011}")))
             .collect();
-        assert_eq!(
-            wants.albums, albums,
-            "each album's latest release, at most 10"
-        );
+        assert_eq!(wants.albums, albums, "each album's latest release, all");
         assert_eq!(wants.singles, [b62("0FakeSingle00000000000")]);
 
         // A country the artist has no top songs for takes the first listed...
@@ -2565,6 +3047,159 @@ mod tests {
 
         let none = Artist::try_from(&proto_artist(Vec::new(), 0)).unwrap();
         assert!(ArtistWants::of(&none, "US").top.is_empty());
+    }
+
+    fn track_gid(n: usize) -> SpotifyId {
+        b62(&format!("0FakeTrack{n:012}"))
+    }
+
+    /// A release of `year` holding tracks `discs`, a disc each.
+    fn release(id: &str, year: i32, discs: &[&[usize]]) -> (SpotifyId, Album) {
+        let mut msg = proto_album(id, id, proto::album::Type::ALBUM, year);
+        msg.disc = discs
+            .iter()
+            .map(|tracks| proto::Disc {
+                track: tracks
+                    .iter()
+                    .map(|n| proto::Track {
+                        gid: Some(track_gid(*n).to_raw().to_vec()),
+                        ..Default::default()
+                    })
+                    .collect(),
+                ..Default::default()
+            })
+            .collect();
+        (b62(id), Album::try_from(&msg).unwrap())
+    }
+
+    #[test]
+    fn an_artists_other_songs_come_newest_release_first_each_once_without_the_top_songs() {
+        let releases = [
+            release("0FakeAlbum100000000000", 2001, &[&[1, 2], &[3]]),
+            release("0FakeSingle00000000000", 2020, &[&[9, 2]]),
+            release("0FakeAlbum200000000000", 2013, &[&[4, 5, 1]]),
+        ];
+        let ids = release_songs(&[track_gid(5)], &releases);
+        let want: Vec<SpotifyId> = [9, 2, 4, 1, 3].into_iter().map(track_gid).collect();
+        assert_eq!(ids, want);
+    }
+
+    fn song(id: &str) -> Track {
+        Track {
+            id: TrackId {
+                provider: provider(),
+                id: id.into(),
+            },
+            title: id.into(),
+            artists: Vec::new(),
+            artist_ids: Vec::new(),
+            album: None,
+            duration: None,
+            artwork_url: None,
+        }
+    }
+
+    #[test]
+    fn the_top_songs_lead_and_the_other_songs_follow_without_them() {
+        let ids = |ts: &[Track]| ts.iter().map(|t| t.id.id.clone()).collect::<Vec<_>>();
+        let all = with_songs(
+            vec![song("a"), song("b")],
+            vec![song("c"), song("a"), song("d")],
+        );
+        assert_eq!(ids(&all), ["a", "b", "c", "d"]);
+    }
+
+    #[test]
+    fn batched_details_are_matched_by_uri_and_errors_left_out() {
+        use librespot_protocol::entity_extension_data::{
+            EntityExtensionData, EntityExtensionDataHeader,
+        };
+        use librespot_protocol::extended_metadata::EntityExtensionDataArray;
+        use protobuf::well_known_types::any::Any;
+
+        let uri = |n| SpotifyUri::Track { id: track_gid(n) };
+        let data = |n: usize, status: i32, name: &str| EntityExtensionData {
+            header: MessageField::some(EntityExtensionDataHeader {
+                status_code: status,
+                ..Default::default()
+            }),
+            entity_uri: uri(n).to_uri(),
+            extension_data: MessageField::some(Any {
+                value: proto::Track {
+                    gid: Some(track_gid(n).to_raw().to_vec()),
+                    name: Some(name.into()),
+                    album: MessageField::some(proto_album(
+                        "0FakeAlbum100000000000",
+                        "Record",
+                        proto::album::Type::ALBUM,
+                        2013,
+                    )),
+                    ..Default::default()
+                }
+                .write_to_bytes()
+                .unwrap(),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let mut empty = data(4, 200, "");
+        empty.extension_data = MessageField::some(Any::default());
+        let res = BatchedExtensionResponse {
+            extended_metadata: vec![EntityExtensionDataArray {
+                extension_data: vec![
+                    data(3, 200, "Three"),
+                    data(1, 200, "One"),
+                    data(2, 404, "Two"),
+                    empty,
+                ],
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let found = matched::<SpotifyTrack>(&[uri(1), uri(2), uri(3), uri(4), uri(5)], &res);
+        let got: Vec<(SpotifyId, &str)> =
+            found.iter().map(|(id, t)| (*id, t.name.as_str())).collect();
+        assert_eq!(got, [(track_gid(1), "One"), (track_gid(3), "Three")]);
+    }
+
+    #[test]
+    fn an_artists_songs_are_fetched_once_and_told_of_only_when_they_change() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+        let songs = ArtistSongs::new();
+        let mut heard = songs.subscribe();
+        let id = b62("0FakeArtist10000000000");
+        let t0 = Instant::now();
+
+        assert_eq!(songs.get(id, t0), (None, true), "none kept: fetch");
+        assert_eq!(songs.get(id, t0), (None, false), "one fetch at a time");
+        songs.found(id, None, t0);
+        assert!(heard.try_recv().is_err(), "a failed fetch changes nothing");
+        assert_eq!(
+            songs.get(id, t0),
+            (None, true),
+            "and the next open tries again"
+        );
+
+        songs.found(id, Some(vec![song("a")]), t0);
+        assert_eq!(rt.block_on(heard.recv()).unwrap(), id);
+        assert_eq!(
+            songs.get(id, t0),
+            (Some(vec![song("a")]), false),
+            "kept and fresh"
+        );
+
+        // Stale ones are served while fetched again, and the same list again is no change,
+        // so the page it was served on doesn't fetch itself again and again.
+        let late = t0 + ARTIST_SONGS_FRESH;
+        assert_eq!(songs.get(id, late), (Some(vec![song("a")]), true));
+        songs.found(id, Some(vec![song("a")]), late);
+        assert!(heard.try_recv().is_err());
+        assert!(!songs.get(id, late).1);
+
+        songs.clear();
+        assert_eq!(songs.get(id, late), (None, true));
     }
 
     #[test]

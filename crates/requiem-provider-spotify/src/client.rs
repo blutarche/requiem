@@ -248,15 +248,10 @@ impl Provider for SpotifyProvider {
         ProviderId(PROVIDER_ID.into())
     }
 
-    /// Tracks only: Spotify's search context lists no albums or playlists.
     fn search(&self, query: &str, limit: usize) -> Result<SearchResults, ProviderError> {
-        self.call::<Tracks>(&Request::Search {
+        self.call(&Request::Search {
             q: query.to_owned(),
             limit,
-        })
-        .map(|t| SearchResults {
-            tracks: t.tracks,
-            ..SearchResults::default()
         })
     }
 
