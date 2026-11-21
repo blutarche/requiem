@@ -16,7 +16,7 @@ use objc2_core_graphics::CGPath;
 use objc2_foundation::{MainThreadMarker, NSArray, NSNumber, NSString};
 use objc2_quartz_core::{
     CABasicAnimation, CAGradientLayer, CALayer, CAMediaTiming, CAMediaTimingFunction, CAShapeLayer,
-    CATransaction, kCALineCapRound,
+    CATransaction, kCAGradientLayerConic, kCALineCapRound,
 };
 
 use super::appearance;
@@ -114,17 +114,41 @@ fn resolved(
     appearance::resolve(color, &current)
 }
 
-/// A turning arc round the play button, in a view of its own that sits below the transport so
+/// The gradient's colours, as the array a gradient layer takes.
+fn gradient_colors(
+    view: &NSView,
+    colors: &[Retained<objc2_app_kit::NSColor>],
+) -> Retained<NSArray<AnyObject>> {
+    let colors: Vec<_> = colors.iter().map(|c| resolved(view, c)).collect();
+    // SAFETY: a CGColor is a Core Foundation object, which Objective-C collections hold as
+    // any other object; the array only retains them.
+    unsafe {
+        NSArray::from_slice(
+            &colors
+                .iter()
+                .map(|c| &*std::ptr::from_ref(&**c).cast::<AnyObject>())
+                .collect::<Vec<_>>(),
+        )
+    }
+}
+
+/// A comet turning round the play button, in a view of its own that sits below the transport so
 /// it never takes a click.
 pub struct Ring {
     pub view: Retained<NSView>,
     host: Retained<CALayer>,
-    arc: Retained<CAShapeLayer>,
+    /// Holds the gradient and its mask, which turn together.
+    spinner: Retained<CALayer>,
+    comet: Retained<CAGradientLayer>,
     on: Rc<Cell<bool>>,
 }
 
 impl Ring {
     const STROKE: CGFloat = 2.0;
+    /// The comet's share of the circle.
+    const SPAN: CGFloat = 0.4;
+    /// The gradient's lead over the head, in turns.
+    const PAD: CGFloat = 0.01;
 
     /// `frame` is the square round the button, in the transport's coordinates.
     pub fn new(mtm: MainThreadMarker, frame: CGRect, mask: widgets::Mask) -> Ring {
@@ -134,6 +158,21 @@ impl Ring {
         host.setFrame(rect(0.0, 0.0, w, h));
         host.setOpacity(0.0);
         host.setHidden(true);
+        let spinner = CALayer::layer();
+        spinner.setFrame(rect(0.0, 0.0, w, h));
+        let comet = CAGradientLayer::layer();
+        comet.setFrame(rect(0.0, 0.0, w, h));
+        // SAFETY: the static is an immutable framework constant.
+        comet.setType(unsafe { kCAGradientLayerConic });
+        comet.setStartPoint(CGPoint::new(0.5, 0.5));
+        // The stroke runs anticlockwise from three o'clock, which is where the head is, and so
+        // does a conic gradient from its end point. It starts a little clockwise of the head so
+        // the head's round cap is coloured too.
+        let start = (0.25 + Self::PAD) * std::f64::consts::TAU;
+        comet.setEndPoint(CGPoint::new(
+            0.5 + 0.5 * start.sin(),
+            0.5 + 0.5 * start.cos(),
+        ));
         let arc = CAShapeLayer::layer();
         arc.setFrame(rect(0.0, 0.0, w, h));
         let inset = Self::STROKE / 2.0;
@@ -146,19 +185,26 @@ impl Ring {
         };
         arc.setPath(Some(&path));
         arc.setFillColor(None);
+        // As a mask only the stroke's opacity counts, not its colour.
+        arc.setStrokeColor(Some(&objc2_core_graphics::CGColor::new_generic_gray(
+            0.0, 1.0,
+        )));
         arc.setLineWidth(Self::STROKE);
-        // A quarter of the circle.
-        arc.setStrokeEnd(0.25);
+        arc.setStrokeEnd(Self::SPAN);
         // SAFETY: the line-cap static is an immutable framework constant.
         arc.setLineCap(unsafe { kCALineCapRound });
-        host.addSublayer(&arc);
+        // SAFETY: the mask layer is not in the tree and belongs to this gradient alone.
+        unsafe { comet.setMask(Some(&arc)) };
+        spinner.addSublayer(&comet);
+        host.addSublayer(&spinner);
         if let Some(layer) = view.layer() {
             layer.addSublayer(&host);
         }
         Ring {
             view,
             host,
-            arc,
+            spinner,
+            comet,
             on: Rc::new(Cell::new(false)),
         }
     }
@@ -169,27 +215,35 @@ impl Ring {
         }
         let animated = widgets::on_screen(&self.view);
         if on {
-            let color = resolved(&self.view, &theme::accent());
-            self.arc.setStrokeColor(Some(&color));
-            self.arc.removeAllAnimations();
+            let tail = theme::heat(0.0).colorWithAlphaComponent(0.0);
+            let colors = gradient_colors(
+                &self.view,
+                &[theme::heat(1.0), theme::heat(0.5), theme::heat(0.0), tail],
+            );
+            // SAFETY: the array holds CGColors, which is what a gradient's colours are.
+            unsafe { self.comet.setColors(Some(&colors)) };
+            let at = |f: CGFloat| NSNumber::new_f64(Self::PAD + f * Self::SPAN);
+            let locations = NSArray::from_retained_slice(&[at(0.0), at(0.35), at(0.7), at(1.0)]);
+            self.comet.setLocations(Some(&locations));
+            self.spinner.removeAllAnimations();
             self.host.setHidden(false);
             match Motion::of(&self.view) {
                 Motion::Moving => {
                     // Clockwise, which a positive angle is not in this unflipped layer.
                     let spin = animation("transform.rotation.z", 0.0, -std::f64::consts::TAU, TURN);
                     linear(&spin);
-                    self.arc
+                    self.spinner
                         .addAnimation_forKey(&spin, Some(&NSString::from_str("spin")));
                 }
-                Motion::Pulsing => pulse(&self.arc),
+                Motion::Pulsing => pulse(&self.spinner),
                 Motion::Still => {}
             }
             fade(&self.host, true, animated, || {});
         } else {
-            let (host, arc, on) = (self.host.clone(), self.arc.clone(), self.on.clone());
+            let (host, spinner, on) = (self.host.clone(), self.spinner.clone(), self.on.clone());
             fade(&self.host, false, animated, move || {
                 if !on.get() {
-                    arc.removeAllAnimations();
+                    spinner.removeAllAnimations();
                     host.setHidden(true);
                 }
             });
@@ -280,24 +334,11 @@ impl Shimmer {
         if on {
             let motion = Motion::of(view);
             self.motion.set(motion);
-            let ink = theme::ink();
-            let clear = ink.colorWithAlphaComponent(0.0);
-            let lit =
-                ink.colorWithAlphaComponent(if motion == Motion::Pulsing { 0.18 } else { 0.3 });
-            let colors = [
-                resolved(view, &clear),
-                resolved(view, &lit),
-                resolved(view, &clear),
-            ];
-            // SAFETY: a CGColor is a Core Foundation object, which Objective-C collections
-            // hold as any other object; the array only retains them.
-            let colors = unsafe {
-                NSArray::from_slice(
-                    &colors
-                        .each_ref()
-                        .map(|c| &*std::ptr::from_ref(&**c).cast::<AnyObject>()),
-                )
-            };
+            let alpha = if motion == Motion::Pulsing { 0.45 } else { 0.7 };
+            let lit = |t| theme::heat(t).colorWithAlphaComponent(alpha);
+            let clear = theme::heat(0.0).colorWithAlphaComponent(0.0);
+            let colors =
+                gradient_colors(view, &[clear.clone(), lit(0.0), lit(0.5), lit(1.0), clear]);
             // SAFETY: the array holds CGColors, which is what a gradient's colours are.
             unsafe { self.band.setColors(Some(&colors)) };
             self.lay_band();
