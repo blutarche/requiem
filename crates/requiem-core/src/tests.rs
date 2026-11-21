@@ -960,6 +960,63 @@ fn playing_another_track_stops_the_playing_one_at_once() {
 }
 
 #[test]
+fn next_onto_a_track_still_resolving_stops_the_playing_one_at_once() {
+    let r = rig(config());
+    let gate = Gate::new();
+    r.provider
+        .script_resolve("b", vec![Step::ok(()).gated(&gate)]);
+    r.play_started(&["a", "b"]);
+    r.drain();
+    r.send(Command::Next);
+    let evs = r.events_until(1, |e| matches!(e, Event::QueueChanged { .. }));
+    assert_eq!(
+        evs,
+        [
+            Event::State(PlayState::Buffering),
+            Event::QueueChanged {
+                tracks: tracks(&["a", "b"]),
+                current: Some(1),
+            }
+        ]
+    );
+    r.engine.wait_calls(|c| c.last() == Some(&EngineCall::Stop));
+    gate.release();
+    let (r#gen, _) = r.nth_load(2);
+    assert_eq!(r.loads(), ["a", "b"]);
+    r.start(r#gen, None);
+}
+
+#[test]
+fn prev_onto_an_unresolved_track_stops_the_playing_one_at_once() {
+    let r = rig(config());
+    let gate = Gate::new();
+    r.provider
+        .script_resolve("a", vec![Step::ok(()), Step::ok(()).gated(&gate)]);
+    r.play_started(&["a", "b"]);
+    r.send(Command::PlayIndex(1));
+    let (r#gen, _) = r.nth_load(2);
+    r.start(r#gen, None);
+    r.drain();
+    r.send(Command::Prev);
+    let evs = r.events_until(1, |e| matches!(e, Event::QueueChanged { .. }));
+    assert_eq!(
+        evs,
+        [
+            Event::State(PlayState::Buffering),
+            Event::QueueChanged {
+                tracks: tracks(&["a", "b"]),
+                current: Some(0),
+            }
+        ]
+    );
+    r.engine.wait_calls(|c| c.last() == Some(&EngineCall::Stop));
+    gate.release();
+    let (r#gen, _) = r.nth_load(3);
+    assert_eq!(r.loads(), ["a", "b", "a"]);
+    r.start(r#gen, None);
+}
+
+#[test]
 fn playing_a_track_stops_one_still_loading() {
     let r = rig(config());
     let gate = Gate::new();

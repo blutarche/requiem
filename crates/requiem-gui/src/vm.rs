@@ -3648,6 +3648,26 @@ mod tests {
     }
 
     #[test]
+    fn a_track_that_fails_to_start_leaves_the_bar_once_stopped() {
+        let mut vm = connected();
+        let q = vec![track("a", 100)];
+        vm.apply(Event::QueueChanged {
+            tracks: q.clone(),
+            current: Some(0),
+        });
+        vm.apply(Event::State(PlayState::Buffering));
+        assert_eq!(vm.ui().now_playing.as_ref(), Some(&q[0]));
+        vm.apply(Event::TrackFailed {
+            track: q[0].clone(),
+            error: "unplayable".into(),
+        });
+        vm.apply(Event::State(PlayState::Stopped));
+        assert_eq!(vm.ui().now_playing, None);
+        assert_eq!(vm.ui().total_text(), "");
+        assert_eq!(vm.ui().current, Some(0));
+    }
+
+    #[test]
     fn a_cued_track_does_not_show_as_playing() {
         let mut vm = connected();
         vm.apply(Event::QueueChanged {
