@@ -594,11 +594,19 @@ fn remove_before_current_shifts_index_and_keeps_playing() {
     r.send(Command::PlayIndex(2));
     let (g, _) = r.engine.wait_load(2);
     r.start(g, None);
+    let stops = || {
+        r.engine
+            .calls()
+            .iter()
+            .filter(|c| **c == EngineCall::Stop)
+            .count()
+    };
+    let before = stops();
     r.send(Command::Remove(0));
     r.wait_event(queue_is(&["b", "c"], Some(1)));
     r.barrier();
     assert_eq!(r.loads(), ["a", "c"]);
-    assert!(!r.engine.calls().contains(&EngineCall::Stop));
+    assert_eq!(stops(), before);
 }
 
 #[test]
@@ -919,6 +927,134 @@ fn playing_a_track_ends_a_pause() {
     let (r#gen, paused) = r.nth_load(2);
     assert!(!paused);
     r.start(r#gen, None);
+}
+
+#[test]
+fn playing_another_track_stops_the_playing_one_at_once() {
+    let r = rig(config());
+    let gate = Gate::new();
+    r.provider
+        .script_resolve("c", vec![Step::ok(()).gated(&gate)]);
+    r.play_started(&["a", "b", "c"]);
+    r.drain();
+    r.send(Command::PlayIndex(2));
+    // Before the new track resolves: the queue names it, the state buffers, and the engine
+    // no longer sounds the old one.
+    let evs = r.events_until(1, |e| matches!(e, Event::QueueChanged { .. }));
+    assert_eq!(
+        evs,
+        [
+            Event::State(PlayState::Buffering),
+            Event::QueueChanged {
+                tracks: tracks(&["a", "b", "c"]),
+                current: Some(2),
+            }
+        ]
+    );
+    r.engine.wait_calls(|c| c.last() == Some(&EngineCall::Stop));
+    gate.release();
+    let (r#gen, paused) = r.nth_load(2);
+    assert!(!paused);
+    assert_eq!(r.loads(), ["a", "c"]);
+    r.start(r#gen, None);
+}
+
+#[test]
+fn playing_a_track_stops_one_still_loading() {
+    let r = rig(config());
+    let gate = Gate::new();
+    r.provider
+        .script_resolve("b", vec![Step::ok(()).gated(&gate)]);
+    r.enqueue(&["a", "b"]);
+    r.send(Command::PlayIndex(0));
+    r.nth_load(1);
+    r.send(Command::PlayIndex(1));
+    r.engine.wait_calls(|c| c.last() == Some(&EngineCall::Stop));
+    gate.release();
+    r.nth_load(2);
+}
+
+#[test]
+fn playing_a_track_while_paused_does_not_stop_the_engine() {
+    let r = rig(config());
+    r.play_started(&["a", "b"]);
+    r.send(Command::Pause);
+    r.wait_event(|e| *e == Event::State(PlayState::Paused));
+    r.send(Command::PlayIndex(1));
+    r.nth_load(2);
+    assert!(!r.engine.calls().contains(&EngineCall::Stop));
+}
+
+#[test]
+fn next_onto_a_ready_track_loads_it_without_a_stop() {
+    let r = rig(config());
+    r.play_started(&["a", "b"]);
+    r.provider.wait_resolve_calls("b", 1);
+    r.settle();
+    r.send(Command::Next);
+    r.wait_event(|e| *e == Event::State(PlayState::Buffering));
+    let (r#gen, _) = r.nth_load(2);
+    assert!(!r.engine.calls().contains(&EngineCall::Stop));
+    r.start(r#gen, None);
+}
+
+#[test]
+fn ended_advances_without_a_stop_or_buffering() {
+    let r = rig(config());
+    let r#gen = r.play_started(&["a", "b"]);
+    r.provider.wait_resolve_calls("b", 1);
+    r.settle();
+    r.engine.emit(EngineEvent::Ended { r#gen });
+    r.nth_load(2);
+    let evs = r.drain();
+    assert!(no_state(&evs), "{evs:?}");
+    assert!(!r.engine.calls().contains(&EngineCall::Stop));
+}
+
+#[test]
+fn preresolve_reads_the_next_tracks_first_bytes_ahead() {
+    let r = rig(config());
+    r.play_started(&["a", "b"]);
+    r.provider.wait_resolve_calls("b", 1);
+    r.settle();
+    assert!(r.provider.source_reads("b") > 0);
+    r.send(Command::Next);
+    // Read from the start again, whole.
+    let (_, payload) = r.engine.wait_load(2);
+    assert_eq!(payload, "b");
+}
+
+#[test]
+fn an_edit_that_keeps_the_next_track_keeps_its_preresolve() {
+    let r = rig(config());
+    r.play_started(&["a", "b"]);
+    r.provider.wait_resolve_calls("b", 1);
+    r.settle();
+    r.send(Command::Enqueue {
+        tracks: tracks(&["c"]),
+        mode: EnqueueMode::Append,
+    });
+    r.send(Command::Move { from: 2, to: 0 });
+    r.settle();
+    assert_eq!(r.provider.resolve_calls("b"), 1);
+    r.send(Command::Next);
+    let (_, payload) = r.engine.wait_load(2);
+    assert_eq!(payload, "b");
+    assert_eq!(r.provider.resolve_calls("b"), 1);
+}
+
+#[test]
+fn an_edit_that_changes_the_next_track_preresolves_the_new_one() {
+    let r = rig(config());
+    r.play_started(&["a", "b", "c"]);
+    r.provider.wait_resolve_calls("b", 1);
+    r.send(Command::Remove(1));
+    r.provider.wait_resolve_calls("c", 1);
+    r.settle();
+    r.send(Command::Next);
+    let (_, payload) = r.engine.wait_load(2);
+    assert_eq!(payload, "c");
+    assert_eq!(r.provider.resolve_calls("c"), 1);
 }
 
 type PersistLog = Arc<std::sync::Mutex<Vec<PersistState>>>;

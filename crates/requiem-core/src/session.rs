@@ -1,5 +1,6 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::fmt;
+use std::io::{Read, Seek, SeekFrom};
 use std::panic::{self, AssertUnwindSafe};
 use std::sync::Arc;
 use std::thread::{self, JoinHandle};
@@ -143,14 +144,8 @@ impl Default for SessionConfig {
 }
 
 enum Purpose {
-    Start {
-        r#gen: u64,
-    },
-    Pre {
-        version: u64,
-        index: usize,
-        track: TrackId,
-    },
+    Start { r#gen: u64 },
+    Pre { slot: u64, track: TrackId },
 }
 
 enum Msg {
@@ -277,6 +272,8 @@ enum PreState {
 }
 
 struct PreSlot {
+    /// Tells this slot's resolve from a dropped slot's, which may still be running.
+    id: u64,
     version: u64,
     index: usize,
     track: TrackId,
@@ -377,6 +374,8 @@ struct Actor {
     last_pos: Duration,
     duration: Option<Duration>,
     pre: Option<PreSlot>,
+    /// The id of the last pre-resolve slot made.
+    pre_id: u64,
 
     strikes: u32,
     stream_strikes: u32,
@@ -574,6 +573,20 @@ fn merge(page: &Page, answers: Vec<Browsed>) -> Browsed {
     }
 }
 
+/// Reads the first bytes of a source resolved ahead, so its start needs no network wait: a
+/// ranged source fetches its first range, a streamed one opens. Errors are left for the start
+/// to meet, except a source that cannot go back to its start.
+fn warm(mut src: AudioSource) -> Result<AudioSource, ProviderError> {
+    let AudioSource::Encoded { bytes, .. } = &mut src;
+    let _ = bytes.read(&mut [0u8; 1]);
+    match bytes.seek(SeekFrom::Start(0)) {
+        Ok(0) => Ok(src),
+        _ => Err(ProviderError::Network(
+            "the source resolved ahead cannot seek back to its start".into(),
+        )),
+    }
+}
+
 fn resolve_with_retry(
     provider: &dyn Provider,
     track: &TrackId,
@@ -668,6 +681,7 @@ impl Actor {
             last_pos: Duration::ZERO,
             duration: None,
             pre: None,
+            pre_id: 0,
             strikes: 0,
             stream_strikes: 0,
             last_parse_failure: None,
@@ -1760,12 +1774,18 @@ impl Actor {
         self.set_state(PlayState::Stopped);
     }
 
-    /// Starts `idx` because the user picked it, which ends a pause.
+    /// Starts `idx` because the user picked it, which ends a pause. The track playing, or
+    /// loading, goes silent at once rather than when the new one starts.
     fn play(&mut self, idx: usize) {
-        if self.state == PlayState::Paused {
+        let sounding = self.loaded && self.state != PlayState::Paused;
+        if matches!(self.state, PlayState::Paused | PlayState::Playing) {
             self.set_state(PlayState::Buffering);
         }
         self.start(idx);
+        // A source that was ready is loaded already, and its load replaces the old track.
+        if sounding && !self.loaded && self.playing.is_some() {
+            self.engine.stop();
+        }
     }
 
     /// Keeps a pause: a track moved to on its own loads paused.
@@ -1809,8 +1829,19 @@ impl Actor {
             .load(r#gen, src, self.state == PlayState::Paused);
     }
 
-    /// Discards the pre-resolve slot. A start already waiting on it is resolved afresh.
+    /// After a queue edit: keeps the pre-resolve slot if the next track is still its track,
+    /// else discards it. A start already waiting on a discarded slot is resolved afresh.
     fn drop_pre(&mut self) {
+        let next = self.current.map(|c| c + 1);
+        let next_track = next.and_then(|i| self.queue.get(i)).map(|t| t.id.clone());
+        if let (Some(slot), Some(index), Some(track)) = (self.pre.as_mut(), next, next_track)
+            && slot.waiting.is_none()
+            && slot.track == track
+        {
+            slot.version = self.queue_version;
+            slot.index = index;
+            return;
+        }
         let Some(slot) = self.pre.take() else { return };
         if let (Some(r#gen), Some(track)) = (slot.waiting, self.playing.as_ref())
             && r#gen == self.r#gen
@@ -1834,7 +1865,9 @@ impl Actor {
             return;
         }
         let track = track.id.clone();
+        self.pre_id += 1;
         self.pre = Some(PreSlot {
+            id: self.pre_id,
             version: self.queue_version,
             index: idx,
             track: track.clone(),
@@ -1842,8 +1875,7 @@ impl Actor {
             waiting: None,
         });
         let purpose = Purpose::Pre {
-            version: self.queue_version,
-            index: idx,
+            slot: self.pre_id,
             track: track.clone(),
         };
         self.spawn_resolve(track, purpose);
@@ -1857,14 +1889,18 @@ impl Actor {
             .cloned();
         let tx = self.tx.clone();
         let delay = self.config.resolve_retry_delay;
+        let ahead = matches!(purpose, Purpose::Pre { .. });
         thread::spawn(move || {
-            let result = match provider {
+            let mut result = match provider {
                 Some(p) => resolve_with_retry(p.as_ref(), &track, delay),
                 None => Err(ProviderError::Unplayable(format!(
                     "no provider {:?}",
                     track.provider.0
                 ))),
             };
+            if ahead {
+                result = result.and_then(warm);
+            }
             let _ = tx.send(Msg::Resolved { purpose, result });
         });
     }
@@ -1880,15 +1916,12 @@ impl Actor {
                     Err(e) => self.on_resolve_error(e),
                 }
             }
-            Purpose::Pre {
-                version,
-                index,
-                track,
-            } => {
+            Purpose::Pre { slot: id, track } => {
                 let Some(slot) = self.pre.as_mut() else {
                     return;
                 };
-                if !slot.matches(version, index, &track) || version != self.queue_version {
+                // A slot outlives only the edits that keep its track next.
+                if slot.id != id {
                     return;
                 }
                 let waiting = slot.waiting.filter(|g| *g == self.r#gen);

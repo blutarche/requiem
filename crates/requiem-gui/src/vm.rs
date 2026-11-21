@@ -1745,6 +1745,7 @@ impl Vm {
                 self.ui.queue = tracks;
                 self.ui.current = current;
                 self.dirty |= Dirty::QUEUE;
+                self.show_current();
                 self.amend_failure(failed, "Skipped to the next track.");
             }
             Event::NowPlaying { track, duration } => {
@@ -1770,6 +1771,7 @@ impl Vm {
                     self.amend_failure(failed, "Playback stopped.");
                 }
                 self.set_state(state);
+                self.show_current();
             }
             Event::Volume(v) => {
                 if !held(&mut self.volume_hold, |&t| t == v, now) {
@@ -2783,6 +2785,32 @@ impl Vm {
         }
     }
 
+    /// Shows the queue's current track as playing while the session loads it: the session
+    /// says `NowPlaying` only once the track sounds, and a click must show at once. Stopped,
+    /// the current track is only cued.
+    fn show_current(&mut self) {
+        if self.ui.state == PlayState::Stopped {
+            return;
+        }
+        let Some(track) = self.ui.current.and_then(|c| self.ui.queue.get(c)) else {
+            return;
+        };
+        if self
+            .ui
+            .now_playing
+            .as_ref()
+            .is_some_and(|np| np.id == track.id)
+        {
+            return;
+        }
+        let track = track.clone();
+        self.seek_hold = None;
+        self.ui.duration = track.duration;
+        self.ui.now_playing = Some(track);
+        self.set_position(Duration::ZERO);
+        self.dirty |= Dirty::NOW_PLAYING | Dirty::ELAPSED | Dirty::SEEK;
+    }
+
     fn set_volume(&mut self, v: u8) {
         if v != self.ui.volume {
             self.ui.volume = v;
@@ -3575,6 +3603,83 @@ mod tests {
         assert_eq!(ui.total_text(), "");
         let d = vm.take_dirty();
         assert!(d.contains(Dirty::STATE | Dirty::NOW_PLAYING | Dirty::ELAPSED | Dirty::SEEK));
+    }
+
+    #[test]
+    fn a_track_started_shows_in_the_bar_before_it_plays() {
+        let mut vm = playing(225);
+        vm.apply(Event::Position(Duration::from_secs(40)));
+        let q = vec![track("a", 100), track("b", 130)];
+        vm.apply(Event::State(PlayState::Buffering));
+        vm.take_dirty();
+        vm.apply(Event::QueueChanged {
+            tracks: q.clone(),
+            current: Some(1),
+        });
+        let ui = vm.ui();
+        assert_eq!(ui.now_playing.as_ref(), Some(&q[1]));
+        assert_eq!(ui.duration, Some(Duration::from_secs(130)));
+        assert_eq!(ui.position, Duration::ZERO);
+        assert_eq!(ui.total_text(), "2:10");
+        assert_eq!(ui.elapsed_text(), "Buffering…");
+        assert!(vm.take_dirty().contains(Dirty::NOW_PLAYING | Dirty::SEEK));
+        // The session's word, when it starts, changes only what the engine measured.
+        vm.apply(Event::NowPlaying {
+            track: q[1].clone(),
+            duration: Some(Duration::from_millis(130_400)),
+        });
+        assert_eq!(vm.ui().now_playing.as_ref(), Some(&q[1]));
+        assert_eq!(vm.ui().duration, Some(Duration::from_millis(130_400)));
+    }
+
+    #[test]
+    fn a_track_started_from_stopped_shows_once_the_session_buffers() {
+        let mut vm = connected();
+        let q = vec![track("a", 100), track("b", 130)];
+        // The session names the track, then leaves Stopped.
+        vm.apply(Event::QueueChanged {
+            tracks: q.clone(),
+            current: Some(0),
+        });
+        assert_eq!(vm.ui().now_playing, None);
+        vm.apply(Event::State(PlayState::Buffering));
+        assert_eq!(vm.ui().now_playing.as_ref(), Some(&q[0]));
+        assert_eq!(vm.ui().total_text(), "1:40");
+    }
+
+    #[test]
+    fn a_cued_track_does_not_show_as_playing() {
+        let mut vm = connected();
+        vm.apply(Event::QueueChanged {
+            tracks: tracks(3),
+            current: Some(2),
+        });
+        assert_eq!(vm.ui().now_playing, None);
+        assert_eq!(vm.ui().total_text(), "");
+    }
+
+    #[test]
+    fn queue_edits_keep_the_playing_track() {
+        let mut vm = playing(225);
+        let np = vm.ui().now_playing.clone();
+        // A replaced queue keeps the old track playing until another is played.
+        vm.apply(Event::QueueChanged {
+            tracks: tracks(3),
+            current: None,
+        });
+        assert_eq!(vm.ui().now_playing, np);
+        vm.apply(Event::Position(Duration::from_secs(9)));
+        // The same track at another index is no change.
+        let mut q = tracks(3);
+        q.insert(1, np.clone().unwrap());
+        vm.take_dirty();
+        vm.apply(Event::QueueChanged {
+            tracks: q,
+            current: Some(1),
+        });
+        assert_eq!(vm.ui().now_playing, np);
+        assert_eq!(vm.ui().position, Duration::from_secs(9));
+        assert!(!vm.take_dirty().contains(Dirty::NOW_PLAYING));
     }
 
     #[test]
