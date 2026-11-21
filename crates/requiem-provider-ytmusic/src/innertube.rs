@@ -65,7 +65,16 @@ fn url_family(url: &str) -> IpFamily {
     }
 }
 
-/// A `RangeFetcher` bound to one family for the life of a source.
+/// The family `url` must be fetched on: its `ip=` address's, else `resolved_on`.
+fn fetch_family(url: &str, resolved_on: IpFamily) -> IpFamily {
+    match url_family(url) {
+        IpFamily::Any => resolved_on,
+        f => f,
+    }
+}
+
+/// A `RangeFetcher` that fetches each URL on its own family, so a source keeps the family of
+/// the URL it holds, also after falling back to one of the other family.
 struct PinnedFetcher {
     transport: Arc<dyn Transport>,
     family: IpFamily,
@@ -73,7 +82,8 @@ struct PinnedFetcher {
 
 impl RangeFetcher for PinnedFetcher {
     fn fetch(&self, url: &str, start: u64, end: u64) -> Result<RangeResponse, FetchError> {
-        self.transport.fetch_on(self.family, url, start, end)
+        self.transport
+            .fetch_on(fetch_family(url, self.family), url, start, end)
     }
 }
 
@@ -527,27 +537,57 @@ impl Route for InnertubeClient {
 }
 
 /// Re-resolves one video for `HttpRangeSource`. Holds the client, never the session.
-/// Stays on the family of the original URL, which embeds that address.
+/// A refresh stays on the family of the URL it replaces, which embeds that address.
 pub(crate) struct ClientRefresher {
     pub client: Arc<InnertubeClient>,
     pub video_id: String,
     pub prefer_aac: bool,
+    /// The family the first URL was resolved on.
     pub family: IpFamily,
 }
 
-impl Refresher for ClientRefresher {
-    fn refresh(&self) -> Result<(String, u32, u64), ProviderError> {
-        // Some visitorData buckets get URLs capped at 1 MiB (403 from byte 1048576), and
-        // re-resolving with the same visitorData returns another capped URL.
-        self.client.reset_visitor();
+impl ClientRefresher {
+    fn resolve_on(
+        &self,
+        family: IpFamily,
+        fresh: bool,
+    ) -> Result<(String, u32, u64), ProviderError> {
         match self
             .client
-            .resolve_on(self.family, &self.video_id, self.prefer_aac, true)
+            .resolve_on(family, &self.video_id, self.prefer_aac, fresh)
         {
             Ok(f) => Ok((f.url, f.itag, f.content_length)),
             Err(Failure::Other(e)) => Err(e),
-            Err(Failure::BotCheck) => Err(InnertubeClient::bot_check_error(&[self.family])),
+            Err(Failure::BotCheck) => Err(InnertubeClient::bot_check_error(&[family])),
         }
+    }
+}
+
+impl Refresher for ClientRefresher {
+    fn refresh(&self, url: &str) -> Result<(String, u32, u64), ProviderError> {
+        // Some visitorData buckets get URLs capped at 1 MiB (403 from byte 1048576), and
+        // re-resolving with the same visitorData returns another capped URL.
+        self.client.reset_visitor();
+        self.resolve_on(fetch_family(url, self.family), true)
+    }
+
+    /// The other family's URL names that family's address, likely reachable when this one's
+    /// host was not; a family the user chose is kept, and gets a fresh URL of its own. Leaves
+    /// the client's visitorData and connections alone: the source may be one nobody plays.
+    fn fallback(&self, url: &str) -> Result<(String, u32, u64), ProviderError> {
+        let family = fetch_family(url, self.family);
+        let other = match family {
+            IpFamily::V4 => Some(IpFamily::V6),
+            IpFamily::V6 => Some(IpFamily::V4),
+            IpFamily::Any => None,
+        };
+        if let Some(other) = other.filter(|_| self.client.configured == IpFamily::Any) {
+            match self.resolve_on(other, false) {
+                Ok(r) => return Ok(r),
+                Err(e) => debug!("no fallback on {}: {e}", family_name(other)),
+            }
+        }
+        self.resolve_on(family, false)
     }
 }
 
@@ -888,6 +928,55 @@ mod tests {
     }
 
     #[test]
+    fn a_url_is_fetched_on_its_own_family() {
+        let v6 = "https://h/videoplayback?ip=2001:db8::1";
+        assert_eq!(fetch_family(v6, IpFamily::V4), IpFamily::V6);
+        assert_eq!(fetch_family(v6, IpFamily::Any), IpFamily::V6);
+        let bare = "https://h/videoplayback";
+        assert_eq!(fetch_family(bare, IpFamily::V4), IpFamily::V4);
+        assert_eq!(fetch_family(bare, IpFamily::Any), IpFamily::Any);
+    }
+
+    fn refresher(t: &Arc<FakeTransport>, configured: IpFamily) -> ClientRefresher {
+        ClientRefresher {
+            client: Arc::new(client_on(t, configured)),
+            video_id: "vid".into(),
+            prefer_aac: true,
+            family: configured,
+        }
+    }
+
+    const V4_URL: &str = "https://h/videoplayback?ip=1.2.3.4";
+
+    #[test]
+    fn a_fallback_resolves_on_the_other_family() {
+        let t = FakeTransport::keyed(vec![(IpFamily::V6, vec![(200, &vd_reply("V")), (200, OK)])]);
+        let (url, itag, _) = refresher(&t, IpFamily::Any).fallback(V4_URL).unwrap();
+        assert!(url.contains("videoplayback"));
+        assert_eq!(itag, 140);
+        assert_eq!(t.families(), [IpFamily::V6, IpFamily::V6]);
+        assert_eq!(*t.resets.lock().unwrap(), 0);
+    }
+
+    #[test]
+    fn a_fallback_with_the_other_family_down_resolves_on_this_one() {
+        let t = FakeTransport::keyed(vec![(IpFamily::V4, vec![(200, &vd_reply("V")), (200, OK)])]);
+        t.replies.lock().unwrap().insert(
+            IpFamily::V6,
+            VecDeque::from([Err(ProviderError::Network("unreachable".into()))]),
+        );
+        refresher(&t, IpFamily::Any).fallback(V4_URL).unwrap();
+        assert_eq!(t.families(), [IpFamily::V6, IpFamily::V4, IpFamily::V4]);
+    }
+
+    #[test]
+    fn a_fallback_keeps_a_family_the_user_chose() {
+        let t = FakeTransport::keyed(vec![(IpFamily::V4, vec![(200, &vd_reply("V")), (200, OK)])]);
+        refresher(&t, IpFamily::V4).fallback(V4_URL).unwrap();
+        assert_eq!(t.families(), [IpFamily::V4, IpFamily::V4]);
+    }
+
+    #[test]
     fn http_statuses_map_as_specified() {
         for (status, network) in [
             (429, true),
@@ -945,7 +1034,7 @@ mod tests {
             prefer_aac: true,
             family: IpFamily::Any,
         };
-        let (url, itag, len) = r.refresh().unwrap();
+        let (url, itag, len) = r.refresh("https://h/videoplayback").unwrap();
         assert!(url.contains("videoplayback"));
         assert_eq!((itag, len), (140, 6953417));
     }
@@ -966,7 +1055,7 @@ mod tests {
             prefer_aac: false,
             family: IpFamily::Any,
         };
-        r.refresh().unwrap();
+        r.refresh("https://h/videoplayback").unwrap();
         assert_eq!(
             t.urls(),
             vec![

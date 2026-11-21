@@ -13,6 +13,10 @@ use crate::clients::{MUSIC_UA, STREAM_UA};
 use crate::range::{FetchError, RangeResponse};
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
+/// A stream host answers its handshake in well under a second (time to first byte measured
+/// 56-431 ms, connect included); one that hangs is retried, then left for a URL served
+/// elsewhere, so it must not hold playback for long.
+const RANGE_CONNECT_TIMEOUT: Duration = Duration::from_secs(2);
 const IO_TIMEOUT: Duration = Duration::from_secs(10);
 /// Innertube bodies are ~100-200 KB; anything near this is not an API response.
 const MAX_API_BODY: u64 = 8 * 1024 * 1024;
@@ -128,6 +132,30 @@ impl UreqTransport {
     }
 }
 
+/// Whether `e` left the request without a connection to the host.
+fn unconnected(e: &ureq::Error) -> bool {
+    use std::io::ErrorKind::*;
+    match e {
+        ureq::Error::Timeout(t) => {
+            matches!(t, ureq::Timeout::Connect | ureq::Timeout::Resolve)
+        }
+        ureq::Error::HostNotFound | ureq::Error::ConnectionFailed => true,
+        ureq::Error::Io(e) => matches!(
+            e.kind(),
+            ConnectionRefused | HostUnreachable | NetworkUnreachable | AddrNotAvailable
+        ),
+        _ => false,
+    }
+}
+
+fn fetch_error(e: &ureq::Error) -> FetchError {
+    if unconnected(e) {
+        FetchError::Connect(e.to_string())
+    } else {
+        FetchError::Transient(e.to_string())
+    }
+}
+
 fn read_limited(body: ureq::Body, limit: u64) -> std::io::Result<Vec<u8>> {
     let mut out = Vec::new();
     body.into_reader().take(limit).read_to_end(&mut out)?;
@@ -166,10 +194,13 @@ impl Transport for UreqTransport {
         let resp = self
             .agent(family)
             .get(url)
+            .config()
+            .timeout_connect(Some(RANGE_CONNECT_TIMEOUT))
+            .build()
             .header("Range", format!("bytes={start}-{end_inclusive}"))
             .header("User-Agent", STREAM_UA)
             .call()
-            .map_err(|e| transient(&e))?;
+            .map_err(|e| fetch_error(&e))?;
         let status = resp.status().as_u16();
         let content_range = resp
             .headers()
