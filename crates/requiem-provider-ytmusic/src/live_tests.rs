@@ -5,7 +5,9 @@
 use std::io::{Read, Seek, SeekFrom};
 use std::time::{Duration, Instant};
 
-use requiem_core::{AccountState, FormatHint, Item, Page, Provider, Shelf};
+use requiem_core::{
+    AccountState, CollectionId, FormatHint, Item, Page, Provider, ProviderId, Shelf,
+};
 
 use crate::{IpFamily, YtMusicOptions, YtMusicProvider};
 
@@ -187,5 +189,39 @@ fn live_library() {
             panic!("{item:?}")
         };
         assert!(!t.title.is_empty() && !t.artists.is_empty(), "{t:?}");
+    }
+}
+
+#[test]
+#[ignore]
+fn live_artist_page_lists_every_song_album_and_single() {
+    // YouTube's artist page itself shows 5 songs and 10 cards per release shelf.
+    let mut opened = Vec::new();
+    for (name, id) in [
+        ("Daft Punk", "UCRr1xG_2WIDs18a6cIiCxeA"),
+        ("Taylor Swift", "UCqECaJ8Gagnn7YCbPEzWH6g"),
+    ] {
+        let page = Page::Collection(CollectionId {
+            provider: ProviderId("ytmusic".to_owned()),
+            id: format!("browse:{id}"),
+        });
+        let t0 = Instant::now();
+        let shelves = provider(false, IpFamily::Any)
+            .browse(&page)
+            .unwrap()
+            .shelves;
+        println!("{name}: {:?} in {:?}", summary(&shelves), t0.elapsed());
+        opened.push((name, shelves));
+    }
+    for (name, shelves) in opened {
+        let count = |title: &str| {
+            shelves
+                .iter()
+                .find(|s| s.title == title)
+                .map_or(0, |s| s.items.len())
+        };
+        assert!(count("Top songs") > 5, "{name} songs");
+        assert!(count("Albums") > 10, "{name} albums");
+        assert!(count("Singles & EPs") > 10, "{name} singles");
     }
 }

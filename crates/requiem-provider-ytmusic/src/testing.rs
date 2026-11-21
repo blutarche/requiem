@@ -57,6 +57,23 @@ impl FakeMusic {
         self.script(&format!("{path}#{browse_id}"), status, body);
     }
 
+    /// Like `script_browse`, for the browse of `browse_id` with `params`.
+    pub(crate) fn script_browse_params(
+        &self,
+        path: &str,
+        browse_id: &str,
+        params: &str,
+        status: u16,
+        body: &str,
+    ) {
+        self.script(&format!("{path}#{browse_id}#{params}"), status, body);
+    }
+
+    /// Like `script`, for the continuation `token`, in the body or the query.
+    pub(crate) fn script_next(&self, path: &str, token: &str, status: u16, body: &str) {
+        self.script(&format!("{path}#next:{token}"), status, body);
+    }
+
     /// Like `script`, for calls to `path` whose body asks for `params` only.
     pub(crate) fn script_search(&self, path: &str, params: &str, status: u16, body: &str) {
         self.script(&format!("{path}#{params}"), status, body);
@@ -82,29 +99,50 @@ impl FakeMusic {
 
     fn reply(&self, call: MusicCall) -> Result<HttpResponse, ProviderError> {
         let path = call.url.split('?').next().unwrap_or_default().to_owned();
-        let browse_id = serde_json::from_str::<serde_json::Value>(&call.body)
-            .ok()
-            .and_then(|b| {
-                b["browseId"]
-                    .as_str()
-                    .or_else(|| b["params"].as_str())
-                    .map(str::to_owned)
+        let body = serde_json::from_str::<serde_json::Value>(&call.body).ok();
+        let browse_id = body.as_ref().and_then(|b| {
+            b["browseId"]
+                .as_str()
+                .or_else(|| b["params"].as_str())
+                .map(str::to_owned)
+        });
+        // A browse with params also answers to its id and params together, and a continuation
+        // to its token, as the body or the query gives it.
+        let with_params = body.as_ref().and_then(|b| {
+            Some(format!(
+                "{}#{}",
+                b["browseId"].as_str()?,
+                b["params"].as_str()?
+            ))
+        });
+        let token = body
+            .as_ref()
+            .and_then(|b| b["continuation"].as_str().map(str::to_owned))
+            .or_else(|| {
+                let (_, query) = call.url.split_once("&continuation=")?;
+                Some(query.split('&').next()?.to_owned())
             });
+        let keys: Vec<String> = with_params
+            .into_iter()
+            .chain(token.map(|t| format!("next:{t}")))
+            .chain(browse_id)
+            .collect();
         self.calls.lock().unwrap().push(call);
         let hook = {
             let mut hooks = self.hooks.lock().unwrap();
-            browse_id
-                .as_ref()
-                .and_then(|id| hooks.remove(&format!("{path}#{id}")))
+            keys.iter()
+                .find_map(|id| hooks.remove(&format!("{path}#{id}")))
                 .or_else(|| hooks.remove(&path))
         };
         if let Some(hook) = hook {
             hook();
         }
         let mut replies = self.replies.lock().unwrap();
-        let by_id = browse_id
-            .and_then(|id| replies.get_mut(&format!("{path}#{id}")))
-            .and_then(VecDeque::pop_front);
+        let by_id = keys.iter().find_map(|id| {
+            replies
+                .get_mut(&format!("{path}#{id}"))
+                .and_then(VecDeque::pop_front)
+        });
         let (status, body) = by_id
             .or_else(|| replies.get_mut(&path).and_then(VecDeque::pop_front))
             .ok_or_else(|| ProviderError::Network(format!("unscripted {path}")))?;

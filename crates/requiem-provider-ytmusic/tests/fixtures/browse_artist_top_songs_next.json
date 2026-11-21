@@ -1,0 +1,925 @@
+{
+ "trackingParams": "CAAQhGciEwj14Lv1n5mYAxVNFYMDHdNkKlPKAQQMJlSv",
+ "onResponseReceivedActions": [
+  {
+   "clickTrackingParams": "CAAQhGciEwj14Lv1n5mYAxVNFYMDHdNkKlPKAQQMJlSv",
+   "appendContinuationItemsAction": {
+    "continuationItems": [
+     {
+      "musicResponsiveListItemRenderer": {
+       "trackingParams": "CIwIEMn0AhgBIhMI9eC79Z-ZmAMVTRWDAx3TZCpT",
+       "thumbnail": {
+        "musicThumbnailRenderer": {
+         "thumbnail": {
+          "thumbnails": [
+           {
+            "url": "https://yt3.googleusercontent.com/KaJnfZODrFtPLUHqJsoWW5tDXp9LijCKqQv80Vi7Egpq9W5DLomExELyVOIqZcmumvqCsf0LLTOlD457=w60-h60-l90-rj",
+            "width": 60,
+            "height": 60
+           },
+           {
+            "url": "https://yt3.googleusercontent.com/KaJnfZODrFtPLUHqJsoWW5tDXp9LijCKqQv80Vi7Egpq9W5DLomExELyVOIqZcmumvqCsf0LLTOlD457=w120-h120-l90-rj",
+            "width": 120,
+            "height": 120
+           }
+          ]
+         },
+         "thumbnailCrop": "MUSIC_THUMBNAIL_CROP_UNSPECIFIED",
+         "thumbnailScale": "MUSIC_THUMBNAIL_SCALE_ASPECT_FIT",
+         "trackingParams": "CKEIEIS_AiITCPXgu_WfmZgDFU0VgwMd02QqUw=="
+        }
+       },
+       "overlay": {
+        "musicItemThumbnailOverlayRenderer": {
+         "background": {
+          "verticalGradient": {
+           "gradientLayerColors": [
+            "3422552064",
+            "3422552064"
+           ]
+          }
+         },
+         "content": {
+          "musicPlayButtonRenderer": {
+           "playNavigationEndpoint": {
+            "clickTrackingParams": "CKAIEMjeAiITCPXgu_WfmZgDFU0VgwMd02QqU8oBBAwmVK8=",
+            "watchEndpoint": {
+             "videoId": "_bz8rU7LdyE",
+             "playlistId": "OLAK5uy_lNVBcjNtiCwq-n95uoxJ-Gd4vsfMkyZNs",
+             "playerParams": "ygYQMTJCQkQ3Njc4NzAxNUY4OA%3D%3D",
+             "playlistSetVideoId": "12BBD76787015F88",
+             "loggingContext": {
+              "vssLoggingContext": {
+               "serializedContextData": "GilPTEFLNXV5X2xOVkJjak50aUN3cS1uOTV1b3hKLUdkNHZzZk1reVpOcw%3D%3D"
+              }
+             },
+             "watchEndpointMusicSupportedConfigs": {
+              "watchEndpointMusicConfig": {
+               "musicVideoType": "MUSIC_VIDEO_TYPE_ATV"
+              }
+             }
+            }
+           },
+           "trackingParams": "CKAIEMjeAiITCPXgu_WfmZgDFU0VgwMd02QqUw==",
+           "playIcon": {
+            "iconType": "PLAY_ARROW"
+           },
+           "pauseIcon": {
+            "iconType": "PAUSE"
+           },
+           "iconColor": 4294967295,
+           "backgroundColor": 0,
+           "activeBackgroundColor": 0,
+           "loadingIndicatorColor": 14745645,
+           "playingIcon": {
+            "iconType": "VOLUME_UP"
+           },
+           "iconLoadingColor": 0,
+           "activeScaleFactor": 1,
+           "buttonSize": "MUSIC_PLAY_BUTTON_SIZE_SMALL",
+           "rippleTarget": "MUSIC_PLAY_BUTTON_RIPPLE_TARGET_SELF",
+           "accessibilityPlayData": {
+            "accessibilityData": {
+             "label": "Play Sea of Simulation - Daft Punk - 2 minutes, 41 seconds"
+            }
+           },
+           "accessibilityPauseData": {
+            "accessibilityData": {
+             "label": "Pause Sea of Simulation - Daft Punk - 2 minutes, 41 seconds"
+            }
+           }
+          }
+         },
+         "contentPosition": "MUSIC_ITEM_THUMBNAIL_OVERLAY_CONTENT_POSITION_CENTERED",
+         "displayStyle": "MUSIC_ITEM_THUMBNAIL_OVERLAY_DISPLAY_STYLE_PERSISTENT"
+        }
+       },
+       "flexColumns": [
+        {
+         "musicResponsiveListItemFlexColumnRenderer": {
+          "text": {
+           "runs": [
+            {
+             "text": "Sea of Simulation",
+             "navigationEndpoint": {
+              "clickTrackingParams": "CIwIEMn0AhgBIhMI9eC79Z-ZmAMVTRWDAx3TZCpTygEEDCZUrw==",
+              "watchEndpoint": {
+               "videoId": "_bz8rU7LdyE",
+               "playlistId": "OLAK5uy_lNVBcjNtiCwq-n95uoxJ-Gd4vsfMkyZNs",
+               "loggingContext": {
+                "vssLoggingContext": {
+                 "serializedContextData": "GilPTEFLNXV5X2xOVkJjak50aUN3cS1uOTV1b3hKLUdkNHZzZk1reVpOcw%3D%3D"
+                }
+               },
+               "watchEndpointMusicSupportedConfigs": {
+                "watchEndpointMusicConfig": {
+                 "musicVideoType": "MUSIC_VIDEO_TYPE_ATV"
+                }
+               }
+              }
+             }
+            }
+           ]
+          },
+          "displayPriority": "MUSIC_RESPONSIVE_LIST_ITEM_COLUMN_DISPLAY_PRIORITY_HIGH"
+         }
+        },
+        {
+         "musicResponsiveListItemFlexColumnRenderer": {
+          "text": {
+           "runs": [
+            {
+             "text": "Daft Punk",
+             "navigationEndpoint": {
+              "clickTrackingParams": "CIwIEMn0AhgBIhMI9eC79Z-ZmAMVTRWDAx3TZCpTygEEDCZUrw==",
+              "browseEndpoint": {
+               "browseId": "UCRr1xG_2WIDs18a6cIiCxeA",
+               "browseEndpointContextSupportedConfigs": {
+                "browseEndpointContextMusicConfig": {
+                 "pageType": "MUSIC_PAGE_TYPE_ARTIST"
+                }
+               }
+              }
+             }
+            }
+           ],
+           "accessibility": {
+            "accessibilityData": {
+             "label": "Daft Punk"
+            }
+           }
+          },
+          "displayPriority": "MUSIC_RESPONSIVE_LIST_ITEM_COLUMN_DISPLAY_PRIORITY_HIGH"
+         }
+        },
+        {
+         "musicResponsiveListItemFlexColumnRenderer": {
+          "text": {
+           "runs": [
+            {
+             "text": "2M plays"
+            }
+           ],
+           "accessibility": {
+            "accessibilityData": {
+             "label": "2 million plays"
+            }
+           }
+          },
+          "displayPriority": "MUSIC_RESPONSIVE_LIST_ITEM_COLUMN_DISPLAY_PRIORITY_HIGH"
+         }
+        },
+        {
+         "musicResponsiveListItemFlexColumnRenderer": {
+          "text": {
+           "runs": [
+            {
+             "text": "TRON: Legacy - The Complete Edition (Original Motion Picture Soundtrack)",
+             "navigationEndpoint": {
+              "clickTrackingParams": "CIwIEMn0AhgBIhMI9eC79Z-ZmAMVTRWDAx3TZCpTygEEDCZUrw==",
+              "browseEndpoint": {
+               "browseId": "MPREb_3L0yrk0Vxg5",
+               "browseEndpointContextSupportedConfigs": {
+                "browseEndpointContextMusicConfig": {
+                 "pageType": "MUSIC_PAGE_TYPE_ALBUM"
+                }
+               }
+              }
+             }
+            }
+           ]
+          },
+          "displayPriority": "MUSIC_RESPONSIVE_LIST_ITEM_COLUMN_DISPLAY_PRIORITY_MEDIUM"
+         }
+        }
+       ],
+       "fixedColumns": [
+        {
+         "musicResponsiveListItemFixedColumnRenderer": {
+          "text": {
+           "runs": [
+            {
+             "text": "2:41"
+            }
+           ],
+           "accessibility": {
+            "accessibilityData": {
+             "label": "2 minutes, 41 seconds"
+            }
+           }
+          },
+          "displayPriority": "MUSIC_RESPONSIVE_LIST_ITEM_COLUMN_DISPLAY_PRIORITY_HIGH",
+          "size": "MUSIC_RESPONSIVE_LIST_ITEM_FIXED_COLUMN_SIZE_SMALL"
+         }
+        }
+       ],
+       "playlistItemData": {
+        "playlistSetVideoId": "12BBD76787015F88",
+        "videoId": "_bz8rU7LdyE",
+        "voteSortValue": 1795267999
+       },
+       "multiSelectCheckbox": {
+        "checkboxRenderer": {
+         "onSelectionChangeCommand": {
+          "clickTrackingParams": "CI0IEL6-CSITCPXgu_WfmZgDFU0VgwMd02QqU8oBBAwmVK8=",
+          "updateMultiSelectStateCommand": {
+           "multiSelectParams": "CAISKU9MQUs1dXlfbE5WQmNqTnRpQ3dxLW45NXVveEotR2Q0dnNmTWt5Wk5z",
+           "multiSelectItem": "Ch8KC19iejhyVTdMZHlFEhAxMkJCRDc2Nzg3MDE1Rjg4"
+          }
+         },
+         "checkedState": "CHECKBOX_CHECKED_STATE_UNCHECKED",
+         "trackingParams": "CI0IEL6-CSITCPXgu_WfmZgDFU0VgwMd02QqUw=="
+        }
+       }
+      }
+     },
+     {
+      "musicResponsiveListItemRenderer": {
+       "trackingParams": "CPYHEMn0AhgCIhMI9eC79Z-ZmAMVTRWDAx3TZCpT",
+       "thumbnail": {
+        "musicThumbnailRenderer": {
+         "thumbnail": {
+          "thumbnails": [
+           {
+            "url": "https://yt3.googleusercontent.com/KaJnfZODrFtPLUHqJsoWW5tDXp9LijCKqQv80Vi7Egpq9W5DLomExELyVOIqZcmumvqCsf0LLTOlD457=w60-h60-l90-rj",
+            "width": 60,
+            "height": 60
+           },
+           {
+            "url": "https://yt3.googleusercontent.com/KaJnfZODrFtPLUHqJsoWW5tDXp9LijCKqQv80Vi7Egpq9W5DLomExELyVOIqZcmumvqCsf0LLTOlD457=w120-h120-l90-rj",
+            "width": 120,
+            "height": 120
+           }
+          ]
+         },
+         "thumbnailCrop": "MUSIC_THUMBNAIL_CROP_UNSPECIFIED",
+         "thumbnailScale": "MUSIC_THUMBNAIL_SCALE_ASPECT_FIT",
+         "trackingParams": "CIsIEIS_AiITCPXgu_WfmZgDFU0VgwMd02QqUw=="
+        }
+       },
+       "overlay": {
+        "musicItemThumbnailOverlayRenderer": {
+         "background": {
+          "verticalGradient": {
+           "gradientLayerColors": [
+            "3422552064",
+            "3422552064"
+           ]
+          }
+         },
+         "content": {
+          "musicPlayButtonRenderer": {
+           "playNavigationEndpoint": {
+            "clickTrackingParams": "CIoIEMjeAiITCPXgu_WfmZgDFU0VgwMd02QqU8oBBAwmVK8=",
+            "watchEndpoint": {
+             "videoId": "Xp6dMCyCB4s",
+             "playlistId": "OLAK5uy_lNVBcjNtiCwq-n95uoxJ-Gd4vsfMkyZNs",
+             "playerParams": "ygYQNDVDQ0ExRUVCMjVGMEMzQg%3D%3D",
+             "playlistSetVideoId": "45CCA1EEB25F0C3B",
+             "loggingContext": {
+              "vssLoggingContext": {
+               "serializedContextData": "GilPTEFLNXV5X2xOVkJjak50aUN3cS1uOTV1b3hKLUdkNHZzZk1reVpOcw%3D%3D"
+              }
+             },
+             "watchEndpointMusicSupportedConfigs": {
+              "watchEndpointMusicConfig": {
+               "musicVideoType": "MUSIC_VIDEO_TYPE_ATV"
+              }
+             }
+            }
+           },
+           "trackingParams": "CIoIEMjeAiITCPXgu_WfmZgDFU0VgwMd02QqUw==",
+           "playIcon": {
+            "iconType": "PLAY_ARROW"
+           },
+           "pauseIcon": {
+            "iconType": "PAUSE"
+           },
+           "iconColor": 4294967295,
+           "backgroundColor": 0,
+           "activeBackgroundColor": 0,
+           "loadingIndicatorColor": 14745645,
+           "playingIcon": {
+            "iconType": "VOLUME_UP"
+           },
+           "iconLoadingColor": 0,
+           "activeScaleFactor": 1,
+           "buttonSize": "MUSIC_PLAY_BUTTON_SIZE_SMALL",
+           "rippleTarget": "MUSIC_PLAY_BUTTON_RIPPLE_TARGET_SELF",
+           "accessibilityPlayData": {
+            "accessibilityData": {
+             "label": "Play Father and Son - Daft Punk - 3 minutes, 10 seconds"
+            }
+           },
+           "accessibilityPauseData": {
+            "accessibilityData": {
+             "label": "Pause Father and Son - Daft Punk - 3 minutes, 10 seconds"
+            }
+           }
+          }
+         },
+         "contentPosition": "MUSIC_ITEM_THUMBNAIL_OVERLAY_CONTENT_POSITION_CENTERED",
+         "displayStyle": "MUSIC_ITEM_THUMBNAIL_OVERLAY_DISPLAY_STYLE_PERSISTENT"
+        }
+       },
+       "flexColumns": [
+        {
+         "musicResponsiveListItemFlexColumnRenderer": {
+          "text": {
+           "runs": [
+            {
+             "text": "Father and Son",
+             "navigationEndpoint": {
+              "clickTrackingParams": "CPYHEMn0AhgCIhMI9eC79Z-ZmAMVTRWDAx3TZCpTygEEDCZUrw==",
+              "watchEndpoint": {
+               "videoId": "Xp6dMCyCB4s",
+               "playlistId": "OLAK5uy_lNVBcjNtiCwq-n95uoxJ-Gd4vsfMkyZNs",
+               "loggingContext": {
+                "vssLoggingContext": {
+                 "serializedContextData": "GilPTEFLNXV5X2xOVkJjak50aUN3cS1uOTV1b3hKLUdkNHZzZk1reVpOcw%3D%3D"
+                }
+               },
+               "watchEndpointMusicSupportedConfigs": {
+                "watchEndpointMusicConfig": {
+                 "musicVideoType": "MUSIC_VIDEO_TYPE_ATV"
+                }
+               }
+              }
+             }
+            }
+           ]
+          },
+          "displayPriority": "MUSIC_RESPONSIVE_LIST_ITEM_COLUMN_DISPLAY_PRIORITY_HIGH"
+         }
+        },
+        {
+         "musicResponsiveListItemFlexColumnRenderer": {
+          "text": {
+           "runs": [
+            {
+             "text": "Daft Punk",
+             "navigationEndpoint": {
+              "clickTrackingParams": "CPYHEMn0AhgCIhMI9eC79Z-ZmAMVTRWDAx3TZCpTygEEDCZUrw==",
+              "browseEndpoint": {
+               "browseId": "UCRr1xG_2WIDs18a6cIiCxeA",
+               "browseEndpointContextSupportedConfigs": {
+                "browseEndpointContextMusicConfig": {
+                 "pageType": "MUSIC_PAGE_TYPE_ARTIST"
+                }
+               }
+              }
+             }
+            }
+           ],
+           "accessibility": {
+            "accessibilityData": {
+             "label": "Daft Punk"
+            }
+           }
+          },
+          "displayPriority": "MUSIC_RESPONSIVE_LIST_ITEM_COLUMN_DISPLAY_PRIORITY_HIGH"
+         }
+        },
+        {
+         "musicResponsiveListItemFlexColumnRenderer": {
+          "text": {
+           "runs": [
+            {
+             "text": "2.2M plays"
+            }
+           ],
+           "accessibility": {
+            "accessibilityData": {
+             "label": "2.2 million plays"
+            }
+           }
+          },
+          "displayPriority": "MUSIC_RESPONSIVE_LIST_ITEM_COLUMN_DISPLAY_PRIORITY_HIGH"
+         }
+        },
+        {
+         "musicResponsiveListItemFlexColumnRenderer": {
+          "text": {
+           "runs": [
+            {
+             "text": "TRON: Legacy - The Complete Edition (Original Motion Picture Soundtrack)",
+             "navigationEndpoint": {
+              "clickTrackingParams": "CPYHEMn0AhgCIhMI9eC79Z-ZmAMVTRWDAx3TZCpTygEEDCZUrw==",
+              "browseEndpoint": {
+               "browseId": "MPREb_3L0yrk0Vxg5",
+               "browseEndpointContextSupportedConfigs": {
+                "browseEndpointContextMusicConfig": {
+                 "pageType": "MUSIC_PAGE_TYPE_ALBUM"
+                }
+               }
+              }
+             }
+            }
+           ]
+          },
+          "displayPriority": "MUSIC_RESPONSIVE_LIST_ITEM_COLUMN_DISPLAY_PRIORITY_MEDIUM"
+         }
+        }
+       ],
+       "fixedColumns": [
+        {
+         "musicResponsiveListItemFixedColumnRenderer": {
+          "text": {
+           "runs": [
+            {
+             "text": "3:10"
+            }
+           ],
+           "accessibility": {
+            "accessibilityData": {
+             "label": "3 minutes, 10 seconds"
+            }
+           }
+          },
+          "displayPriority": "MUSIC_RESPONSIVE_LIST_ITEM_COLUMN_DISPLAY_PRIORITY_HIGH",
+          "size": "MUSIC_RESPONSIVE_LIST_ITEM_FIXED_COLUMN_SIZE_SMALL"
+         }
+        }
+       ],
+       "playlistItemData": {
+        "playlistSetVideoId": "45CCA1EEB25F0C3B",
+        "videoId": "Xp6dMCyCB4s",
+        "voteSortValue": 1795267999
+       },
+       "multiSelectCheckbox": {
+        "checkboxRenderer": {
+         "onSelectionChangeCommand": {
+          "clickTrackingParams": "CPcHEL6-CSITCPXgu_WfmZgDFU0VgwMd02QqU8oBBAwmVK8=",
+          "updateMultiSelectStateCommand": {
+           "multiSelectParams": "CAISKU9MQUs1dXlfbE5WQmNqTnRpQ3dxLW45NXVveEotR2Q0dnNmTWt5Wk5z",
+           "multiSelectItem": "Ch8KC1hwNmRNQ3lDQjRzEhA0NUNDQTFFRUIyNUYwQzNC"
+          }
+         },
+         "checkedState": "CHECKBOX_CHECKED_STATE_UNCHECKED",
+         "trackingParams": "CPcHEL6-CSITCPXgu_WfmZgDFU0VgwMd02QqUw=="
+        }
+       }
+      }
+     },
+     {
+      "musicResponsiveListItemRenderer": {
+       "trackingParams": "COAHEMn0AhgDIhMI9eC79Z-ZmAMVTRWDAx3TZCpT",
+       "thumbnail": {
+        "musicThumbnailRenderer": {
+         "thumbnail": {
+          "thumbnails": [
+           {
+            "url": "https://yt3.googleusercontent.com/KaJnfZODrFtPLUHqJsoWW5tDXp9LijCKqQv80Vi7Egpq9W5DLomExELyVOIqZcmumvqCsf0LLTOlD457=w60-h60-l90-rj",
+            "width": 60,
+            "height": 60
+           },
+           {
+            "url": "https://yt3.googleusercontent.com/KaJnfZODrFtPLUHqJsoWW5tDXp9LijCKqQv80Vi7Egpq9W5DLomExELyVOIqZcmumvqCsf0LLTOlD457=w120-h120-l90-rj",
+            "width": 120,
+            "height": 120
+           }
+          ]
+         },
+         "thumbnailCrop": "MUSIC_THUMBNAIL_CROP_UNSPECIFIED",
+         "thumbnailScale": "MUSIC_THUMBNAIL_SCALE_ASPECT_FIT",
+         "trackingParams": "CPUHEIS_AiITCPXgu_WfmZgDFU0VgwMd02QqUw=="
+        }
+       },
+       "overlay": {
+        "musicItemThumbnailOverlayRenderer": {
+         "background": {
+          "verticalGradient": {
+           "gradientLayerColors": [
+            "3422552064",
+            "3422552064"
+           ]
+          }
+         },
+         "content": {
+          "musicPlayButtonRenderer": {
+           "playNavigationEndpoint": {
+            "clickTrackingParams": "CPQHEMjeAiITCPXgu_WfmZgDFU0VgwMd02QqU8oBBAwmVK8=",
+            "watchEndpoint": {
+             "videoId": "9l6S1adYrbg",
+             "playlistId": "OLAK5uy_lNVBcjNtiCwq-n95uoxJ-Gd4vsfMkyZNs",
+             "playerParams": "ygYQQTMyRUI0RTU3QjFCRjkzOA%3D%3D",
+             "playlistSetVideoId": "A32EB4E57B1BF938",
+             "loggingContext": {
+              "vssLoggingContext": {
+               "serializedContextData": "GilPTEFLNXV5X2xOVkJjak50aUN3cS1uOTV1b3hKLUdkNHZzZk1reVpOcw%3D%3D"
+              }
+             },
+             "watchEndpointMusicSupportedConfigs": {
+              "watchEndpointMusicConfig": {
+               "musicVideoType": "MUSIC_VIDEO_TYPE_ATV"
+              }
+             }
+            }
+           },
+           "trackingParams": "CPQHEMjeAiITCPXgu_WfmZgDFU0VgwMd02QqUw==",
+           "playIcon": {
+            "iconType": "PLAY_ARROW"
+           },
+           "pauseIcon": {
+            "iconType": "PAUSE"
+           },
+           "iconColor": 4294967295,
+           "backgroundColor": 0,
+           "activeBackgroundColor": 0,
+           "loadingIndicatorColor": 14745645,
+           "playingIcon": {
+            "iconType": "VOLUME_UP"
+           },
+           "iconLoadingColor": 0,
+           "activeScaleFactor": 1,
+           "buttonSize": "MUSIC_PLAY_BUTTON_SIZE_SMALL",
+           "rippleTarget": "MUSIC_PLAY_BUTTON_RIPPLE_TARGET_SELF",
+           "accessibilityPlayData": {
+            "accessibilityData": {
+             "label": "Play Round One - Daft Punk - 1 minute, 41 seconds"
+            }
+           },
+           "accessibilityPauseData": {
+            "accessibilityData": {
+             "label": "Pause Round One - Daft Punk - 1 minute, 41 seconds"
+            }
+           }
+          }
+         },
+         "contentPosition": "MUSIC_ITEM_THUMBNAIL_OVERLAY_CONTENT_POSITION_CENTERED",
+         "displayStyle": "MUSIC_ITEM_THUMBNAIL_OVERLAY_DISPLAY_STYLE_PERSISTENT"
+        }
+       },
+       "flexColumns": [
+        {
+         "musicResponsiveListItemFlexColumnRenderer": {
+          "text": {
+           "runs": [
+            {
+             "text": "Round One",
+             "navigationEndpoint": {
+              "clickTrackingParams": "COAHEMn0AhgDIhMI9eC79Z-ZmAMVTRWDAx3TZCpTygEEDCZUrw==",
+              "watchEndpoint": {
+               "videoId": "9l6S1adYrbg",
+               "playlistId": "OLAK5uy_lNVBcjNtiCwq-n95uoxJ-Gd4vsfMkyZNs",
+               "loggingContext": {
+                "vssLoggingContext": {
+                 "serializedContextData": "GilPTEFLNXV5X2xOVkJjak50aUN3cS1uOTV1b3hKLUdkNHZzZk1reVpOcw%3D%3D"
+                }
+               },
+               "watchEndpointMusicSupportedConfigs": {
+                "watchEndpointMusicConfig": {
+                 "musicVideoType": "MUSIC_VIDEO_TYPE_ATV"
+                }
+               }
+              }
+             }
+            }
+           ]
+          },
+          "displayPriority": "MUSIC_RESPONSIVE_LIST_ITEM_COLUMN_DISPLAY_PRIORITY_HIGH"
+         }
+        },
+        {
+         "musicResponsiveListItemFlexColumnRenderer": {
+          "text": {
+           "runs": [
+            {
+             "text": "Daft Punk",
+             "navigationEndpoint": {
+              "clickTrackingParams": "COAHEMn0AhgDIhMI9eC79Z-ZmAMVTRWDAx3TZCpTygEEDCZUrw==",
+              "browseEndpoint": {
+               "browseId": "UCRr1xG_2WIDs18a6cIiCxeA",
+               "browseEndpointContextSupportedConfigs": {
+                "browseEndpointContextMusicConfig": {
+                 "pageType": "MUSIC_PAGE_TYPE_ARTIST"
+                }
+               }
+              }
+             }
+            }
+           ],
+           "accessibility": {
+            "accessibilityData": {
+             "label": "Daft Punk"
+            }
+           }
+          },
+          "displayPriority": "MUSIC_RESPONSIVE_LIST_ITEM_COLUMN_DISPLAY_PRIORITY_HIGH"
+         }
+        },
+        {
+         "musicResponsiveListItemFlexColumnRenderer": {
+          "text": {
+           "runs": [
+            {
+             "text": "2M plays"
+            }
+           ],
+           "accessibility": {
+            "accessibilityData": {
+             "label": "2 million plays"
+            }
+           }
+          },
+          "displayPriority": "MUSIC_RESPONSIVE_LIST_ITEM_COLUMN_DISPLAY_PRIORITY_HIGH"
+         }
+        },
+        {
+         "musicResponsiveListItemFlexColumnRenderer": {
+          "text": {
+           "runs": [
+            {
+             "text": "TRON: Legacy - The Complete Edition (Original Motion Picture Soundtrack)",
+             "navigationEndpoint": {
+              "clickTrackingParams": "COAHEMn0AhgDIhMI9eC79Z-ZmAMVTRWDAx3TZCpTygEEDCZUrw==",
+              "browseEndpoint": {
+               "browseId": "MPREb_3L0yrk0Vxg5",
+               "browseEndpointContextSupportedConfigs": {
+                "browseEndpointContextMusicConfig": {
+                 "pageType": "MUSIC_PAGE_TYPE_ALBUM"
+                }
+               }
+              }
+             }
+            }
+           ]
+          },
+          "displayPriority": "MUSIC_RESPONSIVE_LIST_ITEM_COLUMN_DISPLAY_PRIORITY_MEDIUM"
+         }
+        }
+       ],
+       "fixedColumns": [
+        {
+         "musicResponsiveListItemFixedColumnRenderer": {
+          "text": {
+           "runs": [
+            {
+             "text": "1:41"
+            }
+           ],
+           "accessibility": {
+            "accessibilityData": {
+             "label": "1 minute, 41 seconds"
+            }
+           }
+          },
+          "displayPriority": "MUSIC_RESPONSIVE_LIST_ITEM_COLUMN_DISPLAY_PRIORITY_HIGH",
+          "size": "MUSIC_RESPONSIVE_LIST_ITEM_FIXED_COLUMN_SIZE_SMALL"
+         }
+        }
+       ],
+       "playlistItemData": {
+        "playlistSetVideoId": "A32EB4E57B1BF938",
+        "videoId": "9l6S1adYrbg",
+        "voteSortValue": 1795267999
+       },
+       "multiSelectCheckbox": {
+        "checkboxRenderer": {
+         "onSelectionChangeCommand": {
+          "clickTrackingParams": "COEHEL6-CSITCPXgu_WfmZgDFU0VgwMd02QqU8oBBAwmVK8=",
+          "updateMultiSelectStateCommand": {
+           "multiSelectParams": "CAISKU9MQUs1dXlfbE5WQmNqTnRpQ3dxLW45NXVveEotR2Q0dnNmTWt5Wk5z",
+           "multiSelectItem": "Ch8KCzlsNlMxYWRZcmJnEhBBMzJFQjRFNTdCMUJGOTM4"
+          }
+         },
+         "checkedState": "CHECKBOX_CHECKED_STATE_UNCHECKED",
+         "trackingParams": "COEHEL6-CSITCPXgu_WfmZgDFU0VgwMd02QqUw=="
+        }
+       }
+      }
+     },
+     {
+      "musicResponsiveListItemRenderer": {
+       "trackingParams": "CMoHEMn0AhgEIhMI9eC79Z-ZmAMVTRWDAx3TZCpT",
+       "thumbnail": {
+        "musicThumbnailRenderer": {
+         "thumbnail": {
+          "thumbnails": [
+           {
+            "url": "https://yt3.googleusercontent.com/KaJnfZODrFtPLUHqJsoWW5tDXp9LijCKqQv80Vi7Egpq9W5DLomExELyVOIqZcmumvqCsf0LLTOlD457=w60-h60-l90-rj",
+            "width": 60,
+            "height": 60
+           },
+           {
+            "url": "https://yt3.googleusercontent.com/KaJnfZODrFtPLUHqJsoWW5tDXp9LijCKqQv80Vi7Egpq9W5DLomExELyVOIqZcmumvqCsf0LLTOlD457=w120-h120-l90-rj",
+            "width": 120,
+            "height": 120
+           }
+          ]
+         },
+         "thumbnailCrop": "MUSIC_THUMBNAIL_CROP_UNSPECIFIED",
+         "thumbnailScale": "MUSIC_THUMBNAIL_SCALE_ASPECT_FIT",
+         "trackingParams": "CN8HEIS_AiITCPXgu_WfmZgDFU0VgwMd02QqUw=="
+        }
+       },
+       "overlay": {
+        "musicItemThumbnailOverlayRenderer": {
+         "background": {
+          "verticalGradient": {
+           "gradientLayerColors": [
+            "3422552064",
+            "3422552064"
+           ]
+          }
+         },
+         "content": {
+          "musicPlayButtonRenderer": {
+           "playNavigationEndpoint": {
+            "clickTrackingParams": "CN4HEMjeAiITCPXgu_WfmZgDFU0VgwMd02QqU8oBBAwmVK8=",
+            "watchEndpoint": {
+             "videoId": "W_krrkNE-Sc",
+             "playlistId": "OLAK5uy_lNVBcjNtiCwq-n95uoxJ-Gd4vsfMkyZNs",
+             "playerParams": "ygYQOTU1QjA5MzlEN0ZFNzc1OA%3D%3D",
+             "playlistSetVideoId": "955B0939D7FE7758",
+             "loggingContext": {
+              "vssLoggingContext": {
+               "serializedContextData": "GilPTEFLNXV5X2xOVkJjak50aUN3cS1uOTV1b3hKLUdkNHZzZk1reVpOcw%3D%3D"
+              }
+             },
+             "watchEndpointMusicSupportedConfigs": {
+              "watchEndpointMusicConfig": {
+               "musicVideoType": "MUSIC_VIDEO_TYPE_ATV"
+              }
+             }
+            }
+           },
+           "trackingParams": "CN4HEMjeAiITCPXgu_WfmZgDFU0VgwMd02QqUw==",
+           "playIcon": {
+            "iconType": "PLAY_ARROW"
+           },
+           "pauseIcon": {
+            "iconType": "PAUSE"
+           },
+           "iconColor": 4294967295,
+           "backgroundColor": 0,
+           "activeBackgroundColor": 0,
+           "loadingIndicatorColor": 14745645,
+           "playingIcon": {
+            "iconType": "VOLUME_UP"
+           },
+           "iconLoadingColor": 0,
+           "activeScaleFactor": 1,
+           "buttonSize": "MUSIC_PLAY_BUTTON_SIZE_SMALL",
+           "rippleTarget": "MUSIC_PLAY_BUTTON_RIPPLE_TARGET_SELF",
+           "accessibilityPlayData": {
+            "accessibilityData": {
+             "label": "Play Encom Part I - Daft Punk - 3 minutes, 52 seconds"
+            }
+           },
+           "accessibilityPauseData": {
+            "accessibilityData": {
+             "label": "Pause Encom Part I - Daft Punk - 3 minutes, 52 seconds"
+            }
+           }
+          }
+         },
+         "contentPosition": "MUSIC_ITEM_THUMBNAIL_OVERLAY_CONTENT_POSITION_CENTERED",
+         "displayStyle": "MUSIC_ITEM_THUMBNAIL_OVERLAY_DISPLAY_STYLE_PERSISTENT"
+        }
+       },
+       "flexColumns": [
+        {
+         "musicResponsiveListItemFlexColumnRenderer": {
+          "text": {
+           "runs": [
+            {
+             "text": "Encom Part I",
+             "navigationEndpoint": {
+              "clickTrackingParams": "CMoHEMn0AhgEIhMI9eC79Z-ZmAMVTRWDAx3TZCpTygEEDCZUrw==",
+              "watchEndpoint": {
+               "videoId": "W_krrkNE-Sc",
+               "playlistId": "OLAK5uy_lNVBcjNtiCwq-n95uoxJ-Gd4vsfMkyZNs",
+               "loggingContext": {
+                "vssLoggingContext": {
+                 "serializedContextData": "GilPTEFLNXV5X2xOVkJjak50aUN3cS1uOTV1b3hKLUdkNHZzZk1reVpOcw%3D%3D"
+                }
+               },
+               "watchEndpointMusicSupportedConfigs": {
+                "watchEndpointMusicConfig": {
+                 "musicVideoType": "MUSIC_VIDEO_TYPE_ATV"
+                }
+               }
+              }
+             }
+            }
+           ]
+          },
+          "displayPriority": "MUSIC_RESPONSIVE_LIST_ITEM_COLUMN_DISPLAY_PRIORITY_HIGH"
+         }
+        },
+        {
+         "musicResponsiveListItemFlexColumnRenderer": {
+          "text": {
+           "runs": [
+            {
+             "text": "Daft Punk",
+             "navigationEndpoint": {
+              "clickTrackingParams": "CMoHEMn0AhgEIhMI9eC79Z-ZmAMVTRWDAx3TZCpTygEEDCZUrw==",
+              "browseEndpoint": {
+               "browseId": "UCRr1xG_2WIDs18a6cIiCxeA",
+               "browseEndpointContextSupportedConfigs": {
+                "browseEndpointContextMusicConfig": {
+                 "pageType": "MUSIC_PAGE_TYPE_ARTIST"
+                }
+               }
+              }
+             }
+            }
+           ],
+           "accessibility": {
+            "accessibilityData": {
+             "label": "Daft Punk"
+            }
+           }
+          },
+          "displayPriority": "MUSIC_RESPONSIVE_LIST_ITEM_COLUMN_DISPLAY_PRIORITY_HIGH"
+         }
+        },
+        {
+         "musicResponsiveListItemFlexColumnRenderer": {
+          "text": {
+           "runs": [
+            {
+             "text": "2.7M plays"
+            }
+           ],
+           "accessibility": {
+            "accessibilityData": {
+             "label": "2.7 million plays"
+            }
+           }
+          },
+          "displayPriority": "MUSIC_RESPONSIVE_LIST_ITEM_COLUMN_DISPLAY_PRIORITY_HIGH"
+         }
+        },
+        {
+         "musicResponsiveListItemFlexColumnRenderer": {
+          "text": {
+           "runs": [
+            {
+             "text": "TRON: Legacy - The Complete Edition (Original Motion Picture Soundtrack)",
+             "navigationEndpoint": {
+              "clickTrackingParams": "CMoHEMn0AhgEIhMI9eC79Z-ZmAMVTRWDAx3TZCpTygEEDCZUrw==",
+              "browseEndpoint": {
+               "browseId": "MPREb_3L0yrk0Vxg5",
+               "browseEndpointContextSupportedConfigs": {
+                "browseEndpointContextMusicConfig": {
+                 "pageType": "MUSIC_PAGE_TYPE_ALBUM"
+                }
+               }
+              }
+             }
+            }
+           ]
+          },
+          "displayPriority": "MUSIC_RESPONSIVE_LIST_ITEM_COLUMN_DISPLAY_PRIORITY_MEDIUM"
+         }
+        }
+       ],
+       "fixedColumns": [
+        {
+         "musicResponsiveListItemFixedColumnRenderer": {
+          "text": {
+           "runs": [
+            {
+             "text": "3:52"
+            }
+           ],
+           "accessibility": {
+            "accessibilityData": {
+             "label": "3 minutes, 52 seconds"
+            }
+           }
+          },
+          "displayPriority": "MUSIC_RESPONSIVE_LIST_ITEM_COLUMN_DISPLAY_PRIORITY_HIGH",
+          "size": "MUSIC_RESPONSIVE_LIST_ITEM_FIXED_COLUMN_SIZE_SMALL"
+         }
+        }
+       ],
+       "playlistItemData": {
+        "playlistSetVideoId": "955B0939D7FE7758",
+        "videoId": "W_krrkNE-Sc",
+        "voteSortValue": 1795267999
+       },
+       "multiSelectCheckbox": {
+        "checkboxRenderer": {
+         "onSelectionChangeCommand": {
+          "clickTrackingParams": "CMsHEL6-CSITCPXgu_WfmZgDFU0VgwMd02QqU8oBBAwmVK8=",
+          "updateMultiSelectStateCommand": {
+           "multiSelectParams": "CAISKU9MQUs1dXlfbE5WQmNqTnRpQ3dxLW45NXVveEotR2Q0dnNmTWt5Wk5z",
+           "multiSelectItem": "Ch8KC1dfa3Jya05FLVNjEhA5NTVCMDkzOUQ3RkU3NzU4"
+          }
+         },
+         "checkedState": "CHECKBOX_CHECKED_STATE_UNCHECKED",
+         "trackingParams": "CMsHEL6-CSITCPXgu_WfmZgDFU0VgwMd02QqUw=="
+        }
+       }
+      }
+     }
+    ],
+    "targetId": "OLAK5uy_lNVBcjNtiCwq-n95uoxJ-Gd4vsfMkyZNs"
+   }
+  }
+ ]
+}

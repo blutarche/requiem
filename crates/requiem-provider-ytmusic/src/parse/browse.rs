@@ -1,15 +1,16 @@
 //! Innertube browse pages: the home feed, the Library's playlists, playlists (`VL…`), albums
-//! (`MPREb_…`) and artists (`UC…`). Only Home's continuations are followed.
+//! (`MPREb_…`) and artists (`UC…`). Home follows its continuations to a bound; an artist page,
+//! its songs and releases.
 
-use std::collections::HashMap;
-use std::time::Duration;
+use std::collections::HashSet;
+use std::thread;
 
 use requiem_core::{
     Browsed, Collection, CollectionId, CollectionKind, Item, ProviderError, ProviderId, Shelf,
     Track, TrackId,
 };
 use serde::Deserialize;
-use serde_json::Value;
+use serde_json::{Value, json};
 
 use super::{
     ListItem, NavEndpoint, PROVIDER, Run, Runs, SEPARATOR, Thumbnail, WatchEndpoint, collect_items,
@@ -379,23 +380,61 @@ pub(crate) fn parse_artist_releases(
     Ok(artist_releases(&root(body, "artist")?, artist))
 }
 
+/// The link a carousel's title carries, when it has one.
+fn carousel_link(carousel: &Value) -> Option<&Value> {
+    carousel
+        .pointer("/header/musicCarouselShelfBasicHeaderRenderer/title/runs/0/navigationEndpoint")
+}
+
+/// A browse link's page type.
+fn link_page_type(link: &Value) -> Option<&str> {
+    link.pointer(
+        "/browseEndpoint/browseEndpointContextSupportedConfigs/browseEndpointContextMusicConfig/pageType",
+    )
+    .and_then(Value::as_str)
+}
+
+const DISCOGRAPHY_PAGE: &str = "MUSIC_PAGE_TYPE_ARTIST_DISCOGRAPHY";
+
+/// `cards` as collections of `kind`. Releases read like a search's, naming `artist` unless it
+/// is empty; playlists drop the kind a search's hits carry.
+fn collections_of<'a>(
+    cards: impl Iterator<Item = &'a Value>,
+    kind: CollectionKind,
+    artist: &str,
+) -> Vec<Collection> {
+    let cards = cards
+        .filter_map(|card| TwoRowItem::deserialize(card).ok())
+        .filter_map(|card| match two_row_item(&card)? {
+            Item::Collection(c) if c.kind == kind => Some(c),
+            _ => None,
+        });
+    let mut out = Vec::new();
+    for mut c in cards {
+        if kind == CollectionKind::Album {
+            c.subtitle = Some(release_subtitle(c.subtitle.as_deref(), artist));
+        } else if let Some(rest) = c
+            .subtitle
+            .as_deref()
+            .and_then(|s| s.strip_prefix("Playlist \u{2022} "))
+        {
+            // Search's playlist hits leave out the kind; drop it so both read alike.
+            c.subtitle = Some(rest.to_owned());
+        }
+        out.push(c);
+    }
+    out
+}
+
 fn artist_releases(root: &Value, artist: &str) -> ArtistReleases {
     let mut carousels = Vec::new();
     find_all(root, &["musicCarouselShelfRenderer"], &mut carousels);
     let mut found = ArtistReleases::default();
     let mut discographies = 0;
     for carousel in carousels {
-        let title_run = "/header/musicCarouselShelfBasicHeaderRenderer/title/runs/0";
-        let link = carousel.pointer(&format!("{title_run}/navigationEndpoint"));
-        let page_type = link
-            .and_then(|l| {
-                l.pointer(
-                    "/browseEndpoint/browseEndpointContextSupportedConfigs/browseEndpointContextMusicConfig/pageType",
-                )
-            })
-            .and_then(Value::as_str);
-        let (kind, into) = match (link, page_type) {
-            (Some(_), Some("MUSIC_PAGE_TYPE_ARTIST_DISCOGRAPHY")) => {
+        let link = carousel_link(carousel);
+        let (kind, into) = match link {
+            Some(l) if link_page_type(l) == Some(DISCOGRAPHY_PAGE) => {
                 discographies += 1;
                 let into = if discographies == 1 {
                     &mut found.albums
@@ -404,32 +443,16 @@ fn artist_releases(root: &Value, artist: &str) -> ArtistReleases {
                 };
                 (CollectionKind::Album, into)
             }
-            (None, _) => (CollectionKind::Playlist, &mut found.playlists),
-            _ => continue,
+            None => (CollectionKind::Playlist, &mut found.playlists),
+            Some(_) => continue,
         };
         let cards = carousel
             .get("contents")
             .and_then(Value::as_array)
             .into_iter()
             .flatten()
-            .filter_map(|entry| TwoRowItem::deserialize(entry.get("musicTwoRowItemRenderer")?).ok())
-            .filter_map(|card| match two_row_item(&card)? {
-                Item::Collection(c) if c.kind == kind => Some(c),
-                _ => None,
-            });
-        for mut c in cards {
-            if kind == CollectionKind::Album {
-                c.subtitle = Some(release_subtitle(c.subtitle.as_deref(), artist));
-            } else if let Some(rest) = c
-                .subtitle
-                .as_deref()
-                .and_then(|s| s.strip_prefix("Playlist \u{2022} "))
-            {
-                // Search's playlist hits leave out the kind; drop it so both read alike.
-                c.subtitle = Some(rest.to_owned());
-            }
-            into.push(c);
-        }
+            .filter_map(|entry| entry.get("musicTwoRowItemRenderer"));
+        into.extend(collections_of(cards, kind, artist));
     }
     found
 }
@@ -440,38 +463,60 @@ const ARTIST_ALBUMS: &str = "Albums";
 const ARTIST_SINGLES: &str = "Singles & EPs";
 const ARTIST_FEATURED: &str = "Featured on";
 
-/// An artist's page: its top songs, the page's first song list, then its albums, its singles
-/// and EPs, and the playlists it is featured on. The cards leave out the artist, whose page
-/// it is.
+/// What the artist page's own shelves hold only in part: every song, album, and single or EP
+/// of the artist, when they could be had.
+#[derive(Default)]
+struct Whole {
+    songs: Option<Vec<Track>>,
+    albums: Option<Vec<Collection>>,
+    singles: Option<Vec<Collection>>,
+}
+
+/// An artist's page as it is served: its top songs, the page's first song list, then its
+/// albums, its singles and EPs, and the playlists it is featured on. The cards leave out the
+/// artist, whose page it is.
+#[cfg(test)]
 pub(crate) fn parse_artist_page(body: &[u8]) -> Result<Vec<Shelf>, ProviderError> {
-    let root = root(body, "artist")?;
+    Ok(artist_shelves(&root(body, "artist")?, Whole::default()))
+}
+
+/// The page's own song rows lead; the artist's whole list follows, without the rows it already
+/// has.
+fn artist_shelves(root: &Value, whole: Whole) -> Vec<Shelf> {
     let mut lists = Vec::new();
-    find_all(&root, &["musicShelfRenderer"], &mut lists);
+    find_all(root, &["musicShelfRenderer"], &mut lists);
     let mut rows = Vec::new();
     if let Some(contents) = lists.first().and_then(|l| l.get("contents")) {
         collect_items(contents, &mut rows);
     }
-    let top: Vec<Item> = rows
-        .iter()
-        .filter_map(list_item_track)
-        .map(Item::Track)
-        .collect();
-    let releases = artist_releases(&root, "");
+    let mut songs: Vec<Track> = rows.iter().filter_map(list_item_track).collect();
+    if let Some(all) = whole.songs {
+        songs.retain(|t| !all.iter().any(|a| a.id == t.id));
+        songs.extend(all);
+    }
+    let top: Vec<Item> = songs.into_iter().map(Item::Track).collect();
+    let releases = artist_releases(root, "");
     let collections = |cs: Vec<Collection>| cs.into_iter().map(Item::Collection).collect();
     let shelves = [
         (ARTIST_TOP_SONGS, top),
-        (ARTIST_ALBUMS, collections(releases.albums)),
-        (ARTIST_SINGLES, collections(releases.singles)),
+        (
+            ARTIST_ALBUMS,
+            collections(whole.albums.unwrap_or(releases.albums)),
+        ),
+        (
+            ARTIST_SINGLES,
+            collections(whole.singles.unwrap_or(releases.singles)),
+        ),
         (ARTIST_FEATURED, collections(releases.playlists)),
     ];
-    Ok(shelves
+    shelves
         .into_iter()
         .filter(|(_, items)| !items.is_empty())
         .map(|(title, items)| Shelf {
             title: title.to_owned(),
             items,
         })
-        .collect())
+        .collect()
 }
 
 /// The artist page `browse_id` is about, from its header, as an artists search lists it:
@@ -498,12 +543,93 @@ fn artist_about(root: &Value, browse_id: &str) -> Option<Collection> {
     })
 }
 
+/// A browse the artist page asks of YouTube Music besides itself.
+pub(crate) enum BrowseRequest<'a> {
+    /// A page by browse id, with the `params` its link gave, if any.
+    Page {
+        id: &'a str,
+        params: Option<&'a str>,
+    },
+    /// The next page of a list, by the token the page before it gave.
+    Next(&'a str),
+}
+
+impl BrowseRequest<'_> {
+    /// The request body in `context`.
+    pub(crate) fn body(&self, context: Value) -> Value {
+        match self {
+            Self::Page {
+                id,
+                params: Some(params),
+            } => json!({"context": context, "browseId": id, "params": params}),
+            Self::Page { id, params: None } => json!({"context": context, "browseId": id}),
+            Self::Next(token) => json!({"context": context, "continuation": token}),
+        }
+    }
+}
+
+/// An artist's songs stop here, so that a continuation token that never runs out can't loop.
+const MAX_SONGS: usize = 2000;
+const MAX_RELEASES: usize = 1000;
+const MAX_PAGES: usize = 50;
+
+/// The token that opens the page after the one in `v`, from a continuation item or from the
+/// older continuation data.
+fn next_token(v: &Value) -> Option<String> {
+    let mut found = Vec::new();
+    find_all(
+        v,
+        &["continuationCommand", "nextContinuationData"],
+        &mut found,
+    );
+    let c = found.first()?;
+    let token = c.get("token").or_else(|| c.get("continuation"))?.as_str()?;
+    (!token.is_empty()).then(|| token.to_owned())
+}
+
+/// `items`, then the rows of each page after them, until no page follows, a page adds nothing,
+/// a token repeats or there are `limit` rows. A page that can't be had ends the list there.
+fn follow<T>(
+    fetch: &impl Fn(&BrowseRequest) -> Result<Vec<u8>, ProviderError>,
+    mut items: Vec<T>,
+    mut token: Option<String>,
+    rows: impl Fn(&Value) -> Vec<T>,
+    limit: usize,
+) -> Vec<T> {
+    let mut seen = HashSet::new();
+    for _ in 0..MAX_PAGES {
+        let Some(t) = token.take() else { break };
+        if items.len() >= limit || !seen.insert(t.clone()) {
+            break;
+        }
+        let page = fetch(&BrowseRequest::Next(&t)).and_then(|b| {
+            serde_json::from_slice::<Value>(&b)
+                .map_err(|e| parse_err(format!("continuation json: {e}")))
+        });
+        match page {
+            Ok(page) => {
+                let more = rows(&page);
+                if more.is_empty() {
+                    break;
+                }
+                items.extend(more);
+                token = next_token(&page);
+            }
+            Err(e) => {
+                debug!("artist page's next page: {e}");
+                break;
+            }
+        }
+    }
+    items.truncate(limit);
+    items
+}
+
 /// The browse id of the playlist an artist's top songs link to ("Show all"): the page's first
 /// song list's `bottomEndpoint`, when it opens a playlist.
-fn top_songs_playlist(body: &[u8]) -> Option<String> {
-    let root: Value = serde_json::from_slice(body).ok()?;
+fn top_songs_playlist(root: &Value) -> Option<String> {
     let mut lists = Vec::new();
-    find_all(&root, &["musicShelfRenderer"], &mut lists);
+    find_all(root, &["musicShelfRenderer"], &mut lists);
     let target = lists.first()?.pointer("/bottomEndpoint/browseEndpoint")?;
     let page_type = target.pointer(
         "/browseEndpointContextSupportedConfigs/browseEndpointContextMusicConfig/pageType",
@@ -515,62 +641,162 @@ fn top_songs_playlist(body: &[u8]) -> Option<String> {
     (!id.is_empty()).then(|| id.to_owned())
 }
 
-/// The artist page's top songs rows leave out their durations, which the playlist they link to
-/// has. Fills each missing duration from the playlist row with the same track id; the rows, their
-/// order and their count stay the page's. A playlist that can't be had leaves them as they were.
-fn fill_top_song_durations(
-    body: &[u8],
-    shelves: &mut [Shelf],
-    fetch_playlist: impl FnOnce(&str) -> Result<Vec<u8>, ProviderError>,
-) {
-    let Some(top) = shelves.first_mut().filter(|s| s.title == ARTIST_TOP_SONGS) else {
-        return;
+/// Every song of the playlist `playlist`, in its order, one of each track.
+fn every_song(
+    fetch: &impl Fn(&BrowseRequest) -> Result<Vec<u8>, ProviderError>,
+    playlist: &str,
+) -> Result<Vec<Track>, ProviderError> {
+    let body = fetch(&BrowseRequest::Page {
+        id: playlist,
+        params: None,
+    })?;
+    let first = parse_collection(&body, CollectionKind::Playlist)?
+        .items
+        .into_iter()
+        .filter_map(|item| match item {
+            Item::Track(t) => Some(t),
+            Item::Collection(_) => None,
+        })
+        .collect();
+    let root = root(&body, "playlist")?;
+    let mut lists = Vec::new();
+    find_all(
+        &root,
+        &["musicPlaylistShelfRenderer", "musicShelfRenderer"],
+        &mut lists,
+    );
+    let token = lists.into_iter().find_map(next_token);
+    let rows = |page: &Value| {
+        let mut rows = Vec::new();
+        collect_items(page, &mut rows);
+        rows.iter().filter_map(list_item_track).collect()
     };
-    let missing = |item: &Item| matches!(item, Item::Track(t) if t.duration.is_none());
-    if !top.items.iter().any(missing) {
-        return;
-    }
-    let Some(playlist) = top_songs_playlist(body) else {
-        return;
-    };
-    let durations: HashMap<String, Duration> = match fetch_playlist(&playlist)
-        .and_then(|b| parse_collection(&b, CollectionKind::Playlist))
-    {
-        Ok(shelf) => shelf
-            .items
-            .into_iter()
-            .filter_map(|item| match item {
-                Item::Track(t) => Some((t.id.id, t.duration?)),
-                Item::Collection(_) => None,
+    let mut seen = HashSet::new();
+    let mut songs = follow(fetch, first, token, rows, MAX_SONGS);
+    songs.retain(|t| seen.insert(t.id.id.clone()));
+    Ok(songs)
+}
+
+/// Where a discography page is: the browse id and `params` its carousel's title links to.
+#[derive(Clone)]
+struct DiscographyLink {
+    id: String,
+    params: Option<String>,
+}
+
+/// The discography links of the page's release carousels, in order: the Albums carousel's
+/// first, then Singles & EPs'. A carousel whose link has no browse id is `None`.
+fn discography_links(root: &Value) -> Vec<Option<DiscographyLink>> {
+    let mut carousels = Vec::new();
+    find_all(root, &["musicCarouselShelfRenderer"], &mut carousels);
+    carousels
+        .into_iter()
+        .filter_map(carousel_link)
+        .filter(|l| link_page_type(l) == Some(DISCOGRAPHY_PAGE))
+        .map(|l| {
+            let target = l.get("browseEndpoint")?;
+            Some(DiscographyLink {
+                id: target.get("browseId")?.as_str()?.to_owned(),
+                params: target
+                    .get("params")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned),
             })
-            .collect(),
-        Err(e) => {
-            debug!("artist's top songs without durations: {e}");
-            return;
+        })
+        .collect()
+}
+
+/// The release cards anywhere in `v`, as the page of an artist's own albums, singles or EPs.
+fn release_cards(v: &Value) -> Vec<Collection> {
+    let mut cards = Vec::new();
+    find_all(v, &["musicTwoRowItemRenderer"], &mut cards);
+    collections_of(cards.into_iter(), CollectionKind::Album, "")
+}
+
+/// Every release of a discography page, in its order, one of each.
+fn every_release(
+    fetch: &impl Fn(&BrowseRequest) -> Result<Vec<u8>, ProviderError>,
+    link: &DiscographyLink,
+) -> Result<Vec<Collection>, ProviderError> {
+    let body = fetch(&BrowseRequest::Page {
+        id: &link.id,
+        params: link.params.as_deref(),
+    })?;
+    let root = root(&body, "discography")?;
+    let mut grids = Vec::new();
+    find_all(&root, &["gridRenderer"], &mut grids);
+    let token = grids.into_iter().find_map(next_token);
+    let mut seen = HashSet::new();
+    let mut releases = follow(
+        fetch,
+        release_cards(&root),
+        token,
+        release_cards,
+        MAX_RELEASES,
+    );
+    releases.retain(|c| seen.insert(c.id.id.clone()));
+    Ok(releases)
+}
+
+/// `list` when it has any, else nothing, saying why in the log.
+fn some<T>(list: Result<Vec<T>, ProviderError>, what: &str) -> Option<Vec<T>> {
+    match list {
+        Ok(list) if !list.is_empty() => Some(list),
+        Ok(_) => {
+            debug!("artist's {what}: none");
+            None
         }
-    };
-    for item in &mut top.items {
-        if let Item::Track(t) = item
-            && t.duration.is_none()
-        {
-            t.duration = durations.get(&t.id.id).copied();
+        Err(e) => {
+            debug!("artist's {what}: {e}");
+            None
         }
     }
 }
 
+/// The artist's every song and release, from the pages their shelves link to, fetched at once.
+/// What can't be had is left for the page's own shelf to hold.
+fn whole_artist<F>(root: &Value, fetch: &F) -> Whole
+where
+    F: Fn(&BrowseRequest) -> Result<Vec<u8>, ProviderError> + Sync,
+{
+    let playlist = top_songs_playlist(root);
+    let links = discography_links(root);
+    let link = |i: usize| links.get(i).and_then(Option::as_ref);
+    let releases = move |link: Option<&DiscographyLink>| {
+        link.and_then(|l| some(every_release(fetch, l), "discography"))
+    };
+    thread::scope(|scope| {
+        let (albums, singles) = (link(0), link(1));
+        let songs = scope.spawn(|| {
+            let playlist = playlist.as_deref()?;
+            some(every_song(fetch, playlist), "songs")
+        });
+        let singles = scope.spawn(move || releases(singles));
+        let albums = releases(albums);
+        Whole {
+            songs: songs.join().unwrap_or(None),
+            albums,
+            singles: singles.join().unwrap_or(None),
+        }
+    })
+}
+
 /// The page `browse_id` opens: an artist's shelves, with the artist it is about, or a
-/// playlist or album as one shelf. `fetch_playlist` browses the playlist an artist's top
-/// songs link to, for their durations.
-pub(crate) fn parse_page(
+/// playlist or album as one shelf. An artist's songs and releases are every one of them, not
+/// the few the page itself shows, as far as `fetch` gets them.
+pub(crate) fn parse_page<F>(
     body: &[u8],
     browse_id: &str,
-    fetch_playlist: impl FnOnce(&str) -> Result<Vec<u8>, ProviderError>,
-) -> Result<Browsed, ProviderError> {
+    fetch: F,
+) -> Result<Browsed, ProviderError>
+where
+    F: Fn(&BrowseRequest) -> Result<Vec<u8>, ProviderError> + Sync,
+{
     match collection_kind(browse_id) {
         CollectionKind::Artist => {
-            let mut shelves = parse_artist_page(body)?;
-            fill_top_song_durations(body, &mut shelves, fetch_playlist);
-            let about = artist_about(&root(body, "artist")?, browse_id);
+            let root = root(body, "artist")?;
+            let shelves = artist_shelves(&root, whole_artist(&root, &fetch));
+            let about = artist_about(&root, browse_id);
             Ok(Browsed { about, shelves })
         }
         kind => Ok(Browsed {
@@ -644,6 +870,7 @@ pub(crate) fn parse_collection(body: &[u8], kind: CollectionKind) -> Result<Shel
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
     use std::time::Duration;
 
     use super::*;
@@ -655,8 +882,14 @@ mod tests {
     // Singles & EPs, Videos, Featured on, Playlists by and Fans might also like shelves,
     // trimmed; its header's name, photo and audience from another capture that day.
     const ARTIST: &str = include_str!("../../tests/fixtures/browse_artist.json");
-    // The playlist that artist's Top songs link to, 2026-10-23: the five songs the page lists.
+    // Live anonymous captures of 2026-11-21, trimmed: the playlist that artist's Top songs link
+    // to ("Show all"; its first 8 of 100 rows and its continuation), that artist's Albums and
+    // Singles & EPs discography pages (every card), with the menus and the response context cut.
     const TOP_SONGS: &str = include_str!("../../tests/fixtures/browse_artist_top_songs.json");
+    const TOP_SONGS_NEXT: &str =
+        include_str!("../../tests/fixtures/browse_artist_top_songs_next.json");
+    const ALBUMS: &str = include_str!("../../tests/fixtures/browse_artist_albums.json");
+    const SINGLES: &str = include_str!("../../tests/fixtures/browse_artist_singles.json");
 
     fn track(item: &Item) -> &Track {
         match item {
@@ -1186,68 +1419,243 @@ mod tests {
 
     const DAFT_PUNK: &str = "UCRr1xG_2WIDs18a6cIiCxeA";
     const TOP_SONGS_ID: &str = "VLOLAK5uy_lNVBcjNtiCwq-n95uoxJ-Gd4vsfMkyZNs";
+    const DISCOGRAPHY_ID: &str = "MPADUCRr1xG_2WIDs18a6cIiCxeA";
+    const ALBUMS_PARAMS: &str = "ggMIegYIARoCAQI%3D";
+    const SINGLES_PARAMS: &str = "ggMIegYIAhoCAQI%3D";
+    const PAGE_SONGS: [&str; 5] = [
+        "khnokW3Mw24",
+        "Rgrt_8mXrK8",
+        "wU26xVT_vBU",
+        "Jb6gcoR266U",
+        "qe8Q7mjxjig",
+    ];
+    // The playlist's first page, in its order.
+    const PLAYLIST_SONGS: [&str; 8] = [
+        "khnokW3Mw24",
+        "Rgrt_8mXrK8",
+        "wU26xVT_vBU",
+        "Jb6gcoR266U",
+        "JhulBGMA7G4",
+        "qe8Q7mjxjig",
+        "URzOGF_QGls",
+        "iU7oF4OXZSE",
+    ];
 
-    fn top_songs(shelves: &[Shelf]) -> Vec<&Track> {
-        assert_eq!(shelves[0].title, "Top songs");
-        shelves[0].items.iter().map(track).collect()
+    fn playlist_key() -> String {
+        TOP_SONGS_ID.to_owned()
+    }
+
+    fn albums_key() -> String {
+        format!("{DISCOGRAPHY_ID}#{ALBUMS_PARAMS}")
+    }
+
+    fn singles_key() -> String {
+        format!("{DISCOGRAPHY_ID}#{SINGLES_PARAMS}")
+    }
+
+    /// A stand-in for YouTube Music: the page asked for, by browse id with the params it came
+    /// with, or `next:` and the token; anything it was not given is a network error. Keeps what
+    /// it was asked.
+    #[derive(Default)]
+    struct Site {
+        pages: HashMap<String, String>,
+        asked: std::sync::Mutex<Vec<String>>,
+    }
+
+    impl Site {
+        fn with(mut self, key: &str, body: &str) -> Self {
+            self.pages.insert(key.to_owned(), body.to_owned());
+            self
+        }
+
+        /// The artist's playlist and discographies, as captured.
+        fn captured() -> Self {
+            Self::default()
+                .with(&playlist_key(), TOP_SONGS)
+                .with(&next_key(TOP_SONGS), TOP_SONGS_NEXT)
+                .with(&albums_key(), ALBUMS)
+                .with(&singles_key(), SINGLES)
+        }
+
+        fn fetch(&self, request: &BrowseRequest) -> Result<Vec<u8>, ProviderError> {
+            let key = match request {
+                BrowseRequest::Page {
+                    id,
+                    params: Some(params),
+                } => format!("{id}#{params}"),
+                BrowseRequest::Page { id, params: None } => (*id).to_owned(),
+                BrowseRequest::Next(token) => format!("next:{token}"),
+            };
+            self.asked.lock().unwrap().push(key.clone());
+            self.pages
+                .get(&key)
+                .map(|body| body.clone().into_bytes())
+                .ok_or_else(|| ProviderError::Network(format!("offline: {key}")))
+        }
+
+        fn asked(&self) -> Vec<String> {
+            self.asked.lock().unwrap().clone()
+        }
+    }
+
+    /// The key of the page after `body`'s.
+    fn next_key(body: &str) -> String {
+        format!(
+            "next:{}",
+            next_token(&serde_json::from_str(body).unwrap()).unwrap()
+        )
+    }
+
+    fn open(site: &Site) -> Vec<Shelf> {
+        parse_page(ARTIST.as_bytes(), DAFT_PUNK, |r| site.fetch(r))
+            .unwrap()
+            .shelves
+    }
+
+    fn shelf<'a>(shelves: &'a [Shelf], title: &str) -> &'a Shelf {
+        shelves.iter().find(|s| s.title == title).unwrap()
+    }
+
+    fn song_ids(shelves: &[Shelf]) -> Vec<&str> {
+        shelf(shelves, "Top songs")
+            .items
+            .iter()
+            .map(|i| track(i).id.id.as_str())
+            .collect()
+    }
+
+    fn release_titles<'a>(shelves: &'a [Shelf], title: &str) -> Vec<&'a str> {
+        shelf(shelves, title)
+            .items
+            .iter()
+            .map(|i| collection(i).title.as_str())
+            .collect()
+    }
+
+    /// A continuation response of `rows` (a copy of the captured next page's first row each,
+    /// under the ids `ids`), pointing on to `next`.
+    fn continuation(ids: &[String], next: Option<&str>) -> String {
+        let captured: Value = serde_json::from_str(TOP_SONGS_NEXT).unwrap();
+        let row = captured["onResponseReceivedActions"][0]["appendContinuationItemsAction"]
+            ["continuationItems"][0]
+            .clone();
+        let mut items: Vec<Value> = ids
+            .iter()
+            .map(|id| {
+                let mut row = row.clone();
+                row["musicResponsiveListItemRenderer"]["playlistItemData"]["videoId"] =
+                    Value::from(id.as_str());
+                row
+            })
+            .collect();
+        if let Some(token) = next {
+            items.push(
+                serde_json::json!({"continuationItemRenderer": {"continuationEndpoint":
+                {"continuationCommand": {"token": token}}}}),
+            );
+        }
+        serde_json::json!({"onResponseReceivedActions": [
+            {"appendContinuationItemsAction": {"continuationItems": items}}]})
+        .to_string()
     }
 
     #[test]
     fn an_artists_top_songs_link_to_their_playlist() {
+        let root = |s: &str| serde_json::from_str::<Value>(s).unwrap();
         assert_eq!(
-            top_songs_playlist(ARTIST.as_bytes()).as_deref(),
+            top_songs_playlist(&root(ARTIST)).as_deref(),
             Some(TOP_SONGS_ID)
         );
-        let mut v: Value = serde_json::from_str(ARTIST).unwrap();
+        let mut v = root(ARTIST);
         let path = "/contents/singleColumnBrowseResultsRenderer/tabs/0/tabRenderer/content/sectionListRenderer/contents/0/musicShelfRenderer/bottomEndpoint/browseEndpoint";
         v.pointer_mut(path).unwrap()["browseEndpointContextSupportedConfigs"]["browseEndpointContextMusicConfig"]
             ["pageType"] = Value::from("MUSIC_PAGE_TYPE_ALBUM");
-        assert_eq!(top_songs_playlist(v.to_string().as_bytes()), None);
+        assert_eq!(top_songs_playlist(&v), None);
         v.pointer_mut(path).unwrap().take();
-        assert_eq!(top_songs_playlist(v.to_string().as_bytes()), None);
-        assert_eq!(top_songs_playlist(br#"{"contents":{}}"#), None);
-        assert_eq!(top_songs_playlist(b"nope"), None);
+        assert_eq!(top_songs_playlist(&v), None);
+        assert_eq!(top_songs_playlist(&root(r#"{"contents":{}}"#)), None);
     }
 
     #[test]
-    fn top_songs_take_their_durations_from_the_playlist_by_track_id() {
-        let mut asked = Vec::new();
-        let shelves = parse_page(ARTIST.as_bytes(), DAFT_PUNK, |id| {
-            asked.push(id.to_owned());
-            Ok(TOP_SONGS.as_bytes().to_vec())
+    fn an_artists_discography_links_carry_their_params() {
+        let links = discography_links(&serde_json::from_str(ARTIST).unwrap());
+        let links: Vec<_> = links.into_iter().map(Option::unwrap).collect();
+        assert_eq!(links.len(), 2);
+        assert!(links.iter().all(|l| l.id == DISCOGRAPHY_ID));
+        assert_eq!(links[0].params.as_deref(), Some(ALBUMS_PARAMS));
+        assert_eq!(links[1].params.as_deref(), Some(SINGLES_PARAMS));
+    }
+
+    #[test]
+    fn top_songs_hold_every_song_of_the_playlist_past_the_pages_five() {
+        let site = Site::captured();
+        let shelves = open(&site);
+        let ids = song_ids(&shelves);
+        // The playlist's order, its first page and then its continuation.
+        assert_eq!(ids.len(), 12);
+        assert_eq!(ids[..8], PLAYLIST_SONGS);
+        assert!(PAGE_SONGS.iter().all(|s| ids.contains(s)));
+        assert_eq!(ids.iter().collect::<HashSet<_>>().len(), 12);
+        let top = &shelf(&shelves, "Top songs").items;
+        assert!(top.iter().all(|i| track(i).duration.is_some()));
+        assert_eq!(
+            track(&top[0]).duration,
+            Some(std::time::Duration::from_secs(5 * 60 + 38))
+        );
+        assert!(site.asked().contains(&next_key(TOP_SONGS)));
+    }
+
+    #[test]
+    fn a_continuation_that_continues_is_followed_to_its_end() {
+        let more: Vec<String> = (0..3).map(|i| format!("more{i}")).collect();
+        let last: Vec<String> = (0..2).map(|i| format!("last{i}")).collect();
+        let site = Site::captured()
+            .with(
+                &next_key(TOP_SONGS),
+                &continuation(&more, Some("SECOND-TOKEN")),
+            )
+            .with("next:SECOND-TOKEN", &continuation(&last, None));
+        let shelves = open(&site);
+        let ids = song_ids(&shelves);
+        assert_eq!(ids.len(), 8 + 3 + 2);
+        assert_eq!(ids[8..], ["more0", "more1", "more2", "last0", "last1"]);
+        assert!(site.asked().contains(&"next:SECOND-TOKEN".to_owned()));
+    }
+
+    #[test]
+    fn a_continuation_that_never_ends_stops_at_a_bound() {
+        let page = std::sync::atomic::AtomicUsize::new(0);
+        let site = Site::captured();
+        let shelves = parse_page(ARTIST.as_bytes(), DAFT_PUNK, |r| match r {
+            BrowseRequest::Next(_) => {
+                let n = page.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                let ids: Vec<String> = (0..100).map(|i| format!("p{n}s{i}")).collect();
+                Ok(continuation(&ids, Some(&format!("TOKEN-{n}"))).into_bytes())
+            }
+            _ => site.fetch(r),
         })
         .unwrap()
         .shelves;
-        assert_eq!(asked, [TOP_SONGS_ID]);
-        let bare = parse_artist_page(ARTIST.as_bytes()).unwrap();
-        assert!(top_songs(&bare).iter().all(|t| t.duration.is_none()));
+        assert_eq!(song_ids(&shelves).len(), MAX_SONGS);
+        // 8 rows on the first page, 100 on each next: 20 pages reach the bound.
+        assert_eq!(page.load(std::sync::atomic::Ordering::SeqCst), 20);
 
-        let secs: Vec<Option<u64>> = top_songs(&shelves)
-            .iter()
-            .map(|t| t.duration.map(|d| d.as_secs()))
-            .collect();
-        assert_eq!(
-            secs,
-            [
-                Some(5 * 60 + 38),
-                Some(4 * 60 + 9),
-                Some(5 * 60 + 21),
-                Some(7 * 60 + 10),
-                Some(5 * 60 + 46)
-            ]
+        // A token that points to itself is followed once.
+        let site = Site::captured().with(
+            &next_key(TOP_SONGS),
+            &continuation(&["again".to_owned()], Some("LOOP")),
         );
-        // The page's own rows, order and count stay.
-        let mut filled = shelves.clone();
-        for item in &mut filled[0].items {
-            if let Item::Track(t) = item {
-                t.duration = None;
-            }
-        }
-        assert_eq!(filled, bare);
+        let site = site.with(
+            "next:LOOP",
+            &continuation(&["again2".to_owned()], Some("LOOP")),
+        );
+        let ids = song_ids(&open(&site)).len();
+        assert_eq!(ids, 8 + 1 + 1);
+        assert_eq!(site.asked().iter().filter(|k| *k == "next:LOOP").count(), 1);
     }
 
     #[test]
-    fn a_top_song_the_playlist_lacks_stays_without_a_duration() {
+    fn a_song_the_playlist_lacks_leads_from_the_page() {
         let mut v: Value = serde_json::from_str(TOP_SONGS).unwrap();
         let path = "/contents/twoColumnBrowseResultsRenderer/secondaryContents/sectionListRenderer/contents/0/musicPlaylistShelfRenderer/contents";
         v.pointer_mut(path)
@@ -1255,32 +1663,188 @@ mod tests {
             .as_array_mut()
             .unwrap()
             .remove(1);
-        let shelves = parse_page(ARTIST.as_bytes(), DAFT_PUNK, |_| {
-            Ok(v.to_string().into_bytes())
-        })
-        .unwrap()
-        .shelves;
-        let top = top_songs(&shelves);
-        assert_eq!(top.len(), 5);
-        assert_eq!(top[0].duration, Some(Duration::from_secs(5 * 60 + 38)));
-        assert_eq!(top[1].duration, None);
-        assert_eq!(top[2].duration, Some(Duration::from_secs(5 * 60 + 21)));
+        let site = Site::captured().with(&playlist_key(), &v.to_string());
+        let shelves = open(&site);
+        let ids = song_ids(&shelves);
+        // The page's "Rgrt_8mXrK8" comes first, then the playlist as it is.
+        assert_eq!(ids[0], "Rgrt_8mXrK8");
+        assert_eq!(
+            ids[1..8],
+            [
+                "khnokW3Mw24",
+                "wU26xVT_vBU",
+                "Jb6gcoR266U",
+                "JhulBGMA7G4",
+                "qe8Q7mjxjig",
+                "URzOGF_QGls",
+                "iU7oF4OXZSE"
+            ]
+        );
+        assert_eq!(ids.len(), 12);
+        assert_eq!(track(&shelf(&shelves, "Top songs").items[0]).duration, None);
     }
 
     #[test]
-    fn a_playlist_that_fails_leaves_the_artist_page_as_it_was() {
+    fn top_songs_are_the_pages_five_when_the_playlist_fails() {
         let bare = parse_artist_page(ARTIST.as_bytes()).unwrap();
-        let failed = parse_page(ARTIST.as_bytes(), DAFT_PUNK, |_| {
-            Err(ProviderError::Network("offline".into()))
-        })
-        .unwrap()
-        .shelves;
-        assert_eq!(failed, bare);
-        let garbled = parse_page(ARTIST.as_bytes(), DAFT_PUNK, |_| Ok(b"nope".to_vec()))
+        assert_eq!(song_ids(&bare), PAGE_SONGS);
+        for site in [
+            Site::captured().with(&playlist_key(), "nope"),
+            Site::captured().with(&playlist_key(), r#"{"contents":{}}"#),
+        ] {
+            let shelves = open(&site);
+            assert_eq!(song_ids(&shelves), PAGE_SONGS);
+            assert_eq!(shelf(&shelves, "Top songs"), shelf(&bare, "Top songs"));
+        }
+        let mut offline = Site::captured();
+        offline.pages.remove(&playlist_key());
+        assert_eq!(song_ids(&open(&offline)), PAGE_SONGS);
+    }
+
+    #[test]
+    fn a_continuation_that_fails_keeps_the_songs_before_it() {
+        let mut site = Site::captured();
+        site.pages.remove(&next_key(TOP_SONGS));
+        let shelves = open(&site);
+        assert_eq!(song_ids(&shelves), PLAYLIST_SONGS);
+    }
+
+    #[test]
+    fn albums_and_singles_hold_the_whole_discography_past_the_carousels_ten() {
+        let site = Site::captured();
+        let shelves = open(&site);
+        let albums = release_titles(&shelves, "Albums");
+        assert_eq!(albums.len(), 11);
+        assert_eq!(albums[1], "Random Access Memories");
+        assert_eq!(albums[10], "Musique, Vol. 1");
+        assert_eq!(release_titles(&shelves, "Singles & EPs").len(), 24);
+        assert_eq!(
+            release_titles(&shelves, "Singles & EPs")[23],
+            "Human After All"
+        );
+        let cards = |title| shelf(&shelves, title).items.iter().map(collection);
+        assert_eq!(
+            cards("Albums").nth(1).unwrap().subtitle.as_deref(),
+            Some("Album \u{2022} 2013")
+        );
+        assert_eq!(
+            cards("Singles & EPs").nth(3).unwrap().subtitle.as_deref(),
+            Some("Single \u{2022} 2005")
+        );
+        assert!(cards("Albums").all(|c| c.kind == CollectionKind::Album));
+        // Each page asked as its link gave it.
+        let asked = site.asked();
+        assert!(asked.contains(&albums_key()) && asked.contains(&singles_key()));
+        // Featured on stays the page's.
+        assert_eq!(release_titles(&shelves, "Featured on").len(), 4);
+    }
+
+    #[test]
+    fn a_discography_that_fails_leaves_the_carousels_cards() {
+        let bare = parse_artist_page(ARTIST.as_bytes()).unwrap();
+        let mut no_albums = Site::captured();
+        no_albums.pages.remove(&albums_key());
+        let shelves = open(&no_albums);
+        assert_eq!(shelf(&shelves, "Albums"), shelf(&bare, "Albums"));
+        assert_eq!(release_titles(&shelves, "Singles & EPs").len(), 24);
+
+        let garbled = Site::captured().with(&singles_key(), "nope");
+        let shelves = open(&garbled);
+        assert_eq!(
+            shelf(&shelves, "Singles & EPs"),
+            shelf(&bare, "Singles & EPs")
+        );
+        assert_eq!(release_titles(&shelves, "Albums").len(), 11);
+
+        let empty = Site::captured().with(&albums_key(), r#"{"contents":{}}"#);
+        assert_eq!(shelf(&open(&empty), "Albums"), shelf(&bare, "Albums"));
+
+        // Nothing at all: the page as it was served.
+        assert_eq!(open(&Site::default()), bare);
+    }
+
+    #[test]
+    fn a_discographys_continuation_is_followed() {
+        let cards: Vec<Value> = {
+            let v: Value = serde_json::from_str(SINGLES).unwrap();
+            let grid = &v["contents"]["singleColumnBrowseResultsRenderer"]["tabs"][0]["tabRenderer"]
+                ["content"]["sectionListRenderer"]["contents"][0]["gridRenderer"]["items"];
+            // Singles that the albums grid lacks.
+            grid.as_array().unwrap()[..2].to_vec()
+        };
+        let mut v: Value = serde_json::from_str(ALBUMS).unwrap();
+        let items = v
+            .pointer_mut("/contents/singleColumnBrowseResultsRenderer/tabs/0/tabRenderer/content/sectionListRenderer/contents/0/gridRenderer/items")
             .unwrap()
-            .shelves;
-        assert_eq!(garbled, bare);
-        assert_eq!(top_songs(&failed).len(), 5);
+            .as_array_mut()
+            .unwrap();
+        items.push(
+            serde_json::json!({"continuationItemRenderer": {"continuationEndpoint":
+            {"continuationCommand": {"token": "GRID-TOKEN"}}}}),
+        );
+        let next = serde_json::json!({"onResponseReceivedActions": [
+            {"appendContinuationItemsAction": {"continuationItems": cards}}]});
+        let site = Site::captured()
+            .with(&albums_key(), &v.to_string())
+            .with("next:GRID-TOKEN", &next.to_string());
+        let albums = release_titles(&open(&site), "Albums").len();
+        assert_eq!(albums, 11 + 2);
+    }
+
+    #[test]
+    fn the_songs_and_both_discographies_are_fetched_at_once() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::time::{Duration, Instant};
+        let site = Site::captured();
+        let waiting = AtomicUsize::new(0);
+        let met = AtomicUsize::new(0);
+        parse_page(ARTIST.as_bytes(), DAFT_PUNK, |r| {
+            if matches!(r, BrowseRequest::Page { .. }) {
+                waiting.fetch_add(1, Ordering::SeqCst);
+                let until = Instant::now() + Duration::from_secs(10);
+                while waiting.load(Ordering::SeqCst) < 3 && Instant::now() < until {
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+                if waiting.load(Ordering::SeqCst) == 3 {
+                    met.fetch_add(1, Ordering::SeqCst);
+                }
+            }
+            site.fetch(r)
+        })
+        .unwrap();
+        assert_eq!(met.load(Ordering::SeqCst), 3);
+    }
+
+    #[test]
+    fn requests_ask_for_their_page_or_continuation() {
+        let ctx = || serde_json::json!({"client": {}});
+        let page = BrowseRequest::Page {
+            id: "UCx",
+            params: None,
+        };
+        assert_eq!(
+            page.body(ctx()),
+            serde_json::json!({"context": ctx(), "browseId": "UCx"})
+        );
+        let with = BrowseRequest::Page {
+            id: "MPADx",
+            params: Some("ab%3D"),
+        };
+        assert_eq!(
+            with.body(ctx()),
+            serde_json::json!({"context": ctx(), "browseId": "MPADx", "params": "ab%3D"})
+        );
+        assert_eq!(
+            BrowseRequest::Next("T").body(ctx()),
+            serde_json::json!({"context": ctx(), "continuation": "T"})
+        );
+    }
+
+    #[test]
+    fn older_continuation_data_names_the_next_page_too() {
+        let v = serde_json::json!({"continuations": [{"nextContinuationData": {"continuation": "OLD"}}]});
+        assert_eq!(next_token(&v).as_deref(), Some("OLD"));
+        assert_eq!(next_token(&serde_json::json!({"contents": []})), None);
     }
 
     #[test]

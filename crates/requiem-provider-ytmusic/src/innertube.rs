@@ -12,9 +12,9 @@ use crate::IpFamily;
 use crate::clients::*;
 use crate::log::debug;
 use crate::parse::{
-    ArtistReleases, BROWSE_PREFIX, PlayerOutcome, StreamFormat, classify_player, merge_collections,
-    parse_artist_releases, parse_radio, parse_search, parse_search_collections, parse_top_artist,
-    structure_summary, visitor_data,
+    ArtistReleases, BROWSE_PREFIX, BrowseRequest, PlayerOutcome, StreamFormat, classify_player,
+    merge_collections, parse_artist_releases, parse_radio, parse_search, parse_search_collections,
+    parse_top_artist, structure_summary, visitor_data,
 };
 use crate::range::{FetchError, RangeFetcher, RangeResponse, Refresher};
 use crate::transport::{HttpResponse, Transport};
@@ -341,6 +341,11 @@ impl InnertubeClient {
     pub(crate) fn browse(&self, browse_id: &str) -> Result<Vec<u8>, ProviderError> {
         let body = json!({"context": self.context(), "browseId": browse_id});
         self.post("browse", "browse", &body)
+    }
+
+    /// An anonymous browse of `request`.
+    pub(crate) fn request(&self, request: &BrowseRequest) -> Result<Vec<u8>, ProviderError> {
+        self.post("browse", "browse", &request.body(self.context()))
     }
 
     /// The songs of `video_id`'s radio, without `video_id`.

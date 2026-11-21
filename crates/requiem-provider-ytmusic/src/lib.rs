@@ -290,8 +290,8 @@ impl Provider for YtMusicProvider {
                     if let Some(s) = session {
                         return self.session.page(&s, id);
                     }
-                    parse::parse_page(&self.client.browse(id)?, id, |playlist| {
-                        self.client.browse(playlist)
+                    parse::parse_page(&self.client.browse(id)?, id, |request| {
+                        self.client.request(request)
                     })
                 } else {
                     Err(ProviderError::Unplayable(format!(
@@ -381,7 +381,14 @@ mod tests {
     const ARTIST: &str = include_str!("../tests/fixtures/browse_artist.json");
     const PLAYER: &str = include_str!("../tests/fixtures/player_ok.json");
     const TOP_SONGS: &str = include_str!("../tests/fixtures/browse_artist_top_songs.json");
+    const TOP_SONGS_NEXT: &str =
+        include_str!("../tests/fixtures/browse_artist_top_songs_next.json");
+    const DISCOGRAPHY_ALBUMS: &str = include_str!("../tests/fixtures/browse_artist_albums.json");
+    const DISCOGRAPHY_SINGLES: &str = include_str!("../tests/fixtures/browse_artist_singles.json");
     const TOP_SONGS_ID: &str = "VLOLAK5uy_lNVBcjNtiCwq-n95uoxJ-Gd4vsfMkyZNs";
+    const DISCOGRAPHY_ID: &str = "MPADUCRr1xG_2WIDs18a6cIiCxeA";
+    const DISCOGRAPHY_ALBUMS_PARAMS: &str = "ggMIegYIARoCAQI%3D";
+    const DISCOGRAPHY_SINGLES_PARAMS: &str = "ggMIegYIAhoCAQI%3D";
 
     const SECRET: &str = "fakeSID-MARKER";
     const SAPISID: &str = "FAKEsapisid-0123/AbCdEfGh";
@@ -1137,64 +1144,91 @@ mod tests {
             .collect()
     }
 
+    /// Every song of the playlist and every release of both discographies, as there are in the
+    /// captures, where the page itself lists 5 songs and 10 of each release.
     const ARTIST_SHELVES: [(&str, usize); 4] = [
-        ("Top songs", 5),
-        ("Albums", 10),
-        ("Singles & EPs", 10),
+        ("Top songs", 12),
+        ("Albums", 11),
+        ("Singles & EPs", 24),
         ("Featured on", 4),
     ];
 
-    fn durations(shelves: &[Shelf]) -> Vec<Option<u64>> {
-        shelves[0]
-            .items
-            .iter()
-            .map(|item| match item {
-                requiem_core::Item::Track(t) => t.duration.map(|d| d.as_secs()),
-                requiem_core::Item::Collection(_) => panic!("top songs are tracks"),
-            })
-            .collect()
+    /// The token that opens the playlist's second page.
+    fn songs_token() -> String {
+        let v: serde_json::Value = serde_json::from_str(TOP_SONGS).unwrap();
+        let path = "/contents/twoColumnBrowseResultsRenderer/secondaryContents/sectionListRenderer/contents/0/musicPlaylistShelfRenderer/contents/8/continuationItemRenderer/continuationEndpoint/continuationCommand/token";
+        v.pointer(path).unwrap().as_str().unwrap().to_owned()
     }
 
-    const TOP_SONGS_SECS: [Option<u64>; 5] =
-        [Some(338), Some(249), Some(321), Some(430), Some(346)];
+    fn script_artist(rig: &Rig) {
+        let music = &rig.music;
+        music.script_browse(BROWSE_URL, "UCRr1xG_2WIDs18a6cIiCxeA", 200, ARTIST);
+        music.script_browse(BROWSE_URL, TOP_SONGS_ID, 200, TOP_SONGS);
+        music.script_next(BROWSE_URL, &songs_token(), 200, TOP_SONGS_NEXT);
+        music.script_browse_params(
+            BROWSE_URL,
+            DISCOGRAPHY_ID,
+            DISCOGRAPHY_ALBUMS_PARAMS,
+            200,
+            DISCOGRAPHY_ALBUMS,
+        );
+        music.script_browse_params(
+            BROWSE_URL,
+            DISCOGRAPHY_ID,
+            DISCOGRAPHY_SINGLES_PARAMS,
+            200,
+            DISCOGRAPHY_SINGLES,
+        );
+    }
 
     #[test]
-    fn an_artist_opens_as_its_page_signed_in_or_not() {
+    fn an_artist_opens_as_its_whole_page_signed_in_or_not() {
         let rig = Rig::new();
-        rig.music
-            .script_browse(BROWSE_URL, "UCRr1xG_2WIDs18a6cIiCxeA", 200, ARTIST);
-        rig.music
-            .script_browse(BROWSE_URL, TOP_SONGS_ID, 200, TOP_SONGS);
+        script_artist(&rig);
         let page = rig.provider().browse(&daft_punk()).unwrap();
         assert_eq!(titles(&page.shelves), ARTIST_SHELVES);
-        assert_eq!(durations(&page.shelves), TOP_SONGS_SECS);
         assert_eq!(page.about.unwrap().title, "Daft Punk");
         assert!(rig.music.calls.lock().unwrap().iter().all(|c| !c.signed));
+        let anonymous = page.shelves;
 
         let rig = Rig::new();
         let p = rig.signed_in();
-        rig.music
-            .script_browse(BROWSE_URL, "UCRr1xG_2WIDs18a6cIiCxeA", 200, ARTIST);
-        rig.music
-            .script_browse(BROWSE_URL, TOP_SONGS_ID, 200, TOP_SONGS);
+        script_artist(&rig);
         let page = p.browse(&daft_punk()).unwrap();
         assert_eq!(titles(&page.shelves), ARTIST_SHELVES);
-        assert_eq!(durations(&page.shelves), TOP_SONGS_SECS);
+        assert_eq!(page.shelves, anonymous);
         assert_eq!(page.about.unwrap().title, "Daft Punk");
         let calls = rig.music.calls.lock().unwrap();
         let asked = |id: &str| calls.iter().find(|c| c.body.contains(id)).unwrap().signed;
-        assert!(asked("UCRr1xG_2WIDs18a6cIiCxeA") && asked(TOP_SONGS_ID));
+        assert!(asked("UCRr1xG_2WIDs18a6cIiCxeA") && asked(TOP_SONGS_ID) && asked(DISCOGRAPHY_ID));
+        // The signed-in continuation is asked as Home's are, in the query.
+        let next = calls
+            .iter()
+            .find(|c| c.url.contains(&format!("&continuation={}", songs_token())))
+            .expect("the playlist's second page was asked");
+        assert!(next.signed && next.url.contains("&ctoken="));
     }
 
     #[test]
-    fn an_artist_page_opens_without_durations_when_its_playlist_fails() {
+    fn an_artist_page_opens_as_it_was_served_when_nothing_else_loads() {
         let rig = Rig::new();
         rig.music
             .script_browse(BROWSE_URL, "UCRr1xG_2WIDs18a6cIiCxeA", 200, ARTIST);
         rig.music.script_browse(BROWSE_URL, TOP_SONGS_ID, 500, "{}");
+        for params in [DISCOGRAPHY_ALBUMS_PARAMS, DISCOGRAPHY_SINGLES_PARAMS] {
+            rig.music
+                .script_browse_params(BROWSE_URL, DISCOGRAPHY_ID, params, 500, "{}");
+        }
         let shelves = rig.provider().browse(&daft_punk()).unwrap().shelves;
-        assert_eq!(titles(&shelves), ARTIST_SHELVES);
-        assert_eq!(durations(&shelves), [None; 5]);
+        assert_eq!(
+            titles(&shelves),
+            [
+                ("Top songs", 5),
+                ("Albums", 10),
+                ("Singles & EPs", 10),
+                ("Featured on", 4)
+            ]
+        );
     }
 
     #[test]

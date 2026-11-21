@@ -23,8 +23,8 @@ use crate::files::{commit, private_dir, read_capped, remove, stage_private, tigh
 use crate::innertube::{music_context, status_error};
 use crate::log::debug;
 use crate::parse::{
-    BROWSE_PREFIX, PROVIDER, collection_kind, logged_in, parse_collection, parse_home,
-    parse_library_playlists, parse_page,
+    BROWSE_PREFIX, BrowseRequest, PROVIDER, collection_kind, logged_in, parse_collection,
+    parse_home, parse_library_playlists, parse_page,
 };
 use crate::transport::Transport;
 
@@ -632,9 +632,20 @@ impl BrowserSession {
     /// artist it is about, or a playlist or album as one shelf.
     pub(crate) fn page(&self, s: &Signed, browse_id: &str) -> Result<Browsed, ProviderError> {
         let body = self.browse(s, "", &self.browse_body(&s.headers, browse_id))?;
-        parse_page(&body, browse_id, |playlist| {
-            self.browse(s, "", &self.browse_body(&s.headers, playlist))
-        })
+        parse_page(&body, browse_id, |request| self.request(s, request))
+    }
+
+    /// `request` made with `s`; a continuation as Home's are.
+    fn request(&self, s: &Signed, request: &BrowseRequest) -> Result<Vec<u8>, ProviderError> {
+        let context = self.context(&s.headers);
+        match request {
+            BrowseRequest::Page { .. } => self.browse(s, "", &request.body(context)),
+            BrowseRequest::Next(token) => {
+                let token = query_value(token);
+                let params = format!("&ctoken={token}&continuation={token}");
+                self.browse(s, &params, &json!({"context": context}))
+            }
+        }
     }
 }
 
