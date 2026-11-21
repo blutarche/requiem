@@ -146,6 +146,7 @@ fn show_view(ui: &Ui, view: View) {
         View::Collection
         | View::CollectionPlaying
         | View::Artist
+        | View::ArtistExpanded
         | View::ArtistSpotify
         | View::Album => {
             ui.show(AppView::Collection);

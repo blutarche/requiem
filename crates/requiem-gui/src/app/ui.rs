@@ -124,6 +124,8 @@ const COLLECTION_COVER: CGFloat = 120.0;
 /// The top songs' title on an artist's page, and the space under it: a shelf title's.
 const ARTIST_HEAD_H: CGFloat = 34.0;
 const BACK_H: CGFloat = 28.0;
+/// The room under an artist's songs for their Show all button.
+const SONGS_MORE_H: CGFloat = BACK_H + 12.0;
 const BUTTON_H: CGFloat = 36.0;
 const SIGN_IN_W: CGFloat = 560.0;
 const SIGN_IN_H: CGFloat = 280.0;
@@ -307,6 +309,8 @@ pub struct Ui {
     artist_shelves: Shelves,
     /// The top songs' title, and the collection table while an artist's page shows.
     artist_lead: Retained<FlippedView>,
+    /// The artist lead's Show all songs / Show less, under the table.
+    songs_more: Retained<HoverButton>,
     /// The artist whose shelves are on screen, so a newer page of it keeps their scroll.
     artist_shown: RefCell<Option<CollectionId>>,
     search_page: Retained<NSView>,
@@ -622,7 +626,7 @@ impl Ui {
             rect(0.0, 0.0, mw, collection_list.size.height),
         );
         artist_shelves.view.setHidden(true);
-        let artist_lead = Self::artist_lead(mtm, mw);
+        let (artist_lead, songs_more) = Self::artist_lead(mtm, mw, target);
         collection_page.addSubview(&collection_head.view);
         collection_page.addSubview(&collection_table.view);
         collection_page.addSubview(&collection_state.view);
@@ -713,6 +717,7 @@ impl Ui {
             collection_state,
             artist_shelves,
             artist_lead,
+            songs_more,
             artist_shown: RefCell::new(None),
             search_page,
             search,
@@ -906,8 +911,12 @@ impl Ui {
     }
 
     /// The lead of an artist's shelves: a "Top songs" title, over the collection table once
-    /// `show_collection` moves it in.
-    fn artist_lead(mtm: MainThreadMarker, width: CGFloat) -> Retained<FlippedView> {
+    /// `show_collection` moves it in, and under it the button that lists every song.
+    fn artist_lead(
+        mtm: MainThreadMarker,
+        width: CGFloat,
+        target: &AnyObject,
+    ) -> (Retained<FlippedView>, Retained<HoverButton>) {
         // SAFETY: `initWithFrame:` is NSView's designated initializer.
         let lead: Retained<FlippedView> = unsafe {
             msg_send![FlippedView::alloc(mtm), initWithFrame: rect(0.0, 0.0, width, ARTIST_HEAD_H)]
@@ -922,7 +931,11 @@ impl Ui {
         ));
         title.setAutoresizingMask(FLEX_W);
         lead.addSubview(&title);
-        lead
+        let more = HoverButton::plain(mtm, rect(PAD, 0.0, 0.0, BACK_H));
+        more.set_action(target, sel!(toggleSongs:));
+        more.setHidden(true);
+        lead.addSubview(&more);
+        (lead, more)
     }
 
     fn toast_view(mtm: MainThreadMarker, target: &AnyObject) -> ToastView {
@@ -2539,6 +2552,7 @@ impl Ui {
             .setFrame(rect(PAD, h.back.frame().origin.y, w, BACK_H));
         widgets::accessibility_label(&h.back, &format!("Back to {back}"));
         let songs = c.rows.len();
+        let more = c.songs_toggle.is_some();
         let loaded = c.view == PageView::Ready;
         // An artist's page shows with its shelves alone; another collection needs tracks.
         let shelved = artist && loaded && (songs > 0 || !c.shelves.is_empty());
@@ -2555,7 +2569,8 @@ impl Ui {
         }
         self.collection_table
             .set_album(table::lists_album(c.collection.kind));
-        self.place_collection_table(shelved && songs > 0, songs);
+        self.place_collection_table(shelved && songs > 0, songs, more);
+        self.show_songs_toggle(c.songs_toggle.as_deref(), songs);
         self.collection_table.view.setHidden(!ready || songs == 0);
         self.collection_table
             .set_rows(if ready { c.rows } else { Vec::new() }, c.playing);
@@ -2568,7 +2583,7 @@ impl Ui {
             let same = *self.artist_shown.borrow() == id;
             *self.artist_shown.borrow_mut() = id;
             let lead = (songs > 0).then(|| {
-                let height = ARTIST_HEAD_H + Table::height_for(songs);
+                let height = Self::lead_height(songs, more);
                 (Retained::into_super(self.artist_lead.clone()), height)
             });
             self.artist_shelves.set_lead(lead);
@@ -2585,9 +2600,28 @@ impl Ui {
         h.add.set_enabled(can);
     }
 
+    /// The artist lead's height: its title, `songs` rows, and the Show all button if `more`.
+    fn lead_height(songs: usize, more: bool) -> CGFloat {
+        let button = if more { SONGS_MORE_H } else { 0.0 };
+        ARTIST_HEAD_H + Table::height_for(songs) + button
+    }
+
+    /// Words the lead's Show all songs / Show less button with `text`, under the `songs` rows,
+    /// or hides it when there is none.
+    fn show_songs_toggle(&self, text: Option<&str>, songs: usize) {
+        let b = &self.songs_more;
+        b.setHidden(text.is_none());
+        let Some(text) = text else { return };
+        let w = b.set_label(text);
+        let y = ARTIST_HEAD_H + Table::height_for(songs) + 12.0;
+        b.setFrame(rect(PAD, y, w, BACK_H));
+        widgets::accessibility_label(b, text);
+    }
+
     /// Puts the collection table in the artist page's lead, fitted to its `songs` rows and
-    /// leaving the wheel to the page, or back on the collection page under the head.
-    fn place_collection_table(&self, in_lead: bool, songs: usize) {
+    /// leaving the wheel to the page, or back on the collection page under the head. `more`
+    /// leaves room under the rows for the lead's button.
+    fn place_collection_table(&self, in_lead: bool, songs: usize, more: bool) {
         let t = &self.collection_table;
         let lead: &NSView = &self.artist_lead;
         let page: &NSView = &self.collection_page;
@@ -2595,7 +2629,7 @@ impl Ui {
         let parent = unsafe { t.view.superview() };
         if in_lead {
             let width = self.artist_shelves.view.contentSize().width;
-            let height = ARTIST_HEAD_H + Table::height_for(songs);
+            let height = Self::lead_height(songs, more);
             lead.setFrameSize(NSSize::new(width, height));
             if parent.as_deref() != Some(lead) {
                 lead.addSubview(&t.view);
@@ -3080,6 +3114,8 @@ struct CollectionPatch {
     playing: Vec<usize>,
     /// The shelves of collections on the page, which an artist's lists after its top songs.
     shelves: Vec<Shelf>,
+    /// The words of the button that lists all of an artist's songs, if it has one.
+    songs_toggle: Option<String>,
 }
 
 /// The sign-in panels' buttons, one per provider: a title and the provider's badge.
@@ -3237,9 +3273,10 @@ impl Patch {
                     from: c.from,
                     back: c.previous.as_ref().map(|p| p.collection.title.clone()),
                     view: c.browse.view(),
-                    rows: table::rows(&c.tracks),
+                    rows: table::rows(c.listed()),
                     playing: s.collection_playing(),
                     shelves: collection_shelves(&c.browse.shelves),
+                    songs_toggle: c.songs_toggle(),
                 })
             }),
             // The queue says whether the badge shows.

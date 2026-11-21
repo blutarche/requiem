@@ -20,7 +20,7 @@ usage: requiem-gui [--demo] [--smoke] [--snapshot <png>] [--view <view>] [--size
                      settings-session, empty, disconnected, toast, out-of-date,
                      update-ready, update-failed, not-updatable, up-to-date, search-albums,
                      search-songs, search-artists, search-song-selected,
-                     search-card-selected, artist or album
+                     search-card-selected, artist, artist-expanded or album
   --size <w>x<h>     the window's content size in points, at least 800x500
   --appearance <system|light|dark>
                      the window's appearance for this run, in place of the one chosen in
@@ -86,6 +86,8 @@ pub enum View {
     SearchArtists,
     /// Demo only: the top artist's page, opened from the search results.
     Artist,
+    /// Demo only: the top artist's page with all its songs listed.
+    ArtistExpanded,
     /// Demo only: the playing Spotify track's artist's page, opened from Now Playing.
     ArtistSpotify,
     /// Demo only: an album's page, opened from the search results.
@@ -98,7 +100,7 @@ pub enum View {
 }
 
 impl View {
-    const NAMES: [(&str, View); 35] = [
+    const NAMES: [(&str, View); 36] = [
         ("home", View::Home),
         ("search", View::Search),
         ("library", View::Library),
@@ -130,6 +132,7 @@ impl View {
         ("search-songs", View::SearchSongs),
         ("search-artists", View::SearchArtists),
         ("artist", View::Artist),
+        ("artist-expanded", View::ArtistExpanded),
         ("artist-spotify", View::ArtistSpotify),
         ("album", View::Album),
         ("search-song-selected", View::SearchSongSelected),
@@ -389,6 +392,7 @@ mod tests {
             ("search-songs", View::SearchSongs),
             ("search-artists", View::SearchArtists),
             ("artist", View::Artist),
+            ("artist-expanded", View::ArtistExpanded),
             ("artist-spotify", View::ArtistSpotify),
             ("album", View::Album),
             ("search-song-selected", View::SearchSongSelected),
