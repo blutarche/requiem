@@ -15,6 +15,7 @@ use objc2_app_kit::{
     NSAnimatablePropertyContainer, NSBorderType, NSControl, NSCursor, NSEvent, NSEventMask,
     NSEventPhase, NSEventType, NSFocusRingType, NSLineBreakMode, NSMenu, NSMenuItem, NSResponder,
     NSScrollView, NSTextField, NSTrackingAreaOptions, NSView, NSViewBoundsDidChangeNotification,
+    NSViewFrameDidChangeNotification,
 };
 use objc2_core_foundation::CGFloat;
 use objc2_foundation::{
@@ -110,6 +111,14 @@ define_class!(
         fn scrolled(&self, _notification: &NSNotification) {
             let surface = self.ivars().surface;
             ui::with(|ui| ui.shelves_of(surface).sync());
+        }
+
+        /// The page's visible area changed size without a window resize, as when a banner
+        /// comes or goes; no bounds change tells of it.
+        #[unsafe(method(resized:))]
+        fn resized(&self, _notification: &NSNotification) {
+            let surface = self.ivars().surface;
+            ui::with(|ui| ui.shelves_of(surface).relayout());
         }
 
         #[unsafe(method(pageBack:))]
@@ -1275,6 +1284,16 @@ impl Shelves {
         let outer = self.view.contentView();
         outer.setPostsBoundsChangedNotifications(true);
         observe(&self.watcher, &outer);
+        outer.setPostsFrameChangedNotifications(true);
+        // SAFETY: as in `observe`.
+        unsafe {
+            centre.addObserver_selector_name_object(
+                &self.watcher,
+                sel!(resized:),
+                Some(NSViewFrameDidChangeNotification),
+                Some(&outer),
+            );
+        }
         *self.rows.borrow_mut() = rows;
         for row in self.rows.borrow().iter() {
             row.clamp_scroll();
