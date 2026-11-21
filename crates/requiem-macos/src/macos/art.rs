@@ -44,7 +44,8 @@ use crate::art::{
 pub const DEFAULT_CAPACITY: usize = 96 * 1024 * 1024;
 /// Downloaded images kept on disk.
 const DISK_CAPACITY: u64 = 256 * 1024 * 1024;
-/// Waiting requests past this many drop the oldest, for rows long scrolled away.
+/// Waiting requests past this many push out the oldest, for rows long scrolled away; those
+/// whose views remain are parked and queued again as room frees.
 const QUEUE_LIMIT: usize = 48;
 const NETWORK_THREADS: usize = 4;
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
@@ -56,7 +57,13 @@ const FADE: Duration = Duration::from_millis(120);
 const GRACE: Duration = Duration::from_millis(50);
 
 /// Called with the image and whether it came from the network.
-type Waiter = Box<dyn FnOnce(&NSImage, bool)>;
+type Done = Box<dyn FnOnce(&NSImage, bool)>;
+
+struct Waiter {
+    done: Done,
+    /// False once whoever asked no longer shows the image, so a parked request for it goes.
+    wanted: Box<dyn Fn() -> bool>,
+}
 
 /// One image wanted at one size.
 struct Request {
@@ -116,7 +123,10 @@ struct Fetcher {
 
 struct Loader {
     cache: Lru<Retained<NSImage>>,
-    book: Book<Waiter>,
+    book: Book<Waiter, Request>,
+    /// Requests in the lanes or being fetched, so parked ones refill only up to the limit and
+    /// never push out others.
+    outstanding: usize,
     /// Started by the first fetch.
     fetcher: Option<Arc<Fetcher>>,
 }
@@ -126,7 +136,8 @@ thread_local! {
     /// fetches deliver through the main queue.
     static LOADER: RefCell<Loader> = RefCell::new(Loader {
         cache: Lru::new(DEFAULT_CAPACITY),
-        book: Book::new(),
+        book: Book::default(),
+        outstanding: 0,
         fetcher: None,
     });
 }
@@ -146,23 +157,25 @@ pub fn insert(_mtm: MainThreadMarker, url: &str, image: &NSImage) {
 }
 
 /// `url`'s artwork drawn `px` pixels square: returned at once if cached. Otherwise `None`, and
-/// `done` runs on the main thread once it arrives; it never runs if the load fails or the
-/// request is dropped for newer ones. Only https URLs are fetched.
+/// `done` runs on the main thread once it arrives; it never runs if the load fails. Only https
+/// URLs are fetched.
 pub fn load(
     mtm: MainThreadMarker,
     url: &str,
     px: u32,
     done: impl FnOnce(&NSImage) + 'static,
 ) -> Option<Retained<NSImage>> {
-    request(mtm, url, px, move |image, _| done(image))
+    request(mtm, url, px, move |image, _| done(image), || true)
 }
 
-/// [`load`], with `done` also told whether the image came from the network.
+/// [`load`], with `done` also told whether the image came from the network, and `wanted`
+/// saying whether it is still worth fetching after being pushed out of a full queue.
 fn request(
     _mtm: MainThreadMarker,
     url: &str,
     px: u32,
     done: impl FnOnce(&NSImage, bool) + 'static,
+    wanted: impl Fn() -> bool + 'static,
 ) -> Option<Retained<NSImage>> {
     let sized = sized_url(url, px);
     // Images are decoded at `px`, which only Google's URLs carry.
@@ -171,7 +184,11 @@ fn request(
         if let Some(image) = l.cache.get(&key).or_else(|| l.cache.get(url)) {
             return Some(image);
         }
-        if sized.starts_with("https://") && l.book.want(&key, Box::new(done)) == Want::Fetch {
+        let waiter = Waiter {
+            done: Box::new(done),
+            wanted: Box::new(wanted),
+        };
+        if sized.starts_with("https://") && l.book.want(&key, waiter) == Want::Fetch {
             l.enqueue(Request {
                 key,
                 url: sized,
@@ -189,8 +206,23 @@ impl Loader {
             Some((_, lane)) => lane,
             None => &fetcher.network,
         };
-        if let Some(dropped) = lane.push(request) {
-            self.book.dropped(&dropped.key);
+        self.outstanding += 1;
+        if let Some(pushed_out) = lane.push(request) {
+            self.pushed_out(pushed_out);
+        }
+    }
+
+    fn pushed_out(&mut self, request: Request) {
+        self.outstanding = self.outstanding.saturating_sub(1);
+        let key = request.key.clone();
+        self.book.park(&key, request);
+    }
+
+    /// Queues parked requests still wanted, as far as the limit allows.
+    fn refill(&mut self) {
+        let room = QUEUE_LIMIT.saturating_sub(self.outstanding);
+        for request in self.book.unpark(room, |w| (w.wanted)()) {
+            self.enqueue(request);
         }
     }
 }
@@ -256,9 +288,9 @@ fn disk_loop(fetcher: &Fetcher) {
             }
             disk.remove(&request.url);
         }
-        if let Some(dropped) = fetcher.network.push(request) {
+        if let Some(pushed_out) = fetcher.network.push(request) {
             DispatchQueue::main().exec_async(move || {
-                LOADER.with_borrow_mut(|l| l.book.dropped(&dropped.key));
+                LOADER.with_borrow_mut(|l| l.pushed_out(pushed_out));
             });
         }
     }
@@ -341,11 +373,14 @@ fn deliver(key: &str, image: Option<CFRetained<CGImage>>, fresh: bool) {
         if let Some((image, cost)) = &image {
             l.cache.insert(key.to_owned(), image.clone(), *cost);
         }
-        l.book.finish(key, image.is_some())
+        l.outstanding = l.outstanding.saturating_sub(1);
+        let waiters = l.book.finish(key, image.is_some());
+        l.refill();
+        waiters
     });
     if let Some((image, _)) = image {
-        for done in waiters {
-            done(&image, fresh);
+        for waiter in waiters {
+            (waiter.done)(&image, fresh);
         }
     }
 }
@@ -552,13 +587,24 @@ impl Cover {
         iv.generation.set(generation);
         let image = url.and_then(|url| {
             let cover = Weak::new(self);
-            request(self.mtm(), url, self.pixel_size(), move |image, fresh| {
-                if let Some(cover) = cover.load()
-                    && cover.ivars().generation.get() == generation
-                {
-                    cover.show(Some(image), fresh);
-                }
-            })
+            let asker = Weak::new(self);
+            request(
+                self.mtm(),
+                url,
+                self.pixel_size(),
+                move |image, fresh| {
+                    if let Some(cover) = cover.load()
+                        && cover.ivars().generation.get() == generation
+                    {
+                        cover.show(Some(image), fresh);
+                    }
+                },
+                move || {
+                    asker
+                        .load()
+                        .is_some_and(|c| c.ivars().generation.get() == generation)
+                },
+            )
         });
         self.show(image.as_deref(), false);
         if url.is_some() && image.is_none() {

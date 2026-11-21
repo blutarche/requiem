@@ -187,33 +187,44 @@ pub enum Want {
     Failed,
 }
 
-/// Fetches in progress, with whoever waits on each, and the keys that failed.
-pub struct Book<W> {
+/// Fetches in progress, with whoever waits on each, and the keys that failed. A request `R`
+/// pushed out of a full queue may be parked with its waiters, to be queued again once there is
+/// room.
+pub struct Book<W, R = ()> {
     waiting: HashMap<String, Vec<W>>,
     failed: HashSet<String>,
+    /// Oldest first.
+    parked: Vec<(String, R)>,
 }
 
-impl<W> Default for Book<W> {
+impl<W, R> Default for Book<W, R> {
     fn default() -> Self {
-        Self::new()
+        Self {
+            waiting: HashMap::new(),
+            failed: HashSet::new(),
+            parked: Vec::new(),
+        }
     }
 }
 
 impl<W> Book<W> {
     pub fn new() -> Self {
-        Self {
-            waiting: HashMap::new(),
-            failed: HashSet::new(),
-        }
+        Self::default()
     }
+}
 
-    /// For a key not in the cache.
+impl<W, R> Book<W, R> {
+    /// For a key not in the cache. A parked key is fetched now, with its earlier waiters.
     pub fn want(&mut self, key: &str, waiter: W) -> Want {
         if self.failed.contains(key) {
             return Want::Failed;
         }
         if let Some(waiters) = self.waiting.get_mut(key) {
             waiters.push(waiter);
+            if let Some(i) = self.parked.iter().position(|(k, _)| k == key) {
+                self.parked.remove(i);
+                return Want::Fetch;
+            }
             return Want::Joined;
         }
         self.waiting.insert(key.to_owned(), vec![waiter]);
@@ -230,12 +241,40 @@ impl<W> Book<W> {
         if !ok {
             self.failed.insert(key.to_owned());
         }
+        self.parked.retain(|(k, _)| k != key);
         self.waiting.remove(key).unwrap_or_default()
     }
 
     /// `key` left the queue unfetched, so a later `want` fetches it.
     pub fn dropped(&mut self, key: &str) {
         self.waiting.remove(key);
+    }
+
+    /// `key` left the queue unfetched; its waiters stay, and `unpark` gives `request` back.
+    pub fn park(&mut self, key: &str, request: R) {
+        if self.waiting.contains_key(key) && !self.parked.iter().any(|(k, _)| k == key) {
+            self.parked.push((key.to_owned(), request));
+        }
+    }
+
+    /// Up to `room` parked requests to queue again, the most recently parked first. Waiters
+    /// no longer `wanted` are let go first, and a key left with none is forgotten, so a later
+    /// `want` fetches it.
+    pub fn unpark(&mut self, room: usize, wanted: impl Fn(&W) -> bool) -> Vec<R> {
+        let waiting = &mut self.waiting;
+        self.parked.retain(|(key, _)| {
+            let Some(waiters) = waiting.get_mut(key) else {
+                return false;
+            };
+            waiters.retain(&wanted);
+            if waiters.is_empty() {
+                waiting.remove(key);
+                return false;
+            }
+            true
+        });
+        let keep = self.parked.len().saturating_sub(room);
+        self.parked.drain(keep..).rev().map(|(_, r)| r).collect()
     }
 }
 
@@ -543,6 +582,46 @@ mod tests {
         book.dropped("u");
         assert_eq!(book.want("u", 2), Want::Fetch);
         assert_eq!(book.finish("u", true), vec![2]);
+    }
+
+    #[test]
+    fn a_parked_request_still_wanted_is_queued_again_once_there_is_room() {
+        let mut book: Book<i32, &str> = Book::default();
+        for (key, w) in [("a", 1), ("b", 2), ("c", 3)] {
+            assert_eq!(book.want(key, w), Want::Fetch);
+            book.park(key, key);
+        }
+        assert_eq!(book.unpark(0, |_| true), Vec::<&str>::new());
+        assert_eq!(book.unpark(2, |_| true), vec!["c", "b"]);
+        assert_eq!(book.unpark(5, |_| true), vec!["a"]);
+        assert_eq!(book.unpark(5, |_| true), Vec::<&str>::new());
+        // Its waiters were kept, so the fetch reaches them.
+        assert_eq!(book.finish("b", true), vec![2]);
+    }
+
+    #[test]
+    fn a_parked_request_nobody_wants_is_forgotten() {
+        let mut book: Book<i32, &str> = Book::default();
+        assert_eq!(book.want("u", 1), Want::Fetch);
+        assert_eq!(book.want("u", 2), Want::Joined);
+        assert_eq!(book.want("v", 3), Want::Fetch);
+        book.park("u", "u");
+        book.park("v", "v");
+        assert_eq!(book.unpark(5, |w| *w == 2), vec!["u"]);
+        assert_eq!(book.finish("u", true), vec![2]);
+        assert_eq!(book.want("v", 4), Want::Fetch);
+        assert_eq!(book.finish("v", true), vec![4]);
+    }
+
+    #[test]
+    fn wanting_a_parked_key_fetches_it_for_every_waiter() {
+        let mut book: Book<i32, &str> = Book::default();
+        assert_eq!(book.want("u", 1), Want::Fetch);
+        book.park("u", "u");
+        assert_eq!(book.want("u", 2), Want::Fetch);
+        assert_eq!(book.want("u", 3), Want::Joined);
+        assert_eq!(book.unpark(5, |_| true), Vec::<&str>::new());
+        assert_eq!(book.finish("u", true), vec![1, 2, 3]);
     }
 
     #[test]

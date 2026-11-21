@@ -14,6 +14,7 @@ use objc2::{DefinedClass, MainThreadOnly, define_class, msg_send, sel};
 use objc2_app_kit::{
     NSAccessibility, NSBorderType, NSEvent, NSFocusRingType, NSResponder, NSScrollView,
     NSTextField, NSTrackingAreaOptions, NSView, NSViewBoundsDidChangeNotification,
+    NSViewFrameDidChangeNotification,
 };
 use objc2_core_foundation::CGFloat;
 use objc2_foundation::{
@@ -164,6 +165,15 @@ define_class!(
     impl GridWatcher {
         #[unsafe(method(scrolled:))]
         fn scrolled(&self, _notification: &NSNotification) {
+            if let Some(grid) = self.ivars().grid.upgrade() {
+                grid.sync();
+            }
+        }
+
+        /// The visible area changed size without a window resize, as when a banner comes or
+        /// goes; no bounds change tells of it.
+        #[unsafe(method(resized:))]
+        fn resized(&self, _notification: &NSNotification) {
             if let Some(grid) = self.ivars().grid.upgrade() {
                 grid.sync();
             }
@@ -503,13 +513,21 @@ impl CoverGrid {
         let watcher: Retained<GridWatcher> = unsafe { msg_send![super(watcher), init] };
         let clip = view.contentView();
         clip.setPostsBoundsChangedNotifications(true);
-        // SAFETY: the watcher implements the selector; it is kept as long as the grid, and
+        clip.setPostsFrameChangedNotifications(true);
+        let centre = NSNotificationCenter::defaultCenter();
+        // SAFETY: the watcher implements the selectors; it is kept as long as the grid, and
         // removed from the centre when the grid is dropped.
         unsafe {
-            NSNotificationCenter::defaultCenter().addObserver_selector_name_object(
+            centre.addObserver_selector_name_object(
                 &watcher,
                 sel!(scrolled:),
                 Some(NSViewBoundsDidChangeNotification),
+                Some(&clip),
+            );
+            centre.addObserver_selector_name_object(
+                &watcher,
+                sel!(resized:),
+                Some(NSViewFrameDidChangeNotification),
                 Some(&clip),
             );
         }
