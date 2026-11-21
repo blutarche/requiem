@@ -337,6 +337,9 @@ fn live_artist() {
         found.playlists.len(),
         found.top_artist
     );
+    let t = Instant::now();
+    assert_eq!(p.search("pentakill", 10).unwrap().artists, found.artists);
+    println!("  again in {:?}", t.elapsed());
     for c in found
         .artists
         .iter()

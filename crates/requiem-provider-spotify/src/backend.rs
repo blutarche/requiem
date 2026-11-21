@@ -106,6 +106,8 @@ const PATHFINDER: &str = "https://api-partner.spotify.com/pathfinder/v1/query";
 /// The web player's search query, which Spotify knows by this hash; it may retire it, and
 /// then searches find songs only.
 const SEARCH_QUERY_HASH: &str = "21969b655b795601fb2d2204a4243188e75fdc6d3520e7b9cd3f4db2aff9591e";
+/// How long a search waits for its artists, albums and playlists; they are left out after.
+const SEARCH_BUDGET: Duration = Duration::from_secs(5);
 /// Entities asked of extended metadata in one request.
 const METADATA_BATCH: usize = 100;
 /// Extended metadata requests in flight at a time.
@@ -269,9 +271,11 @@ impl Librespot {
             ids.truncate(limit);
             tracks(session, ids).await
         };
-        let (songs, collections) = tokio::join!(songs, search_collections(session, q));
+        let collections = tokio::time::timeout(SEARCH_BUDGET, search_collections(session, q));
+        let (songs, collections) = tokio::join!(songs, collections);
         let mut found = match collections
-            .map_err(|e| shown(&e))
+            .map_err(|_| "timed out".to_owned())
+            .and_then(|r| r.map_err(|e| shown(&e)))
             .and_then(|b| parse_search(&b).map_err(|e| e.to_string()))
         {
             Ok(found) => found,
@@ -2153,10 +2157,14 @@ async fn search_collections(session: &Session, q: &str) -> Result<Bytes, Error> 
 pub(crate) fn parse_search(bytes: &[u8]) -> Result<SearchResults, ProviderError> {
     let v: Value = serde_json::from_slice(bytes)
         .map_err(|e| ProviderError::Parse(format!("Spotify search: {e}")))?;
-    let found = v.pointer("/data/searchV2");
+    // A query Spotify retired answers with errors and no search.
+    let found = v
+        .pointer("/data/searchV2")
+        .ok_or_else(|| ProviderError::Parse("Spotify search: no search in the answer".into()))?;
     let items = |kind: &str| -> Vec<&Value> {
         found
-            .and_then(|f| f.get(kind)?.get("items")?.as_array())
+            .get(kind)
+            .and_then(|k| k.get("items")?.as_array())
             .into_iter()
             .flatten()
             .filter_map(|i| i.get("data"))
@@ -2171,7 +2179,7 @@ pub(crate) fn parse_search(bytes: &[u8]) -> Result<SearchResults, ProviderError>
     };
     let mut artists = cards("artists", artist_card);
     let top = found
-        .and_then(|f| f.pointer("/topResults/itemsV2/0/item/data"))
+        .pointer("/topResults/itemsV2/0/item/data")
         .and_then(artist_card);
     let top_artist = top.is_some();
     if let Some(top) = top {
@@ -2891,7 +2899,12 @@ mod tests {
         assert!(!found.top_artist);
         assert_eq!(found.artists[0].title, "Daft Punk");
         assert!(!found.albums.is_empty() && !found.playlists.is_empty());
-        assert!(parse_search(b"{}").unwrap() == SearchResults::default());
+        let empty = br#"{"data":{"searchV2":{}}}"#;
+        assert_eq!(parse_search(empty).unwrap(), SearchResults::default());
+        assert!(matches!(
+            parse_search(br#"{"errors":[{"message":"PersistedQueryNotFound"}]}"#),
+            Err(ProviderError::Parse(_))
+        ));
         assert!(matches!(
             parse_search(b"not json"),
             Err(ProviderError::Parse(_))
